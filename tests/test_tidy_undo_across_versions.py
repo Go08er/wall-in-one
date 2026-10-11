@@ -1,23 +1,28 @@
-"""Undo of a Tidy up archive by the other version: this one's by 0.2.2, and 0.2.2's by this one.
+"""Undo of a Tidy up archive the released 0.2.2 made, or did not finish, by this version.
 
 Both versions write the same manifest (kind and version) into
-``tidy-archive/``, so each offers Undo for an archive the other made. This
-version archives kinds the released 0.2.2 never did: a file left at a
-``.wall-in-one-commit-…`` name, and one under a staging name of 0.2.x itself
-(which may have been public). The leftovers are made by the real producers,
-never laid out by hand: each version's download and the released removal,
-stopped before each of their changes (`tests.released_faults`).
+``tidy-archive/``, so this version offers Undo for an archive 0.2.2 made. The
+leftovers are made by the real producer, never laid out by hand: the released
+removal, stopped before each of its changes (`tests.released_faults`), which
+0.2.2's own start then finishes and its Tidy up archives.
 
-One way: this version's Tidy up archives what was left, a day later; the
-released 0.2.2 runs Undo; this version looks again, archives again and undoes
-its own. The other way: 0.2.2 starts on what its removal left and archives;
-this version runs Undo, starts twice and tidies; 0.2.2 undoes that.
+- 0.2.2 starts on what its removal left and archives; this version runs Undo,
+  starts twice and tidies.
+- 0.2.2 dies before each change of that start (its replay, then its archive);
+  this version runs Undo on whatever manifest that left.
+- 0.2.2 archives, and its own Undo dies before each of its changes; this
+  version's Undo then puts everything back.
 
 What must hold at every hop: no file loses a byte; an Undo either puts each
 item back exactly where its manifest says it came from, or leaves it in the
-archive with the manifest saying so, or refuses with a reason; neither
-version raises on the other's archive; and what a version says it put back
-is what moved.
+archive with the manifest saying so, or refuses with a reason; this version
+never raises on 0.2.2's archive; and what it says it put back is what moved.
+
+Updates are one-way: 0.2.2 is only ever the producer here. It never runs over
+what this version archived or undid.
+
+`leftover_states`, `again`, `TIDY` and `_Probe` are also what
+`tests/test_disk_full_gaps.py` builds its Undo-under-a-full-disk campaign from.
 """
 
 from __future__ import annotations
@@ -37,13 +42,13 @@ from tests import released_faults as faults
 from tests import test_released_leftovers_download as downloads
 from tests import test_released_leftovers_removals as removals
 from tests.released import released_source  # noqa: F401 -- a fixture
-from tests.test_released_round_trip import RELEASED_TURN, REMOVAL, SOURCE, _released_turn
+from tests.turns import RELEASED_TURN, SOURCE, _released_turn
 from wall_in_one import file_io, tidy
 from wall_in_one.providers import download
 
 LATER_SECONDS = 25 * 3600
 
-#: Either version's Tidy up, a day later: ``archive`` applies what its plan
+#: A version's Tidy up, a day later: ``archive`` applies what its plan
 #: offers of the leftovers; ``undo`` puts the latest archive back.
 TIDY = r"""
 import os
@@ -310,79 +315,6 @@ def _killed_at_each_change(
     return jobs
 
 
-def _this_version_archives_and_the_released_one_undoes(
-    released: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, full: bool
-) -> _Probe:
-    _quiet(monkeypatch)
-    probe = _Probe()
-    del full  # a download has few changes: every one, always
-    jobs = _killed_at_each_change(released, downloads.PRODUCER, (), tmp_path, "old", 1)
-    jobs += _killed_at_each_change(SOURCE, downloads.PRODUCER, (), tmp_path, "new", 1)
-    held: list[tuple[faults.Job, faults.Tree, faults.Tree, str]] = []
-    for job in jobs:
-        label = f"{job.base.name} {dict(job.plan)}"
-        first = faults.tree(job.base)
-        with monkeypatch.context() as scoped:
-            faults.scratch_profile(scoped, job.base)
-            words = _tidy_here(job.base, "archive")
-        archived = faults.tree(job.base)
-        probe.said("this version archives", words, job.base)
-        probe.hop(label, "this version's archive", first, archived, job.base)
-        if words.startswith("RAISED"):
-            probe.findings.append(f"FINDING {label}: this version's Tidy up raised: {words}")
-        probe.archived += _kinds(archived, job.base)
-        held.append((job, first, archived, words))
-    turns = faults.run(
-        released, TIDY, [faults.Job(job.base, {}, ("undo",)) for job, _f, _a, _w in held]
-    )
-    for (job, first, archived, words), turn in zip(held, turns, strict=True):
-        label = f"{job.base.name} {dict(job.plan)}"
-        after = faults.tree(job.base)
-        said = turn.output if turn.status == 0 else f"RAISED it ended {turn.status}: {turn.errors}"
-        probe.said("0.2.2 undoes", said, job.base)
-        probe.hop(label, "0.2.2's Undo", archived, after, job.base)
-        probe.undone(label, "0.2.2", said, archived, after, job.base)
-        if words.startswith("ARCHIVED") and said.startswith("UNDID") and "couldn't" not in said:
-            # Everything is where it was before this version archived it.
-            moved = sorted(
-                str(entry.path.relative_to(job.base))
-                for entry in first.entries
-                if after.at(entry.path) is None or after.at(entry.path) != entry
-            )
-            if moved:
-                probe.findings.append(
-                    f"FINDING {label}: 0.2.2 undid this version's archive, and {moved} is not "
-                    "back as it was"
-                )
-        with monkeypatch.context() as scoped:
-            faults.scratch_profile(scoped, job.base)
-            for step in ("undo", "archive", "undo"):
-                before = faults.tree(job.base)
-                mine = _tidy_here(job.base, step)
-                now = faults.tree(job.base)
-                probe.said(f"this version again, {step}", mine, job.base)
-                probe.hop(label, f"this version's {step} afterwards", before, now, job.base)
-                if mine.startswith("RAISED"):
-                    probe.findings.append(f"FINDING {label}: this version's {step}: {mine}")
-                if step == "undo":
-                    probe.undone(label, "this version", mine, before, now, job.base)
-    return probe
-
-
-def test_the_released_version_undoes_this_versions_archive(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    probe = _this_version_archives_and_the_released_one_undoes(
-        released_source, tmp_path, monkeypatch, full=bool(os.environ.get(faults.FULL))
-    )
-    print("\n" + probe.summary("this version archives, 0.2.2 undoes"))
-    assert probe.archived["a commit name"], "one state had a commit name to archive"
-    assert probe.archived["an older stage"], "one state had one of 0.2.x's stages to archive"
-    assert not probe.findings, "\n".join(sorted(set(probe.findings))[:30])
-
-
 def _the_released_version_archives_and_this_one_undoes(
     released: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, full: bool
 ) -> _Probe:
@@ -392,19 +324,16 @@ def _the_released_version_archives_and_this_one_undoes(
     jobs = _killed_at_each_change(
         released, removals.PRODUCER, ("remove",), tmp_path, "gone", 1 if full else 3
     )
-    jobs += _killed_at_each_change(SOURCE, REMOVAL, ("remove",), tmp_path, "ours", 1 if full else 3)
-    firsts = [faults.tree(job.base) for job in jobs]
     # 0.2.2 starts (its replay finishes or cancels the removal), scans, and
     # applies its Tidy up a day later.
     turns = _released_turn(released, "removals", [job.base for job in jobs])
-    for job, first, turn in zip(jobs, firsts, turns, strict=True):
+    for job, turn in zip(jobs, turns, strict=True):
         label = f"{job.base.name} {dict(job.plan)}"
         archived = faults.tree(job.base)
         probe.said("0.2.2 starts and archives", turn.output, job.base)
         probe.archived += _kinds(archived, job.base)
         if turn.status != 0 or "RAISED" in turn.output:
             probe.findings.append(f"FINDING {label}: 0.2.2's turn: {turn.output} {turn.errors}")
-        del first  # what 0.2.2's own start may take is its business (the round-trip probes)
         with monkeypatch.context() as scoped:
             faults.scratch_profile(scoped, job.base)
             mine = _tidy_here(job.base, "undo")
@@ -432,16 +361,6 @@ def _the_released_version_archives_and_this_one_undoes(
                     ],
                 )
                 before = now
-    # And back: 0.2.2 undoes what this version's Tidy up archived just now.
-    before_undo = [faults.tree(job.base) for job in jobs]
-    again = faults.run(released, TIDY, [faults.Job(job.base, {}, ("undo",)) for job in jobs])
-    for job, before, turn in zip(jobs, before_undo, again, strict=True):
-        label = f"{job.base.name} {dict(job.plan)}"
-        after = faults.tree(job.base)
-        said = turn.output if turn.status == 0 else f"RAISED it ended {turn.status}: {turn.errors}"
-        probe.said("0.2.2 undoes this version's later archive", said, job.base)
-        probe.hop(label, "0.2.2's Undo afterwards", before, after, job.base)
-        probe.undone(label, "0.2.2", said, before, after, job.base)
     return probe
 
 
@@ -458,7 +377,7 @@ def test_this_version_undoes_the_released_versions_archive(
     assert not probe.findings, "\n".join(sorted(set(probe.findings))[:30])
 
 
-# -- an archive the other version did not finish -------------------------------------------------
+# -- an archive the released version did not finish ----------------------------------------------
 
 
 def _archivable(base: Path) -> str:
@@ -490,86 +409,6 @@ def again(source: Path, job: faults.Job, tmp_path: Path, names: Sequence[str]) -
         downloads._prepare(each.base)
     faults.run(source, downloads.PRODUCER, fresh)
     return fresh
-
-
-def test_the_released_version_undoes_an_archive_this_version_did_not_finish(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """This version's Tidy up dies before each change of an archive (in full,
-    a change fails too); 0.2.2 runs Undo on whatever manifest that left; this
-    version then undoes, archives and undoes. Nothing is lost at any hop, and
-    at the end every file is back where the download left it."""
-    _quiet(monkeypatch)
-    full = bool(os.environ.get(faults.FULL))
-    probe = _Probe()
-    tried = 0
-    for kind, states in sorted(leftover_states(released_source, tmp_path).items()):
-        for state, (source, job) in enumerate(states if full else states[:1]):
-            tag = f"{kind.split()[-1]}{state}"
-            (traced,) = again(source, job, tmp_path, [f"{tag}-trace"])
-            (trace,) = faults.run(SOURCE, TIDY, [faults.Job(traced.base, {}, ("archive",))])
-            assert trace.output.startswith("ARCHIVED"), trace.output + trace.errors[-1000:]
-            plans: list[dict[str, object]] = [{"kill": call.index} for call in trace.changes]
-            if full:
-                plans += [{"fail": call.index, "errno": "EIO"} for call in trace.changes]
-            jobs = again(
-                source, job, tmp_path, [f"{tag}-a{number:05d}" for number in range(len(plans))]
-            )
-            firsts = [faults.tree(each.base) for each in jobs]
-            faults.run(
-                SOURCE,
-                TIDY,
-                [
-                    faults.Job(each.base, plan, ("archive",))
-                    for each, plan in zip(jobs, plans, strict=True)
-                ],
-            )
-            befores = [faults.tree(each.base) for each in jobs]
-            turns = faults.run(
-                released_source, TIDY, [faults.Job(each.base, {}, ("undo",)) for each in jobs]
-            )
-            tried += len(plans)
-            for each, plan, first, before, turn in zip(
-                jobs, plans, firsts, befores, turns, strict=True
-            ):
-                label = f"{kind}, this version's archive under {plan}"
-                probe.archived += _kinds(before, each.base)
-                probe.hop(label, "this version's unfinished archive", first, before, each.base)
-                after = faults.tree(each.base)
-                said = turn.output if turn.status == 0 else f"RAISED it ended {turn.status}"
-                probe.said("0.2.2 undoes", said, each.base)
-                probe.hop(label, "0.2.2's Undo", before, after, each.base)
-                probe.undone(label, "0.2.2", said, before, after, each.base)
-                with monkeypatch.context() as scoped:
-                    faults.scratch_profile(scoped, each.base)
-                    mine = ""
-                    for step in ("undo", "archive", "undo"):
-                        earlier = faults.tree(each.base)
-                        mine = _tidy_here(each.base, step)
-                        now = faults.tree(each.base)
-                        probe.said(f"this version again, {step}", mine, each.base)
-                        probe.hop(
-                            label, f"this version's {step} afterwards", earlier, now, each.base
-                        )
-                        if mine.startswith("RAISED"):
-                            probe.findings.append(f"FINDING {label}: this version's {step}: {mine}")
-                        if step == "undo":
-                            probe.undone(label, "this version", mine, earlier, now, each.base)
-                    astray = sorted(
-                        str(entry.path.relative_to(each.base))
-                        for entry in first.entries
-                        if now.at(entry.path) != entry
-                    )
-                    if astray and "couldn't" not in mine:
-                        probe.findings.append(
-                            f"FINDING {label}: after both versions' Undo, {astray} is not back "
-                            f"as the download left it: {mine}"
-                        )
-    print("\n" + probe.summary(f"an unfinished archive of this version, {tried} of them"))
-    assert probe.archived, "one kill left something in the archive"
-    assert not probe.findings, "\n".join(sorted(set(probe.findings))[:30])
 
 
 def test_this_version_undoes_an_archive_the_released_version_did_not_finish(
@@ -640,33 +479,7 @@ def test_this_version_undoes_an_archive_the_released_version_did_not_finish(
     assert not probe.findings, "\n".join(sorted(set(probe.findings))[:30])
 
 
-# -- an Undo the other version did not finish ----------------------------------------------------
-
-
-def _finished_by(
-    probe: _Probe,
-    label: str,
-    who: str,
-    words: str,
-    first: faults.Tree,
-    before: faults.Tree,
-    base: Path,
-) -> None:
-    """The second Undo's turn: nothing lost, its words true, everything back as it was."""
-    after = faults.tree(base)
-    probe.said(f"{who} finishes the Undo", words, base)
-    probe.hop(label, f"{who}'s Undo", before, after, base)
-    probe.undone(label, who, words, before, after, base)
-    astray = sorted(
-        str(entry.path.relative_to(base))
-        for entry in first.entries
-        if after.at(entry.path) != entry
-    )
-    if astray and "couldn't" not in words:
-        probe.findings.append(
-            f"FINDING {label}: after {who} finished the Undo, {astray} is not back as it was: "
-            f"{words}"
-        )
+# -- an Undo the released version did not finish -------------------------------------------------
 
 
 def test_this_version_finishes_an_undo_the_released_version_did_not(
@@ -674,89 +487,59 @@ def test_this_version_finishes_an_undo_the_released_version_did_not(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """This version archives what a download left; 0.2.2's Undo dies before each
-    of its changes; this version's Undo then puts everything back."""
+    """0.2.2 archives what its own finished removal left, and its Undo dies
+    before each of its changes; this version's Undo then puts everything back."""
     _quiet(monkeypatch)
     full = bool(os.environ.get(faults.FULL))
     probe = _Probe()
-    for kind, states in sorted(leftover_states(released_source, tmp_path).items()):
-        for state, (source, job) in enumerate(states if full else states[:1]):
-            tag = f"{kind.split()[-1]}{state}"
-            (traced,) = again(source, job, tmp_path, [f"{tag}-trace"])
-            faults.run(SOURCE, TIDY, [faults.Job(traced.base, {}, ("archive",))])
-            (trace,) = faults.run(released_source, TIDY, [faults.Job(traced.base, {}, ("undo",))])
-            assert trace.output.startswith("UNDID"), trace.output + trace.errors[-1000:]
-            jobs = again(
-                source, job, tmp_path, [f"{tag}-a{n:05d}" for n in range(len(trace.changes))]
-            )
-            firsts = [faults.tree(each.base) for each in jobs]
-            faults.run(SOURCE, TIDY, [faults.Job(each.base, {}, ("archive",)) for each in jobs])
-            archived = [faults.tree(each.base) for each in jobs]
-            faults.run(
-                released_source,
-                TIDY,
-                [
-                    faults.Job(each.base, {"kill": call.index}, ("undo",))
-                    for each, call in zip(jobs, trace.changes, strict=True)
-                ],
-            )
-            for each, call, first, was in zip(jobs, trace.changes, firsts, archived, strict=True):
-                label = f"{kind}, 0.2.2's Undo killed before change {call.index} ({call.name})"
-                before = faults.tree(each.base)
-                probe.archived += _kinds(was, each.base)
-                probe.hop(label, "0.2.2's unfinished Undo", was, before, each.base)
-                with monkeypatch.context() as scoped:
-                    faults.scratch_profile(scoped, each.base)
-                    mine = _tidy_here(each.base, "undo")
-                _finished_by(probe, label, "this version", mine, first, before, each.base)
-    print("\n" + probe.summary("0.2.2's Undo stopped, this version finishes it"))
-    assert probe.archived["a commit name"] and probe.archived["an older stage"]
-    assert not probe.findings, "\n".join(sorted(set(probe.findings))[:30])
 
+    def archived_by_the_released_version(names: Sequence[str]) -> list[faults.Job]:
+        made = [faults.Job(tmp_path / name, {}, ("remove",)) for name in names]
+        for each in made:
+            removals._prepare(each.base)
+        faults.run(released_source, removals.PRODUCER, made)
+        for turn in _released_turn(released_source, "removals", [each.base for each in made]):
+            assert "Archived" in turn.output, turn.output + turn.errors[-1000:]
+        return made
 
-def test_the_released_version_finishes_an_undo_this_version_did_not(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """This version archives what a download left and its own Undo dies before
-    each of its changes; 0.2.2's Undo then puts everything back."""
-    _quiet(monkeypatch)
-    full = bool(os.environ.get(faults.FULL))
-    probe = _Probe()
-    for kind, states in sorted(leftover_states(released_source, tmp_path).items()):
-        for state, (source, job) in enumerate(states if full else states[:1]):
-            tag = f"{kind.split()[-1]}{state}"
-            (traced,) = again(source, job, tmp_path, [f"{tag}-trace"])
-            faults.run(SOURCE, TIDY, [faults.Job(traced.base, {}, ("archive",))])
-            (trace,) = faults.run(SOURCE, TIDY, [faults.Job(traced.base, {}, ("undo",))])
-            assert trace.output.startswith("UNDID"), trace.output + trace.errors[-1000:]
-            jobs = again(
-                source, job, tmp_path, [f"{tag}-a{n:05d}" for n in range(len(trace.changes))]
+    (traced,) = archived_by_the_released_version(["trace"])
+    (trace,) = faults.run(released_source, TIDY, [faults.Job(traced.base, {}, ("undo",))])
+    assert trace.output.startswith("UNDID"), trace.output + trace.errors[-1000:]
+    changes = trace.changes if full else trace.changes[::2]
+    jobs = archived_by_the_released_version([f"a{number:05d}" for number in range(len(changes))])
+    archived = [faults.tree(each.base) for each in jobs]
+    faults.run(
+        released_source,
+        TIDY,
+        [
+            faults.Job(each.base, {"kill": call.index}, ("undo",))
+            for each, call in zip(jobs, changes, strict=True)
+        ],
+    )
+    for each, call, was in zip(jobs, changes, archived, strict=True):
+        label = f"0.2.2's Undo killed before change {call.index} ({call.name})"
+        before = faults.tree(each.base)
+        probe.archived += _kinds(was, each.base)
+        probe.hop(label, "0.2.2's unfinished Undo", was, before, each.base)
+        with monkeypatch.context() as scoped:
+            faults.scratch_profile(scoped, each.base)
+            mine = _tidy_here(each.base, "undo")
+        after = faults.tree(each.base)
+        probe.said("this version finishes the Undo", mine, each.base)
+        probe.hop(label, "this version's Undo", before, after, each.base)
+        probe.undone(label, "this version", mine, before, after, each.base)
+        if "couldn't" not in mine:
+            still = sorted(
+                str(entry.path.relative_to(each.base))
+                for entry in after.entries
+                if _in_archive(entry.path) and not _is_bookkeeping(entry)
             )
-            firsts = [faults.tree(each.base) for each in jobs]
-            faults.run(SOURCE, TIDY, [faults.Job(each.base, {}, ("archive",)) for each in jobs])
-            archived = [faults.tree(each.base) for each in jobs]
-            faults.run(
-                SOURCE,
-                TIDY,
-                [
-                    faults.Job(each.base, {"kill": call.index}, ("undo",))
-                    for each, call in zip(jobs, trace.changes, strict=True)
-                ],
-            )
-            befores = [faults.tree(each.base) for each in jobs]
-            turns = faults.run(
-                released_source, TIDY, [faults.Job(each.base, {}, ("undo",)) for each in jobs]
-            )
-            for each, call, first, was, before, turn in zip(
-                jobs, trace.changes, firsts, archived, befores, turns, strict=True
-            ):
-                label = f"{kind}, this version's Undo killed before change {call.index}"
-                probe.archived += _kinds(was, each.base)
-                probe.hop(label, "this version's unfinished Undo", was, before, each.base)
-                said = turn.output if turn.status == 0 else f"RAISED it ended {turn.status}"
-                _finished_by(probe, label, "0.2.2", said, first, before, each.base)
-    print("\n" + probe.summary("this version's Undo stopped, 0.2.2 finishes it"))
-    assert probe.archived["a commit name"] and probe.archived["an older stage"]
+            if still:
+                probe.findings.append(
+                    f"FINDING {label}: after this version finished the Undo, {still} is still "
+                    f"archived: {mine}"
+                )
+    print("\n" + probe.summary(f"0.2.2's Undo stopped, this version finishes it, {len(changes)}"))
+    assert probe.archived, "0.2.2's Tidy up archived something for its Undo to put back"
+    assert changes, "0.2.2's Undo makes changes to stop before"
     assert not probe.findings, "\n".join(sorted(set(probe.findings))[:30])

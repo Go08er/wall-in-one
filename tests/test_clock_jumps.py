@@ -11,6 +11,8 @@ is moved (the time source the code reads; never the system clock):
 - Back a day: a stage written while the clock was ahead looks recent. It is
   kept for now, and reclaimed once the clock has passed it by a day: nothing
   is "recent" for ever.
+- An edit restarts the day: a stage of this version's that a person edited is
+  reclaimed a day after the edit, whatever its modification time is set to.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import pytest
 
 from tests import released_faults as faults
 from tests import test_released_leftovers_download as downloads
-from tests.test_released_round_trip import SOURCE
+from tests.turns import LATER_SECONDS, SOURCE, _root
 from wall_in_one import tidy
 from wall_in_one.providers import download
 
@@ -232,3 +234,70 @@ def test_an_older_name_is_never_swept_whatever_the_clock_says(
         listed = ahead.name in repr(found)
         print(f"\na v2 stage dated a day ahead is named in Tidy up's plan: {listed}")
         assert ahead.is_file() and ahead.stat().st_size, "kept as recent"
+
+
+def test_a_v2_stage_a_person_edited_is_reclaimed_a_day_after_the_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterisation of a known case, by design: this version's own
+    day-old sweep reclaims its v2 and commit names even when a person edited
+    one. Such a name is never public by construction (AB-1), which is why the
+    sweep may reclaim it; the app keeps no record of what a crash-left partial
+    should hold, so it can't tell an edit from its own partial bytes. The
+    older names, which may have been public, it never touches (the test
+    above).
+
+    This version's download dies leaving a ``.wall-in-one-v2-…-stage-*`` file,
+    and a person appends a note to it. The sweep's age is the later of the file's two
+    times, and nothing can set its change time back, so the edit restarts the
+    day whatever its modification time is then set to: swept now, the edited
+    stage is kept; with its mtime set back a day, it is still kept; a day
+    after the edit it is reclaimed. Nothing at a public name changes."""
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
+    plain = faults.Job(tmp_path / "plain", {}, ())
+    downloads._prepare(plain.base)
+    (trace,) = faults.run(SOURCE, downloads.PRODUCER, [plain])
+    jobs = [
+        faults.Job(tmp_path / f"a{number:05d}", {"kill": call.index}, ())
+        for number, call in enumerate(trace.changes)
+    ]
+    for job in jobs:
+        downloads._prepare(job.base)
+    faults.run(SOURCE, downloads.PRODUCER, jobs)
+    tried = 0
+    for job in jobs:
+        root = _root(job.base)
+        stages = [
+            entry
+            for entry in faults.tree(root).entries
+            if entry.path.name.startswith(".wall-in-one-v2-") and entry.size
+        ]
+        if not stages:
+            continue
+        tried += 1
+        stage = stages[0].path
+        public = {
+            entry.path: entry.data
+            for entry in faults.tree(job.base).entries
+            if not any(part.startswith(".") for part in entry.path.relative_to(job.base).parts)
+        }
+        faults.edit_in_place(stage, "extend")
+        edited = stage.read_bytes()
+        with monkeypatch.context() as scoped:
+            faults.scratch_profile(scoped, job.base)
+            download.managed_directory(root, download.MOTIONBGS_LOCATION)
+            assert stage.read_bytes() == edited, "edited a moment ago: the sweep leaves it"
+            old = time.time() - LATER_SECONDS
+            os.utime(stage, (old, old))
+            directory, _marker = download.managed_directory(root, download.MOTIONBGS_LOCATION)
+            assert stage.read_bytes() == edited, "its mtime set back: still edited a moment ago"
+            # A change time can't be set back, so the same sweep is asked what
+            # it would do a day and an hour on.
+            download.recover_abandoned(
+                directory, download.MOTIONBGS_LOCATION, now=time.time() + LATER_SECONDS
+            )
+        assert not stage.exists() or not stage.stat().st_size, "a day after the edit: reclaimed"
+        now = {path: path.read_bytes() for path in public if path.is_file()}
+        assert now == public, "nothing at a public name changed"
+    assert tried, "at least one kill left a v2 stage holding bytes"

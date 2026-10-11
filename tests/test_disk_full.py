@@ -31,8 +31,7 @@ from tests import test_released_leftovers_removals as removals
 from tests import test_released_leftovers_stills as stills_probe
 from tests import test_released_leftovers_stores as stores
 from tests import test_released_leftovers_template as templates
-from tests import test_released_round_trip as trips
-from tests import test_released_round_trip_more as more
+from tests import turns as trips
 from wall_in_one import config, tidy
 from wall_in_one.library import stills
 from wall_in_one.theme import noctalia
@@ -118,7 +117,7 @@ def _cases() -> dict[str, tuple[str, tuple[str, ...], Callable[[Path], faults.Tr
         "still": (stills_probe.PRODUCER, ("again",), stills_probe._prepare),
         "removal": (trips.REMOVAL, ("remove",), removals._prepare),
         "trash": (trips.REMOVAL, ("trash",), removals._prepare),
-        "tidy": (more.TIDY_UP, (), downloads._prepare),
+        "tidy": (trips.TIDY_UP, (), downloads._prepare),
         "template-install": (templates.PRODUCER, ("install",), templates._prepare),
         "template-uninstall": (templates.PRODUCER, ("uninstall",), templates._prepare),
     }

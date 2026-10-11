@@ -26,7 +26,7 @@ import pytest
 
 from tests import released_faults as faults
 from tests import test_released_leftovers_download as downloads
-from tests.test_released_round_trip import SOURCE
+from tests.turns import SOURCE
 
 MEDIA = b"validated media bytes"
 

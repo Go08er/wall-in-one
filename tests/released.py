@@ -2,9 +2,10 @@
 
 An invariant that holds for what this checkout's code produces does not hold
 for what the released code already left on disk (review rule 4). So a test
-that depends on one runs the released code itself as the *producer* (or, for
-"going back", as the *consumer*), never a hand-made filename, and then runs
-this checkout's code on what it left.
+that depends on one runs the released code itself as the *producer*, never a
+hand-made filename, and then runs this checkout's code on what it left.
+Updates are one-way: the released code is never the consumer of what this
+checkout wrote.
 
 The released modules are vendored byte for byte under
 ``tests/fixtures/released_0_2_2/`` as ``<path>.py.frozen``, mirroring ``src/``.

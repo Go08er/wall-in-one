@@ -1,24 +1,15 @@
-"""One profile's stores, written by two versions, or by something else while this one holds them.
+"""A store this version holds open, rewritten by something else meanwhile.
 
-Three boundaries a release meets and a single-version test doesn't:
-
-- Going back and returning: this checkout writes every store (the newest
-  formats included), the released 0.2.2 opens each and saves a change of its
-  own (`tests.released`), and this checkout opens them again. Each version
-  reads what the other wrote, and each version's changes are still there.
-- Two versions at once: a 0.2.2 save held at one of its filesystem calls
-  (`released_faults.paused`) while this checkout saves the same store, then
-  let go. Neither wedges; both changes are in the file.
-- An external rewrite while this checkout holds a store open: it loaded the
-  store, something else (0.2.2, or a second writer of this version) saves a
-  change, and the held store then makes a relative edit (add, rename,
-  remove). The external change survives the edit.
+It loaded the store; something else saves a change to the file (the released
+0.2.2 in a process of its own, standing for any other program, or a second
+writer of this version); and the held store then makes a relative edit (add,
+rename, reorder, remove). The external change survives the edit: a relative
+edit is applied to what is read under the lock, never to what was held
+(review question 5).
 """
 
 from __future__ import annotations
 
-import os
-import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -137,107 +128,6 @@ def _released(source: Path, store: str, save: str) -> str:
     done = released.run(source, RELEASED_SAVE, store, save)
     assert done.returncode == 0, done.stderr[-2000:]
     return done.stdout.strip()
-
-
-def test_each_version_reads_what_the_other_wrote(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """This version writes every store, its newest formats too; 0.2.2 opens each
-    and saves a change; this version opens them again, with both changes."""
-    faults.scratch_profile(monkeypatch, tmp_path)
-    saves = _table()
-    problems: list[str] = []
-    for store in STORES:
-        saves["first"][store]()
-        if store in saves["newer"]:
-            saves["newer"][store]()
-        said = _released(released_source, store, "second")
-        if said != "DONE":
-            problems.append(f"{store}: 0.2.2 could not save over what this version wrote: {said}")
-        if (fault := _fault(store)) is not None:
-            problems.append(f"{store}: this version can't read it after 0.2.2 saved: {fault}")
-        saves["third"][store]()
-        problems += _missing(store, "first", "second", "third")
-    assert not problems, "\n".join(problems)
-
-
-def _interleaved(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    names: tuple[str, ...],
-    *,
-    every_call: bool,
-) -> None:
-    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
-    saves = _table()
-    problems: list[str] = []
-    tried = 0
-    for store in names:
-        arguments = (store, "valid", "second")
-        plain = faults.Job(tmp_path / store / "plain", {}, arguments)
-        stores._prepare(plain.base)
-        (trace,) = faults.run(released_source, stores.PRODUCER, [plain])
-        assert trace.status == 0 and trace.output == "DONE", trace.output + trace.errors[-2000:]
-        points = trace.calls if every_call else trace.changes
-        for call in points:
-            tried += 1
-            job = faults.Job(tmp_path / store / f"p{call.index:04d}", {}, arguments)
-            stores._prepare(job.base)
-            raised: list[BaseException] = []
-
-            def ours(store: str = store, raised: list[BaseException] = raised) -> None:
-                try:
-                    saves["third"][store]()
-                except Exception as error:
-                    raised.append(error)
-
-            with monkeypatch.context() as scoped:
-                faults.scratch_profile(scoped, job.base)
-                writer = threading.Thread(target=ours)
-                with faults.paused(released_source, stores.PRODUCER, job, call.index) as theirs:
-                    # 0.2.2 is alive in the middle of its save; this version
-                    # starts its own, and may have to wait for it.
-                    writer.start()
-                    writer.join(0.2)
-                writer.join(60)
-                where = f"{store}, 0.2.2 held at call {call.index} ({call.name})"
-                if writer.is_alive():
-                    problems.append(f"WEDGED {where}: this version's save never returned")
-                    continue
-                (made,) = theirs
-                if made.status != 0 or "WEDGED" in made.errors or made.output != "DONE":
-                    problems.append(f"{where}: 0.2.2 ended {made.status}: {made.output[:200]}")
-                if raised:
-                    problems.append(f"{where}: this version refused: {raised[0]}")
-                if (fault := _fault(store)) is not None:
-                    problems.append(f"{where}: unreadable afterwards: {fault}")
-                else:
-                    problems += [
-                        f"LOST {where}: {gone}" for gone in _missing(store, "second", "third")
-                    ]
-    print(f"\ntwo versions saving one store: {tried} interleavings, {len(problems)} problems")
-    assert not problems, "\n".join(problems[:30])
-
-
-def test_two_versions_saving_one_store_keep_both_changes(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """What a gate runs: the playlists, 0.2.2 held before each of its changes."""
-    _interleaved(released_source, tmp_path, monkeypatch, ("playlists",), every_call=False)
-
-
-@faults.full_campaign
-def test_two_versions_saving_any_store_keep_both_changes_at_any_call(
-    released_source: Path,  # noqa: F811
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _interleaved(released_source, tmp_path, monkeypatch, STORES, every_call=True)
 
 
 #: The relative edits a held store makes, each naming what it must leave alone.

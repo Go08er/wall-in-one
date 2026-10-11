@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import datetime
-import importlib.machinery
-import importlib.util
 import logging
 import math
 import os
 import re
 import stat
-import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
@@ -428,28 +424,7 @@ def test_the_tidy_offer_dismissal_is_written_only_once_true() -> None:
     assert UiPrefs.from_mapping({"tidy_offer_dismissed": "yes"}).tidy_offer_dismissed is False
 
 
-# -- version 2: the interface to start, behind the format guards ------------------------
-
-#: ui_prefs.py exactly as 0.2.0 and 0.2.1 shipped it (identical in both tags):
-#: the reader a rollback meets. Kept verbatim, outside the linters, as a fixture.
-RELEASED_READER = Path(__file__).parent / "fixtures" / "ui_prefs_v0_2.py.frozen"
-#: ui_prefs.py exactly as 0.2.2 shipped it: the first release with version 2,
-#: whose default was classic. Kept verbatim the same way.
-RELEASED_READER_0_2_2 = Path(__file__).parent / "fixtures" / "ui_prefs_v0_2_2.py.frozen"
-
-
-def _released(
-    monkeypatch: pytest.MonkeyPatch, reader: Path = RELEASED_READER, version: int = 1
-) -> ModuleType:
-    name = f"ui_prefs_as_released_{reader.name.split('.')[0]}"
-    loader = importlib.machinery.SourceFileLoader(name, str(reader))
-    spec = importlib.util.spec_from_loader(name, loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, name, module)  # dataclasses look their module up
-    loader.exec_module(module)
-    assert version == module.VERSION, "the reader is the release it claims to be"
-    return module
+# -- version 2: the interface to start ---------------------------------------------------
 
 
 def test_the_interfaces_are_the_ones_the_app_builds() -> None:
@@ -532,32 +507,6 @@ def test_something_at_the_old_copys_name_does_not_stop_the_bump(chosen: str) -> 
     assert obstacle.is_dir()
 
 
-@pytest.mark.parametrize("chosen", ["classic", "next"])
-def test_0_2_releases_read_a_version_2_file_but_never_write_it(
-    monkeypatch: pytest.MonkeyPatch, chosen: str
-) -> None:
-    """Choosing Classic now moves the file to version 2 too, so 0.2.0 and 0.2.1 only read it."""
-    released = _released(monkeypatch)
-    target = paths.ui_prefs_path()
-    ui_prefs.update({"window_style": "translucent", "thumbnail_size": "small"})
-    # Until an interface is chosen, a 0.2 release keeps editing the file.
-    assert released.load().writable
-    released.update({"frost": 0.3})
-    assert ui_prefs.load().prefs.frost == 0.3
-
-    ui_prefs.update({"interface": chosen})
-    chosen_bytes = target.read_bytes()
-    seen = released.load()
-
-    assert seen.prefs.window_style == "translucent" and seen.prefs.thumbnail_size == "small"
-    assert "newer version of Wall-in-One (version 2)" in seen.read_only
-    with pytest.raises(released.UiPrefsReadOnlyError):
-        released.update({"frost": 0.9})
-    with pytest.raises(released.UiPrefsReadOnlyError):
-        released.update({"tidy_offer_dismissed": True})
-    assert target.read_bytes() == chosen_bytes, "read-only, never broken or rewritten"
-
-
 #: 0.2.2 itself, in a child (`tests.released`), saving what its Settings rows save.
 RELEASED_SAVES = """
 from wall_in_one import ui_prefs
@@ -593,20 +542,6 @@ def test_a_0_2_2_return_to_classic_is_indistinguishable_from_no_choice(
     gpu_off = tomllib.loads(paths.ui_prefs_path().read_text())
     assert gpu_off["version"] == 2 and "interface" not in gpu_off
     assert ui_prefs.launch_interface() == "next", "the version is not read as a choice"
-
-
-def test_0_2_2_starts_classic_for_a_profile_0_3_0_left_unchosen(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Rolling back with no choice made: 0.2.2's own default, classic, and nothing changes."""
-    released = _released(monkeypatch, RELEASED_READER_0_2_2, version=2)
-    ui_prefs.update({"window_style": "frosted"})
-    before = paths.ui_prefs_path().read_bytes()
-
-    seen = released.load()
-    assert seen.writable and seen.prefs.window_style == "frosted"
-    assert released.launch_interface() is None
-    assert paths.ui_prefs_path().read_bytes() == before
 
 
 def _config_files() -> dict[str, bytes] | None:
@@ -689,23 +624,6 @@ def test_a_first_file_that_turns_gpu_acceleration_off_is_version_2() -> None:
 
     assert tomllib.loads(paths.ui_prefs_path().read_text())["version"] == 2
     assert _siblings() == {"ui.toml", ".ui.toml.mutation.lock"}
-
-
-def test_0_2_releases_never_write_a_file_with_gpu_acceleration_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    released = _released(monkeypatch)
-    target = paths.ui_prefs_path()
-    ui_prefs.update({"window_style": "frosted", "gpu_acceleration": False})
-    written = target.read_bytes()
-
-    seen = released.load()
-
-    assert seen.prefs.window_style == "frosted"
-    assert "newer version of Wall-in-One (version 2)" in seen.read_only
-    with pytest.raises(released.UiPrefsReadOnlyError):
-        released.update({"frost": 0.9})
-    assert target.read_bytes() == written
 
 
 @pytest.mark.parametrize(

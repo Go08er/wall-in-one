@@ -31,7 +31,7 @@ import pytest
 
 from tests import released_faults as faults
 from tests import test_released_leftovers_removals as removals
-from tests.test_released_round_trip import REMOVAL, SOURCE
+from tests.turns import REMOVAL, SOURCE
 
 CLAIMED = "changed while removal claimed it"
 CHANGED = "changed before removal"

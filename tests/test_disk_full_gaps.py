@@ -41,7 +41,7 @@ from tests import test_released_leftovers_removals as removals
 from tests import test_tidy_undo_across_versions as undoing
 from tests.released import released_source  # noqa: F401 -- a fixture
 from tests.test_disk_full import _sound
-from tests.test_released_round_trip import REMOVAL, SOURCE, STORES
+from tests.turns import REMOVAL, SOURCE, STORES
 from wall_in_one import file_io
 
 RECORD = "aurora.mp4.motionbgs.json"

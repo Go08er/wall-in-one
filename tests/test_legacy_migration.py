@@ -516,6 +516,9 @@ def test_schema_five_import_preserves_authoring_and_never_edits_source(
     assert "Per-display engine settings differed" in report
     assert "Legacy bytes modified: no" in report
     assert "abc_123" not in report
+    # Updates are one-way: a report written now says nothing about going back.
+    assert "Rollback" not in report and "old plugin again" not in report
+    assert report.endswith("\n") and not report.endswith("\n\n")
 
 
 @pytest.mark.parametrize(

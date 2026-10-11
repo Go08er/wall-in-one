@@ -469,7 +469,7 @@ def probe(*, source_dir: Path | None = None, noctalia_settings: Path | None = No
         return Probe("conflict", str(error), source, conflicts=(journal_path(),))
     if journal is not None:
         try:
-            legacy = _validate_resumable_journal(
+            legacy, _targets_as_staged = _validate_resumable_journal(
                 journal,
                 source=source,
                 noctalia_settings=noctalia_settings,
@@ -788,14 +788,13 @@ def _migrate_locked(
                 f"cannot write migration journal {journal_path()}: {error}"
             ) from error
     else:
-        source = _validate_resumable_journal(
+        # Finished with the bytes it staged, whichever version began it.
+        source, targets = _validate_resumable_journal(
             journal,
             source=source_directory,
             noctalia_settings=noctalia_settings,
         )
         converted = _convert(source)
-        created_at_value = str(journal["created_at"])
-        targets = _targets(source, converted, created_at_value)
         _prepare_directories(bool(converted.api_key))
         _stage_targets(targets, keep_existing=True)
 
@@ -2018,7 +2017,15 @@ def _api_key(plugin: dict[str, Any], notes: list[str]) -> str:
         return ""
 
 
-def _targets(source: _LegacySource, converted: _Converted, created_at: str) -> tuple[_Target, ...]:
+def _targets(
+    source: _LegacySource, converted: _Converted, created_at: str, *, as_released: bool = False
+) -> tuple[_Target, ...]:
+    """Every file an import installs, the marker last.
+
+    ``as_released`` renders them byte for byte as 0.2.2 and earlier did, for
+    finishing an import one of those versions began (`_targets_as_staged`).
+    A new import never uses it.
+    """
     pairings_payload = {
         "version": pairings.FORMAT_VERSION,
         "pairings": [converted.pairings[key].to_json() for key in sorted(converted.pairings)],
@@ -2045,7 +2052,7 @@ def _targets(source: _LegacySource, converted: _Converted, created_at: str) -> t
         "displays": converted.displays,
     }
     favourites_payload = {"version": favourites.FORMAT_VERSION, "paths": []}
-    report = _report(source, converted, created_at)
+    report = _report(source, converted, created_at, as_released=as_released)
     targets = [
         _Target(
             "settings",
@@ -2110,7 +2117,22 @@ def _targets(source: _LegacySource, converted: _Converted, created_at: str) -> t
     return tuple(targets)
 
 
-def _report(source: _LegacySource, converted: _Converted, created_at: str) -> str:
+#: How the report ended up to 0.2.2. Updates are one-way, so a report written
+#: now says nothing about running the old plugin again; one a released
+#: version staged is installed with the bytes its journal recorded.
+_RELEASED_REPORT_ENDING: Final = """
+## Rollback
+
+The source `config.json`, `runtime.json`, Noctalia plugin settings, provider markers,
+and legacy automatic stills were not edited. Stop the current service before
+running the old plugin again. Current authoring lives in `{config}`
+and `{state}`; back those directories up before changing them.
+"""
+
+
+def _report(
+    source: _LegacySource, converted: _Converted, created_at: str, *, as_released: bool = False
+) -> str:
     notes = "\n".join(f"- {note}" for note in converted.notes)
     designated = converted.designated_output or "(none)"
     playlist_summary = (
@@ -2118,6 +2140,11 @@ def _report(source: _LegacySource, converted: _Converted, created_at: str) -> st
     )
     display_summary = f"{len(converted.displays)} (legacy outputs: {converted.legacy_output_count})"
     credential_summary = "yes, into a private app-owned file" if converted.api_key else "no"
+    ending = (
+        _RELEASED_REPORT_ENDING.format(config=paths.app_config_dir(), state=paths.app_state_dir())
+        if as_released
+        else ""
+    )
     return f"""# Wall-in-One legacy migration report
 
 Imported at: {created_at}
@@ -2136,14 +2163,7 @@ Imported at: {created_at}
 ## Compatibility decisions and losses
 
 {notes}
-
-## Rollback
-
-The source `config.json`, `runtime.json`, Noctalia plugin settings, provider markers,
-and legacy automatic stills were not edited. Stop the current service before
-running the old plugin again. Current authoring lives in `{paths.app_config_dir()}`
-and `{paths.app_state_dir()}`; back those directories up before changing them.
-"""
+{ending}"""
 
 
 def _prepare_directories(has_key: bool) -> None:
@@ -2275,9 +2295,31 @@ def _read_journal() -> dict[str, Any] | None:
     return document
 
 
+def _targets_as_staged(
+    journal: dict[str, Any], legacy: _LegacySource, converted: _Converted
+) -> tuple[_Target, ...]:
+    """The targets exactly as the journaled import staged them.
+
+    A journal binds the digest of every target, so an interrupted import is
+    finished with those bytes and no others. One this build began describes
+    this build's output. One that 0.2.2 or earlier began describes theirs,
+    which this build can still render (`_targets`, ``as_released``): it is
+    completed as it was staged, never restarted in another rendering, which
+    would leave its staged and already installed files unaccounted for.
+    """
+    created_at = str(journal["created_at"])
+    for as_released in (False, True):
+        targets = _targets(legacy, converted, created_at, as_released=as_released)
+        if journal["targets"] == {target.key: target.digest for target in targets}:
+            return targets
+    raise MigrationError(
+        f"migration journal {journal_path()} does not describe this build's output"
+    )
+
+
 def _validate_resumable_journal(
     journal: dict[str, Any], *, source: Path, noctalia_settings: Path | None
-) -> _LegacySource:
+) -> tuple[_LegacySource, tuple[_Target, ...]]:
     recorded_source = _recorded_path(journal["legacy_source"], "migration journal legacy source")
     if recorded_source != source:
         raise MigrationError(
@@ -2290,13 +2332,7 @@ def _validate_resumable_journal(
             "legacy source changed after migration staging began; no current file was "
             f"overwritten. Restore the source matching {journal_path()} before retrying"
         )
-    converted = _convert(legacy)
-    targets = _targets(legacy, converted, str(journal["created_at"]))
-    expected = {target.key: target.digest for target in targets}
-    if journal["targets"] != expected:
-        raise MigrationError(
-            f"migration journal {journal_path()} does not describe this build's output"
-        )
+    targets = _targets_as_staged(journal, legacy, _convert(legacy))
     for target in targets:
         if _path_exists(target.path) and not _exact_regular(
             target.path, target.contents, target.maximum
@@ -2305,7 +2341,7 @@ def _validate_resumable_journal(
                 f"interrupted migration target {target.path} exists with different or unsafe "
                 "bytes; it was not overwritten"
             )
-    return legacy
+    return legacy, targets
 
 
 def _validate_completed_journal(marker: dict[str, Any] | None, journal: dict[str, Any]) -> None:

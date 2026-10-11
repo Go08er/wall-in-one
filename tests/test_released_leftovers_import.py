@@ -32,6 +32,8 @@ first and changes nothing (`test_a_stage_that_is_also_the_public_file...`).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -204,7 +206,13 @@ def test_an_import_the_released_code_left_half_done_completes_here(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Killed before each of its changes in turn, with nothing edited: this
-    version's import finishes every one, on the older data as it was."""
+    version's import finishes every one, on the older data as it was.
+
+    An import the released code had journaled is finished with the bytes it
+    staged: its journal binds each target's digest, the report's included,
+    and the released report ends with a "Rollback" paragraph this version no
+    longer writes. One it had not journaled yet is this version's own, and
+    its report has no such paragraph."""
     monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
     consumer = _Consumer()
     states = _killed_at_each_change(released_source, tmp_path, consumer)
@@ -214,11 +222,15 @@ def test_an_import_the_released_code_left_half_done_completes_here(
         for entry in faults.tree(job.base).entries
     ), "one state had a stage that was also its public target"
 
+    began: set[str] = set()
     for job, made in states:
         assert made.killed, made.output + made.errors[-2000:]
         with monkeypatch.context() as scoped:
             faults.scratch_profile(scoped, job.base)
             was = consumer._older_data(job.base)
+            released_began = (
+                legacy_migration.journal_path().exists() or legacy_migration.marker_path().exists()
+            )
             outcome = legacy_migration.migrate()
             where = f"killed before call {job.plan['kill']}: {outcome.detail}"
             # Imported now; or it already was, and only the journal was left.
@@ -238,10 +250,17 @@ def test_an_import_the_released_code_left_half_done_completes_here(
             marker = legacy_migration.marker_path()
             assert all(os.path.samefile(stage, marker) for stage in left), where
             assert not consumer._older_data_changed(job.base, was), where
+            # The report is the one the import that began it staged, to the byte.
+            report = legacy_migration.report_path().read_bytes()
+            recorded = json.loads(marker.read_bytes())["targets"]["report"]["sha256"]
+            assert hashlib.sha256(report).hexdigest() == recorded, where
+            assert (b"## Rollback" in report) == released_began, where
+            began.add("the released version" if released_began else "this version")
             # What it installed is what this version reads.
             assert config.load_strict(require_present=True).roots, where
             assert playlists.Store.open().fault is None, where
             assert not legacy_migration.migrate().changed, "and a second import has nothing to do"
+    assert began == {"the released version", "this version"}, "both kinds of state were met"
 
 
 def test_a_stage_that_is_also_the_public_file_is_never_written_through(

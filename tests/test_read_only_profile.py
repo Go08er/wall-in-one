@@ -1348,7 +1348,6 @@ def test_the_start_after_that_delete_still_loads_the_library(
 # -- found, lower severity: a refusal that gives the wrong reason, or none -------------------------
 
 
-@ro.pinned("read-only wording, r5-ac3b")
 def test_a_template_install_the_state_folder_refuses_says_why(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1460,7 +1459,6 @@ def _leftover(folder: Path) -> Path:
     return entry
 
 
-@ro.pinned("read-only wording, r5-ac3b")
 def test_tidy_up_says_why_a_leftover_in_a_read_only_folder_stayed(profile: ro.Profile) -> None:
     """FINDING (lower severity: the wrong reason).
 

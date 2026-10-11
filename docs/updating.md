@@ -188,12 +188,17 @@ are handled differently by the two versions:
   like), because such a file can hold an edit; Tidy up lists them and offers
   to archive them. 0.2.x's own cleanup does empty them once they are a day
   old. To keep one, archive it in 0.3.0's Tidy up before going back.
-- **A removal 0.3.0 didn't finish.** If 0.3.0 stopped partway through removing
-  a downloaded wallpaper, the wallpaper's download record waits in a hidden
-  `.wall-in-one-removal-…` folder beside it. 0.2.x cancels the unfinished
-  removal without putting that record back, so the wallpaper counts as a
-  local file there. Nothing is deleted, and both versions' Tidy up keep the
-  folder.
+- **A removal 0.3.0 didn't finish.** What 0.2.x does with it at its next start
+  depends on how far 0.3.0 got:
+  - **0.3.0 stopped before it took the wallpaper out of its place.** The
+    wallpaper is still at its own path, and its download record waits in a
+    hidden `.wall-in-one-removal-…` folder beside it. 0.2.x cancels the
+    removal without putting that record back, so the wallpaper counts as a
+    local file there. Nothing is deleted, and both versions' Tidy up keep
+    that folder.
+  - **0.3.0 had already taken the wallpaper out of its place.** 0.2.x
+    finishes the removal you asked for: the wallpaper is deleted, as it would
+    have been in 0.3.0.
 
 ### Going back to 0.2.1 or 0.2.0 after choosing the new interface or turning GPU acceleration off
 

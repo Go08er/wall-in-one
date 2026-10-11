@@ -9,6 +9,14 @@ cleaned. A restart can finish authored metadata and an exact token-owned media
 claim, but never rediscovers physical companions after commit: a same-name file
 could belong to a later lifecycle. Only paths named by this explicit journal
 cross the missing-media boundary.
+
+The wallpaper's own files (its selector, its captured stills) are not moved
+into a claim, so an intent also records each one that is there when it is
+prepared, by generation and contents (``companions``,
+`manage.CompanionProof`): what a restart needs to tell the removed
+wallpaper's files from ones written under the same names since. An intent
+with no such record was prepared by a version that kept none (0.2.2, and
+0.3.0 before this field), and it still reads.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from pathlib import Path
 from typing import Any, Final, Literal, TypeVar
 
 from wall_in_one import file_io, paths
-from wall_in_one.library import state_file
+from wall_in_one.library import manage, state_file
 from wall_in_one.library.model import Kind, MediaItem
 
 STATE_FILENAME: Final = "pending-removals.json"
@@ -35,10 +43,15 @@ STATE_FILENAME: Final = "pending-removals.json"
 #: newer version refuses every mutation with kind ``newer-version`` (any
 #: other fault keeps ``invalid-state``); neither is ever rewritten. Unknown
 #: keys in this version are carried through every save; see `DOCUMENT_SHAPE`.
+#: ``companions`` was added within this version, and its presence is what a
+#: reader checks: an intent without the key has no proof of the wallpaper's
+#: own files, whichever version wrote it (`Intent.companions`).
 FORMAT_VERSION: Final = 1
 MAX_PENDING_REMOVALS: Final = 4096
 MAX_STATE_BYTES: Final = 4 * 1024 * 1024
 MAX_ROOTS_PER_REMOVAL: Final = 32
+#: A wallpaper's own files: one selector, and per root a still and its record.
+MAX_COMPANIONS_PER_REMOVAL: Final = 1 + 2 * MAX_ROOTS_PER_REMOVAL
 MAX_PATH_BYTES: Final = 4096
 MAX_PROVIDER_BYTES: Final = 256
 MAX_TOKEN_BYTES: Final = 128
@@ -104,6 +117,7 @@ DOCUMENT_SHAPE: Final = state_file.Shape(
                     "root_inode",
                     "parent_device",
                     "parent_inode",
+                    "companions",
                 }
             ),
             identity="identity",
@@ -156,6 +170,12 @@ class Intent:
     root_inode: int | None = None
     parent_device: int | None = None
     parent_inode: int | None = None
+    #: Each of the wallpaper's own files that was there when this removal was
+    #: prepared, as proof for a replay (`manage.prove_companions`).
+    #: Empty: none was there, or none could be proven. None: this intent
+    #: carries no proof at all (an external uninstall, or one prepared by a
+    #: version before the field), and a replay must not act as if it did.
+    companions: tuple[manage.CompanionProof, ...] | None = None
 
     @property
     def identity(self) -> str:
@@ -279,6 +299,14 @@ class Intent:
         )
 
     def to_json(self) -> dict[str, object]:
+        document = self._to_json()
+        if self.companions is not None:
+            # Absent, never null, without proof: exactly what the versions
+            # before the field wrote, and what they are read back as.
+            document["companions"] = [_companion_json(proof) for proof in self.companions]
+        return document
+
+    def _to_json(self) -> dict[str, object]:
         return {
             "identity": self.identity,
             "path": str(self.path),
@@ -300,6 +328,57 @@ class Intent:
             "parent_device": self.parent_device,
             "parent_inode": self.parent_inode,
         }
+
+
+_FINGERPRINT_KEYS: Final = ("device", "inode", "size", "mtime_ns", "ctime_ns")
+_COMPANION_KEYS: Final = frozenset({"path", *_FINGERPRINT_KEYS, "sha256"})
+_SHA256_HEX: Final = frozenset("0123456789abcdef")
+
+
+def _companion_json(proof: manage.CompanionProof) -> dict[str, object]:
+    return {
+        "path": str(proof.path),
+        **dict(zip(_FINGERPRINT_KEYS, proof.fingerprint, strict=True)),
+        "sha256": proof.sha256,
+    }
+
+
+def _parse_companions(
+    raw: object, roots: Sequence[Path]
+) -> tuple[manage.CompanionProof, ...] | Literal[False] | None:
+    """``companions`` as saved: the proofs, None when the key is absent, False when malformed.
+
+    Strict, because each entry is authority to remove a file: exactly these
+    keys, a path inside one of the intent's roots, each path once.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or len(raw) > MAX_COMPANIONS_PER_REMOVAL:
+        return False
+    proofs: list[manage.CompanionProof] = []
+    seen: set[Path] = set()
+    for entry in raw:
+        if not isinstance(entry, dict) or entry.keys() != _COMPANION_KEYS:
+            return False
+        path = _bounded_absolute(entry["path"])
+        device, inode, size, mtime_ns, ctime_ns = (entry[key] for key in _FINGERPRINT_KEYS)
+        digest = entry["sha256"]
+        if (
+            path is None
+            or path in seen
+            or not any(path.is_relative_to(root) for root in roots)
+            or any(type(number) is not int for number in (device, inode, size, mtime_ns, ctime_ns))
+            or min(device, inode, size) < 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or not _SHA256_HEX.issuperset(digest)
+        ):
+            return False
+        seen.add(path)
+        proofs.append(
+            manage.CompanionProof(path, (device, inode, size, mtime_ns, ctime_ns), digest)
+        )
+    return tuple(proofs)
 
 
 def _parse_intent(raw: object) -> Intent | None:
@@ -375,6 +454,9 @@ def _parse_intent(raw: object) -> Intent | None:
             return None
     elif scene:
         return None
+    companions = _parse_companions(raw.get("companions"), roots)
+    if companions is False:
+        return None
     if external:
         if (
             not committed
@@ -384,6 +466,7 @@ def _parse_intent(raw: object) -> Intent | None:
             or source_root is not None
             or root_device is not None
             or parent_device is not None
+            or companions is not None
         ):
             return None
     elif (
@@ -415,6 +498,7 @@ def _parse_intent(raw: object) -> Intent | None:
         root_inode=root_inode,
         parent_device=parent_device,
         parent_inode=parent_inode,
+        companions=companions,
     )
     return intent if raw.get("identity") == intent.identity else None
 
@@ -511,6 +595,37 @@ def _save(
         raise RemovalJournalError(
             "local-io", f"could not write {path}: {error.strerror or error}"
         ) from error
+
+
+def _prove_companions(
+    item: MediaItem,
+    roots: tuple[Path, ...],
+    source_root: Path,
+    source: file_io.RootScopedPin,
+) -> tuple[manage.CompanionProof, ...]:
+    """The proofs a new intent records: what `manage.prove_companions` can take, bounded.
+
+    Through the folder just pinned for the source, the one the removal goes
+    on to use. Never refuses the removal: proof that can't be taken, or can't
+    be saved (a path past the journal's bound), is left out, and a replay
+    then leaves that file where it is.
+    """
+    try:
+        with file_io.pin_directory_beneath(
+            source_root,
+            item.path.parent,
+            expected_root_identity=source.root_identity,
+            expected_directory_identity=source.parent_identity,
+        ) as context:
+            proofs = manage.prove_companions(
+                item, roots, source_root=source_root, source_context=context
+            )
+    except OSError, ValueError:
+        return ()
+    saved = [
+        proof for proof in proofs if _parse_companions([_companion_json(proof)], roots) == (proof,)
+    ]
+    return tuple(saved[:MAX_COMPANIONS_PER_REMOVAL])
 
 
 class Store:
@@ -800,6 +915,11 @@ class Store:
                 "local-io",
                 f"could not identify {item.path}: {getattr(error, 'strerror', None) or error}",
             ) from error
+        try:
+            companions = _prove_companions(item, bounded, source_root, scoped_pin)
+        except Exception:
+            self._release_operation_lease(token)
+            raise
         proposed = Intent(
             path=item.path,
             kind=item.kind,
@@ -807,6 +927,7 @@ class Store:
             scene=item.scene,
             provider=item.provider,
             token=token,
+            companions=companions,
             device=status.st_dev,
             inode=status.st_ino,
             source_size=status.st_size,

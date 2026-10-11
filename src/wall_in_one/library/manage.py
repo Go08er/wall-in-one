@@ -63,6 +63,10 @@ _PROVIDER_SIDECAR_PROVIDERS: Final = {
     ".motionbgs.json": "MotionBGS",
     ".wallhaven.json": "Wallhaven",
 }
+#: A wallpaper's own file larger than this is not hashed when its removal is
+#: prepared (`prove_companions`), so a replay of that removal leaves it. A
+#: selector is a few hundred bytes and a captured still a few megabytes.
+MAX_COMPANION_PROOF_BYTES: Final = 256 * 1024 * 1024
 
 
 class ManageError(Exception):
@@ -209,6 +213,23 @@ class _ArtifactCandidate:
     access: Path
     expected_fingerprint: SourceFingerprint | None = None
     adopted_role: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CompanionProof:
+    """One of a wallpaper's own files, exactly as it was when its removal was prepared.
+
+    Its selector, a still the app captured for it, that still's record: files
+    kept under names worked out from the wallpaper's path, so a name says
+    nothing about which wallpaper a file at it was written for. A removal that
+    is finished later, by replay, has no pin left from before the media moved.
+    This is what it has instead (`prove_companions`), kept in the pending
+    removal record: the file's generation and its contents.
+    """
+
+    path: Path
+    fingerprint: SourceFingerprint
+    sha256: str
 
 
 def _record_claim_token(operation_token: str, suffix: str) -> str:
@@ -1268,6 +1289,90 @@ def _pin_pairing_artifacts_locked(
             pinned = [artifact for artifact in pinned if not artifact.adopted_role]
             kept.extend(artifact.logical for artifact in adopted_pins)
     return tuple(pinned), tuple(kept)
+
+
+def _own_companions(
+    item: MediaItem,
+    roots: tuple[Path, ...],
+    *,
+    source_root: Path,
+    source_context: file_io.PinnedDirectoryContext,
+    access_stack: contextlib.ExitStack,
+) -> tuple[list[_ArtifactCandidate], list[Path]]:
+    """``item``'s own files that are there now, and its own names that can't be looked at.
+
+    Its selector, its captured stills and their records
+    (`pairing_artifact_paths`), reached through the folder the removal
+    prepared, as the removal itself reaches them. Never a download record: a
+    removal takes that out of its name before the media, and its replay finds
+    it only in the claim named from the removal's token
+    (`settle_record_claims`). One now at the public name was written after.
+    """
+    own = frozenset(pairing_artifact_paths(item, roots))
+    found, unseen = _companions(
+        item,
+        roots,
+        source_root=source_root,
+        lookup_root=source_context.root_anchor,
+        lookup_parent=source_context.directory_anchor,
+        source_context=source_context,
+        access_stack=access_stack,
+    )
+    return (
+        [candidate for candidate in found if candidate.logical in own],
+        [path for path in unseen if path in own],
+    )
+
+
+def prove_companions(
+    item: MediaItem,
+    roots: Sequence[Path],
+    *,
+    source_root: Path,
+    source_context: file_io.PinnedDirectoryContext,
+) -> tuple[CompanionProof, ...]:
+    """Each of ``item``'s own files that is there, as proof for a replay of its removal.
+
+    Taken when the removal is prepared (`removals.Store.prepare`), before any
+    of it can move. A file that can't be read whole, is larger than
+    `MAX_COMPANION_PROOF_BYTES`, or changes while it is read is left out, and
+    so is everything when the folder can't be looked at: a replay then leaves
+    what it finds at those names and says so. Never raises over a file: a
+    removal is not refused for proof that could not be taken.
+    """
+    proofs: list[CompanionProof] = []
+    with contextlib.ExitStack() as access_stack:
+        try:
+            candidates, _unseen = _own_companions(
+                item,
+                tuple(roots),
+                source_root=source_root,
+                source_context=source_context,
+                access_stack=access_stack,
+            )
+        except OSError, ValueError:
+            return ()
+        for candidate in candidates:
+            try:
+                with file_io.pin_regular_path(candidate.access) as pin:
+                    fingerprint = pin.fingerprint
+                    if fingerprint[2] > MAX_COMPANION_PROOF_BYTES:
+                        continue
+                    _size, digest = file_io.hash_pinned_regular(
+                        pin,
+                        expected_fingerprint=fingerprint,
+                        maximum_bytes=fingerprint[2],
+                    )
+                    # The name still holds what was just read.
+                    file_io.pin_regular_path(
+                        candidate.access,
+                        expected_identity=fingerprint[:2],
+                        expected_fingerprint=fingerprint,
+                    ).close()
+            except OSError, ValueError:
+                continue
+            proofs.append(CompanionProof(candidate.logical, fingerprint, digest))
+    return tuple(proofs)
 
 
 def _revalidate_adopted_authority(

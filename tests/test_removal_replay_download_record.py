@@ -197,6 +197,69 @@ def test_a_removal_that_dies_before_claiming_the_media_gets_its_record_back(
     assert sorted(path.name for path in media.parent.glob(".wall-in-one-re*")) == []
 
 
+def test_a_record_whose_claim_could_not_be_made_durable_is_put_back_by_the_next_start(
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing dies here. The disk is full at the sync right after the download
+    record moved into its claim, and the removal stops there with the media
+    untouched. The record is whole in that claim and nowhere else, so the session
+    keeps the pending removal record instead of cancelling it, and the next
+    start, finding the media exactly as prepared, puts the record back.
+
+    Through the session, which is what decides between keeping and cancelling
+    the pending record. (A downloaded wallpaper is removed, never trashed, by
+    the session; the trash move's shared withdrawal is pinned at its own level
+    in `test_manage_download_record`.)"""
+    item = downloaded(root)
+    media = item.path
+    record = media.with_name(media.name + ".wallhaven.json")
+    written = record.read_bytes()
+    generation = file_io.regular_file_fingerprint(media)
+    journal = tmp_path / "pending-removals.json"
+    session = Session(
+        replace(config.Settings(), roots=(root,)).validated(),
+        applier=Applier(FakeRenderer()),  # type: ignore[arg-type]
+        favourite_store=favourites.Store.open(tmp_path / "favourites.json"),
+        pairing_store=pairings.Store.open(tmp_path / "pairings.json"),
+        playlist_store=playlists.Store.open(tmp_path / "playlists.json"),
+        removal_store=removals.Store.open(journal),
+    )
+    sync = file_io._fsync_directory_capability
+    failed: list[bool] = []
+
+    def no_room(descriptor: int, **options: Any) -> None:
+        if not failed and not record.exists() and media.exists():
+            failed.append(True)
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        sync(descriptor, **options)
+
+    try:
+        session.refresh()
+        (listed,) = (found for found in session.library.items if found.path == media)
+        with monkeypatch.context() as patched:
+            patched.setattr(file_io, "_fsync_directory_capability", no_room)
+            result = session.prepare_removal_plan(listed, trash=False).run()
+    finally:
+        session.shutdown()
+
+    assert failed, f"the fault was not reached: {result}"
+    assert not result.committed and result.error_kind == "local-io", result.error_message
+    assert "its pending removal record was retained" in (result.error_message or "")
+    assert media.is_file() and file_io.regular_file_fingerprint(media) == generation
+    assert not record.exists() and len(_whole_copies(media.parent, written)) == 1
+    # Failed on 62de5ac: 0. The pending record was cancelled, so nothing would
+    # look in that claim again and the wallpaper was a local file from then on.
+    assert _pending(journal) == 1
+
+    assert _replay(tmp_path, root, journal) == ()
+
+    assert record.read_bytes() == written
+    assert file_io.regular_file_fingerprint(media) == generation
+    assert scan.has_download_sidecar(media), "still a download"
+    assert _whole_copies(media.parent, written) == [] and _pending(journal) == 0
+    assert sorted(path.name for path in media.parent.glob(".wall-in-one-re*")) == []
+
+
 @pytest.mark.parametrize("point", ["before-media-discard", "before-consume"])
 def test_a_removal_that_dies_with_the_media_claimed_or_gone_loses_its_record_too(
     tmp_path: Path, root: Path, point: str

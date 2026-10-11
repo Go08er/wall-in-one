@@ -369,6 +369,40 @@ def _claim_not_durable(monkeypatch: pytest.MonkeyPatch, item: MediaItem) -> None
     monkeypatch.setattr(file_io, "_fsync_directory_capability", no_room)
 
 
+def _record_claim_not_durable(monkeypatch: pytest.MonkeyPatch, item: MediaItem) -> None:
+    """Injected: no room at the sync right after the *record* moves into its
+    claim. The media has not been touched yet."""
+    sync = file_io._fsync_directory_capability
+    record = _record(item)
+    done: list[bool] = []
+
+    def no_room(descriptor: int, **options: Any) -> None:
+        if not done and not record.exists() and item.path.exists():
+            done.append(True)
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        sync(descriptor, **options)
+
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", no_room)
+
+
+def _record_claim_unverified(monkeypatch: pytest.MonkeyPatch, item: MediaItem) -> Undo:
+    """The record's claim folder can't be searched once the record is in it: its
+    claim is neither verified nor undone."""
+    folder = _record_claim(item)
+    record = _record(item)
+    rename = file_io._rename_noreplace
+    done: list[bool] = []
+
+    def move(old: Path, new: Path) -> None:
+        rename(old, new)
+        if not done and old.name == record.name and new.name == "entry":
+            done.append(True)
+            folder.chmod(0o000)
+
+    monkeypatch.setattr(file_io, "_rename_noreplace", move)
+    return lambda: folder.chmod(0o700)
+
+
 def _nothing(_monkeypatch: pytest.MonkeyPatch, _item: MediaItem) -> None:
     return None
 
@@ -377,6 +411,13 @@ def _nothing(_monkeypatch: pytest.MonkeyPatch, _item: MediaItem) -> None:
 _REMOVE_EXITS: list[tuple[str, Arm, str, tuple[str | None, bool, bool], str]] = [
     ("claim-unverified", _claim_unverified, REMOVAL_TOKEN, ("changed", False, True), "kept"),
     ("claim-not-durable", _claim_not_durable, REMOVAL_TOKEN, ("local-io", False, True), "kept"),
+    (
+        "record-claim-not-durable",
+        _record_claim_not_durable,
+        REMOVAL_TOKEN,
+        ("local-io", False, True),
+        "kept",
+    ),
     ("replaced", _replaced_before_the_claim, REMOVAL_TOKEN, ("changed", False, False), "back"),
     ("gone", _gone_before_the_claim, REMOVAL_TOKEN, ("changed", False, False), "back"),
     ("bad-token", _nothing, "not-a-token", ("unrecorded", False, False), "back"),
@@ -562,6 +603,92 @@ def test_a_claim_that_could_not_be_made_durable_is_said_as_that(
     ), said
 
 
+# -- the record's own claim ---------------------------------------------------
+
+
+@pytest.mark.parametrize("how", ["remove", "trash"])
+def test_a_record_whose_own_claim_could_not_be_made_durable_keeps_the_pending_removal(
+    root: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The disk is full at the sync right after the download record moved into
+    its claim, before the media is touched. The record is whole, in the claim
+    the removal's token names, and it is not one of the records the removal
+    goes on to settle. So the pending removal record is kept, for the next start
+    to put the record back; cancelled, nothing would look in that claim again
+    and the wallpaper would be a local file from then on. And it is said as a
+    move that could not be made durable, not as a record that changed."""
+    item = downloaded(root)
+    written = _record(item).read_bytes()
+    untouched = _fingerprint(item.path)
+    _record_claim_not_durable(monkeypatch, item)
+
+    with pytest.raises(ManageError) as caught:
+        # As the session calls either: with the pending removal's token.
+        (manage.remove if how == "remove" else manage.trash)(
+            item,
+            (root,),
+            expected_source=_expected(item.path),
+            expected_fingerprint=_fingerprint(item.path),
+            operation_token=REMOVAL_TOKEN,
+        )
+
+    said = str(caught.value)
+    kept = _record_claim(item) / "entry"
+    assert _fingerprint(item.path) == untouched, "the media was never touched"
+    assert kept.read_bytes() == written and not _record(item).exists()
+    # Failed on 62de5ac: ("changed", False, False), so the session cancelled the
+    # pending removal record and the record stayed in its claim for good.
+    assert (caught.value.kind, caught.value.committed, caught.value.retain_intent) == (
+        "local-io",
+        False,
+        True,
+    ), said
+    # Failed on 62de5ac: "... changed before removal; the wallpaper was left
+    # untouched; an unverified entry was preserved at ...".
+    assert "changed" not in said, said
+    assert said == (
+        f"local-io: {_record(item)} was moved into its claim, but that could not be made "
+        "durable (No space left on device); the wallpaper was left untouched; its download "
+        f"record was kept at {kept}; its pending removal record was retained, so the next "
+        "start puts the download record back"
+    )
+    assert not _trash_folder("files").exists() or list(_trash_folder("files").iterdir()) == []
+
+
+def test_a_record_whose_own_claim_could_not_be_verified_keeps_the_pending_removal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record moved into its claim and could then be neither verified nor
+    moved back (its claim folder can't be searched). What is there may be the
+    record: the pending removal record is kept, so the next start looks again,
+    and nothing promises more than that."""
+    item = downloaded(root)
+    written = _record(item).read_bytes()
+    untouched = _fingerprint(item.path)
+    undo = _record_claim_unverified(monkeypatch, item)
+    try:
+        with pytest.raises(ManageError) as caught:
+            _remove(item, (root,))
+    finally:
+        undo()
+
+    said = str(caught.value)
+    kept = _record_claim(item) / "entry"
+    assert _fingerprint(item.path) == untouched, "the media was never touched"
+    assert kept.read_bytes() == written and not _record(item).exists()
+    # Failed on 62de5ac: retain_intent was False.
+    assert (caught.value.kind, caught.value.committed, caught.value.retain_intent) == (
+        "changed",
+        False,
+        True,
+    ), said
+    assert said == (
+        f"changed: {_record(item)} changed before removal; the wallpaper was left untouched; "
+        f"an unverified entry was preserved at {kept}; its pending removal record was "
+        "retained, so the next start looks at what is there again"
+    )
+
+
 # -- every exit of a trash move after the withdrawal ---------------------------
 
 
@@ -737,6 +864,10 @@ def _record_changed_after_the_move(monkeypatch: pytest.MonkeyPatch, _item: Media
 
 #: exit, its fault, (kind, committed), the record's fate.
 _TRASH_EXITS: list[tuple[str, Arm, tuple[str | None, bool], str]] = [
+    # Given no token (as here), the record's claim is a nameless one no later
+    # start would find: there is no pending record to keep, and the reply says
+    # where the record is without promising a put-back.
+    ("record-claim-not-durable", _record_claim_not_durable, ("local-io", False), "kept"),
     ("record-folder-read-only", _record_folder_read_only, ("local-io", False), "back"),
     ("record-not-pinned", _record_not_pinned, ("local-io", False), "back"),
     ("record-not-written", _record_not_written, ("local-io", False), "back"),
@@ -793,6 +924,7 @@ def test_the_download_record_at_every_exit_of_a_trash_move(
     # wallpaper never left its folder.
     assert _fate(item, written, said) == fate, said
     assert committed == (fate == "consumed")
+    assert "the next start" not in said, "no token: no later start is promised anything"
     if fate == "back" and item.path.exists() and _fingerprint(item.path) == untouched:
         assert scan.has_download_sidecar(item.path), "untouched, so still a download"
 

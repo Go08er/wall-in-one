@@ -1309,6 +1309,59 @@ def _revalidate_adopted_authority(
     return replace(authority, adoption_id="", sidecar_fingerprint=None)
 
 
+def _record_claim_failure(
+    logical: Path, error: file_io.PathChangedError, *, replayable: bool
+) -> ManageError:
+    """The failure for a download record whose own claim did not go through.
+
+    The media has not been touched yet, whichever this is.
+
+    With no ``preserved_path`` the record never left its name, or went back
+    to it: nothing moved, and the removal is simply refused.
+
+    With one, the record is not at its name: it is in the claim this removal's
+    token names, and it never joined the records `_WithdrawnAuthority` settles.
+    Cancelling the pending removal record then would leave it there for good,
+    and the wallpaper a local file from then on, because replay looks under
+    pending records only. So the failure keeps the pending record
+    (``retain_intent``), which also keeps any record withdrawn before this one
+    in its claim, and the next start settles them all together
+    (`settle_record_claims`): a record of the file this removal prepared goes
+    back to its name, and anything else is named and left as it is.
+
+    A claim that could not be made durable (`file_io.ClaimNotDurableError`: a
+    full disk at the sync after the move) is said as that. Nothing about the
+    record changed.
+
+    ``replayable``: the claim is named from a removal token. Without one there
+    is no pending record to keep and no later start that would look, so only
+    where the record is can be said.
+    """
+    kept = error.preserved_path
+    if kept is None:
+        return ManageError(
+            "changed", f"{logical} changed before removal; the wallpaper was left untouched"
+        )
+    if isinstance(error, file_io.ClaimNotDurableError):
+        kind = "local-io"
+        said = (
+            f"{logical} was moved into its claim, but that could not be made durable "
+            f"({error.reason}); the wallpaper was left untouched; its download record was "
+            f"kept at {kept}"
+        )
+        then = "puts the download record back"
+    else:
+        kind = "changed"
+        said = (
+            f"{logical} changed before removal; the wallpaper was left untouched; "
+            f"an unverified entry was preserved at {kept}"
+        )
+        then = "looks at what is there again"
+    if replayable:
+        said += f"; its pending removal record was retained, so the next start {then}"
+    return ManageError(kind, said, retain_intent=replayable)
+
+
 def _withdraw_download_authority(
     item: MediaItem,
     pinned: Sequence[_PinnedArtifact],
@@ -1396,15 +1449,8 @@ def _withdraw_download_authority(
                 operation_token=record_token,
             )
         except file_io.PathChangedError as error:
-            detail = (
-                f"; an unverified entry was preserved at {error.preserved_path}"
-                if error.preserved_path is not None
-                else ""
-            )
-            failure = ManageError(
-                "changed",
-                f"{artifact.logical} changed before removal; "
-                f"the wallpaper was left untouched{detail}",
+            failure = _record_claim_failure(
+                artifact.logical, error, replayable=record_token is not None
             )
             withdrawn.settle(failure, target=item.path, expected_fingerprint=expected_fingerprint)
             raise failure from error

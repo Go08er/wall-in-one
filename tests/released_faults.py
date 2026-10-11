@@ -1126,9 +1126,14 @@ def round_trip(
     exempt: Callable[[Entry, Tree], bool] = lambda _entry, _before: False,
     judge: Callable[[Path, Tree, Tree, str], str] = lambda _base, _before, _after, _said: "",
     plans: Callable[[Produced], list[dict[str, object]]] | None = None,
+    edited_after: int = 0,
     full: bool = False,
 ) -> Campaign:
     """A producer under every plan, another version's turn on what it left, then ``consume``.
+
+    With ``edited_after`` (one file in so many), each state a kill left is made
+    again and a person edits one of its files in place, one of `EDITS` in
+    turn, before the other version's turn: that file is protected from then on.
 
     Going back and returning: ``script`` is run from ``source`` under each plan
     (the usual `single_faults`, or ``plans``); ``between(profiles)`` gives each
@@ -1162,13 +1167,44 @@ def round_trip(
             seen.add(key)
             chosen.append((job, first, made, state))
             result.states.append(shape(state, job.base))
+    labels = {job.base: f"{dict(job.plan)}" for job, _first, _made, _state in chosen}
+    person: dict[Path, frozenset[int]] = {}
+    if edited_after:
+        again: list[tuple[Job, tuple[str, int], str]] = []
+        files = 0
+        for job, _first, _made, state in list(chosen):
+            if "kill" not in job.plan:
+                continue
+            for wanted in sorted({pair for pair in shape(state, job.base) if pair[1] > 0}):
+                files += 1
+                if files % edited_after == 0:
+                    how = EDITS[len(again) % len(EDITS)]
+                    again.append(
+                        (Job(base / f"b{len(again):05d}", job.plan, arguments), wanted, how)
+                    )
+        result.edits_after = len(again)
+        firsts = [prepare(job.base) for job, _wanted, _how in again]
+        produced = run(source, script, [job for job, _wanted, _how in again])
+        for (job, wanted, how), first, made in zip(again, firsts, produced, strict=True):
+            matching = [
+                entry
+                for entry in tree(job.base).entries
+                if shape(Tree((entry,)), job.base)[0] == wanted
+            ]
+            if not matching:
+                continue
+            edit_in_place(matching[0].path, how)
+            person[job.base] = frozenset({matching[0].inode})
+            labels[job.base] = f"{dict(job.plan)}, then a person edits {wanted[0]} ({how})"
+            chosen.append((job, first, made, tree(job.base)))
     turns = between([job.base for job, _first, _made, _state in chosen])
     for (job, first, made, before), turn in zip(chosen, turns, strict=True):
-        label = f"{dict(job.plan)}"
+        label = labels[job.base]
         protected = (
             frozenset(entry.inode for entry in first.entries)
             | made.once_public
             | frozenset(inode for _call, _path, inode in made.edited)
+            | person.get(job.base, frozenset())
         )
         after = tree(job.base)
         said = turn.output if turn.status == 0 else f"FINDING it ended {turn.status}: {turn.output}"

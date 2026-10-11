@@ -136,6 +136,32 @@ def _is_new_name(path: Path, base: Path) -> bool:
     )
 
 
+def _archived_holding_bytes(base: Path, before: faults.Tree, after: faults.Tree) -> str:
+    """A finding if 0.2.2's Tidy up archived anything but an empty file.
+
+    What it does archive in a profile this version wrote is empty: the
+    tombstones under ``.wall-in-one-retained/`` (in a download folder, the
+    stills folder, the state folder) and the emptied media of a finished
+    claim (``.wall-in-one-removal-<token>/entry``). Never a withdrawn download
+    record, a retained copy that holds bytes, or a pending claim: those this
+    version would look for when it comes back.
+    """
+    was = {entry.inode: entry for entry in before.entries}
+    moved = sorted(
+        f"{was[entry.inode].path.relative_to(base)} ({entry.size} bytes)"
+        for entry in after.entries
+        if "tidy-archive" in entry.path.parts
+        and entry.size
+        and entry.inode in was
+        and "tidy-archive" not in was[entry.inode].path.parts
+    )
+    return f"FINDING 0.2.2's Tidy up archived what still holds bytes: {moved}" if moved else ""
+
+
+def _profile_of(path: Path) -> Path:
+    return next(parent for parent in path.parents if parent.name.startswith(("a0", "b0")))
+
+
 def _is_older_name(path: Path) -> bool:
     return path.name.startswith(download.LEGACY_STAGING_PREFIXES)
 
@@ -201,6 +227,8 @@ def _downloads(
     _quiet(monkeypatch)
 
     def judge(base: Path, before: faults.Tree, after: faults.Tree, said: str) -> str:
+        if archived := _archived_holding_bytes(base, before, after):
+            return archived
         touched = sorted(
             str(entry.path.relative_to(base))
             for entry in before.entries
@@ -222,7 +250,16 @@ def _downloads(
         between=lambda bases: _released_turn(released_source, "downloads", bases),
         consume=_opened_a_day_later,
         exempt_between=lambda entry, _before, _after: _is_older_name(entry.path),
+        # Known, by design: this version's own day-old sweep reclaims its v2
+        # and commit names even when a person edited one. Such a name is
+        # never public by construction (AB-1), which is why the sweep may
+        # reclaim it; the app keeps no record of what a crash-left partial
+        # should hold, so it can't tell an edit from its own partial bytes.
+        # The older names, which may have been public, it never touches.
+        # `test_a_v2_stage_a_person_edited_is_reclaimed_a_day_after_the_edit`.
+        exempt=lambda entry, _before: _is_new_name(entry.path, _profile_of(entry.path)),
         judge=judge,
+        edited_after=2 if full else 5,
         full=full,
     )
     print("\n" + found.summary("a download: this version, 0.2.2 a day later, this version"))
@@ -331,6 +368,8 @@ def _removals(
         return found.at(media) is not None, claimed, found.at(record) is not None, pending
 
     def judge(base: Path, before: faults.Tree, after: faults.Tree, said: str) -> str:
+        if archived := _archived_holding_bytes(base, before, after):
+            return archived
         there, claimed, record, pending = facts(base, before)
         there_after, claimed_after, record_after, _pending = facts(base, after)
         if not pending:
@@ -354,7 +393,7 @@ def _removals(
         # it; and it rewrites the journal and the stores it takes the entry out of.
         if entry.path.name in STORES:
             return True
-        base = next(parent for parent in entry.path.parents if parent.name.startswith("a0"))
+        base = next(parent for parent in entry.path.parents if parent.name.startswith(("a0", "b0")))
         if after.at(consumer.media(base)) is not None:
             return False
         return entry.data == removals.MEDIA or entry in consumer._beside(base, _before)
@@ -371,6 +410,7 @@ def _removals(
         exempt_between=exempt_between,
         exempt=consumer.exempt,
         judge=judge,
+        edited_after=2 if full else 5,
         full=full,
     )
     print("\n" + found.summary("a removal: this version, 0.2.2's start, this version's start"))
@@ -397,3 +437,55 @@ def test_a_removal_survives_going_back_and_returning_under_any_plan(
 ) -> None:
     found = _removals(released_source, tmp_path, monkeypatch, full=True)
     assert not found.findings, "\n".join(sorted(set(found.findings))[:30])
+
+
+def test_a_v2_stage_a_person_edited_is_reclaimed_a_day_after_the_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterisation of a known case (see `_downloads`): this version's
+    download dies leaving a ``.wall-in-one-v2-…-stage-*`` file, and a person
+    appends a note to it. The sweep's age is the file's modification time, so
+    the edit restarts the day: swept now, the edited stage is kept; a day
+    after the edit it is reclaimed. Nothing at a public name changes."""
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
+    plain = faults.Job(tmp_path / "plain", {}, ())
+    downloads._prepare(plain.base)
+    (trace,) = faults.run(SOURCE, downloads.PRODUCER, [plain])
+    jobs = [
+        faults.Job(tmp_path / f"a{number:05d}", {"kill": call.index}, ())
+        for number, call in enumerate(trace.changes)
+    ]
+    for job in jobs:
+        downloads._prepare(job.base)
+    faults.run(SOURCE, downloads.PRODUCER, jobs)
+    tried = 0
+    for job in jobs:
+        root = _root(job.base)
+        stages = [
+            entry
+            for entry in faults.tree(root).entries
+            if entry.path.name.startswith(".wall-in-one-v2-") and entry.size
+        ]
+        if not stages:
+            continue
+        tried += 1
+        stage = stages[0].path
+        public = {
+            entry.path: entry.data
+            for entry in faults.tree(job.base).entries
+            if not any(part.startswith(".") for part in entry.path.relative_to(job.base).parts)
+        }
+        faults.edit_in_place(stage, "extend")
+        edited = stage.read_bytes()
+        with monkeypatch.context() as scoped:
+            faults.scratch_profile(scoped, job.base)
+            download.managed_directory(root, download.MOTIONBGS_LOCATION)
+            assert stage.read_bytes() == edited, "edited a moment ago: the sweep leaves it"
+            old = time.time() - LATER_SECONDS
+            os.utime(stage, (old, old))
+            download.managed_directory(root, download.MOTIONBGS_LOCATION)
+        assert not stage.exists() or not stage.stat().st_size, "a day after the edit: reclaimed"
+        now = {path: path.read_bytes() for path in public if path.is_file()}
+        assert now == public, "nothing at a public name changed"
+    assert tried, "at least one kill left a v2 stage holding bytes"

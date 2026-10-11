@@ -362,6 +362,33 @@ def test_a_candidate_that_cannot_be_put_back_is_said_as_retired(
     assert wrote == []
 
 
+def test_a_candidate_in_a_profile_folder_that_is_a_link_is_still_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same, with the store's folder reached through a symbolic link (a
+    profile kept on another drive). The candidate is retired intact there, as it
+    is in a folder that is not a link."""
+    real = tmp_path / "another-drive"
+    real.mkdir(mode=0o700)
+    linked = tmp_path / "state-link"
+    linked.symlink_to(real)
+    target = linked / "state.json"
+
+    with (
+        put_back_refused(monkeypatch, target, lambda name: name.write_text("repair\n")) as moved,
+        pytest.raises(file_io.PathChangedError) as raised,
+    ):
+        state_file.write_atomic_text(target, CANDIDATE, replace_existing=False)
+
+    said = str(raised.value)
+    retired = _retired_entries(linked)
+    # Failed on 843b241: "could not be retired intact (... Not a directory ...), so it
+    # was left at <temporary>".
+    assert len(retired) == 1 and retired[0].read_text(encoding="utf-8") == CANDIDATE
+    assert not moved[0].exists(), "no stray temporary in the store's folder"
+    assert said.endswith(RETIRED_INTACT.format(retired[0])), said
+
+
 def test_a_candidate_retired_but_not_durably_is_said_where_it_is_and_not_as_retired(
     folder: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

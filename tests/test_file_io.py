@@ -1808,3 +1808,58 @@ def test_a_new_retained_folder_that_cannot_be_made_durable_moves_nothing(
     assert not isinstance(caught.value, file_io.PathChangedError)
     assert events == [] and source.read_bytes() == b"a record a person added to"
     assert list((folder / file_io.RETAINED_ENTRY_DIRECTORY).iterdir()) == []
+
+
+def test_an_entry_in_a_folder_reached_through_a_link_is_retired_and_synced_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wallpaper folder or a profile folder that is itself a symbolic link (to
+    another drive, say) is an ordinary set-up. The entry's folder is found by
+    what it holds, not by how it is spelled: the entry is retired, and the syncs
+    go to the real folder, in the same order."""
+    real = tmp_path / "another-drive"
+    real.mkdir()
+    folder = tmp_path / "Wallpapers"
+    folder.symlink_to(real)
+    source = folder / "record.json"
+    source.write_bytes(b"a record a person added to")
+    events = _record_moves_and_syncs(monkeypatch)
+
+    # Failed on 843b241: NotADirectoryError, and the entry stayed where it was.
+    destination = _retire(source)
+
+    its_folder = ("sync", file_io.path_identity(real))
+    retained = real / file_io.RETAINED_ENTRY_DIRECTORY
+    assert events == [
+        its_folder,
+        ("rename", None),
+        ("sync", file_io.path_identity(retained)),
+        its_folder,
+    ]
+    assert destination.parent == folder / file_io.RETAINED_ENTRY_DIRECTORY
+    assert destination.read_bytes() == b"a record a person added to" and not source.exists()
+
+
+def test_a_folder_that_does_not_hold_the_entry_is_never_the_one_synced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other side of finding the folder by what it holds: when the name in it
+    is not the entry that was to be retired, nothing is moved and nothing synced."""
+    folder = tmp_path / "library"
+    folder.mkdir()
+    source = folder / "record.json"
+    source.write_bytes(b"a record a person added to")
+    other = folder / "other.json"
+    other.write_bytes(b"something else")
+    events = _record_moves_and_syncs(monkeypatch)
+    fingerprint = file_io.regular_file_fingerprint(other)
+
+    with pytest.raises(file_io.PathChangedError):
+        file_io._retain_exact_entry(
+            source,
+            expected_identity=fingerprint[:2],
+            expected_file_type=stat.S_IFREG,
+            expected_fingerprint=fingerprint,
+        )
+
+    assert events == [] and source.read_bytes() == b"a record a person added to"

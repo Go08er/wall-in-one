@@ -1745,6 +1745,35 @@ def _pin_private_claim_directory(directory: Path) -> _PinnedClaimDirectory:
     return _PinnedClaimDirectory(directory, descriptor, identity)
 
 
+def _pin_folder_holding(directory: Path, name: str, identity: PathIdentity) -> PinnedPath:
+    """Pin the folder that holds the entry ``identity`` under ``name``, however it is spelled.
+
+    For a sync that must reach the folder an entry is really in. A folder
+    whose own name is a symbolic link is an ordinary set-up (a wallpaper
+    folder, or a profile folder, that is a link to another drive), and
+    `_pin_directory_for_durability` refuses to pin one by that name. So when
+    it refuses, the name is followed, and in either case what makes this the
+    right folder is checked through the descriptor: it holds that exact inode
+    under that name now.
+    """
+    try:
+        pinned = _pin_directory_for_durability(directory)
+    except OSError:
+        pinned = PinnedPath(
+            directory,
+            os.open(directory, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC),
+            stat.S_IFDIR,
+        )
+    try:
+        held = os.stat(name, dir_fd=pinned.descriptor, follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != identity:
+            raise PathChangedError(f"{directory / name} is no longer the entry that was expected")
+    except BaseException:
+        pinned.close()
+        raise
+    return pinned
+
+
 def _retain_exact_entry(
     path: Path,
     *,
@@ -1788,9 +1817,13 @@ def _retain_exact_entry(
     try:
         if durable:
             # Pinned before the move, as the claim does: the folder synced
-            # afterwards is the one the entry was moved out of.
-            source_parent_pin = _pin_directory_for_durability(path.parent)
-            retained_parent_pin = _pin_directory_for_durability(access_parent)
+            # afterwards is the one the entry was moved out of. By what each
+            # folder holds, not by its spelling: either may be reached
+            # through a symbolic link (`_pin_folder_holding`).
+            source_parent_pin = _pin_folder_holding(path.parent, path.name, expected_identity)
+            retained_parent_pin = _pin_folder_holding(
+                access_parent, RETAINED_ENTRY_DIRECTORY, directory_pin.identity
+            )
             try:
                 # Persist the retained folder's own name before the only link
                 # to the entry is inside it. Every time, as the claim does,

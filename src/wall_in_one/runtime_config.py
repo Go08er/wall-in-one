@@ -1349,6 +1349,8 @@ def checked_entries_addition[Work](
     sources: Iterable[Path],
     work: Callable[[], Work],
     session: Session,
+    *,
+    said_by_caller: bool = False,
 ) -> Callable[[], Work]:
     """``work`` (it adds ``sources`` to playlist ``reference``), once checked.
 
@@ -1356,7 +1358,9 @@ def checked_entries_addition[Work](
     playlist, and no file is needed to say so. The playlists themselves are
     the store ``work`` writes to: when their file can't be read, the question
     is left to that store, which refuses the write or, for a damaged file,
-    sets it aside as it always has.
+    sets it aside as it always has. With ``said_by_caller`` the refusal is
+    the reason alone, for a caller that says "was not added; nothing changed"
+    itself.
     """
     adding = [Entry(f"adding-{index}", str(source)) for index, source in enumerate(sources)]
 
@@ -1368,7 +1372,11 @@ def checked_entries_addition[Work](
             playlist, [*playlist.entries, *adding], view.settings, view, taking_away=False
         )
         if refusal:
-            raise PlaybackGuardError(f"Nothing was added to {_quoted_name(playlist)}: {refusal}")
+            raise PlaybackGuardError(
+                refusal
+                if said_by_caller
+                else f"Nothing was added to {_quoted_name(playlist)}: {refusal}"
+            )
 
     return judged_on_what_is_saved(refuse, work, session, needs=())
 

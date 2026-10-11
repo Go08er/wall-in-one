@@ -842,7 +842,19 @@ class RealPlaylists:
                 (at + index, playlists.Entry(playlists.new_id(), str(item.path)))
                 for index, item in enumerate(items)
             ]
-            return lambda: store.insert_entries(pid, placed)
+            # Those were this page's early answers, from the library and the
+            # settings this window holds. The one that counts is the
+            # application's, asked again on the worker of what is saved then
+            # (`runtime_config.checked_entries_addition`): another program may
+            # have saved other library folders since, and a wallpaper no
+            # longer in the library must not become a playlist's only entry.
+            return runtime_config.checked_entries_addition(
+                pid,
+                [item.path for item in items],
+                lambda: store.insert_entries(pid, placed),
+                backend.session,
+                said_by_caller=True,  # the report below says "was not added; nothing changed"
+            )
 
         def saved(_updated: playlists.Playlist) -> bool:
             what = quoted(views[0].name) if len(views) == 1 else f"{len(views)} wallpapers"
@@ -935,7 +947,16 @@ class RealPlaylists:
             for index, entry in removed:
                 restored.insert(max(0, min(len(restored), index)), entry)
             self._require_buildable(current, restored)
-            return lambda: store.insert_entries(pid, removed)
+            # The early answer; asked again on the worker of what is saved
+            # then, as an addition is (`add_entries`): the entries go back
+            # with their own ids at their old positions, or not at all.
+            return runtime_config.checked_entries_addition(
+                pid,
+                [entry.path for _index, entry in removed],
+                lambda: store.insert_entries(pid, removed),
+                self._backend.session,
+                said_by_caller=True,  # the report below says "was not undone; nothing changed"
+            )
 
         self._queue(
             f"The removal from {quoted(name)} was not undone",

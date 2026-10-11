@@ -10,7 +10,7 @@
 
 # Explicit A/B safe-restart gate using actual release and candidate packages.
 # The user chose an announced restart with saved configuration/data preserved;
-# seamless session restoration and automatic downgrade are not requirements.
+# seamless session restoration is not a requirement, and nothing goes back.
 let
   inherit (pkgs) lib;
   home = "/home/wallpaper";
@@ -473,26 +473,22 @@ pkgs.testers.runNixOSTest {
         stop_runtime()
         change_settings(new, {"stop_animations_on_battery": True})
         start_runtime()
-        enabled = wait_status(lambda value: value.get("stop_animations_on_battery") is True)
+        wait_status(lambda value: value.get("stop_animations_on_battery") is True)
         check_running(new)
         assert document(runtime)["schema_version"] == 5
         stop_runtime()
         before = snapshot()
         runtime_hash = run("sha256sum " + q(runtime)).split()[0]
-        parser_code, parser_output = machine.execute(user(old + "/bin/wall-in-one-service --check-config --config " + q(runtime) + " 2>&1"))
         if old_supports_battery:
             # Maintenance updates may change dependencies without changing the
-            # config schema. An older compatible parser must still accept it.
+            # config schema. An older compatible parser, still the running
+            # service until it is restarted, must accept the document. What an
+            # older package without schema 5 makes of it is not examined:
+            # updates are one-way.
+            parser_code, parser_output = machine.execute(user(old + "/bin/wall-in-one-service --check-config --config " + q(runtime) + " 2>&1"))
             assert parser_code == 0, (parser_code, parser_output)
             record("battery_enabled_compatible_old_parser", {"parser_exit": parser_code,
                 "schema_five_supported": True, "files_unchanged": True})
-        else:
-            compiler_code, compiler_output = machine.execute(user(old + "/bin/wall-in-one --write-config 2>&1"))
-            assert compiler_code != 0 and "stop_animations_on_battery" in compiler_output, (compiler_code, compiler_output)
-            assert parser_code == 78, (parser_code, parser_output)
-            record("battery_enabled_package_only_rollback", {"compiler_exit": compiler_code, "parser_exit": parser_code,
-                "files_unchanged": True, "compiler_error": compiler_output.strip(), "power_available": enabled["power_available"],
-                "recovery": "restart the compatible newer package; no automatic data downgrade"})
         assert snapshot() == before
         assert run("sha256sum " + q(runtime)).split()[0] == runtime_hash
         machine.fail("test -e ${runtimeDir}/wall-in-one-runtime.sock")

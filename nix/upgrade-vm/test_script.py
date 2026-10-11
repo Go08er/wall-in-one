@@ -1,21 +1,21 @@
-# The upgrade-rollback scenario, run by the NixOS test driver.
+# The upgrade scenario, run by the NixOS test driver: the shipped v0.1.4 runs
+# on the golden profile, this build is installed over it, starts, idles and
+# then uses what bumps a store. Updates are one-way: nothing here goes back.
 #
-# upgrade-rollback-test.nix prepends the constants it uses (OLD, NEW, HOME,
+# upgrade-vm-test.nix prepends the constants it uses (OLD, NEW, HOME,
 # RUNTIME_DIR, PROFILE, DRIVER_LOG, NOCTALIA_PROBE, SUPPORT, GUEST_PYTHON, PACKAGE_PYTHON,
-# SITE_PACKAGES, BASH, NIRI, STRICT). `machine`, `start_all` and `subtest`
+# SITE_PACKAGES, BASH, STRICT). `machine`, `start_all` and `subtest`
 # are the driver's. Every write to the profile is judged with
 # tests/golden/harness.py's own diff and allowance machinery, on snapshots the
 # guest takes of the trees Wall-in-One owns or reads.
 
 import importlib
 import json
-import re
 import shlex
 import sys
 import time
 import tomllib
 from collections.abc import Callable
-from functools import partial
 from typing import Any
 
 # The harness and the guest tool live in the support store path, outside the
@@ -32,13 +32,10 @@ RUNTIME_REL = f"{STATE_REL}/runtime.toml"
 OVERRIDES = f"{STATE}/runtime-overrides.toml"
 OVERRIDES_REL = f"{STATE_REL}/runtime-overrides.toml"
 RUNTIME_SOCKET = f"{RUNTIME_DIR}/wall-in-one-runtime.sock"
-GUI_SOCKET = f"{RUNTIME_DIR}/wall-in-one.sock"
 HEALTH = "wall-in-one-health-sync.service"
-APP_ID = "dev.goober.WallInOne"
 #: The fixture's default playlist ("Evenings", all video), which plays at the
 #: seeded clock because no timed rule is active then.
 EVENINGS = "bd7adc21870f0664"
-TRAVEL = "a545a472f65dd73b"
 #: The enabled Evenings rule, 21:00-04:00.
 NAMED_RULE = "af5d9a02e281e683"
 RULE_NAME = "Evening lights"
@@ -46,21 +43,10 @@ RULE_NAME = "Evening lights"
 OPT_IN = "DP-1"
 INTERVAL = 120
 GLOBAL_INTERVAL = 900
-PICTURE = f"{HOME}/Pictures/Wallpapers/meadow-light.png"
 STORES = ("playlists.json", "schedules.json", "displays.json")
-SAFE_PRE_ADMISSION = {
-    "current-profile authoring is still opening; retry shortly",
-    "another authoring change is still being saved; retry after it finishes",
-}
 
 failures: list[str] = []
 observations: dict[str, Any] = {}
-#: The transient user units the GUIs were launched in, with the window's PID.
-#: Everything a launch starts stays in its unit's cgroup -- including helpers
-#: that begin their own session, as scene and worker helpers do -- so an empty
-#: cgroup is the only proof that nothing the GUI started is still writing.
-gui_units: list[tuple[str, int]] = []
-launches = 0
 
 
 # -- the guest -------------------------------------------------------------------------
@@ -249,155 +235,6 @@ def package_python(package: str, code: str) -> str:
     return run(f"PYTHONPATH={package}/{SITE_PACKAGES} {PACKAGE_PYTHON} -c {q(prologue + code)}")
 
 
-def niri(arguments: str) -> str:
-    return run(
-        f"NIRI_SOCKET=$(find {RUNTIME_DIR} -maxdepth 1 -name 'niri*.sock' -print -quit) "
-        f"{NIRI} msg {arguments}"
-    )
-
-
-def windows() -> list[dict[str, Any]]:
-    return [window for window in json.loads(niri("--json windows")) if window.get("app_id") == APP_ID]
-
-
-def launch_tracked(command: str) -> str:
-    """Run ``command`` as the user, in the same environment, in a unit of its own.
-
-    A oneshot that remains after its command exits, so whatever the command
-    left running stays in the unit's cgroup until it exits too. Returns the
-    unit, which :func:`wait_unit_drained` waits on.
-    """
-    global launches
-    launches += 1
-    unit = f"wall-in-one-test-launch-{launches}.service"
-    run(
-        f"systemd-run --user --quiet --collect --unit={unit} "
-        "--property=Type=oneshot --property=RemainAfterExit=yes "
-        f"-- env -i {user_environment()} {BASH} -euo pipefail -c {q(command)}"
-    )
-    assert prop("ExecMainStatus", unit) == "0", prop("Result", unit)
-    return unit
-
-
-def unit_processes(unit: str) -> list[str]:
-    """The live processes in ``unit``'s cgroup, as ``pid sid args`` lines.
-
-    A snapshot, for naming what is there: a listed process can fork and exit
-    between the list and its ``ps``, leaving a child the list never named.
-    Whether the cgroup is empty is :func:`unit_populated`'s to say.
-    """
-    group = prop("ControlGroup", unit)
-    assert group, f"{unit} has no cgroup"
-    found = []
-    for pid in machine.succeed(f"cat /sys/fs/cgroup{group}/cgroup.procs").split():
-        code, line = machine.execute(f"ps -o pid=,sid=,stat=,args= -p {pid}")
-        if code == 0 and line.split(None, 3)[2:3] and not line.split()[2].startswith("Z"):
-            found.append(line.strip())
-    return found
-
-
-def unit_populated(unit: str) -> bool:
-    """Whether ``unit``'s cgroup holds any process, by the kernel's own count.
-
-    ``cgroup.events`` reads ``populated 0`` only once the cgroup, and every
-    cgroup below it, has no process left, whatever forked and exited when.
-    """
-    group = prop("ControlGroup", unit)
-    assert group, f"{unit} has no cgroup"
-    events = machine.succeed(f"cat /sys/fs/cgroup{group}/cgroup.events")
-    for line in events.splitlines():
-        key, _, value = line.partition(" ")
-        if key == "populated":
-            return value.strip() != "0"
-    raise AssertionError(f"{unit}'s cgroup.events has no populated line: {events!r}")
-
-
-def wait_unit_drained(unit: str, leader: int | None = None, timeout: float = 60) -> None:
-    """Every process launched in ``unit`` has exited, then the unit is stopped.
-
-    The window's own process going away is not enough: anything the app
-    started -- a still renderer, a worker, in its own session or not -- can
-    still be writing to the profile after it. "Exited" is the kernel's word
-    (:func:`unit_populated`), never an empty process snapshot. Nothing is
-    killed: on timeout this fails, naming the survivors, and the unit is
-    stopped only once its cgroup is empty, so its stop signals no one.
-    """
-    deadline = time.monotonic() + timeout
-    lingered: list[str] = []
-    while unit_populated(unit):
-        alive = unit_processes(unit)
-        if leader is not None and alive and not any(line.split()[0] == str(leader) for line in alive):
-            lingered = alive
-        if time.monotonic() > deadline:
-            named = "\n".join(alive) or "(its cgroup is still populated)"
-            raise AssertionError(f"what {unit} launched has not exited after {timeout:g} s:\n{named}")
-        time.sleep(0.2)
-    if lingered:
-        observe(f"{unit}: processes that outlived the GUI", lingered)
-    run(f"systemctl --user stop {unit}")
-
-
-def open_gui(package: str, page: str, title: str) -> dict[str, Any]:
-    """`ctl open`, as vm-test.nix does: the authoring verbs need the GTK app."""
-    unit = launch_tracked(f"{package}/bin/wall-in-one ctl open {page}")
-    machine.wait_until_succeeds(
-        f"journalctl --no-pager -o cat _SYSTEMD_USER_UNIT={unit} "
-        f"| grep -Fx {q(f'launch requested for {page}')}",
-        timeout=15,
-    )
-    machine.wait_until_succeeds(
-        user(
-            f"NIRI_SOCKET=$(find {RUNTIME_DIR} -maxdepth 1 -name 'niri*.sock' -print -quit) "
-            f"{NIRI} msg windows | grep -F {q('Wall-in-One - ' + title)}"
-        ),
-        timeout=90,
-    )
-    (window,) = windows()
-    pid = int(window["pid"])
-    command = machine.succeed(f"tr '\\0' ' ' < /proc/{pid}/cmdline")
-    assert package in command, command
-    assert any(line.split()[0] == str(pid) for line in unit_processes(unit)), (
-        f"the GUI {pid} is not in {unit}"
-    )
-    gui_units.append((unit, pid))
-    return window
-
-
-def close_gui() -> None:
-    for window in windows():
-        niri(f"action close-window --id {window['id']}")
-    while gui_units:
-        wait_unit_drained(*gui_units.pop())
-    machine.wait_until_succeeds(f"test ! -e {GUI_SOCKET}", timeout=30)
-    assert not windows()
-
-
-def gui_library(package: str) -> tuple[int, int, list[str]]:
-    """The open GUI's library, from `ctl list`: rows listed, the library's size, the paths.
-
-    v0.1.4's GUI serves `list` from the scan it is showing:
-    ``# library: <listed> of <size> wallpapers``, then one tab-separated row
-    per wallpaper, its path first.
-    """
-    output = ctl(package, "list")
-    lines = output.splitlines()
-    match = re.match(r"# library: (\d+) of (\d+) ", lines[0]) if lines else None
-    assert match, output
-    paths = sorted(line.split("\t", 1)[0] for line in lines if not line.startswith("# "))
-    return int(match[1]), int(match[2]), paths
-
-
-def settle_authoring(package: str, arguments: str) -> tuple[int, str]:
-    """One authoring verb's outcome once the GUI's startup gate has settled."""
-    command = user(f"{package}/bin/wall-in-one ctl {arguments} 2>&1")
-    for _attempt in range(600):
-        code, output = machine.execute(command)
-        if code == 0 or output.strip() not in SAFE_PRE_ADMISSION:
-            return code, output.strip()
-        time.sleep(0.2)
-    raise AssertionError(f"the authoring gate never settled: {arguments}")
-
-
 # -- snapshots and expectations ---------------------------------------------------------
 
 
@@ -529,18 +366,6 @@ def unchanged(before: dict[str, Any], after: dict[str, Any], name: str) -> None:
     )
 
 
-def broken_copies(nodes: dict[str, Any], name: str) -> list[str]:
-    prefix = f"{STATE_REL}/{name}.broken"
-    return sorted(path for path in nodes if path.startswith(prefix))
-
-
-def compiled_stills(nodes: dict[str, Any], playlist_id: str) -> list[str]:
-    """The stills runtime.toml compiles for one playlist, in order."""
-    document = tomllib.loads(content(nodes, "runtime.toml").decode())
-    (playlist,) = (entry for entry in document["playlists"] if entry["id"] == playlist_id)
-    return [entry.get("still", "") for entry in playlist.get("entries", [])]
-
-
 def schema(nodes: dict[str, Any]) -> int:
     value = tomllib.loads(content(nodes, "runtime.toml").decode())["schema_version"]
     assert isinstance(value, int)
@@ -586,21 +411,6 @@ machine.wait_until_succeeds(user("systemctl --user is-active wall-in-one.service
 machine.wait_until_succeeds(user("systemctl --user is-active noctalia.service"), timeout=90)
 machine.wait_for_file(RUNTIME_SOCKET)
 seeded = _nodes(machine.succeed("cat /var/lib/wall-in-one-upgrade/seed.json"))
-
-with subtest("the GUI census follows a helper that starts its own session"):
-    # A stand-in for a scene or worker helper: started in a new session, it
-    # outlives its launcher. A census by the launcher's session misses it;
-    # the launch unit's cgroup does not. Touches nothing but /tmp.
-    done = "/tmp/wall-in-one-test-helper-done"
-    unit = launch_tracked(f"setsid {BASH} -c 'sleep 6; touch {done}' < /dev/null > /dev/null 2>&1 &")
-    launcher = prop("ExecMainPID", unit)
-    helpers = [line.split()[:2] for line in unit_processes(unit)]
-    # The helper leads a session of its own; nothing left shares the launcher's.
-    assert any(pid == session for pid, session in helpers), helpers
-    assert all(session != launcher for _pid, session in helpers), (launcher, helpers)
-    machine.fail(f"test -e {done}")
-    wait_unit_drained(unit)
-    machine.succeed(f"test -e {done}")
 
 with subtest("a: v0.1.4 starts on the golden profile and applies a wallpaper"):
     check_loaded(OLD)
@@ -777,342 +587,6 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
     )
     expect("c: runtime.toml keeps its shape", lambda: unchanged(c_start, c_done, "runtime.toml"))
     assert schema(c_done) <= 5, schema(c_done)
-
-with subtest("d: v0.1.4 installed again; the mixed window, then its restart"):
-    d_start = snapshot()
-    new_pid = check_running(NEW)
-    install(OLD)
-    assert check_running(NEW) == new_pid
-    mixed = status(OLD)
-    observe("d: v0.1.4 ctl status against v0.2.0", mixed)
-    assert mixed["runtime_executable"] == f"{NEW}/bin/wall-in-one-service", mixed
-    wait_health_sync(OLD)
-    d_window = snapshot()
-    window_writes = writes("d: mixed window", d_start, d_window)
-    expect("d: the mixed window writes nothing", lambda: harness.check_changes(window_writes, ()))
-
-    since, mark = len(log_lines()), cursor()
-    restart()
-    old_pid = check_running(OLD)
-    rolled_back = wait_status(
-        OLD,
-        lambda value: value["runtime_executable"] == f"{OLD}/bin/wall-in-one-service"
-        and value["playlist_id"] == EVENINGS,
-    )
-    observe("d: v0.1.4 status after the rollback", rolled_back)
-    assert "supported_override_schemas" not in rolled_back, rolled_back
-    prepared = journal("wall-in-one.service", mark)
-    observe("d: service journal", prepared)
-    expect(
-        "d: v0.1.4's preflight keeps the last runtime.toml",
-        lambda: require(
-            "could not be compiled" in prepared
-            and "the existing runtime configuration was left untouched" in prepared
-            and "playlists.json has unsupported version 2" in prepared
-            and "schedules.json has unsupported version 3" in prepared
-            and "displays.json has unsupported version 2" in prepared,
-            "no last-known-good refusal naming all three bumped stores",
-        ),
-    )
-    run(f"{OLD}/bin/wall-in-one-service --check-config --config {RUNTIME}")
-    observe("d: applied", wait_applied(old_pid, since))
-    wait_health_sync(OLD)
-    d_done = snapshot()
-    restart_writes = writes("d: v0.1.4 restart and idle", d_window, d_done)
-    expect(
-        "d: the rollback start writes nothing of the app's",
-        lambda: harness.check_changes(restart_writes, [NOCTALIA_PALETTE]),
-    )
-    assert schema(d_done) <= 5
-
-with subtest("e1: v0.1.4's own GUI refuses to edit the bumped profile"):
-    # 0.1.4 has no headless authoring: every authoring ctl verb is served by
-    # the GTK app's socket, `--write-config` only compiles, and `--service` is
-    # the legacy renderer. So the real path is `ctl open` + `ctl playlist-add`,
-    # as vm-test.nix drives it. Its authoring gate first checks references in
-    # all three stores; a store it reads as an unsupported version fails that
-    # check and leaves every write paused (and the library unloaded) -- not
-    # only playlist, schedule and display edits but favourites too.
-    e_start = snapshot()
-    open_gui(OLD, "playlists", "Playlists")
-    for verb in (f"playlist-add {TRAVEL} {PICTURE}", f"favourite {PICTURE}"):
-        code, refused = settle_authoring(OLD, verb)
-        observe(f"e1: v0.1.4 ctl {verb.split()[0]}", {"exit": code, "output": refused})
-        assert code == 1, (verb, code, refused)
-        assert "current authoring needs repair before changes can be saved" in refused, refused
-    # docs/updating.md: the paused app never scans, so it shows an empty
-    # library (its gate holds the first activation's scan back).
-    paused = gui_library(OLD)
-    observe("e1: v0.1.4 ctl list", {"listed": paused[0], "of": paused[1], "paths": paused[2]})
-    expect(
-        "e1: the paused app shows an empty library",
-        partial(require, paused == (0, 0, []), f"v0.1.4 listed {paused}"),
-    )
-    machine.screenshot("rollback-v0.1.4-playlists")
-    close_gui()
-    e_gui = snapshot()
-    gui_writes = writes("e1: v0.1.4 GUI open, refused edit, close", e_start, e_gui)
-    expect("e1: the refused edit writes nothing", lambda: harness.check_changes(gui_writes, ()))
-
-with subtest("e2: v0.2.0 installed again finds the bumped profile as it left it"):
-    e2_start = snapshot()
-    old_pid = check_running(OLD)
-    install(NEW)
-    assert check_running(OLD) == old_pid
-    since, mark = len(log_lines()), cursor()
-    restart()
-    new_pid = check_running(NEW)
-    again = wait_status(
-        NEW,
-        lambda value: value["runtime_executable"] == f"{NEW}/bin/wall-in-one-service"
-        and value.get("loaded_overrides_sha256") == sidecar_sha
-        and value.get("cycle_interval_seconds") == INTERVAL,
-    )
-    observe("e2: v0.2.0 status after the raw rollback", again)
-    observe("e2: applied", wait_applied(new_pid, since))
-    wait_health_sync(NEW)
-    e2_done = snapshot()
-    e2_writes = writes("e2: v0.2.0 start after the raw rollback", e2_start, e2_done)
-    expect(
-        "e2: the start writes only the first-start whitelist",
-        lambda: harness.check_changes(e2_writes, first_start()),
-    )
-    # Nothing was lost, directly: the stores and the overrides are byte for
-    # byte what c left.
-    for kept in (*STORES, "runtime-overrides.toml"):
-        expect(f"e2: {kept} is as c left it", partial(unchanged, c_done, e2_done, kept))
-
-
-def check_narrowed(nodes: dict[str, Any], name: str) -> None:
-    """The tool's rewrite: 0.1.4's version, every record of c's file, minus the new fields."""
-    before = document(c_done, name)
-    after = document(nodes, name)
-    if name == "playlists.json":
-        assert after["version"] == 1, after["version"]
-        assert after["playlists"] == [
-            {key: value for key, value in playlist.items() if key not in ("cycle_interval", "shuffle")}
-            for playlist in before["playlists"]
-        ], "a playlist or entry changed"
-    elif name == "schedules.json":
-        assert after["version"] == 2, after["version"]
-        assert after["rules"] == [
-            {key: value for key, value in rule.items() if key != "name"} for rule in before["rules"]
-        ], "a rule changed"
-    else:
-        assert after == {"version": 1, "displays": before["displays"]}, after
-
-
-with subtest("f: wall-in-one-rollback rewrites the three files for 0.1.4"):
-    run("systemctl --user stop wall-in-one.service")
-    machine.wait_until_fails(user("systemctl --user is-active wall-in-one.service"), timeout=60)
-    f_start = snapshot()
-    dry = run(f"{NEW}/bin/wall-in-one-rollback")
-    observe("f: dry run", dry)
-    for line in (
-        "playlists.json: version 2 -> 1",
-        '  playlist "Evenings" loses its interval (120 s)',
-        "schedules.json: version 3 -> 2",
-        f'  rule "{RULE_NAME}" loses its name',
-        "displays.json: version 2 -> 1",
-        f"  display {OPT_IN} loses its own playlist beating global schedule rules",
-    ):
-        expect(f"f: the dry run says {line.strip()!r}", partial(require, line in dry.splitlines(), dry))
-    expect(
-        "f: the dry run writes nothing",
-        lambda: harness.check_changes(writes("f: dry run", f_start, snapshot()), ()),
-    )
-
-    applied = run(f"{NEW}/bin/wall-in-one-rollback --apply")
-    observe("f: --apply", applied)
-    f_done = snapshot()
-    (backup,) = sorted(
-        path.rsplit("/", 1)[-1]
-        for path in f_done
-        if path.startswith(f"{STATE_REL}/rollback-to-0.1.4-")
-        and path.count("/") == STATE_REL.count("/") + 1
-    )
-    backup_rel = f"{STATE_REL}/{backup}"
-    backed_up_names = (*STORES, "runtime-overrides.toml")
-    f_writes = writes("f: wall-in-one-rollback --apply", f_start, f_done)
-    f_allowed = [
-        *(
-            harness.Allowance(
-                f"{STATE_REL}/{name}",
-                frozenset({"modified"}),
-                f"wall-in-one-rollback rewrites {name} in 0.1.4's version, every record kept",
-                lambda change, name=name: check_narrowed(f_done, name),
-            )
-            for name in STORES
-        ),
-        harness.Allowance(
-            OVERRIDES_REL,
-            frozenset({"deleted"}),
-            "wall-in-one-rollback removes runtime-overrides.toml, which 0.1.4 never reads",
-        ),
-        harness.Allowance(
-            backup_rel, frozenset({"created"}), "wall-in-one-rollback's one backup folder"
-        ),
-        *(
-            harness.Allowance(
-                f"{backup_rel}/{name}",
-                frozenset({"created"}),
-                f"wall-in-one-rollback's copy of {name}, made before anything is written",
-            )
-            for name in backed_up_names
-        ),
-    ]
-    expect(
-        "f: the three stores narrowed, the overrides removed, a backup first, nothing else",
-        lambda: harness.check_changes(f_writes, f_allowed),
-    )
-    # Directly, not only through the callbacks: every one of those writes
-    # happened, and the files hold what the tool promises.
-    expect(
-        "f: every rewrite, the removal and every backup copy happened",
-        lambda: require(
-            sorted((change.path, change.kind) for change in f_writes)
-            == sorted((allowance.pattern, next(iter(allowance.kinds))) for allowance in f_allowed),
-            str(sorted((change.path, change.kind) for change in f_writes)),
-        ),
-    )
-    for name in STORES:
-        expect(f"f: {name} is narrowed with every record", partial(check_narrowed, f_done, name))
-    for name in backed_up_names:
-        expect(
-            f"f: the backup of {name} is the file as it was",
-            partial(
-                require,
-                f_done[f"{backup_rel}/{name}"].content == content(f_start, name),
-                f"the backup of {name} differs",
-            ),
-        )
-    expect(
-        "f: runtime-overrides.toml is gone",
-        lambda: require(OVERRIDES_REL not in f_done, "runtime-overrides.toml is still there"),
-    )
-    for kept in ("runtime.toml", "pairings.json", "favourites.json"):
-        expect(f"f: {kept} is untouched", partial(unchanged, f_start, f_done, kept))
-    expect(
-        "f: it prints the two commands that put the backup back",
-        lambda: require(
-            "systemctl --user stop wall-in-one.service" in applied
-            and f"cp -p -- {STATE}/{backup}/* {STATE}/" in applied,
-            applied,
-        ),
-    )
-    second = run(f"{NEW}/bin/wall-in-one-rollback --apply")
-    observe("f: a second --apply", second)
-    expect(
-        "f: a second --apply finds nothing to do",
-        partial(require, "Nothing to roll back" in second, second),
-    )
-    expect(
-        "f: a second --apply writes nothing",
-        lambda: harness.check_changes(writes("f: second --apply", f_done, snapshot()), ()),
-    )
-
-
-def all_media(nodes: dict[str, Any]) -> list[dict[str, Any]]:
-    """runtime.toml's All media playlist: the whole library a compile scanned."""
-    value = tomllib.loads(content(nodes, "runtime.toml").decode())
-    (fallback,) = (playlist for playlist in value["playlists"] if playlist["id"] == "all-media")
-    return list(fallback.get("entries", []))
-
-
-def library_entries(nodes: dict[str, Any]) -> list[str]:
-    """The ids in runtime.toml's All media playlist."""
-    return sorted(entry["id"] for entry in all_media(nodes))
-
-
-def library_files(nodes: dict[str, Any]) -> list[str]:
-    """The file of every video and picture in All media (a scene is a directory)."""
-    return sorted(
-        entry["motion"] if entry["kind"] == "video" else entry["still"]
-        for entry in all_media(nodes)
-        if entry["kind"] in ("video", "still")
-    )
-
-
-with subtest("g: v0.1.4 runs the rewritten profile and edits it"):
-    g_start = snapshot()
-    install(OLD)
-    since, mark = len(log_lines()), cursor()
-    run("systemctl --user start wall-in-one.service")
-    machine.wait_until_succeeds(user("systemctl --user is-active wall-in-one.service"), timeout=60)
-    machine.wait_for_file(RUNTIME_SOCKET)
-    old_pid = check_running(OLD)
-    rolled = wait_status(
-        OLD,
-        lambda value: value["runtime_executable"] == f"{OLD}/bin/wall-in-one-service"
-        and value["playlist_id"] == EVENINGS,
-    )
-    observe("g: v0.1.4 status on the rewritten profile", rolled)
-    prepared = journal("wall-in-one.service", mark)
-    observe("g: service journal", prepared)
-    expect(
-        "g: v0.1.4's service start compiles the rewritten files",
-        lambda: require(
-            "could not be compiled" not in prepared
-            and (f"wrote: {RUNTIME}" in prepared or f"already current: {RUNTIME}" in prepared),
-            "v0.1.4's preflight did not compile the rewritten stores",
-        ),
-    )
-    observe("g: applied", wait_applied(old_pid, since))
-    g_service = snapshot()
-    writes("g: v0.1.4 start", g_start, g_service)
-    expect(
-        "g: the full library is in v0.1.4's runtime.toml",
-        lambda: require(
-            library_entries(g_service) == library_entries(c_done),
-            f"{library_entries(g_service)} != {library_entries(c_done)}",
-        ),
-    )
-
-    open_gui(OLD, "playlists", "Playlists")
-    code, added = settle_authoring(OLD, f"playlist-add {TRAVEL} {PICTURE}")
-    observe("g: v0.1.4 ctl playlist-add", {"exit": code, "output": added})
-    expect("g: v0.1.4's playlist-add succeeds", partial(require, code == 0, added))
-    # The app itself, not only the service's compile, has the whole library:
-    # every wallpaper 0.2.0 compiled in c, the same count and every file.
-    size = len(library_entries(c_done))
-    deadline = time.monotonic() + 60
-    while True:
-        shown = gui_library(OLD)
-        if shown[1] == size or time.monotonic() > deadline:
-            break
-        time.sleep(0.5)
-    observe("g: v0.1.4 ctl list", {"listed": shown[0], "of": shown[1], "paths": shown[2]})
-    expect(
-        "g: v0.1.4's app opens with the full library",
-        lambda: require(
-            shown[0] == shown[1] == size and set(library_files(c_done)) <= set(shown[2]),
-            f"listed {shown[0]} of {shown[1]}, want {size} with {library_files(c_done)}",
-        ),
-    )
-    machine.screenshot("rolled-back-v0.1.4-playlists")
-    close_gui()
-    g_done = snapshot()
-    writes("g: v0.1.4 GUI edit and close", g_service, g_done)
-
-    def edited() -> None:
-        after = document(g_done, "playlists.json")
-        travel = {playlist["id"]: playlist for playlist in after["playlists"]}[TRAVEL]
-        assert travel["entries"][-1]["source"] == PICTURE, travel
-        assert after["version"] == 1, after["version"]
-        for name in STORES:
-            assert broken_copies(g_done, name) == [], f"{name} was moved aside"
-
-    expect("g: the edit is saved in place, with no .broken copy", edited)
-    # Travel's own compiled entries: All media always lists the picture.
-    expect(
-        "g: v0.1.4 compiled its edit into runtime.toml",
-        lambda: require(
-            PICTURE not in compiled_stills(c_done, TRAVEL)
-            and compiled_stills(g_done, TRAVEL)[-1:] == [PICTURE]
-            and schema(g_done) <= 5,
-            f"Travel compiles {compiled_stills(g_done, TRAVEL)}, schema {schema(g_done)}",
-        ),
-    )
 
 with subtest("the session stayed healthy"):
     machine.fail("coredumpctl --json=short | grep -E 'wall-in-one|niri|noctalia'")

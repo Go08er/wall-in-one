@@ -1,4 +1,4 @@
-"""Guest-side half of the upgrade-rollback VM test.
+"""Guest-side half of the upgrade VM test.
 
 Runs inside the disposable VM with the guest's Python 3.14 and
 ``tests/golden/harness.py`` on ``PYTHONPATH``; it never runs on a host.

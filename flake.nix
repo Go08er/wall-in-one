@@ -15,9 +15,9 @@
       url = "github:noctalia-dev/noctalia/v5.2.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # The last shipped release, the one build every user can roll back to.
-    # Deliberately no `follows`: its own flake.lock is part of what shipped,
-    # so the upgrade-rollback VM installs exactly that build.
+    # The shipped v0.1.4, which the upgrade VM starts from. Deliberately no
+    # `follows`: its own flake.lock is part of what shipped, so the VM
+    # installs exactly that build before this one is installed over it.
     wio-v0-1-4.url = "github:Go08er/wall-in-one/v0.1.4";
   };
 
@@ -629,11 +629,11 @@
             sampleMedia = import ./nix/sample-media.nix { inherit pkgs; };
           };
 
-          # Users go straight from the shipped v0.1.4 to this build, and v0.1.4
-          # is the only build they can roll back to. Prove both directions on
-          # the installed packages with the golden profile: update, use what
-          # bumps a store, roll back, edit there, update again.
-          upgrade-rollback = import ./nix/upgrade-rollback-test.nix {
+          # The update on the installed packages, with the golden profile:
+          # the shipped v0.1.4 runs, this build is installed over it, starts
+          # and idles on what v0.1.4 left, then uses what bumps a store.
+          # Updates are one-way; nothing here goes back.
+          upgrade = import ./nix/upgrade-vm-test.nix {
             inherit pkgs;
             oldPackage = inputs.wio-v0-1-4.packages.${system}.wall-in-one;
             newPackage = wall-in-one;

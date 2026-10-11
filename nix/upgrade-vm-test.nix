@@ -2,7 +2,7 @@
   pkgs,
   # The shipped v0.1.4 build, from the release tag's own flake and lock.
   oldPackage,
-  # This build (0.2.0 once released).
+  # This build.
   newPackage,
   pluginSource,
   sampleMedia,
@@ -11,11 +11,11 @@
   strict ? true,
 }:
 
-# Update to this build and roll back to v0.1.4 on the installed packages, with
-# the golden profile, a real user session and the packaged user units: once
-# raw (the floor: the wallpaper keeps running, nothing is lost, 0.1.4 saves
-# nothing), then, back on this build, through `wall-in-one-rollback --apply`,
-# after which 0.1.4 compiles the profile and edits it.
+# Update from the shipped v0.1.4 to this build on the installed packages, with
+# the golden profile, a real user session and the packaged user units: v0.1.4
+# runs first, this build is installed over it, starts and idles on the profile
+# v0.1.4 left, and then uses what moves a store to a newer format. Updates
+# are one-way, so nothing here installs the old package again.
 #
 # The install is modelled as a user profile: one symlink that is flipped from
 # one package to the other (what `nix profile install`/`upgrade` does to
@@ -42,13 +42,13 @@ let
   # the guest-side tool, in one store path both the guest and the driver read.
   # Building it first proves the tool fails an unrelated change to Noctalia's
   # settings, so a broken write gate cannot boot a VM that passes.
-  support = pkgs.runCommand "wall-in-one-upgrade-rollback-support" { } ''
+  support = pkgs.runCommand "wall-in-one-upgrade-support" { } ''
     mkdir -p $out
     cp ${../tests/golden/harness.py} $out/harness.py
-    cp ${./upgrade-rollback/vm_tool.py} $out/vm_tool.py
+    cp ${./upgrade-vm/vm_tool.py} $out/vm_tool.py
     cp -R ${../tests/golden/profile} $out/profile
     PYTHONPATH=$out PYTHONDONTWRITEBYTECODE=1 \
-      ${python.interpreter} ${./upgrade-rollback/vm_tool_selfcheck.py} $out/profile
+      ${python.interpreter} ${./upgrade-vm/vm_tool_selfcheck.py} $out/profile
   '';
 
   # Records which process asked Noctalia to show a wallpaper, and whether
@@ -65,7 +65,7 @@ let
   '';
 in
 pkgs.testers.runNixOSTest {
-  name = "wall-in-one-upgrade-rollback";
+  name = "wall-in-one-upgrade";
   globalTimeout = 1800;
 
   node.specialArgs = {
@@ -145,8 +145,7 @@ pkgs.testers.runNixOSTest {
     PACKAGE_PYTHON = "${python.withPackages (ps: [ ps.pygobject3 ])}/bin/python3"
     SITE_PACKAGES = "${python.sitePackages}"
     BASH = "${lib.getExe pkgs.bash}"
-    NIRI = "${lib.getExe pkgs.niri}"
     STRICT = ${if strict then "True" else "False"}
   ''
-  + builtins.readFile ./upgrade-rollback/test_script.py;
+  + builtins.readFile ./upgrade-vm/test_script.py;
 }

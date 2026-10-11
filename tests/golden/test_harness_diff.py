@@ -3,7 +3,7 @@
 Every golden check judges :func:`harness.diff`'s changes against allowances
 that name their kinds. ``diff`` once reported one kind per path, preferring a
 content change, so a file both rewritten and chmodded passed as an allowed
-write. The VM's upgrade-rollback gate shares the same ``diff``.
+write. The VM's upgrade gate shares the same ``diff``.
 """
 
 from __future__ import annotations

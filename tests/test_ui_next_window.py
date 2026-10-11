@@ -821,10 +821,10 @@ def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written()
 def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review M-1 in the new interface, with the same real refusal."""
-    target = paths.ui_prefs_path()
+    """Review M-1 in the new interface, with a real refusal: no lock can be taken."""
     ui_prefs.update({"thumbnail_size": "small"})
-    obstacle = target.parent / "ui.toml.v1-backup"
+    obstacle = paths.app_config_dir() / ".ui.toml.mutation.lock"
+    obstacle.unlink()  # the save above left the lock file; no save holds it now
     obstacle.mkdir()
     application = started_application(ui="next")
     reports: list[str] = []
@@ -839,7 +839,7 @@ def test_a_failed_interface_save_in_the_new_interface_goes_back_and_saves_on_ret
         row = page.interface_row
         row.set_selected(0)  # Classic: a choice, so version 2
         spin_until(lambda: reports and not window.preferences.busy, what="the refusal")
-        assert "Nothing was changed" in reports[0]
+        assert "were not saved" in reports[0]
         assert row.get_selected() == 1, "the row shows what ui.toml holds: no choice, New"
         obstacle.rmdir()
         row.set_selected(0)
@@ -857,7 +857,8 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
 ) -> None:
     target = paths.ui_prefs_path()
     ui_prefs.update({"thumbnail_size": "small"})
-    obstacle = target.parent / "ui.toml.v1-backup"
+    obstacle = paths.app_config_dir() / ".ui.toml.mutation.lock"
+    obstacle.unlink()  # the save above left the lock file; no save holds it now
     obstacle.mkdir()
     application = started_application(ui="next")
     reports: list[str] = []
@@ -872,7 +873,7 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
         assert row.get_active() and row.get_sensitive()
         row.set_active(False)
         spin_until(lambda: reports and not window.preferences.busy, what="the refusal")
-        assert "Nothing was changed" in reports[0] and row.get_active()
+        assert "were not saved" in reports[0] and row.get_active()
         obstacle.rmdir()
         row.set_active(False)
         spin_until(lambda: not window.preferences.busy, what="the retried save")

@@ -78,8 +78,8 @@ def test_a_playlist_add_past_the_readers_budget_is_refused_and_changes_nothing(
 def test_a_refused_bump_keeps_no_backup_either(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The document is measured before the one-time backup that precedes a
-    version bump, so a refused edit leaves the directory exactly as it was."""
+    """The document is measured before anything is moved or written, so a
+    refused edit that needed a version bump leaves the directory exactly as it was."""
     target = tmp_path / "playlists.json"
     store = playlists.Store.open(target)
     evening = store.create("Evening")
@@ -91,7 +91,7 @@ def test_a_refused_bump_keeps_no_backup_either(
         store.set_rotation(evening.id, cycle_interval=60)  # needs version 2
 
     assert caught.value.kind == "full"
-    assert sorted(entry.name for entry in tmp_path.iterdir()) == listing, "no .v1-backup"
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == listing
     assert store.get(evening.id) == playlists.Store.open(target).get(evening.id)
 
 

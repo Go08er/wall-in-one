@@ -3386,7 +3386,7 @@ def test_a_rule_can_be_named_and_unnamed_by_its_id(sandbox: Path, applied: list[
     listing = commands.show_schedule().message
     assert listing.splitlines()[-1].split("\t")[-1] == "Frog weekend"
     assert json.loads(target.read_bytes())["version"] == 3
-    assert target.with_name("schedules.json.v2-backup").read_bytes() == unnamed
+    assert not target.with_name("schedules.json.v2-backup").exists(), "no copy is kept"
 
     cleared = _immediate(commands.name_schedule_rule(rule.id))
 
@@ -3402,29 +3402,6 @@ def test_naming_a_rule_that_is_not_there_says_so(sandbox: Path, applied: list[Pa
     with pytest.raises(ScheduleError) as caught:
         commands.name_schedule_rule("nope Frog")
     assert caught.value.kind == "no-such-rule"
-
-
-def test_a_refused_schedule_backup_reaches_ctl_as_no_backup(
-    sandbox: Path, applied: list[Path]
-) -> None:
-    commands, app = _commands(sandbox, [_wallpaper("aurora")])
-    commands.make_playlist("Evening")
-    # A rule needs a playlist with something to play.
-    commands.add_to_playlist(f"Evening {_wallpaper('aurora').path}")
-    commands.add_schedule_rule("Evening")
-    rule = app.session.schedules.rules[0]
-    target = paths.app_state_dir() / "schedules.json"
-    unnamed = target.read_bytes()
-    target.with_name("schedules.json.v2-backup").mkdir()
-
-    with pytest.raises(ScheduleError) as caught:
-        commands.name_schedule_rule(f"{rule.id} Frog")
-    response = Response.decode(failed(caught.value).encode())
-
-    assert response.kind == "no-backup"
-    assert response.message.endswith("Nothing was changed.")
-    assert target.read_bytes() == unnamed
-    assert app.session.schedules.rules[0].name is None
 
 
 def test_deleting_a_playlist_takes_its_schedule_rules(sandbox: Path, applied: list[Path]) -> None:

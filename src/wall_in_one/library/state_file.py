@@ -475,23 +475,20 @@ class Reading[T]:
         return fault_kind(self.fault, newer_version=self.newer_version)
 
 
-# -- format-change guards ------------------------------------------------------
+# -- format versions -----------------------------------------------------------
 #
-# Owner-approved for every 0.2.0 format change (2026-10-01):
+# Lazy bump on use. A file moves to a newer version only when the data being
+# saved needs it; every other edit keeps writing the version the file already
+# has. A bump is an ordinary save: the old format is read, and the new one is
+# written atomically over it. No copy of the old bytes is kept (updates are
+# one-way; see `wall_in_one.library.retired_backups` for the copies earlier
+# versions made).
 #
-# 1. Lazy bump on use. A file moves to a newer version only when the data
-#    being saved needs it; every other edit keeps writing the version the
-#    file already has, so most profiles never leave formats older builds read.
-# 2. One-time backup before the first bump. Just before a store first writes
-#    a newer version than its file holds, the old bytes are copied to
-#    ``<file>.v<old>-backup``; that copy is never overwritten or deleted, and
-#    without it the save is refused.
-#
-# A store adopts both in five steps; schedules.py is the worked example
+# A store adopts it in five steps; schedules.py is the worked example
 # (FORMATS, required_version, _read, save and Store._mutate there).
 #
-# * Declare its versions once. For schedules: v1 is read, v2 is what every
-#   supported older build reads and writes, v3 adds rule names::
+# * Declare its versions once. For schedules: v1 is read, v2 is the oldest
+#   version written, v3 adds rule names::
 #
 #       FORMATS = state_file.FormatVersions(oldest=1, floor=2, current=3)
 #
@@ -514,12 +511,8 @@ class Reading[T]:
 #   or written::
 #
 #       version = FORMATS.to_write(reading.version, required_version(value))
-#       if reading.version is not None and FORMATS.is_bump(reading.version, version):
-#           state_file.backup_before_bump(path, observed=observed, replaced=reading.version)
 #       ...  # then preserve_faulted() if faulted, then save at ``version``
 #
-#   and turn an ``OSError`` from the backup into the store's own refusal,
-#   saying that nothing was changed.
 # * Write ``version`` into the saved document instead of a constant, and
 #   check every other writer of the file (an importer, a migration) does the
 #   same with ``FORMATS.to_write(None, required_version(value))``.
@@ -532,16 +525,13 @@ class FormatVersions:
     ``oldest`` is the oldest version this build reads, and the one a file
     without a ``version`` marker is taken to be. ``floor`` is the oldest it
     writes: a readable file older than that is brought up to ``floor`` on its
-    next save, as stores always did, because every supported older build reads
-    ``floor`` too. ``current`` is the newest version this build understands;
-    a file declaring a newer one is read-only here (:data:`NEWER_VERSION`).
+    next save, as stores always did. ``current`` is the newest version this
+    build understands; a file declaring a newer one is read-only here
+    (:data:`NEWER_VERSION`).
 
-    Writing a version above both ``floor`` and the file's own is a *bump*: an
-    older supported build may not read the result, so guard 2 keeps a backup
-    first. A file never moves back down. Once bumped and backed up it stays at
-    its version even if its data would fit an older one again, so a file does
-    not flip between formats as it is edited, and "the backup is the bytes
-    before the bump" stays true.
+    A file never moves back down. Once at a version it stays there even if
+    its data would fit an older one again, so a file does not flip between
+    formats as it is edited.
     """
 
     oldest: int
@@ -558,7 +548,7 @@ class FormatVersions:
         A missing marker is :attr:`oldest`. A marker this build does not
         read -- newer, damaged, or not an integer -- is ``None``: a newer file
         is never written, and a damaged one is moved aside as ``.broken``
-        (which is its backup) before the store saves what it could parse.
+        before the store saves what it could parse.
         """
         version = document.get("version")
         if version is None:
@@ -568,7 +558,7 @@ class FormatVersions:
         return None
 
     def to_write(self, on_disk: int | None, required: int) -> int:
-        """Guard 1: the version the next save writes.
+        """The version the next save writes.
 
         ``on_disk`` is :attr:`Reading.version`; ``required`` is the minimum
         version that can represent the data being saved. The result keeps the
@@ -580,147 +570,6 @@ class FormatVersions:
         if on_disk is not None and not self.oldest <= on_disk <= self.current:
             raise ValueError(f"on-disk version {on_disk} is outside {self!r}")
         return max(self.floor, required, on_disk if on_disk is not None else self.floor)
-
-    def is_bump(self, on_disk: int | None, writing: int) -> bool:
-        """Whether saving ``writing`` over ``on_disk`` needs guard 2's backup.
-
-        Only a readable file moved above both its own version and
-        :attr:`floor` qualifies. Nothing to replace needs no copy, and an
-        unreadable file is preserved as ``.broken`` instead.
-        """
-        return on_disk is not None and writing > on_disk and writing > self.floor
-
-
-def version_backup_path(path: Path, replaced: int) -> Path:
-    """Where guard 2 keeps ``path`` as it was at version ``replaced``."""
-    return path.with_name(f"{path.name}.v{replaced}-backup")
-
-
-def _kept_backup(backup: Path) -> bool:
-    """Whether ``backup`` already holds a backup; refuse anything else there."""
-    try:
-        found = backup.lstat()
-    except FileNotFoundError:
-        return False
-    if stat.S_ISREG(found.st_mode):
-        return True
-    raise OSError(f"{backup} exists but is not a regular file, so no backup can be kept there")
-
-
-def _observed_bytes(observed: StateFileObservation) -> tuple[bytes, int]:
-    """The exact bytes and permission bits of the generation ``observed`` pinned."""
-    path = observed.path
-    expected = observed.expected_fingerprint
-    if not observed.present or observed.expected_file_type != stat.S_IFREG or expected is None:
-        raise file_io.PathChangedError(f"cannot back up {path}: it is not a regular file")
-    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or file_io.file_fingerprint(before) != expected:
-            raise file_io.PathChangedError(
-                f"{path} changed after it was read, so it was not copied"
-            )
-        chunks: list[bytes] = []
-        remaining = before.st_size + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    contents = b"".join(chunks)
-    if len(contents) != before.st_size or file_io.file_fingerprint(after) != expected:
-        raise file_io.PathChangedError(f"{path} changed while it was backed up")
-    return contents, stat.S_IMODE(before.st_mode)
-
-
-def backup_before_bump(path: Path, *, observed: StateFileObservation, replaced: int) -> Path:
-    """Guard 2: keep the bytes a store's first format bump replaces.
-
-    Call it with the store's mutation lock held, before the newer version is
-    written and before a faulted file is moved aside. The generation
-    ``observed`` pinned is copied byte for byte to
-    :func:`version_backup_path` (``<file>.v<replaced>-backup``) in the same
-    directory, with the original's permission bits, published atomically
-    without replacing anything.
-
-    A regular file already at that name is an earlier backup of the same
-    version, kept from the first bump, and is never overwritten; the save
-    goes ahead. Nothing ever deletes a backup. Returns the backup's path.
-
-    Raises :class:`OSError` when no backup can be kept: something other than
-    a regular file holds the name, the file changed since it was observed, or
-    the copy could not be written. Raises :class:`BackupNotConfirmedError`
-    (an :class:`OSError` too) when the copy was written, and is recorded
-    (`record_write`), but writing it did not finish cleanly: it could not be
-    verified in place, or its folder did not sync. Either way the caller
-    must refuse the save rather than bump on an unconfirmed backup, and say
-    which (`backup_refusal`).
-    """
-    backup = version_backup_path(path, replaced)
-    if _kept_backup(backup):
-        return backup
-    contents, permissions = _observed_bytes(observed)
-    landed: list[Path] = []
-    try:
-        with collecting_writes() as landed:
-            write_atomic_bytes(backup, contents, replace_existing=False, mode=permissions)
-    except FileExistsError:
-        # Another writer kept one first. The first copy is the one that counts.
-        if _kept_backup(backup):
-            return backup
-        raise
-    except OSError as error:
-        if backup in landed:
-            # Written, then its write failed (its folder didn't sync, or it
-            # could not be verified in place): no bump on it, but it is there.
-            raise BackupNotConfirmedError(backup, error) from error
-        raise
-    finally:
-        # Collected here to know what landed; still told to whoever collects.
-        for written in landed:
-            record_write(written)
-    return backup
-
-
-class BackupNotConfirmedError(OSError):
-    """`backup_before_bump` wrote the copy, then its write failed.
-
-    The copy is at ``backup``, complete, but its folder did not sync or it
-    could not be verified in place (and was then put back, or left there,
-    proven to be the copy). The store refuses the bump all the same, and says
-    the copy stays (`backup_refusal`), never that it couldn't keep one.
-    """
-
-    def __init__(self, backup: Path, error: OSError) -> None:
-        detail = error.strerror or str(error)
-        super().__init__(error.errno, detail)
-        self.backup = backup
-
-
-def backup_refusal(target: Path, replaced: int, version: int, error: OSError) -> str:
-    """A store's refusal to bump ``target`` from ``replaced`` to ``version`` without its copy.
-
-    Ends "Nothing was changed." when no copy was kept: then nothing was. When
-    the copy was written but its write then failed (`BackupNotConfirmedError`),
-    the store file is unchanged and the copy stays, and it says exactly that.
-    """
-    backup = version_backup_path(target, replaced)
-    if isinstance(error, BackupNotConfirmedError):
-        return (
-            f"a copy of {target.name} (version {replaced}) was written as {backup.name} "
-            f"before saving it as version {version}, but writing it did not finish cleanly "
-            f"({error.strerror or error}). {target.name} was not changed; the copy stays."
-        )
-    return (
-        f"could not keep a copy of {target.name} (version {replaced}) as {backup.name} "
-        f"before saving it as version {version}: {error.strerror or error}. "
-        "Nothing was changed."
-    )
 
 
 def joined_faults(faults: list[str]) -> str | None:
@@ -1207,8 +1056,7 @@ def require_readable_size(contents: str, path: Path, *, maximum_bytes: int) -> N
     """Raise :class:`DocumentTooLargeError` when ``contents`` encodes past ``maximum_bytes``.
 
     ``maximum_bytes`` is the budget the file's own reader enforces. Checked
-    before anything is written, so a refusal leaves the file and every
-    backup as they were.
+    before anything is written, so a refusal leaves the file as it was.
     """
     size = len(contents.encode("utf-8", "surrogatepass"))
     if size > maximum_bytes:

@@ -7,8 +7,8 @@ person sets something. On the golden profile that means:
   ``displays.json`` at version 1, byte for byte what 0.1.4 writes, and no
   ``runtime-overrides.toml`` ever appears;
 * the first per-playlist interval or shuffle, and the first display opt-in,
-  bump their store once, after exactly one ``<file>.v1-backup`` of the
-  released bytes;
+  bump their store once, as one ordinary save: no copy of the old bytes is
+  kept beside it;
 * ``runtime.toml`` never changes because of them. The overrides go to
   ``runtime-overrides.toml``, which exists only while one is in use;
 * a running 0.1.4 service never blocks saving them;
@@ -39,9 +39,7 @@ from wall_in_one import cli, config, runtime_config
 from wall_in_one.library import displays, playlists
 
 PLAYLISTS: Final = f"{STATE}/playlists.json"
-PLAYLISTS_BACKUP: Final = f"{STATE}/playlists.json.v1-backup"
 DISPLAYS: Final = f"{STATE}/displays.json"
-DISPLAYS_BACKUP: Final = f"{STATE}/displays.json.v1-backup"
 OVERRIDES: Final = f"{STATE}/{runtime_config.OVERRIDES_FILENAME}"
 
 
@@ -60,15 +58,6 @@ def _schema(profile: Profile) -> int:
     value = tomllib.loads((profile.app_state / "runtime.toml").read_text())["schema_version"]
     assert isinstance(value, int)
     return value
-
-
-def _released_bytes(released: bytes, mode: int) -> Any:
-    def check(change: Change) -> None:
-        assert change.after is not None
-        assert change.after.content == released, "the backup is not the released file"
-        assert change.after.mode == mode
-
-    return check
 
 
 def _overrides_are(expected: dict[str, Any]) -> Any:
@@ -133,7 +122,6 @@ def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
 ) -> None:
     profile = golden.profile
     target = profile.app_state / "playlists.json"
-    released = target.read_bytes()
     mode = stat.S_IMODE(target.stat().st_mode)
     identifier = playlist_ids(profile)[0]
     _write_config(capsys)
@@ -153,6 +141,7 @@ def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
         assert new == {"version": 2, "playlists": expected}
 
     after = harness.snapshot(profile.home)
+    # The one write: a copy of the old bytes beside it would be an unexpected one.
     harness.check_changes(
         harness.diff(before, after),
         [
@@ -162,14 +151,9 @@ def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
                 "the first rotation moves the file to version 2",
                 gained_one_rotation,
             ),
-            Allowance(
-                PLAYLISTS_BACKUP,
-                frozenset({"created"}),
-                "guard 2: the bytes before the bump",
-                _released_bytes(released, mode),
-            ),
         ],
     )
+    assert stat.S_IMODE(target.stat().st_mode) == mode
 
     # Publication adds the overrides beside runtime.toml and nothing else.
     _write_config(capsys)
@@ -205,7 +189,6 @@ def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
         ],
     )
     assert read_json(target)["version"] == 2
-    assert (profile.app_state / "playlists.json.v1-backup").read_bytes() == released
 
 
 def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routing(
@@ -215,7 +198,6 @@ def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routin
     target = profile.app_state / "displays.json"
     runtime = profile.app_state / "runtime.toml"
     sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
-    released = target.read_bytes()
     mode = stat.S_IMODE(target.stat().st_mode)
     _write_config(capsys)
     before = harness.snapshot(profile.home)
@@ -236,14 +218,9 @@ def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routin
                 "the first opt-in moves the file to version 2",
                 gained_one_opt_in,
             ),
-            Allowance(
-                DISPLAYS_BACKUP,
-                frozenset({"created"}),
-                "guard 2: the bytes before the bump",
-                _released_bytes(released, mode),
-            ),
         ],
     )
+    assert stat.S_IMODE(target.stat().st_mode) == mode
 
     # The fixture is mirrored: assignments, and the opt-in, stay dormant.
     assert "already current" in _write_config(capsys)
@@ -263,7 +240,6 @@ def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routin
     assert runtime.read_bytes() == with_opt_in, "runtime.toml never carried the opt-in"
     assert not sidecar.exists()
     assert read_json(target)["version"] == 2
-    assert (profile.app_state / "displays.json.v1-backup").read_bytes() == released
 
 
 def test_a_v0_1_4_service_never_blocks_saving_them(
@@ -293,8 +269,7 @@ def test_idle_with_overrides_in_use_writes_only_the_whitelist(
     _write_config(capsys)
     sidecar = profile.app_state / runtime_config.OVERRIDES_FILENAME
     overrides = sidecar.read_bytes()
-    backups = sorted(path.name for path in profile.app_state.glob("*-backup"))
-    assert backups == ["displays.json.v1-backup", "playlists.json.v1-backup"]
+    assert sorted(path.name for path in profile.app_state.glob("*-backup")) == []
 
     before = harness.snapshot(profile.home)
     first = harness.run_idle()
@@ -308,7 +283,7 @@ def test_idle_with_overrides_in_use_writes_only_the_whitelist(
     harness.check_changes(harness.diff(after_first, harness.snapshot(profile.home)), ())
     assert second == first
     assert golden.processes == []
-    assert sorted(path.name for path in profile.app_state.glob("*-backup")) == backups
+    assert sorted(path.name for path in profile.app_state.glob("*-backup")) == []
     assert sidecar.read_bytes() == overrides
     assert _schema(profile) <= runtime_config.BATTERY_SCHEMA_VERSION
 

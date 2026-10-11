@@ -85,7 +85,6 @@ def test_probe_three_a_schedule_rule_keeps_its_name(tmp_path: Path) -> None:
     target.write_text(
         json.dumps({"version": 2, "rules": [{"id": "a", "playlist": "X", "name": "Evening rule"}]})
     )
-    original = target.read_bytes()
     store = schedules.Store.open(target)
     assert store.fault is None
     assert store.rules[0].name == "Evening rule"
@@ -98,4 +97,4 @@ def test_probe_three_a_schedule_rule_keeps_its_name(tmp_path: Path) -> None:
         {"id": "a", "playlist": "X", "name": "Evening rule"},
         {"id": "b", "playlist": "Y"},
     ]
-    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
+    assert not target.with_name("schedules.json.v2-backup").exists(), "no copy is kept"

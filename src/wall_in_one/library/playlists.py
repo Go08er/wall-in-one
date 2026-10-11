@@ -45,9 +45,8 @@ STATE_FILENAME: Final = "playlists.json"
 #: every save; see `DOCUMENT_SHAPE`.
 #:
 #: Version 2 adds a playlist's own ``cycle_interval`` and ``shuffle``. It is
-#: written only once one of them is used (lazy bump), after the version-1
-#: bytes are kept as ``playlists.json.v1-backup``; until then every save stays
-#: version 1, which every older build reads.
+#: written only once one of them is used (lazy bump); until then every save
+#: stays version 1.
 FORMAT_VERSION: Final = 2
 ROTATION_VERSION: Final = 2
 FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=FORMAT_VERSION)
@@ -106,7 +105,7 @@ class PlaylistError(Exception):
 
     Kinds in use: ``local-io``, ``no-such-playlist``, ``no-such-entry``,
     ``invalid-name``, ``identity-conflict``, ``full``, ``newer-version``,
-    ``no-backup``, ``validation``, ``unreadable``.
+    ``validation``, ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -689,6 +688,12 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Playlist], st
     return found, state_file.joined_faults(faults)
 
 
+def reads_cleanly(path: Path | None = None) -> bool:
+    """Whether the file is there and reads without a fault, in a version this build knows."""
+    reading = _read(path if path is not None else state_path())
+    return reading.fault is None and reading.version is not None
+
+
 def load(path: Path | None = None) -> dict[str, Playlist]:
     """The stored playlists, or none at all. Never raises."""
     return _read(path if path is not None else state_path()).value
@@ -751,8 +756,8 @@ def save(
     model; it is merged back so a newer field survives an older build's edit.
     ``version`` defaults to the oldest format that holds ``playlists`` (see
     `required_version`), so playlists without their own rotation are written
-    as version 1. Keeping a file's newer version, and the backup before a
-    bump, belong to `Store`, which knows what is on disk. A document larger
+    as version 1. Keeping a file's newer version belongs to `Store`, which
+    knows what is on disk. A document larger
     than ``MAX_STATE_BYTES``, which this build's reader would refuse, is
     refused (``full``) before anything is written.
     """
@@ -1440,11 +1445,9 @@ class Store:
                     raise
                 if changed:
                     version = FORMATS.to_write(reading.version, required_version(authored.values()))
-                    # Refused if too large to read back, before anything is backed up
-                    # or moved; `save` then renders and writes it.
+                    # Refused if too large to read back, before anything is
+                    # moved; `save` then renders and writes it.
                     _render(authored, target, unknown=reading.unknown, version=version)
-                    if reading.version is not None and FORMATS.is_bump(reading.version, version):
-                        _back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:
                         try:
                             backup = state_file.preserve_faulted(target, observed=observed)
@@ -1488,21 +1491,6 @@ class Store:
                 "local-io",
                 f"could not safely update playlists at {target}: {error.strerror or error}",
             ) from error
-
-
-def _back_up_before_bump(
-    target: Path,
-    observed: state_file.StateFileObservation,
-    replaced: int,
-    version: int,
-) -> None:
-    """Guard 2, or refuse: never bump a file without its old bytes kept."""
-    try:
-        state_file.backup_before_bump(target, observed=observed, replaced=replaced)
-    except OSError as error:
-        raise PlaylistError(
-            "no-backup", state_file.backup_refusal(target, replaced, version, error)
-        ) from error
 
 
 def rotation(

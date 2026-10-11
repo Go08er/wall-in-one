@@ -7,9 +7,7 @@ sibling of ``runtime.toml`` that only this release's service reads. The
 transition rule: nothing changes for a profile until somebody uses one.
 
 * Lazy bump: a store moves to version 2 only on the save that first uses a
-  new field, and never moves back.
-* One-time backup: before that first bump the version-1 bytes are kept as
-  ``<file>.v1-backup``, byte for byte, never overwritten.
+  new field, and never moves back. The bump keeps no copy of the old bytes.
 * ``runtime.toml`` never changes because of them: with the fields in use it
   is byte-identical to the same profile with them cleared, so every released
   service still loads it. The overrides file exists only while one is used.
@@ -121,11 +119,10 @@ def test_edits_that_use_no_new_field_keep_version_one_byte_for_byte(
     assert not _backup(target).exists()
 
 
-def test_the_first_rotation_bumps_once_after_keeping_the_version_one_bytes(
+def test_the_first_rotation_bumps_once_and_keeps_no_copy(
     evening: tuple[playlists.Store, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, identifier, target = evening
-    original = target.read_bytes()
 
     updated = store.set_rotation(identifier, cycle_interval=60)
 
@@ -134,11 +131,10 @@ def test_the_first_rotation_bumps_once_after_keeping_the_version_one_bytes(
     assert document["version"] == 2
     (saved,) = document["playlists"]
     assert saved["cycle_interval"] == 60 and "shuffle" not in saved
-    assert _backup(target).read_bytes() == original
-    assert _backup(target).stat().st_mode & 0o777 == target.stat().st_mode & 0o777
+    assert not _backup(target).exists(), "the bump is an ordinary save"
 
-    # Later saves -- more rotation, clearing it, unrelated edits -- leave the
-    # backup alone, and the file never moves back to version 1.
+    # Later saves -- more rotation, clearing it, unrelated edits -- never
+    # move the file back to version 1.
     store.set_rotation(identifier, shuffle=True)
     assert playlists.Store.open().find(identifier).shuffle is True
     store.set_rotation(identifier, cycle_interval=None, shuffle=None)
@@ -146,15 +142,13 @@ def test_the_first_rotation_bumps_once_after_keeping_the_version_one_bytes(
     assert _json(target)["version"] == 2
     assert set(_json(target)["playlists"][0]) == {"id", "name", "entries"}
     store.set_rotation(identifier, cycle_interval=300)
-    assert _backup(target).read_bytes() == original
-    assert sorted(path.name for path in target.parent.glob("playlists.json.*backup*")) == [
-        "playlists.json.v1-backup"
-    ]
+    assert sorted(path.name for path in target.parent.glob("playlists.json.*backup*")) == []
 
 
-def test_an_existing_backup_is_never_overwritten(
+def test_a_copy_an_earlier_version_kept_is_left_alone_by_a_save(
     evening: tuple[playlists.Store, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A save never writes to that name; only the start-up removal takes it away."""
     store, identifier, target = evening
     _backup(target).write_bytes(b"an earlier first bump")
     store.set_rotation(identifier, shuffle=False)
@@ -162,18 +156,16 @@ def test_an_existing_backup_is_never_overwritten(
     assert _json(target)["version"] == 2
 
 
-def test_no_backup_means_no_bump(
+def test_something_at_an_old_copys_name_does_not_stop_a_bump(
     evening: tuple[playlists.Store, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Earlier versions refused the bump when they could not keep their copy there."""
     store, identifier, target = evening
-    original = target.read_bytes()
     _backup(target).mkdir()
-    with pytest.raises(PlaylistError) as caught:
-        store.set_rotation(identifier, cycle_interval=60)
-    assert caught.value.kind == "no-backup"
-    assert "Nothing was changed" in str(caught.value)
-    assert target.read_bytes() == original
-    assert store.find(identifier).cycle_interval is None
+    store.set_rotation(identifier, cycle_interval=60)
+    assert _json(target)["version"] == 2
+    assert store.find(identifier).cycle_interval == 60
+    assert _backup(target).is_dir() and not list(_backup(target).iterdir())
 
 
 @pytest.mark.parametrize(
@@ -300,7 +292,6 @@ def test_the_display_opt_in_bumps_once_and_belongs_to_its_assignment(
     docked: tuple[displays.Store, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, target = docked
-    original = target.read_bytes()
 
     assert store.set_beats_global_rules("DP-1", True) is True
     assert store.set_beats_global_rules("DP-1", True) is False
@@ -310,7 +301,7 @@ def test_the_display_opt_in_bumps_once_and_belongs_to_its_assignment(
         "displays": {"DP-1": "Evening", "HDMI-A-1": "Morning"},
         "beats_global_rules": ["DP-1"],
     }
-    assert _backup(target).read_bytes() == original
+    assert not _backup(target).exists(), "the bump is an ordinary save"
     reopened = displays.Store.open()
     assert reopened.beats_global_rules("DP-1")
     assert not reopened.beats_global_rules("HDMI-A-1")
@@ -326,7 +317,6 @@ def test_the_display_opt_in_bumps_once_and_belongs_to_its_assignment(
     store.unassign("DP-1")
     assert store.forget_playlist("Morning") == 1
     assert _json(target) == {"version": 2, "displays": {}}
-    assert _backup(target).read_bytes() == original
 
     with pytest.raises(displays.DisplayError, match="assign one before") as caught:
         store.set_beats_global_rules("DP-1", True)

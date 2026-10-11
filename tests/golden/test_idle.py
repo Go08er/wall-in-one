@@ -285,6 +285,76 @@ def test_idle_round_trip_writes_only_what_is_whitelisted(any_golden: Golden, sce
     assert "status" in any_golden.runtime.verbs
 
 
+# -- the copies earlier versions kept before a format change -----------------------------
+
+#: What 0.2.x left beside each store it bumped, and the store it is a copy of.
+KEPT_COPIES: Final = {
+    "playlists.json.v1-backup": "playlists.json",
+    "displays.json.v1-backup": "displays.json",
+    "schedules.json.v2-backup": "schedules.json",
+}
+
+
+def test_the_first_start_removes_the_copies_an_earlier_version_kept(golden: Golden) -> None:
+    """A profile 0.2.x used its new fields on has a ``.vN-backup`` beside each
+    bumped store. The first start takes exactly those away, leaving one empty
+    record each in the state folder's retained folder; a second start writes
+    nothing. Every other file is judged by the ordinary whitelist."""
+    profile = golden.profile
+    state = profile.app_state
+    released = {copy: (state / live).read_bytes() for copy, live in KEPT_COPIES.items()}
+    lists = read_json(state / "playlists.json")["playlists"]
+    playable = next(entry["id"] for entry in lists if entry["entries"])
+    playlists.Store.open().set_rotation(playable, cycle_interval=120, shuffle=True)
+    schedules.Store.open().set_name(read_json(state / "schedules.json")["rules"][0]["id"], "Frogs")
+    connector = next(iter(read_json(state / "displays.json")["displays"]))
+    displays.Store.open().set_beats_global_rules(connector, True)
+    for copy, contents in released.items():
+        (state / copy).write_bytes(contents)
+    assert cli.main(["--write-config"]) == 0
+    before = harness.snapshot(profile.home)
+    records_before = {path for path in before if f"{STATE}/.wall-in-one-retained/" in path}
+
+    def an_empty_record(change: Change) -> None:
+        assert change.after is not None and change.after.size == 0
+
+    first = harness.run_idle()
+    after_first = harness.snapshot(profile.home)
+    harness.check_changes(
+        harness.diff(before, after_first),
+        [
+            *first_start_writes(profile, None),
+            *(
+                Allowance(
+                    f"{STATE}/{copy}",
+                    frozenset({"deleted"}),
+                    "updates are one-way: the store beside it is its translation",
+                )
+                for copy in KEPT_COPIES
+            ),
+            Allowance(
+                f"{STATE}/.wall-in-one-retained/entry-*",
+                frozenset({"created"}),
+                "the discard's own empty record, one per copy, which Tidy up lists",
+                an_empty_record,
+            ),
+        ],
+    )
+    assert first.service_prepare == 0 and first.repair_paused == ()
+    assert [copy for copy in KEPT_COPIES if (state / copy).exists()] == []
+    records = {path for path in after_first if f"{STATE}/.wall-in-one-retained/" in path}
+    assert len(records - records_before) == len(KEPT_COPIES)
+    # The stores still hold what the person set.
+    assert playlists.Store.open().find(playable).cycle_interval == 120
+    assert schedules.Store.open().rules[0].name == "Frogs"
+    assert displays.Store.open().beats_global_rules(connector)
+
+    second = harness.run_idle()
+    harness.check_changes(harness.diff(after_first, harness.snapshot(profile.home)), ())
+    assert second == first
+    assert golden.processes == []
+
+
 # -- a newer file opened by this build: read-only, nothing rewritten ----------------------
 
 STORE_MODULES: Final[dict[str, Any]] = {

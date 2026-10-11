@@ -404,14 +404,21 @@ def test_the_interface_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path
     assert application.reports and "newer version" in application.reports[-1]
 
 
+def _locked_out() -> Path:
+    """A directory where ui.toml's mutation lock must go: every save is refused."""
+    lock = paths.app_config_dir() / ".ui.toml.mutation.lock"
+    lock.unlink(missing_ok=True)  # an earlier save's lock file: no save holds it now
+    lock.mkdir(parents=True)
+    return lock
+
+
 def test_a_failed_interface_save_goes_back_and_the_same_choice_then_saves(
     tmp_path: Path,
 ) -> None:
-    """Review M-1, with a real filesystem refusal: the bump's backup can't be kept."""
+    """Review M-1, with a real filesystem refusal: ui.toml's lock can't be taken."""
     target = paths.ui_prefs_path()
     ui_prefs.update({"thumbnail_size": "small"})
-    obstacle = target.parent / "ui.toml.v1-backup"
-    obstacle.mkdir()
+    obstacle = _locked_out()
     before = target.read_bytes()
     application = SettingsApp(tmp_path)
     page = PreferencesPage(application)  # type: ignore[arg-type]
@@ -420,7 +427,7 @@ def test_a_failed_interface_save_goes_back_and_the_same_choice_then_saves(
     row.set_selected(0)  # Classic: a choice, so version 2
     spin_until(lambda: application.reports and not page._ui_prefs.busy, what="the refusal")
 
-    assert "Nothing was changed" in application.reports[0]
+    assert "were not saved" in application.reports[0]
     assert row.get_selected() == 1, "the row shows what ui.toml holds: no choice, New"
     assert target.read_bytes() == before
     obstacle.rmdir()
@@ -469,17 +476,15 @@ def test_the_gpu_row_is_off_while_ui_toml_cannot_be_written(tmp_path: Path) -> N
 
 
 def test_a_failed_gpu_save_goes_back_and_the_same_choice_then_saves(tmp_path: Path) -> None:
-    target = paths.ui_prefs_path()
     ui_prefs.update({"thumbnail_size": "small"})
-    obstacle = target.parent / "ui.toml.v1-backup"
-    obstacle.mkdir()
+    obstacle = _locked_out()
     application = SettingsApp(tmp_path)
     page = PreferencesPage(application)  # type: ignore[arg-type]
     row = page._gpu
 
     row.set_active(False)
     spin_until(lambda: application.reports and not page._ui_prefs.busy, what="the refusal")
-    assert "Nothing was changed" in application.reports[0]
+    assert "were not saved" in application.reports[0]
     assert row.get_active(), "back on: off was not saved"
     obstacle.rmdir()
     row.set_active(False)

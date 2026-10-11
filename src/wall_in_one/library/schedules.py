@@ -38,8 +38,7 @@ STATE_FILENAME: Final = "schedules.json"
 #: edit, as it always was. Version 3 adds an optional ``name`` per rule and is
 #: written only when a rule has one (format-change guard 1, lazy bump on use):
 #: a schedule without names stays version 2, byte for byte what 0.1.4
-#: writes. The first save that moves a file to version 3 first keeps the
-#: old bytes as ``schedules.json.v<old>-backup`` (guard 2). A file stays at
+#: writes. A file stays at
 #: version 3 once there, even after its last name is cleared. A newer version
 #: is shown but never compiled or rewritten: every mutation is refused (kind
 #: ``newer-version``). Unknown keys in a version this build reads are carried
@@ -77,7 +76,7 @@ class ScheduleError(Exception):
     Kinds in use: ``local-io``, ``no-such-rule``, ``identity-conflict``,
     ``invalid-time``, ``invalid-day``, ``invalid-month``,
     ``invalid-connector``, ``invalid-name``, ``full``, ``newer-version``,
-    ``no-backup``, ``unreadable``.
+    ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -497,6 +496,12 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[tuple[Rule, ...], str |
     return tuple(found), state_file.joined_faults(faults)
 
 
+def reads_cleanly(path: Path | None = None) -> bool:
+    """Whether the file is there and reads without a fault, in a version this build knows."""
+    reading = _read(path if path is not None else state_path())
+    return reading.fault is None and reading.version is not None
+
+
 def load(path: Path | None = None) -> tuple[Rule, ...]:
     """The stored rules, in order. Never raises."""
     return _read(path if path is not None else state_path()).value
@@ -552,8 +557,8 @@ def save(
 
     ``version`` defaults to the oldest format that holds ``rules`` (see
     `required_version`), so unnamed rules are written as version 2. This
-    writes what it is given and nothing more: keeping a file's newer version,
-    and the backup before a bump, belong to `Store`, which knows what is on
+    writes what it is given and nothing more: keeping a file's newer version
+    belongs to `Store`, which knows what is on
     disk. A document larger than ``MAX_STATE_BYTES``, which this build's
     reader would refuse, is refused (``full``) before anything is written.
     """
@@ -761,9 +766,7 @@ class Store:
     def set_name(self, rule_id: str, name: str | None) -> Rule:
         """Name a rule, or clear its name with ``None`` or an empty name.
 
-        Naming the first rule moves the file to format version 3, after
-        keeping the version-2 bytes as ``schedules.json.v2-backup``; if that
-        backup cannot be kept, nothing is saved (kind ``no-backup``).
+        Naming the first rule moves the file to format version 3.
         Clearing the last name leaves the file at version 3.
         """
         chosen = tidy_name(name)
@@ -1059,15 +1062,12 @@ class Store:
                         raise _unreadable_error(fault, target) from error
                     raise
                 if changed:
-                    # Format-change guards: keep the file's version unless
-                    # these rules need a newer one, and keep the old bytes
-                    # before the first bump -- before anything is moved.
+                    # Keep the file's version unless these rules need a
+                    # newer one.
                     version = FORMATS.to_write(reading.version, required_version(rules))
-                    # Refused if too large to read back, before anything is backed up
-                    # or moved; `save` then renders and writes it.
+                    # Refused if too large to read back, before anything is
+                    # moved; `save` then renders and writes it.
                     _render(rules, target, unknown=reading.unknown, version=version)
-                    if reading.version is not None and FORMATS.is_bump(reading.version, version):
-                        self._back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:
                         try:
                             backup = state_file.preserve_faulted(target, observed=observed)
@@ -1110,21 +1110,6 @@ class Store:
             raise ScheduleError(
                 "local-io",
                 f"could not safely update schedules at {target}: {error.strerror or error}",
-            ) from error
-
-    @staticmethod
-    def _back_up_before_bump(
-        target: Path,
-        observed: state_file.StateFileObservation,
-        replaced: int,
-        version: int,
-    ) -> None:
-        """Guard 2, or refuse: never bump a file without its old bytes kept."""
-        try:
-            state_file.backup_before_bump(target, observed=observed, replaced=replaced)
-        except OSError as error:
-            raise ScheduleError(
-                "no-backup", state_file.backup_refusal(target, replaced, version, error)
             ) from error
 
     def _reuse_unchanged_rules(self, current: Sequence[Rule]) -> list[Rule]:

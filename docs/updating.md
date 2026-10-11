@@ -94,6 +94,12 @@ mean stays the same. The bytes of a few files can change, and it writes only:
   same.
 - `pairings.json`, when the wallpaper service reported a wallpaper that failed
   to play: the health sync records that one marker on that wallpaper.
+- The copies 0.2.x kept before a format change, when there are any:
+  `playlists.json.v1-backup`, `displays.json.v1-backup`,
+  `schedules.json.v1-backup` and `schedules.json.v2-backup` in the state
+  folder and `ui.toml.v1-backup` in the config folder are removed, each
+  leaving one empty record in that folder's `.wall-in-one-retained`. See
+  [Format versions](library.md#format-versions).
 - Automatic stills, the one exception that writes into your library (since
   0.1.0). After each scan, including the first one, the app captures a still
   for a moving wallpaper that has none, and captures a scene's managed still
@@ -147,7 +153,12 @@ schedules, displays, favourites, still choices and downloads intact, and the
 retired Noctalia plugin.
 
 Nothing goes the other way. Installing an older version over a profile a
-newer one has used is not supported, and no version converts a profile back.
+newer one has used is not supported, no version converts a profile back, and
+this one keeps nothing so that an older one can run again: a file that moves
+to a newer format is saved over, with no copy of the older one, and the
+copies 0.2.x kept for that (the `.v1-backup` and `.v2-backup` files beside
+`playlists.json`, `schedules.json`, `displays.json` and `ui.toml`) are
+removed the next time the app or its service starts.
 A system rollback of the package (an earlier NixOS or Home Manager
 generation, `nix profile rollback`, an older package from your distribution)
 is such a downgrade: it replaces the app and its service and leaves the

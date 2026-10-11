@@ -4,8 +4,8 @@
 version is newer than this build knows (0.2.0 opening a 0.3.0 file) is
 refused with ``kind == "newer-version"``, never rewritten or moved aside;
 unknown keys, top-level and per record, are carried through every save. A
-store this build once bumped keeps its one-time backup untouched when a newer
-release bumps it again, and while one is newer, neither ``runtime.toml`` nor
+store an earlier version bumped, and kept a copy of, keeps that copy while a
+newer release's file is beside it, and while one is newer, neither ``runtime.toml`` nor
 ``runtime-overrides.toml`` is republished. ``settings.toml`` fails safe: with
 a key this build does not know, every write is refused and
 the headless path compiles the known keys. Each case is its own test, so a
@@ -42,6 +42,7 @@ from wall_in_one.library import (
     pairings,
     playlists,
     removals,
+    retired_backups,
     schedules,
     state_file,
 )
@@ -256,7 +257,7 @@ class BumpCase:
     """A store this build moves to a new version the first time a new field is used."""
 
     store: StoreCase
-    #: The one-time backup of the version before this build's.
+    #: The copy 0.2.x kept of the version before the bump, beside the file.
     backup: str
     #: Use the new field; ``turn`` picks a different value each time.
     use: Callable[[Profile, int], object]
@@ -296,28 +297,34 @@ def _newer_than_this_build(target: Path, version: int) -> bytes:
 
 
 @pytest.mark.parametrize("case", [pytest.param(case, id=case.store.name) for case in BUMPS])
-def test_a_newer_bump_of_a_file_this_build_bumped_keeps_the_file_and_its_backup(
+def test_a_newer_bump_of_a_bumped_file_keeps_the_file_and_an_earlier_copy_of_it(
     golden: Golden, case: BumpCase
 ) -> None:
-    """This build bumped the file once; a newer release bumped it again.
+    """0.2.x bumped the file once, keeping its copy; a newer release bumped it again.
 
     Both the typical edit and another use of the new field are refused,
-    saying why. The file, its one-time backup and the set of backups keep
-    every byte, and nothing is moved aside.
+    saying why. The file keeps every byte and nothing is moved aside. The
+    earlier copy stays too, through this build's start: the file beside it
+    is one this build can't read in full, so nothing proves the copy's
+    contents are all in it.
     """
     profile = golden.profile
     target = profile.app_state / case.store.filename
+    released = target.read_bytes()
     case.use(profile, 1)
     assert read_json(target)["version"] == case.store.version
+    assert _backups(profile) == {}, "this build keeps no copy of its own"
+    (profile.app_state / case.backup).write_bytes(released)
     backups = _backups(profile)
-    assert case.backup in backups
     original = _newer_than_this_build(target, case.store.version)
 
     refusals = [_attempt(case.store.edit, profile), _attempt(lambda p: case.use(p, 2), profile)]
+    removed = retired_backups.remove()
 
     for refusal in refusals:
         assert getattr(refusal, "kind", None) == state_file.NEWER_VERSION, repr(refusal)
     assert target.read_bytes() == original
+    assert removed == ()
     assert _backups(profile) == backups
     assert broken_copies(target) == []
 
@@ -331,11 +338,12 @@ def test_a_newer_store_leaves_runtime_toml_and_the_overrides_file_alone(
     This build's compile refuses it and publishes neither runtime file:
     ``runtime.toml`` and ``runtime-overrides.toml`` keep every byte (a
     refused publication must not drop the overrides as if none were in
-    use), the service unit still starts on them, and the store, its backup
-    and the other store are left as they were.
+    use), the service unit still starts on them, and the store, the copy an
+    earlier version kept of it, and the other store are left as they were.
     """
     profile = golden.profile
     state = profile.app_state
+    released = (state / case.filename).read_bytes()
     config.update({"display_mode": "independent", "theme_source_connector": "DP-1"})
     playable = next(
         playlist["id"]
@@ -350,7 +358,9 @@ def test_a_newer_store_leaves_runtime_toml_and_the_overrides_file_alone(
     published = (runtime.read_bytes(), sidecar.read_bytes())
     overrides = tomllib.loads(sidecar.read_text())
     assert overrides["playlists"] and overrides["displays"], "both features reach the file"
+    (state / f"{case.filename}.v1-backup").write_bytes(released)
     backups = _backups(profile)
+    assert list(backups) == [f"{case.filename}.v1-backup"]
     target = state / case.filename
     original = _newer_than_this_build(target, case.version)
     stores = {name: (state / name).read_bytes() for name in ("playlists.json", "displays.json")}

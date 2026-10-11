@@ -690,31 +690,33 @@ Fields the app does not know, for example ones a newer version added, are kept
 through every save of a file it does understand: at the top level and on each
 playlist, playlist entry, schedule rule, pairing and removal intent.
 
-### Format versions and their backups
+### Format versions
 
-A file moves to a newer format only when you first use what that format adds.
-Every other edit keeps writing the version the file already has, so a profile
-that never uses a new feature stays readable by older releases. The first rule
-name is the first such change: `schedules.json` stays at version 2, exactly as
-0.1.4 writes it, until a rule has a name, and is version 3 from then on.
-Likewise `playlists.json` stays at version 1 until a playlist has its own
-interval or shuffle, and `displays.json` until a display's own playlist is set
-to beat global schedule rules; each is version 2 from then on. Those settings
-reach the service through `runtime-overrides.toml`, never `runtime.toml` (see
+A file moves to a newer format only when you first use what that format adds;
+every other edit keeps writing the version the file already has. The first
+rule name is the first such change: `schedules.json` stays at version 2 until
+a rule has a name, and is version 3 from then on. Likewise `playlists.json`
+stays at version 1 until a playlist has its own interval or shuffle, and
+`displays.json` until a display's own playlist is set to beat global schedule
+rules; each is version 2 from then on. Those settings reach the service
+through `runtime-overrides.toml`, never `runtime.toml` (see
 [the runtime contract](runtime-config.md#per-playlist-rotation-and-display-precedence-runtime-overridestoml)).
 
-Just before a file is first saved in a newer format, its previous bytes are
-copied beside it as `<file>.v<old>-backup`, for example
-`schedules.json.v2-backup`, with the same permissions. That copy is made once
-and never overwritten, even if the file is bumped again later; the app never
-deletes it. If the copy cannot be made, the edit is refused with the reason
-`no-backup` and nothing is changed. If the copy is written but writing it does
-not finish cleanly (it can't be checked in place, or its folder doesn't sync),
-the edit is refused with `no-backup` too: the file is not changed, the copy
-stays, and the message says so. A file stays in its newer format after
-you stop using the feature, for example after clearing the last rule name, so
-it does not switch formats back and forth and the backup always holds the
-file as it was before its first bump.
+The move is an ordinary save: the older format is read and the newer one is
+written over it in one step. No copy of the older file is kept, and a file
+stays in its newer format after you stop using the feature, for example after
+clearing the last rule name, so it does not switch formats back and forth.
+
+0.2.0 to 0.2.2 did keep a copy, beside the file, the first time they saved it
+in a newer format: `playlists.json.v1-backup`, `displays.json.v1-backup`,
+`schedules.json.v1-backup` or `schedules.json.v2-backup` in the state folder,
+and `ui.toml.v1-backup` in the config folder. Nothing reads them, and
+[updates are one-way](updating.md#updates-are-one-way), so the app removes
+those five the next time it or its service starts (`ui.toml`'s only when a
+window opens). A copy stays where it is if it isn't a file of that kind in
+that version, or while the file it is a copy of is missing, damaged, saved by
+a newer version or otherwise not read in full: then it may be the only good
+copy. Nothing else is removed, whatever its name.
 
 ## Where things live
 

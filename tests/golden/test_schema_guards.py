@@ -1,14 +1,14 @@
-"""0.2.0's format-change guards on a whole profile, starting with rule names.
+"""0.2.0's lazy format bump on a whole profile, starting with rule names.
 
-Guard 1, lazy bump on use: an edit that uses no new field writes the version
-the file already has, byte for byte what 0.1.4 writes, so most
-profiles never leave the formats older builds read. Guard 2, one-time backup:
-the first save that does use one keeps the old bytes beside the file as
-``<file>.v<old>-backup``, once, and without it the save is refused.
+An edit that uses no new field writes the version the file already has, byte
+for byte. The first save that does use one moves the file to the newer
+version, as an ordinary save: no copy of the old bytes is kept (updates are
+one-way), and whatever an earlier version left under a copy's name neither
+stops the save nor is touched by it.
 
-Every check diffs the whole sandbox home, so a stray backup, temporary or
-``.broken`` copy fails as an unexpected write. Idle never bumps or backs up
-anything, and names never reach ``runtime.toml``.
+Every check diffs the whole sandbox home, so a stray copy, temporary or
+``.broken`` file fails as an unexpected write. Idle never bumps anything, and
+names never reach ``runtime.toml``.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from wall_in_one import cli
 from wall_in_one.library import schedules
 
 SCHEDULES: Final = f"{STATE}/schedules.json"
-BACKUP: Final = f"{STATE}/schedules.json.v2-backup"
 
 
 def _serialized(document: dict[str, Any]) -> bytes:
@@ -90,10 +89,9 @@ def test_an_unnamed_edit_keeps_version_two_byte_for_byte(golden: Golden) -> None
     )
 
 
-def test_naming_a_rule_bumps_once_and_keeps_the_released_bytes(golden: Golden) -> None:
+def test_naming_a_rule_bumps_once_and_keeps_no_copy(golden: Golden) -> None:
     profile = golden.profile
     target = profile.app_state / "schedules.json"
-    released = target.read_bytes()
     mode = stat.S_IMODE(target.stat().st_mode)
     rules = _rules(profile)
     before = harness.snapshot(profile.home)
@@ -112,12 +110,8 @@ def test_naming_a_rule_bumps_once_and_keeps_the_released_bytes(golden: Golden) -
             ],
         }
 
-    def the_released_bytes(change: Change) -> None:
-        assert change.after is not None
-        assert change.after.content == released, "the backup is not the released file"
-        assert change.after.mode == mode
-
     after = harness.snapshot(profile.home)
+    # The one write: a copy of the old bytes beside it would be an unexpected one.
     harness.check_changes(
         harness.diff(before, after),
         [
@@ -127,18 +121,12 @@ def test_naming_a_rule_bumps_once_and_keeps_the_released_bytes(golden: Golden) -
                 "the first rule name moves the file to version 3",
                 named_one_rule,
             ),
-            Allowance(
-                BACKUP,
-                frozenset({"created"}),
-                "guard 2: the bytes before the bump",
-                the_released_bytes,
-            ),
         ],
     )
-    assert BACKUP in after, "the bump made no backup"
+    assert stat.S_IMODE(target.stat().st_mode) == mode
 
-    # More names, and clearing them all, never touch the backup again; the
-    # file stays at version 3 (no flip-flop back to 2).
+    # More names, and clearing them all: the file stays at version 3 (no
+    # flip-flop back to 2).
     store = schedules.Store.open()
     for index, rule in enumerate(rules):
         store.set_name(rule["id"], f"Rule {index}")
@@ -152,19 +140,23 @@ def test_naming_a_rule_bumps_once_and_keeps_the_released_bytes(golden: Golden) -
     cleared = read_json(target)
     assert cleared["version"] == 3
     assert not any("name" in rule for rule in cleared["rules"])
-    assert (profile.app_state / "schedules.json.v2-backup").read_bytes() == released
 
 
-def test_a_refused_backup_leaves_every_byte_of_the_profile(golden: Golden) -> None:
+def test_something_at_an_old_copys_name_does_not_stop_the_bump(golden: Golden) -> None:
+    """Earlier versions refused the bump when they could not keep their copy
+    there. Nothing writes to that name now: the save goes through and whatever
+    holds the name is not touched."""
     profile = golden.profile
     (profile.app_state / "schedules.json.v2-backup").mkdir()
     before = harness.snapshot(profile.home)
 
-    with pytest.raises(schedules.ScheduleError) as caught:
-        schedules.Store.open().set_name(_rules(profile)[0]["id"], "Frog day")
+    schedules.Store.open().set_name(_rules(profile)[0]["id"], "Frog day")
 
-    assert caught.value.kind == "no-backup"
-    harness.check_changes(harness.diff(before, harness.snapshot(profile.home)), ())
+    assert read_json(profile.app_state / "schedules.json")["version"] == 3
+    harness.check_changes(
+        harness.diff(before, harness.snapshot(profile.home)),
+        [Allowance(SCHEDULES, frozenset({"modified"}), "the name, at version 3")],
+    )
 
 
 def test_names_never_reach_the_runtime(golden: Golden, capsys: pytest.CaptureFixture[str]) -> None:
@@ -186,7 +178,7 @@ def test_names_never_reach_the_runtime(golden: Golden, capsys: pytest.CaptureFix
 
 
 @pytest.mark.parametrize("scenario", ["named-version-three", "hand-named-version-two"])
-def test_idle_never_bumps_or_backs_up_a_schedule(golden: Golden, scenario: str) -> None:
+def test_idle_never_bumps_a_schedule(golden: Golden, scenario: str) -> None:
     """Idle writes only the whitelist whatever the schedule's names and version.
 
     ``hand-named-version-two`` is a ``name`` typed into a version-2 file: this
@@ -216,6 +208,4 @@ def test_idle_never_bumps_or_backs_up_a_schedule(golden: Golden, scenario: str) 
     harness.check_changes(harness.diff(after_first, harness.snapshot(profile.home)), ())
     assert second == first
     assert golden.processes == []
-    backups = sorted(path.name for path in profile.app_state.glob("*-backup"))
-    expected = ["schedules.json.v2-backup"] if scenario == "named-version-three" else []
-    assert backups == expected
+    assert sorted(path.name for path in profile.app_state.glob("*-backup")) == []

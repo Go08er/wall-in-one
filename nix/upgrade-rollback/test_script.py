@@ -693,12 +693,6 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
     c_done = snapshot()
     c_writes = writes("c: v0.2.0 edits", c_start, c_done)
 
-    def backup_of(name: str) -> Callable[[Any], None]:
-        def verify(change: Any) -> None:
-            assert change.after.content == released[name], f"not the released {name}"
-
-        return verify
-
     def bumped(name: str, version: int, check: Callable[[dict[str, Any]], None]) -> Any:
         def verify(change: Any) -> None:
             after = json.loads(change.after.content)
@@ -747,22 +741,10 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
             bumped("playlists.json", 2, rotation),
         ),
         harness.Allowance(
-            f"{STATE_REL}/playlists.json.v1-backup",
-            frozenset({"created"}),
-            "the one-time backup of the released playlists.json",
-            backup_of("playlists.json"),
-        ),
-        harness.Allowance(
             f"{STATE_REL}/schedules.json",
             frozenset({"modified"}),
             "a rule name: schedules.json 2 -> 3",
             bumped("schedules.json", 3, named),
-        ),
-        harness.Allowance(
-            f"{STATE_REL}/schedules.json.v2-backup",
-            frozenset({"created"}),
-            "the one-time backup of the released schedules.json (version 2)",
-            backup_of("schedules.json"),
         ),
         harness.Allowance(
             f"{STATE_REL}/displays.json",
@@ -771,26 +753,22 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
             bumped("displays.json", 2, opted_in),
         ),
         harness.Allowance(
-            f"{STATE_REL}/displays.json.v1-backup",
-            frozenset({"created"}),
-            "the one-time backup of the released displays.json",
-            backup_of("displays.json"),
-        ),
-        harness.Allowance(
             OVERRIDES_REL,
             frozenset({"created"}),
             "the new runtime fields, beside an unchanged runtime.toml",
             overrides,
         ),
     ]
+    # A bump is an ordinary save: a copy of the old bytes beside the file would
+    # be an unexpected write here.
     expect(
-        "c: exactly the bumps, their backups and the overrides file",
+        "c: exactly the bumps and the overrides file",
         lambda: harness.check_changes(c_writes, c_allowed),
     )
-    # check_changes only vets the writes that happened; require all seven, so
+    # check_changes only vets the writes that happened; require all four, so
     # every verifier above has run on its file.
     expect(
-        "c: every bump, backup and the overrides file was written",
+        "c: every bump and the overrides file was written",
         lambda: require(
             sorted((change.path, change.kind) for change in c_writes)
             == sorted((allowance.pattern, next(iter(allowance.kinds))) for allowance in c_allowed),
@@ -899,9 +877,9 @@ with subtest("e2: v0.2.0 installed again finds the bumped profile as it left it"
         "e2: the start writes only the first-start whitelist",
         lambda: harness.check_changes(e2_writes, first_start()),
     )
-    # Nothing was lost, directly: the stores, the overrides and the backups
-    # are byte for byte what c left.
-    for kept in (*STORES, "runtime-overrides.toml", *(f"{name}.v1-backup" for name in ("playlists.json", "displays.json")), "schedules.json.v2-backup"):
+    # Nothing was lost, directly: the stores and the overrides are byte for
+    # byte what c left.
+    for kept in (*STORES, "runtime-overrides.toml"):
         expect(f"e2: {kept} is as c left it", partial(unchanged, c_done, e2_done, kept))
 
 
@@ -1012,7 +990,7 @@ with subtest("f: wall-in-one-rollback rewrites the three files for 0.1.4"):
         "f: runtime-overrides.toml is gone",
         lambda: require(OVERRIDES_REL not in f_done, "runtime-overrides.toml is still there"),
     )
-    for kept in ("runtime.toml", "pairings.json", "favourites.json", "playlists.json.v1-backup"):
+    for kept in ("runtime.toml", "pairings.json", "favourites.json"):
         expect(f"f: {kept} is untouched", partial(unchanged, f_start, f_done, kept))
     expect(
         "f: it prints the two commands that put the backup back",

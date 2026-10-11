@@ -16,8 +16,8 @@ Nothing else lives here: no last page, no window size.
 * A file this build must not write (a newer version, unreadable, malformed)
   is never touched; ``read_only`` says why, and the window turns those
   controls off.
-* Every save comes back as what is durable. A failed save (the version
-  bump's backup can't be written, say) reports why, and the keeper returns
+* Every save comes back as what is durable. A failed save (the folder
+  can't be written, say) reports why, and the keeper returns
   to what ui.toml really holds, read back on the worker; a successful one
   adopts the saved file. Subscribers (`subscribe`) then show that, so a row
   never keeps a choice that was not saved, and choosing it again saves

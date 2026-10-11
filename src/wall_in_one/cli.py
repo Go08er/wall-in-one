@@ -385,7 +385,7 @@ def _run_graphical_startup_upgrade(
 ) -> int | None:
     """Finish an exact deployed upgrade before GTK reads configuration."""
     from wall_in_one import config, deployed_upgrade_transaction, legacy_migration
-    from wall_in_one.library import capture_upgrade
+    from wall_in_one.library import capture_upgrade, retired_backups
 
     while True:
         try:
@@ -401,6 +401,8 @@ def _run_graphical_startup_upgrade(
                 if require_legacy_safe:
                     legacy_migration.require_unattended_safe_locked()
                 capture_upgrade.prepare()
+                retired_backups.remove()
+                ui_prefs.remove_retired_backup()
             break
         except deployed_upgrade_transaction.TransactionError as error:
             result, detail = _deployed_upgrade_error(error), str(error)
@@ -564,9 +566,11 @@ def _prepare_service_start() -> int:
     """
 
     def publish_or_retain() -> int:
-        from wall_in_one.library import capture_upgrade
+        from wall_in_one.library import capture_upgrade, retired_backups
 
         capture_upgrade.prepare()
+        # No window opens here, so ui.toml's own copy is not looked for.
+        retired_backups.remove()
         result = _write_runtime_config()
         if result != 1:
             return result

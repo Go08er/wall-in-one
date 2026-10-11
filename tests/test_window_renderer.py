@@ -155,11 +155,10 @@ def _words(relative: str) -> str:
 
 
 def test_the_docs_name_the_override() -> None:
-    """GPU acceleration's docs, and review L-1: a first choice leaves no v1 backup."""
+    """GPU acceleration's docs."""
     readme = _words("README.md")
     assert "A `GSK_RENDERER` you set yourself always wins over the setting" in readme
     assert "which GTK programs the app starts inherit too" in readme
     assert "An instance that is already running keeps the renderer it started with" in readme
     settings = _words("docs/settings.md")
     assert "`false` sets `GSK_RENDERER=cairo`" in settings
-    assert "it starts at version 2 and there is no backup" in settings

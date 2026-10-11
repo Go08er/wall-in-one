@@ -7,6 +7,7 @@ behind the `Backend` Protocol that records what the adapter asks for.
 
 from __future__ import annotations
 
+import errno
 import tomllib
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -19,7 +20,7 @@ import pytest
 from tests.gtk_helpers import spin_until
 from tests.test_next_status_line import BATTERY, two_display_status
 from wall_in_one import config, paths, runtime_config, ui_prefs
-from wall_in_one.library import pairings, playlists
+from wall_in_one.library import pairings, playlists, state_file
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
 from wall_in_one.theme import css
@@ -1136,18 +1137,12 @@ def test_mirrored_displays_offer_no_one_display_target(backend: FakeApplication)
 # -- review M-1: a choice that was not saved never stays shown ---------------------------
 
 
-def _obstructed_bump() -> Path:
-    """A version 1 ui.toml whose bump to version 2 can't keep its backup."""
-    target = paths.ui_prefs_path()
-    ui_prefs.update({"thumbnail_size": "small"})
-    (target.parent / "ui.toml.v1-backup").mkdir()
-    return target
-
-
 def test_a_failed_save_goes_back_and_the_same_choice_then_saves(
     backend: FakeApplication,
 ) -> None:
-    target = _obstructed_bump()
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    lock = _locked_out()  # a real refusal: no lock can be taken
     before = target.read_bytes()
     keeper = UiPrefsKeeper(backend.window_report)
     shown: list[str | None] = []
@@ -1156,11 +1151,11 @@ def test_a_failed_save_goes_back_and_the_same_choice_then_saves(
     keeper.change(interface="classic")  # a choice now, so it needs version 2
     spin_until(lambda: backend.reports, what="the failed save's report")
 
-    assert "Nothing was changed" in backend.reports[0]
+    assert "were not saved" in backend.reports[0]
     assert keeper.prefs.interface is None and shown == [None], "back to ui.toml: no choice"
     assert target.read_bytes() == before
 
-    (target.parent / "ui.toml.v1-backup").rmdir()
+    lock.rmdir()
     keeper.change(interface="classic")  # the very same choice, once more
     spin_until(lambda: ui_prefs.load().prefs.interface == "classic", what="the retried save")
     keeper.close(wait=True)
@@ -1169,15 +1164,27 @@ def test_a_failed_save_goes_back_and_the_same_choice_then_saves(
 
 
 def test_an_earlier_failure_never_reverts_a_later_queued_choice(
-    backend: FakeApplication,
+    backend: FakeApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = _obstructed_bump()
+    target = paths.ui_prefs_path()
+    ui_prefs.update({"thumbnail_size": "small"})
+    write = state_file.write_atomic_text
+    refused: list[Path] = []
+
+    def first_write_fails(path: Path, *arguments: Any, **keywords: Any) -> None:
+        """The first save of ui.toml meets a full disk; the next one has room."""
+        if path == target and not refused:
+            refused.append(path)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        write(path, *arguments, **keywords)
+
+    monkeypatch.setattr(state_file, "write_atomic_text", first_write_fails)
     keeper = UiPrefsKeeper(backend.window_report)
     shown: list[tuple[str | None, str]] = []
     keeper.subscribe(lambda: shown.append((keeper.prefs.interface, keeper.prefs.window_style)))
 
-    keeper.change(interface="classic")  # needs version 2: refused, no backup possible
-    keeper.change(window_style="frosted")  # version 1 holds it: saved
+    keeper.change(interface="classic")  # refused: its write fails
+    keeper.change(window_style="frosted")  # saved
     assert keeper.saves == 2
     spin_until(lambda: backend.reports and not keeper.busy, what="both saves")
     keeper.close(wait=True)
@@ -1186,7 +1193,7 @@ def test_an_earlier_failure_never_reverts_a_later_queued_choice(
     assert (durable.interface, durable.window_style) == (None, "frosted")
     assert (keeper.prefs.interface, keeper.prefs.window_style) == (None, "frosted")
     assert shown == [(None, "frosted")], "only the latest save reconciled, once"
-    assert len(backend.reports) == 1
+    assert len(backend.reports) == 1 and refused == [target]
     assert tomllib.loads(target.read_text())["version"] == 1
 
 

@@ -30,15 +30,11 @@ The contract every build keeps:
   without ``--ui``, and ``gpu_acceleration``, whether that window may render
   on the GPU (``false`` makes the next start use GTK's software renderer).
   ``gpu_acceleration`` joined version 2 before any release shipped it, so no
-  released build knows a version 2 without it. Both follow the owner-approved
-  format guards of :mod:`wall_in_one.library.state_file`: the file moves to
+  released build knows a version 2 without it. The file moves to
   version 2 only when an ``interface`` or ``gpu_acceleration = false`` is
-  first saved (a lazy bump; a profile that makes neither choice stays at
-  version 1, which 0.2.0 and 0.2.1 keep writing), the version 1 bytes are
-  first copied to ``ui.toml.v1-backup`` (one time, never overwritten; without
-  it the save is refused; nothing to copy when there was no file), and the
-  file never moves back down. 0.2.0 and 0.2.1 read a version 2 file for the
-  keys they know and leave it unwritten.
+  first saved (a lazy bump, see :mod:`wall_in_one.library.state_file`; a
+  profile that makes neither choice stays at version 1), and it never moves
+  back down.
 * ``interface`` is absent until the user chooses one, and absent means the
   default (`DEFAULT_INTERFACE`): the new interface since 0.3.0, classic in
   0.2.2. So 0.3.0 writes either choice, ``"classic"`` included, while 0.2.2
@@ -345,6 +341,49 @@ def load(path: Path | None = None) -> UiPrefsDocument:
     return _read(path if path is not None else paths.ui_prefs_path())[0]
 
 
+def reads_cleanly(path: Path | None = None) -> bool:
+    """Whether ui.toml is there and reads without a problem, in a version this build knows."""
+    document, existing = _read(path if path is not None else paths.ui_prefs_path())
+    return existing is not None and document.writable
+
+
+#: The copy 0.2.2 kept of a version 1 ui.toml before its first version 2
+#: save, beside it. Nothing reads it.
+RETIRED_BACKUP_NAME: Final = "ui.toml.v1-backup"
+
+
+def _declared_version(contents: bytes) -> int | None:
+    """The version a ui.toml document declares, or None when it is not one this build reads."""
+    try:
+        raw = tomllib.loads(contents.decode("utf-8"))
+    except UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
+        return None
+    return FORMATS.declared(raw)
+
+
+def remove_retired_backup() -> bool:
+    """Remove `RETIRED_BACKUP_NAME`, the copy kept for going back; whether it went.
+
+    Only that one name, beside ui.toml in the app's config folder, and only
+    under the checks of `wall_in_one.library.retired_backups`: a regular
+    version 1 ui.toml of this user's, while ui.toml itself reads without a
+    problem. Never raises. For a start that opens a window: no other start
+    reads ui.toml.
+    """
+    from wall_in_one.library import retired_backups
+
+    candidate = retired_backups.Candidate(
+        RETIRED_BACKUP_NAME,
+        paths.ui_prefs_path,
+        1,
+        "UI preferences",
+        MAX_BYTES,
+        _declared_version,
+        reads_cleanly,
+    )
+    return bool(retired_backups.remove((candidate,)))
+
+
 # -- writing TOML 1.0 --------------------------------------------------------
 
 
@@ -467,16 +506,11 @@ def mutate(
     that has not changed is not rewritten.
 
     The file keeps its version unless the change needs a newer one (choosing
-    an interface, or turning GPU acceleration off, needs 2); before that
-    first bump its old bytes are kept as ``ui.toml.v1-backup``, or nothing is
-    saved.
+    an interface, or turning GPU acceleration off, needs 2).
     """
     target = path if path is not None else paths.ui_prefs_path()
     try:
-        with (
-            state_file.mutation_lock(target, description="UI preferences"),
-            state_file.observe(target) as observed,
-        ):
+        with state_file.mutation_lock(target, description="UI preferences"):
             current, existing = _read(target)
             if current.read_only:
                 raise UiPrefsReadOnlyError(current.read_only)
@@ -490,8 +524,6 @@ def mutate(
                     f"ui.toml would exceed its {MAX_BYTES}-byte limit; nothing was saved"
                 )
             if encoded != existing:
-                if on_disk is not None and FORMATS.is_bump(on_disk, version):
-                    _back_up_before_bump(target, observed, on_disk, version)
                 paths.ensure_directory(target.parent)
                 # Published but not confirmed durable is saved: say so, never
                 # "not saved" (`state_file.published_counts`).
@@ -502,16 +534,6 @@ def mutate(
         raise
     except (OSError, TimeoutError, UnicodeError) as error:
         raise UiPrefsError(f"cannot save {target}: {error}") from error
-
-
-def _back_up_before_bump(
-    target: Path, observed: state_file.StateFileObservation, replaced: int, version: int
-) -> None:
-    """Guard 2, or refuse: never bump ui.toml without its old bytes kept."""
-    try:
-        state_file.backup_before_bump(target, observed=observed, replaced=replaced)
-    except OSError as error:
-        raise UiPrefsError(state_file.backup_refusal(target, replaced, version, error)) from error
 
 
 def launch_interface(path: Path | None = None) -> Interface:

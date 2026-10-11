@@ -256,21 +256,20 @@ def _removal_cleanup_blocker(
 _STORE_UNCHANGED = "Nothing was changed."
 
 #: A Store's refusals that leave its own file as it was, by kind, whatever the
-#: wording: an unreadable file, a backup that wasn't (cleanly) made before a
-#: format bump, an edit that would make the file too large to read back.
-_REFUSED_UNCHANGED = frozenset({state_file.UNREADABLE, "no-backup", "full"})
+#: wording: an unreadable file, an edit that would make the file too large to
+#: read back.
+_REFUSED_UNCHANGED = frozenset({state_file.UNREADABLE, "full"})
 
 
 def _cleanup_failure(label: str, filename: str, error: Exception) -> str:
     """One record a committed removal could not clear, worded for after the fact.
 
-    A Store's refusal often ends "Nothing was changed." (a newer file, a backup
-    it could not make), which is true of its own file but, beside a wallpaper
+    A Store's refusal often ends "Nothing was changed." (a newer file, a file
+    it could not read), which is true of its own file but, beside a wallpaper
     already moved or deleted, reads as a denial that anything happened: those
     words go. Whether the store's file still lists the wallpaper is said by
     the refusal's kind (`_REFUSED_UNCHANGED`), so it holds whatever the
-    refusal's last words are ("...; the copy stays." for a backup written but
-    not finished cleanly), and also for any refusal that says it changed
+    refusal's last words are, and also for any refusal that says it changed
     nothing.
     """
     kind = getattr(error, "kind", None)

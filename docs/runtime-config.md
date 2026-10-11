@@ -561,7 +561,7 @@ manual override: the playlist's own `shuffle` when set, else
 
 The authoring side keeps these in `playlists.json` and `displays.json`
 version 2, written only once one is used (see
-[Format versions and their backups](library.md#format-versions-and-their-backups)).
+[Format versions](library.md#format-versions)).
 
 ### An updated app with an older service
 

@@ -1,0 +1,581 @@
+"""The copies earlier versions kept before a format change are removed at start.
+
+0.2.0 to 0.2.2 copied ``playlists.json``, ``schedules.json``, ``displays.json``
+and ``ui.toml`` to ``<file>.v<old>-backup`` before their first save in a newer
+format. Updates are one-way now, so `retired_backups.remove` (the stores) and
+`ui_prefs.remove_retired_backup` take those copies away.
+
+What is pinned here: exactly five names go, each only from the one folder it
+was written to; nothing beside them, like them, or with their name anywhere
+else is touched; and a copy stays whenever it is not provably the copy, or the
+file it is a copy of does not read in full.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import stat
+from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
+from typing import Final
+
+import pytest
+
+from tests import released
+from tests.released import released_source  # noqa: F401 -- a fixture
+from wall_in_one import cli, file_io, paths, ui_prefs
+from wall_in_one.library import displays, playlists, retired_backups, schedules
+
+#: Every name this build removes, by the folder it is removed from.
+STATE_NAMES: Final = (
+    "playlists.json.v1-backup",
+    "displays.json.v1-backup",
+    "schedules.json.v1-backup",
+    "schedules.json.v2-backup",
+)
+CONFIG_NAMES: Final = ("ui.toml.v1-backup",)
+
+V1_PLAYLISTS: Final = b'{"version": 1, "playlists": []}\n'
+V1_DISPLAYS: Final = b'{"version": 1, "displays": {}}\n'
+V1_SCHEDULES: Final = b'{"rules": []}\n'  # no marker: schedules' version 1
+V2_SCHEDULES: Final = b'{"version": 2, "rules": []}\n'
+V1_UI: Final = b'version = 1\nwindow_style = "frosted"\n'
+#: What each copy holds when an earlier version made it.
+COPIES: Final = {
+    "playlists.json.v1-backup": V1_PLAYLISTS,
+    "displays.json.v1-backup": V1_DISPLAYS,
+    "schedules.json.v1-backup": V1_SCHEDULES,
+    "schedules.json.v2-backup": V2_SCHEDULES,
+    "ui.toml.v1-backup": V1_UI,
+}
+
+
+def _state() -> Path:
+    return paths.app_state_dir()
+
+
+def _config() -> Path:
+    return paths.app_config_dir()
+
+
+def _folder(name: str) -> Path:
+    return _config() if name in CONFIG_NAMES else _state()
+
+
+def _bumped_profile() -> None:
+    """Every file at its newest version, saved by this build's own writers."""
+    playlist = playlists.Store.open().create("Evenings")
+    playlists.Store.open().set_rotation(playlist.id, cycle_interval=120, shuffle=True)
+    rule = schedules.Store.open().add(playlist.id, start="07:00", end="08:00")
+    schedules.Store.open().set_name(rule.id, "Frog day")
+    displays.Store.open().assign("DP-1", playlist.id)
+    displays.Store.open().set_beats_global_rules("DP-1", True)
+    ui_prefs.update({"window_style": "frosted"})
+    ui_prefs.update({"interface": "classic"})
+    assert json.loads((_state() / "playlists.json").read_bytes())["version"] == 2
+    assert json.loads((_state() / "schedules.json").read_bytes())["version"] == 3
+    assert json.loads((_state() / "displays.json").read_bytes())["version"] == 2
+    assert ui_prefs.load().raw["version"] == 2
+
+
+def _keep_copies() -> None:
+    for name, contents in COPIES.items():
+        target = _folder(name) / name
+        target.write_bytes(contents)
+        target.chmod(0o644)
+
+
+def _remove_everything() -> tuple[Path, ...]:
+    """What a start that opens a window does."""
+    removed = retired_backups.remove()
+    return (*removed, *((_config() / CONFIG_NAMES[0],) if ui_prefs.remove_retired_backup() else ()))
+
+
+def _tree(root: Path) -> dict[str, bytes | str]:
+    """Every entry below ``root``: a file's bytes, a link's target, else its type."""
+    found: dict[str, bytes | str] = {}
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            found[relative] = f"-> {os.readlink(path)}"
+        elif stat.S_ISREG(mode):
+            found[relative] = path.read_bytes()
+        else:
+            found[relative] = f"type {stat.S_IFMT(mode):o}"
+    return found
+
+
+def test_the_names_are_exactly_the_five_any_version_wrote() -> None:
+    """One per bump a released store could make, each beside its own file."""
+    stores = {candidate.name: candidate for candidate in retired_backups.STORE_CANDIDATES}
+    assert tuple(stores) == STATE_NAMES
+    for name, candidate in stores.items():
+        live = candidate.live()
+        assert live.parent == _state()
+        assert name == f"{live.name}.v{candidate.version}-backup"
+        assert candidate.path() == _state() / name
+    assert CONFIG_NAMES[0] == ui_prefs.RETIRED_BACKUP_NAME
+    # A bump is a save above both the file's version and the oldest version
+    # written: playlists 1->2, displays 1->2, schedules 1->3 and 2->3, ui.toml 1->2.
+    assert (playlists.FORMATS.floor, playlists.FORMATS.current) == (1, 2)
+    assert (displays.FORMATS.floor, displays.FORMATS.current) == (1, 2)
+    assert (schedules.FORMATS.oldest, schedules.FORMATS.floor, schedules.FORMATS.current) == (
+        1,
+        2,
+        3,
+    )
+    assert (ui_prefs.FORMATS.floor, ui_prefs.FORMATS.current) == (1, 2)
+
+
+def test_every_copy_goes_and_nothing_else_does(tmp_path: Path) -> None:
+    """The five copies, beside decoys: near-miss names in the same folders, and
+    the exact names everywhere else a careless sweep could reach."""
+    _bumped_profile()
+    _keep_copies()
+    state, config = _state(), _config()
+    wallpapers = tmp_path / "home" / "Pictures" / "Wallpapers"
+    noctalia = paths.noctalia_state_dir()
+    decoys: list[Path] = []
+    # Near misses, in the app's own folders.
+    for name in (
+        "playlists.json.v1-backup~",
+        "playlists.json.v1-backup.txt",
+        ".playlists.json.v1-backup",
+        "playlists.json.v2-backup",
+        "playlists.json.v0-backup",
+        "displays.json.v2-backup",
+        "schedules.json.v3-backup",
+        "pairings.json.v1-backup",
+        "pairings.json.v2-backup",
+        "favourites.json.v1-backup",
+        "pending-removals.json.v1-backup",
+        "runtime.toml.v1-backup",
+        "playlists.json.broken",
+        "playlists.json.backup",
+        "PLAYLISTS.JSON.V1-BACKUP",
+        # The other folder's name: ui.toml's copy is only ever in config.
+        "ui.toml.v1-backup",
+    ):
+        decoys.append(state / name)
+    for name in (
+        "ui.toml.v2-backup",
+        "ui.toml.v1-backup~",
+        "settings.toml.v1-backup",
+        "ui.toml.bak",
+        # The stores' copies are only ever in the state folder.
+        *STATE_NAMES,
+    ):
+        decoys.append(config / name)
+    # The exact names, anywhere else.
+    for folder in (
+        wallpapers,
+        wallpapers / "Wall-in-One" / "Wallhaven",
+        noctalia,
+        paths.app_cache_dir(),
+        state / "nested",
+        config / "tidy-archive" / "2026-10-11",
+        tmp_path / "home",
+    ):
+        decoys.extend(folder / name for name in (*STATE_NAMES, *CONFIG_NAMES))
+    for decoy in decoys:
+        decoy.parent.mkdir(parents=True, exist_ok=True)
+        decoy.write_bytes(COPIES.get(decoy.name, V1_PLAYLISTS))
+    before = _tree(tmp_path)
+
+    removed = _remove_everything()
+
+    expected = [state / name for name in STATE_NAMES] + [config / name for name in CONFIG_NAMES]
+    assert sorted(removed) == sorted(expected)
+    after = _tree(tmp_path)
+    gone = sorted(set(before) - set(after))
+    assert gone == sorted(str(path.relative_to(tmp_path)) for path in expected)
+    for decoy in decoys:
+        assert decoy.is_file(), decoy
+    # Nothing else changed a byte; what is new is only the discard's own record.
+    for relative, contents in before.items():
+        if relative not in gone:
+            assert after[relative] == contents, relative
+    new = sorted(set(after) - set(before))
+    retained = file_io.RETAINED_ENTRY_DIRECTORY
+    for relative in new:
+        path = tmp_path / relative
+        assert path.parent.name == retained or path.name == retained, relative
+        assert path.parent in (state, config) or path.parent.parent in (state, config), relative
+        assert path.is_dir() or path.stat().st_size == 0, relative
+    # And it is done: a second start finds nothing and changes nothing.
+    settled = _tree(tmp_path)
+    assert _remove_everything() == ()
+    assert _tree(tmp_path) == settled
+
+
+def test_a_profile_without_copies_is_only_looked_at(tmp_path: Path) -> None:
+    """Nothing is locked, made or written: not on a fresh install, where the
+    folders don't exist yet, and not on a profile that has none."""
+    assert _remove_everything() == ()
+    assert not _state().exists() and not _config().exists()
+
+    _bumped_profile()
+    for lock in (*_state().glob(".*.lock"), *_config().glob(".*.lock")):
+        lock.unlink()
+    before = _tree(tmp_path)
+    assert _remove_everything() == ()
+    assert _tree(tmp_path) == before, "no lock file, no retained folder"
+
+
+def _as_directory(path: Path, contents: bytes) -> None:
+    path.mkdir()
+    (path / "inside").write_bytes(contents)
+
+
+def _as_link(path: Path, contents: bytes) -> None:
+    target = path.with_name(f"{path.name}.target")
+    target.write_bytes(contents)
+    path.symlink_to(target)
+
+
+def _with_another_name(path: Path, contents: bytes) -> None:
+    path.write_bytes(contents)
+    os.link(path, path.with_name(f"{path.name}.also"))
+
+
+def _as_fifo(path: Path, contents: bytes) -> None:
+    del contents
+    os.mkfifo(path)
+
+
+NOT_THE_COPY: Final[dict[str, Callable[[Path, bytes], object]]] = {
+    "a directory": _as_directory,
+    "a link to a copy": _as_link,
+    "a file with a second name": _with_another_name,
+    "a fifo": _as_fifo,
+    "a person's notes": lambda path, _contents: path.write_text("call the plumber\n"),
+    "an empty file": lambda path, _contents: path.write_bytes(b""),
+    "a list": lambda path, _contents: path.write_bytes(b"[1, 2, 3]\n"),
+    "not unicode": lambda path, _contents: path.write_bytes(b"\xff\xfe\x00"),
+}
+
+
+@pytest.mark.parametrize("name", [*STATE_NAMES, *CONFIG_NAMES])
+@pytest.mark.parametrize("what", list(NOT_THE_COPY))
+def test_something_else_under_the_name_stays(name: str, what: str, tmp_path: Path) -> None:
+    """The name alone proves nothing: only a regular, singly linked document of
+    the version the name says is the copy."""
+    _bumped_profile()
+    target = _folder(name) / name
+    NOT_THE_COPY[what](target, COPIES[name])
+    before = _tree(tmp_path)
+
+    removed = _remove_everything()
+
+    if (name, what) == ("ui.toml.v1-backup", "an empty file"):
+        # The one overlap: a ui.toml without a version is a version 1 file, so
+        # an empty one is a copy of an empty ui.toml. Nothing is in it to lose.
+        assert removed == (target,)
+        return
+    assert removed == ()
+    assert _tree(tmp_path) == before, "it is where it was, byte for byte, and nothing was made"
+
+
+def _newest(name: str) -> bytes:
+    """The live file's own bytes: a document of its store, in a newer version than the name."""
+    live = {
+        "playlists.json.v1-backup": _state() / "playlists.json",
+        "displays.json.v1-backup": _state() / "displays.json",
+        "schedules.json.v1-backup": _state() / "schedules.json",
+        "schedules.json.v2-backup": _state() / "schedules.json",
+        "ui.toml.v1-backup": _config() / "ui.toml",
+    }[name]
+    return live.read_bytes()
+
+
+@pytest.mark.parametrize("name", [*STATE_NAMES, *CONFIG_NAMES])
+def test_a_document_of_another_version_under_the_name_stays(name: str, tmp_path: Path) -> None:
+    """Somebody's own copy of the current file, say: not what the name says it is."""
+    _bumped_profile()
+    target = _folder(name) / name
+    target.write_bytes(_newest(name))
+    before = _tree(tmp_path)
+
+    assert _remove_everything() == ()
+
+    assert _tree(tmp_path) == before
+
+
+def test_a_copy_larger_than_its_file_may_be_stays(tmp_path: Path) -> None:
+    _bumped_profile()
+    target = _state() / "displays.json.v1-backup"
+    padded = json.dumps({"version": 1, "displays": {}, "x": "y" * displays.MAX_STATE_BYTES})
+    target.write_text(padded)
+    before = _tree(tmp_path)
+
+    assert _remove_everything() == ()
+
+    assert _tree(tmp_path) == before
+
+
+def _missing(live: Path) -> None:
+    live.unlink()
+
+
+def _damaged(live: Path) -> None:
+    live.write_bytes(b'{"version": 2, "playl')
+
+
+def _from_a_newer_version(live: Path) -> None:
+    if live.suffix == ".toml":
+        live.write_text('version = 9\nwindow_style = "frosted"\n')
+        return
+    document = json.loads(live.read_bytes())
+    document["version"] = 9
+    live.write_text(json.dumps(document))
+
+
+def _unreadable(live: Path) -> None:
+    live.chmod(0o000)
+
+
+LIVE_NOT_READ_IN_FULL: Final[dict[str, Callable[[Path], None]]] = {
+    "missing": _missing,
+    "damaged": _damaged,
+    "from a newer version": _from_a_newer_version,
+    "unreadable": _unreadable,
+}
+
+
+@pytest.mark.parametrize("name", [*STATE_NAMES, *CONFIG_NAMES])
+@pytest.mark.parametrize("how", list(LIVE_NOT_READ_IN_FULL))
+def test_a_copy_stays_while_its_file_does_not_read_in_full(
+    name: str, how: str, tmp_path: Path
+) -> None:
+    """Then the copy may be the only good one: nothing is removed on a failed
+    or unavailable proof. The other files' copies still go."""
+    if how == "unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    _bumped_profile()
+    _keep_copies()
+    target = _folder(name) / name
+    live = target.with_name(name.rsplit(".v", 1)[0])
+    LIVE_NOT_READ_IN_FULL[how](live)
+    kept = target.read_bytes()
+    try:
+        removed = _remove_everything()
+    finally:
+        if how == "unreadable":
+            live.chmod(0o644)
+
+    assert target.read_bytes() == kept
+    assert target not in removed
+    # schedules.json has two copies, and both wait for it.
+    waiting = {_folder(n) / n for n in COPIES if n.rsplit(".v", 1)[0] == live.name}
+    assert set(removed) == {_folder(n) / n for n in COPIES} - waiting
+
+
+def test_a_schedule_with_a_damaged_record_keeps_its_copies() -> None:
+    """Readable, but not in full: a rule in it could not be read, so what the
+    copy holds may not all be in it."""
+    _bumped_profile()
+    _keep_copies()
+    live = _state() / "schedules.json"
+    document = json.loads(live.read_bytes())
+    document["rules"].append({"id": 7, "playlist": None})
+    live.write_text(json.dumps(document))
+    assert not schedules.reads_cleanly()
+
+    removed = _remove_everything()
+
+    assert (_state() / "schedules.json.v2-backup").read_bytes() == V2_SCHEDULES
+    assert (_state() / "schedules.json.v1-backup").read_bytes() == V1_SCHEDULES
+    assert len(removed) == 3
+
+
+def test_a_folder_that_cannot_be_written_keeps_its_copies_and_stops_nothing() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root writes into a read-only folder")
+    _bumped_profile()
+    _keep_copies()
+    state = _state()
+    for entry in state.iterdir():
+        entry.chmod(stat.S_IMODE(entry.stat().st_mode) & ~0o222)
+    state.chmod(0o555)
+    try:
+        removed = _remove_everything()
+        for name in STATE_NAMES:
+            assert (state / name).read_bytes() == COPIES[name]
+    finally:
+        state.chmod(0o755)
+    assert removed == (_config() / CONFIG_NAMES[0],), "the config folder's copy still went"
+
+
+def test_a_busy_file_keeps_its_copy_for_a_later_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another process holds the file's lock (its flock, through a descriptor
+    of its own): that one copy waits, and the other files' copies go."""
+    _bumped_profile()
+    _keep_copies()
+    monkeypatch.setattr(retired_backups, "LOCK_TIMEOUT_SECONDS", 0.05)
+    live = _state() / "playlists.json"
+    descriptor = os.open(live.with_name(f".{live.name}.mutation.lock"), os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        removed = retired_backups.remove()
+    finally:
+        os.close(descriptor)
+
+    assert (_state() / "playlists.json.v1-backup").read_bytes() == V1_PLAYLISTS
+    assert len(removed) == 3
+    assert retired_backups.remove() == (_state() / "playlists.json.v1-backup",)
+
+
+def test_a_copy_replaced_while_it_is_checked_is_left() -> None:
+    """The check and the removal are of one pinned file: what is put under the
+    name after the check is not what was checked, and stays."""
+    _bumped_profile()
+    _keep_copies()
+    target = _state() / "displays.json.v1-backup"
+    swapped = b'{"version": 1, "displays": {"DP-9": "mine"}}\n'
+    real = displays.reads_cleanly
+
+    def swap_then_read(path: Path | None = None) -> bool:
+        replacement = target.with_name("replacement")
+        replacement.write_bytes(swapped)
+        os.replace(replacement, target)
+        return real(path)
+
+    candidates = tuple(
+        replace(candidate, reads_cleanly=swap_then_read)
+        if candidate.name == target.name
+        else candidate
+        for candidate in retired_backups.STORE_CANDIDATES
+    )
+
+    removed = retired_backups.remove(candidates)
+
+    assert target.read_bytes() == swapped
+    assert target not in removed and len(removed) == 3
+
+
+#: The released 0.2.2 itself (`tests.released`), using each new field for the
+#: first time on files in the older versions: its own bumps, and its own copies.
+RELEASED_BUMPS: Final = """
+from wall_in_one import ui_prefs
+from wall_in_one.library import displays, playlists, schedules
+
+made = playlists.Store.open().create("Evenings")
+if sys.argv[1] == "from-version-1":
+    # A schedules.json as 0.1.x wrote it: 0.2.2's first rule name takes it to 3.
+    schedules.state_path().write_text(
+        '{"version": 1, "rules": [{"id": "old", "playlist": "%s"}]}' % made.id
+    )
+    rule_id = "old"
+else:
+    rule_id = schedules.Store.open().add(made.id, start="07:00", end="08:00").id
+displays.Store.open().assign("DP-1", made.id)
+ui_prefs.update({"window_style": "frosted"})
+
+playlists.Store.open().set_rotation(made.id, cycle_interval=120, shuffle=True)
+schedules.Store.open().set_name(rule_id, "Frog day")
+displays.Store.open().set_beats_global_rules("DP-1", True)
+ui_prefs.update({"interface": "next"})
+print("DONE", made.id, rule_id)
+"""
+
+
+@pytest.mark.parametrize(
+    ("schedule", "copies"),
+    [
+        (
+            "from-version-2",
+            (
+                "playlists.json.v1-backup",
+                "displays.json.v1-backup",
+                "schedules.json.v2-backup",
+                "ui.toml.v1-backup",
+            ),
+        ),
+        (
+            "from-version-1",
+            (
+                "playlists.json.v1-backup",
+                "displays.json.v1-backup",
+                "schedules.json.v1-backup",
+                "ui.toml.v1-backup",
+            ),
+        ),
+    ],
+)
+def test_the_copies_the_released_version_really_made_are_the_ones_removed(
+    released_source: Path,  # noqa: F811
+    schedule: str,
+    copies: tuple[str, ...],
+    tmp_path: Path,
+) -> None:
+    """Review rule 4, run rather than read: 0.2.2 is the producer. What it left
+    beside the files it bumped is exactly what this build's start takes away,
+    and what the person set there is all still in the files."""
+    done = released.run(released_source, RELEASED_BUMPS, schedule)
+    assert done.stdout.startswith("DONE"), done.stdout + done.stderr
+    _done, playlist_id, rule_id = done.stdout.split()
+    made = sorted(path.name for folder in (_state(), _config()) for path in folder.glob("*-backup"))
+    assert made == sorted(copies), "what 0.2.2 keeps before a bump"
+    lives = {name: (_folder(name) / name.rsplit(".v", 1)[0]).read_bytes() for name in copies}
+    before = _tree(tmp_path)
+
+    removed = _remove_everything()
+
+    assert sorted(removed) == sorted(_folder(name) / name for name in copies)
+    after = _tree(tmp_path)
+    assert sorted(set(before) - set(after)) == sorted(
+        str((_folder(name) / name).relative_to(tmp_path)) for name in copies
+    )
+    for name, contents in lives.items():
+        assert (_folder(name) / name.rsplit(".v", 1)[0]).read_bytes() == contents, name
+    assert playlists.Store.open().find(playlist_id).cycle_interval == 120
+    (rule,) = [rule for rule in schedules.Store.open().rules if rule.id == rule_id]
+    assert rule.name == "Frog day"
+    assert displays.Store.open().beats_global_rules("DP-1")
+    assert ui_prefs.load().prefs.interface == "next"
+
+
+def test_the_service_start_removes_the_stores_copies_and_never_reads_ui_toml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No window opens there, so ui.toml and its copy are not looked at."""
+    _bumped_profile()
+    _keep_copies()
+
+    def refuse(*_arguments: object, **_keywords: object) -> object:
+        raise AssertionError("a start that opens no window read ui.toml")
+
+    from wall_in_one.library import capture_upgrade
+
+    monkeypatch.setattr(ui_prefs, "_read", refuse)
+    monkeypatch.setattr(ui_prefs, "remove_retired_backup", refuse)
+    monkeypatch.setattr(capture_upgrade, "prepare", lambda: None)
+    monkeypatch.setattr(cli, "_write_runtime_config", lambda: 0)
+    monkeypatch.setattr(cli, "_run_unattended_writer", lambda write: write())
+
+    assert cli._prepare_service_start() == 0
+
+    assert [name for name in STATE_NAMES if (_state() / name).exists()] == []
+    assert (_config() / CONFIG_NAMES[0]).read_bytes() == V1_UI
+
+
+def test_a_start_that_opens_a_window_removes_all_five(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wall_in_one import deployed_upgrade_transaction
+    from wall_in_one.library import capture_upgrade
+
+    _bumped_profile()
+    _keep_copies()
+    monkeypatch.setattr(capture_upgrade, "prepare", lambda: None)
+    monkeypatch.setattr(
+        deployed_upgrade_transaction,
+        "ensure",
+        lambda: deployed_upgrade_transaction.Outcome(False, "current", ""),
+    )
+
+    assert cli._run_graphical_startup_upgrade(require_legacy_safe=False) is None
+
+    assert [name for name in COPIES if (_folder(name) / name).exists()] == []

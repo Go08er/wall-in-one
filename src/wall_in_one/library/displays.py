@@ -22,8 +22,7 @@ should not lose the arrangement.
 
 Version 2 adds one opt-in per assigned screen: its own playlist beats the
 *global* schedule rules (rules aimed at that screen still win). The file moves
-to version 2 only when somebody turns that on, after the version-1 bytes are
-kept as ``displays.json.v1-backup``; until then it stays version 1.
+to version 2 only when somebody turns that on; until then it stays version 1.
 """
 
 from __future__ import annotations
@@ -67,8 +66,8 @@ _MutationResult = TypeVar("_MutationResult")
 class DisplayError(Exception):
     """An assignment could not be stored.
 
-    Kinds in use: ``local-io``, ``validation``, ``newer-version``,
-    ``no-backup``, ``full``, ``unreadable``.
+    Kinds in use: ``local-io``, ``validation``, ``newer-version``, ``full``,
+    ``unreadable``.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -150,6 +149,12 @@ def _read(path: Path) -> state_file.Reading[Arrangement]:
     if newer is not None:
         return state_file.Reading(found, newer, newer_version=True, unknown=unknown)
     return state_file.Reading(found, fault, unknown=unknown, version=FORMATS.declared(document))
+
+
+def reads_cleanly(path: Path | None = None) -> bool:
+    """Whether the file is there and reads without a fault, in a version this build knows."""
+    reading = _read(path if path is not None else state_path())
+    return reading.fault is None and reading.version is not None
 
 
 def _parse(path: Path, document: dict[str, Any]) -> tuple[Arrangement, str | None]:
@@ -252,7 +257,7 @@ def save(
 
     ``version`` defaults to the oldest format that holds the arrangement (see
     `required_version`), so a file without opt-ins is written as version 1.
-    Keeping a file's newer version, and the backup before a bump, belong to
+    Keeping a file's newer version belongs to
     `Store`, which knows what is on disk. A document larger than
     ``MAX_STATE_BYTES``, which this build's reader would refuse, is refused
     (``full``) before anything is written.
@@ -670,8 +675,8 @@ class Store:
                     version = FORMATS.to_write(
                         reading.version, required_version(working.beats_global_rules)
                     )
-                    # Refused if too large to read back, before anything is backed up
-                    # or moved; `save` then renders and writes it.
+                    # Refused if too large to read back, before anything is
+                    # moved; `save` then renders and writes it.
                     _render(
                         working.assignments,
                         target,
@@ -679,8 +684,6 @@ class Store:
                         beats_global_rules=working.beats_global_rules,
                         version=version,
                     )
-                    if reading.version is not None and FORMATS.is_bump(reading.version, version):
-                        _back_up_before_bump(target, observed, reading.version, version)
                     if fault is not None:
                         try:
                             backup = state_file.preserve_faulted(target, observed=observed)
@@ -733,18 +736,3 @@ class Store:
                 f"could not safely update display assignments at {target}: "
                 f"{error.strerror or error}",
             ) from error
-
-
-def _back_up_before_bump(
-    target: Path,
-    observed: state_file.StateFileObservation,
-    replaced: int,
-    version: int,
-) -> None:
-    """Guard 2, or refuse: never bump a file without its old bytes kept."""
-    try:
-        state_file.backup_before_bump(target, observed=observed, replaced=replaced)
-    except OSError as error:
-        raise DisplayError(
-            "no-backup", state_file.backup_refusal(target, replaced, version, error)
-        ) from error

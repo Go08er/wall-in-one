@@ -7957,8 +7957,8 @@ class _Commands:
     def name_schedule_rule(self, value: str | None) -> server.Outcome:
         """Name a rule by its id, or clear its name when none is given.
 
-        The first name moves schedules.json to version 3 after keeping the
-        old file as ``schedules.json.v2-backup``; see `schedules.Store.set_name`.
+        The first name moves schedules.json to version 3; see
+        `schedules.Store.set_name`.
         """
         session = self._app.session
         rule_id, name = server.parse_rule_name(value)

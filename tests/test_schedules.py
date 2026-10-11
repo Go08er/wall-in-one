@@ -944,8 +944,10 @@ def test_a_new_unnamed_schedule_is_version_two(tmp_path: Path) -> None:
     )
 
 
-def test_naming_a_rule_bumps_to_version_three_after_one_exact_backup(tmp_path: Path) -> None:
-    target, original = _v2_file(tmp_path)
+def test_naming_a_rule_bumps_to_version_three_and_keeps_no_copy(tmp_path: Path) -> None:
+    """A bump is an ordinary save: the old format is read, the new one written
+    over it. No copy of the version-2 bytes is kept (updates are one-way)."""
+    target, _original = _v2_file(tmp_path)
     store = Store.open(target)
 
     named = store.set_name("night", "  Frog   night ")
@@ -959,39 +961,20 @@ def test_naming_a_rule_bumps_to_version_three_after_one_exact_backup(tmp_path: P
         {**V2_RULES[1], "name": "Frog night"},
         V2_RULES[2],
     ]
-    backup = target.with_name("schedules.json.v2-backup")
-    assert _backups(target) == [backup.name]
-    assert backup.read_bytes() == original
-    assert os.stat(backup).st_mode & 0o777 == 0o644
+    assert _backups(target) == []
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [
+        ".schedules.json.mutation.lock",
+        "schedules.json",
+    ]
 
-    # Further edits at version 3 never touch the backup again.
-    before = backup.stat()
     store.set_name("quiet", "Your pick, parked")
     store.add("Evening", rule_id="evening", name="Evening")
-    assert backup.read_bytes() == original
-    assert file_io.file_fingerprint(backup.stat()) == file_io.file_fingerprint(before)
-    assert _backups(target) == [backup.name]
-
-
-def test_a_second_bump_never_overwrites_the_first_backup(tmp_path: Path) -> None:
-    """0.1.4 narrows a version-3 file back to 2; naming again bumps again."""
-    target, original = _v2_file(tmp_path)
-    Store.open(target).set_name("night", "Frog night")
-    narrowed = _as_written({"version": 2, "rules": [{"id": "night", "playlist": "Night"}]})
-    target.write_bytes(narrowed)
-
-    store = Store.open(target)
-    assert store.rules[0].name is None
-    store.set_name("night", "Frog night again")
-
-    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
-    assert _document(target)["version"] == 3
-    assert _backups(target) == ["schedules.json.v2-backup"]
+    assert _backups(target) == []
 
 
 def test_clearing_the_last_name_stays_on_version_three(tmp_path: Path) -> None:
     """Decided: a bumped file never flips back, though the data would fit v2."""
-    target, original = _v2_file(tmp_path)
+    target, _original = _v2_file(tmp_path)
     store = Store.open(target)
     store.set_name("night", "Frog night")
 
@@ -1002,8 +985,6 @@ def test_clearing_the_last_name_stays_on_version_three(tmp_path: Path) -> None:
 
     assert _document(target)["version"] == 3
     assert all(rule.name is None for rule in Store.open(target).rules)
-    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
-    assert _backups(target) == ["schedules.json.v2-backup"]
 
 
 def test_a_named_rule_keeps_its_name_through_every_other_edit(tmp_path: Path) -> None:
@@ -1049,10 +1030,10 @@ def test_a_version_three_file_round_trips_its_names(tmp_path: Path) -> None:
             {"id": "b", "playlist": "Y", "enabled": False},
         ],
     }
-    assert _backups(target) == [], "already version 3: nothing to back up"
+    assert _backups(target) == []
 
 
-def test_a_named_rule_in_a_new_file_needs_no_backup(tmp_path: Path) -> None:
+def test_a_named_rule_in_a_new_file_is_version_three(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     Store.open(target).add("Evening", rule_id="evening", name="Evening")
     assert _document(target) == {
@@ -1062,83 +1043,62 @@ def test_a_named_rule_in_a_new_file_needs_no_backup(tmp_path: Path) -> None:
     assert _backups(target) == []
 
 
-def test_a_version_one_file_named_is_backed_up_as_version_one(tmp_path: Path) -> None:
+def test_a_version_one_file_named_goes_straight_to_version_three(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     original = _as_written({"version": 1, "rules": [{"id": "a", "playlist": "X"}]})
     target.write_bytes(original)
 
     Store.open(target).set_name("a", "First")
 
-    assert _document(target)["version"] == 3
-    assert target.with_name("schedules.json.v1-backup").read_bytes() == original
-    assert _backups(target) == ["schedules.json.v1-backup"]
+    assert _document(target) == {
+        "version": 3,
+        "rules": [{"id": "a", "playlist": "X", "name": "First"}],
+    }
+    assert _backups(target) == []
 
 
-@pytest.mark.parametrize("occupant", ("directory", "symlink"))
-def test_a_refused_backup_means_no_bump(tmp_path: Path, occupant: str) -> None:
-    """Guard 2: no backup, no save. The file and the live schedule stay put."""
-    target, original = _v2_file(tmp_path)
+@pytest.mark.parametrize("occupant", ("directory", "symlink", "file"))
+def test_something_at_an_old_copys_name_neither_stops_a_bump_nor_is_touched(
+    tmp_path: Path, occupant: str
+) -> None:
+    """Earlier versions refused the bump when they could not keep their copy
+    there. Nothing is written to that name now, so whatever holds it stays as
+    it is and the save goes through."""
+    target, _original = _v2_file(tmp_path)
     backup = target.with_name("schedules.json.v2-backup")
     if occupant == "directory":
         backup.mkdir()
-    else:
+    elif occupant == "symlink":
         backup.symlink_to(tmp_path / "nowhere")
+    else:
+        backup.write_bytes(b"kept by an earlier version")
+    before = backup.lstat()
     store = Store.open(target)
-    before = store.rules
 
-    with pytest.raises(ScheduleError) as caught:
-        store.set_name("night", "Frog night")
+    store.set_name("night", "Frog night")
 
-    assert caught.value.kind == "no-backup"
-    assert "schedules.json.v2-backup" in str(caught.value)
-    assert str(caught.value).endswith("Nothing was changed.")
-    assert target.read_bytes() == original
-    assert store.rules == before
-    assert store.fault is None
+    assert _document(target)["version"] == 3
+    after = backup.lstat()
+    assert (after.st_ino, after.st_mode, after.st_mtime_ns) == (
+        before.st_ino,
+        before.st_mode,
+        before.st_mtime_ns,
+    )
+    if occupant == "file":
+        assert backup.read_bytes() == b"kept by an earlier version"
     assert not list(tmp_path.glob("*.broken*"))
-    assert not list(tmp_path.glob(".schedules.json*.tmp"))
-
-    # An unnamed edit needs no bump, so it still works meanwhile.
-    store.set_enabled("quiet", True)
-    assert _document(target)["version"] == 2
 
 
-def test_a_failed_backup_write_means_no_bump(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    target, original = _v2_file(tmp_path)
-    real = state_file.write_atomic_bytes
-
-    def full_disk(
-        path: Path, contents: bytes, *, replace_existing: bool = True, mode: int | None = None
-    ) -> None:
-        if path.name.endswith("-backup"):
-            raise OSError(28, "No space left on device")
-        real(path, contents, replace_existing=replace_existing, mode=mode)
-
-    monkeypatch.setattr(state_file, "write_atomic_bytes", full_disk)
-    store = Store.open(target)
-
-    with pytest.raises(ScheduleError) as caught:
-        store.add("Evening", name="Evening")
-
-    assert caught.value.kind == "no-backup"
-    assert "No space left on device" in str(caught.value)
-    assert target.read_bytes() == original
-    assert len(store) == len(V2_RULES)
-    assert not target.with_name("schedules.json.v2-backup").exists()
-
-
-def test_a_faulted_file_is_backed_up_before_it_is_moved_aside(tmp_path: Path) -> None:
-    """The bump's backup and the fault's ``.broken`` copy both hold the original."""
+def test_a_faulted_file_is_moved_aside_whole_before_the_bump(tmp_path: Path) -> None:
+    """The fault's ``.broken`` copy holds the original; the bump keeps none of its own."""
     target, original = _v2_file(tmp_path, [*V2_RULES, {"id": "bad", "playlist": 7}])
     store = Store.open(target)
     assert store.fault is not None
 
     store.set_name("night", "Frog night")
 
-    assert target.with_name("schedules.json.v2-backup").read_bytes() == original
     assert target.with_name("schedules.json.broken").read_bytes() == original
+    assert _backups(target) == []
     assert _document(target)["version"] == 3
     assert Store.open(target).fault is None
 

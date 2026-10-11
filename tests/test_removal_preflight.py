@@ -10,7 +10,6 @@ removal is refused before the journal intent and before the file is touched.
 
 from __future__ import annotations
 
-import errno
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -255,12 +254,12 @@ def test_ctl_remove_in_the_headless_service_refuses_up_front_too(sandbox: Path, 
             "playlists",
             playlists,
             playlists.PlaylistError(
-                "no-backup",
-                "could not keep a copy of playlists.json (version 1) as playlists.json.v1-backup "
-                "before saving it as version 2: No space left on device. Nothing was changed.",
+                "full",
+                "playlists.json would be 9,000,000 bytes, more than the 8,388,608 bytes this "
+                "version can read back; remove some entries first. Nothing was changed.",
             ),
-            "no-backup: could not keep a copy of playlists.json (version 1) as "
-            "playlists.json.v1-backup before saving it as version 2: No space left on device.",
+            "full: playlists.json would be 9,000,000 bytes, more than the 8,388,608 bytes this "
+            "version can read back; remove some entries first.",
         ),
         (
             "favourites",
@@ -282,19 +281,17 @@ def test_no_store_refusal_after_the_commit_says_nothing_was_changed(
     assert "Nothing was changed" not in manage.metadata_cleanup_note((failure,))
 
 
-def test_a_kept_copy_refusal_after_a_removal_still_says_the_file_may_list_it() -> None:
-    """The cold review of Z-3: a bump refused on a copy that was written but did not
-    finish cleanly ends "...; the copy stays.", not "Nothing was changed.". The hint
-    comes from the refusal's kind, so it is kept whatever its last words are."""
-    target = Path("/profile/state/playlists.json")
-    backup = state_file.version_backup_path(target, 1)
-    landed = state_file.BackupNotConfirmedError(backup, OSError(errno.EIO, "I/O error"))
-    error = playlists.PlaylistError("no-backup", state_file.backup_refusal(target, 1, 2, landed))
+def test_a_refusal_that_does_not_say_nothing_changed_still_says_the_file_may_list_it() -> None:
+    """The cold review of Z-3: the hint comes from the refusal's kind, so it is kept
+    whatever the refusal's last words are (an edit too large to read back, a file
+    that could not be read)."""
+    error = playlists.PlaylistError(
+        "full", "playlists.json would be too large to read back; remove some entries first."
+    )
 
     failure = session_module._cleanup_failure("playlists", playlists.STATE_FILENAME, error)
 
     assert "Nothing was changed" not in failure
-    assert "the copy stays" in failure
     # Failed on d2260e9: the hint the plain refusal gets was missing here.
     assert failure.endswith(
         "playlists.json was left as it was, so it may still list this wallpaper"

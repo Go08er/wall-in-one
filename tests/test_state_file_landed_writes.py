@@ -20,14 +20,13 @@ import contextlib
 import errno
 import os
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from tests import sync_faults
 from tests.test_palettes import _document
-from tests.test_published_not_durable import _sync_fails_for
 from wall_in_one import file_io
 from wall_in_one.library import playlists, state_file
 from wall_in_one.theme import palettes
@@ -231,59 +230,6 @@ def test_a_candidate_landing_on_the_way_back_is_recorded(
     # Before: ([], True), "remains preserved at <temporary>".
     assert (wrote, "remains preserved at" in said) == ([target], False), said
     assert f"the publication candidate remains at {target}" in said
-
-
-@contextlib.contextmanager
-def _backup_fault(
-    fault: str, monkeypatch: pytest.MonkeyPatch, backup: Path
-) -> Iterator[Sequence[object]]:
-    """The copy lands, then its write fails: its verification read, or its folder sync.
-
-    Yields a list that is non-empty once the fault was injected.
-    """
-    if fault == "verification":
-        with after_the_publication(monkeypatch, backup) as published:
-            yield published
-            return
-    yield _sync_fails_for(monkeypatch, backup.name)
-
-
-@pytest.mark.parametrize("fault", ["verification", "folder-sync"])
-def test_a_backup_written_but_not_finished_cleanly_is_said_as_kept(
-    fault: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A store's first bump keeps a copy first (`backup_before_bump`). When the copy
-    lands but its write then fails, the bump is still refused, and the refusal says
-    the copy was written and stays, not "could not keep a copy ... Nothing was changed"."""
-    picture = tmp_path / "library" / "evening.png"
-    picture.parent.mkdir()
-    picture.write_bytes(b"fixture")
-    store = playlists.Store.open()
-    made = store.create("Evening")
-    store.add(made.id, picture)
-    target = playlists.state_path()
-    before = target.read_bytes()
-    backup = state_file.version_backup_path(target, 1)
-
-    with (
-        _backup_fault(fault, monkeypatch, backup) as happened,
-        state_file.collecting_writes() as wrote,
-        pytest.raises(playlists.PlaylistError) as refused,
-    ):
-        store.set_rotation(made.id, cycle_interval=60)  # version 2: the first bump
-
-    message = str(refused.value)
-    assert refused.value.kind == "no-backup"
-    assert f"was written as {backup.name}" in message, message
-    assert "but writing it did not finish cleanly" in message, message
-    assert "playlists.json was not changed; the copy stays" in message, message
-    assert "could not keep a copy" not in message and "Nothing was changed" not in message
-    assert target.read_bytes() == before, "the store file is unchanged"
-    assert backup.read_bytes() == before, "the copy is the version-1 file"
-    assert wrote == [backup], "the copy landed, and the lane hears it"
-    assert happened, "the fault was injected"
-    # And `backup_before_bump` says it raises this, not only "no backup kept".
-    assert "BackupNotConfirmedError" in (state_file.backup_before_bump.__doc__ or "")
 
 
 @contextlib.contextmanager

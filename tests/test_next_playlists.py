@@ -488,7 +488,7 @@ def test_cleanup_of_an_already_unplayable_used_playlist_is_allowed() -> None:
 # -- how it plays -------------------------------------------------------------------------------
 
 
-def test_interval_and_shuffle_are_the_playlists_own_with_a_one_time_backup(
+def test_interval_and_shuffle_are_the_playlists_own_and_bump_the_file_once(
     backend: FakeApplication,
 ) -> None:
     pid = _evening(backend)
@@ -501,7 +501,7 @@ def test_interval_and_shuffle_are_the_playlists_own_with_a_one_time_backup(
     backend.run_authoring()
     assert backend.session.playlists.find(pid).cycle_interval == 900
     assert json.loads(_file().read_text())["version"] == 2, "bumped on first use"
-    assert _file().with_name("playlists.json.v1-backup").exists()
+    assert not _file().with_name("playlists.json.v1-backup").exists(), "and no copy is kept"
     editing.set_playlist_shuffle(pid, True)
     backend.run_authoring()
     editing.set_playlist_interval(pid, None)
@@ -521,7 +521,7 @@ def test_a_failed_interval_goes_back_to_the_saved_one(
     editing = _editor(backend)[1]
 
     def refuse(*_args: object, **_kwargs: object) -> playlists.Playlist:
-        raise playlists.PlaylistError("no-backup", "could not keep a copy")
+        raise playlists.PlaylistError("local-io", "could not save playlists.json")
 
     monkeypatch.setattr(backend.session.playlists, "set_rotation", refuse)
     editing.set_playlist_interval(pid, 3600)

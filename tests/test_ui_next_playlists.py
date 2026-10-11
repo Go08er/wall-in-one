@@ -564,7 +564,7 @@ def test_interval_and_shuffle_rows_follow_what_is_saved(
     assert backend.session.playlists.find("evening").cycle_interval == 900
 
     def refuse(*_args: object, **_kwargs: object) -> store_module.Playlist:
-        raise store_module.PlaylistError("no-backup", "could not keep a copy")
+        raise store_module.PlaylistError("local-io", "could not save playlists.json")
 
     monkeypatch.setattr(backend.session.playlists, "set_rotation", refuse)
     shuffle.set_selected(1)

@@ -300,9 +300,8 @@ is applied without waiting for the Python app.
 and `schedule-name <rule-id>` with no name clears it. `schedule` prints the
 name in its last column, `-` for none. A name is a label only: the rule keeps
 its id, and the runtime never sees the name. Naming the first rule moves
-`schedules.json` to version 3, after keeping the version-2 file beside it as
-`schedules.json.v2-backup` (see
-[State-file recovery](library.md#state-file-recovery)).
+`schedules.json` to version 3 (see
+[Format versions](library.md#format-versions)).
 
 `remove` is the only verb that destroys anything, and over a socket there is no
 confirmation dialogue to fall back on. So the path must be absolute and must

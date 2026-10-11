@@ -501,7 +501,7 @@ def test_the_lazy_schedule_upgrade_carries_unknown_keys_into_version_two(
     assert saved["version"] == 2
     assert saved["note"] == "kept"
     assert saved["rules"][0] == {"id": "a", "playlist": "X", "colour": "N"}
-    assert not list(tmp_path.glob("*-backup")), "v1 to v2 is the old upgrade, not a bump"
+    assert not list(tmp_path.glob("*-backup")), "no save keeps a copy of the old bytes"
 
 
 def test_pairings_carry_unknown_keys_through_edits_and_the_health_sync(tmp_path: Path) -> None:

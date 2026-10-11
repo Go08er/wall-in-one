@@ -62,6 +62,7 @@ from wall_in_one.library import displays, playlists, schedules, state_file  # no
 from wall_in_one.session import Session  # noqa: E402
 from wall_in_one.ui import playlists_page, schedules_page  # noqa: E402
 from wall_in_one.ui.app import _RuntimeHealthRequest  # noqa: E402
+from wall_in_one.ui.next import schedule_editor  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 
 
@@ -389,22 +390,35 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
         # `playlists.rotation` always looked by id and then by name, so only
         # the id `active_playlist()` reports changed, not what it selects.
         assert [item.path for item in session._rotation()] == [shown.dawn.path]
+        # Resuming the schedule stores the same spelling of what is in force,
+        # so the next tick sees no change (failed on e9fa88d: it stored the
+        # saved name, the tick compared it with the id, and the wallpaper was
+        # applied again from the top of the playlist).
+        session.use_playlist(evening.id)
+        session.resume_schedule()
+        assert session.schedule_changed() is False
         listed = _verb(shown, "playlists", "").message.splitlines()
         assert [row.split("\t")[-1] for row in listed if row.startswith(evening.id)] == ["yes"]
     else:
         assert session.left_out_default == reference
-        # Failed on 7e55112: "ghost", a default row with no name.
-        assert scheduling.default_playlist == runtime_config.FALLBACK_PLAYLIST_ID
+        # The new window's row keeps the saved reference and shows it as what
+        # it is, so choosing "All media" there is a change the page can save.
+        # Classic's row has no entry for it and shows "All media".
+        assert scheduling.default_playlist == reference
+        named = schedule_editor.playlist_name(opened.window.state, reference)
+        assert named == schedule_editor.MISSING == "Missing playlist"
         assert "the saved default selection" not in editing.delete_warning(evening.id)
         assert chosen == "All media (built-in playlist)"
         assert "the saved default selection" not in playlists_page._deletion_body(session, evening)
         assert runtime_config.default_playlist_id(reference, session) == ""
         # A default can stop naming a playlist under a running app, where only
-        # the compiles leave it out and the session is never told: still "All
-        # media" in both windows (failed on edbd327: "phantom", a blank row).
+        # the compiles leave it out and the session is never told: the row
+        # shows that one the same way, not by whether the start left it out.
         session.leave_out_default("")
         application._settings = replace(application._settings, active_playlist="phantom")
-        assert scheduling.default_playlist == runtime_config.FALLBACK_PLAYLIST_ID
+        assert scheduling.default_playlist == "phantom"
+        named = schedule_editor.playlist_name(opened.window.state, "phantom")
+        assert named == schedule_editor.MISSING
 
 
 def test_a_left_out_default_is_said_once(

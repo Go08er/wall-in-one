@@ -1820,18 +1820,26 @@ class Session:
         return self._schedules
 
     def active_playlist(self) -> str:
-        """The one playlist in force: manual choice, schedule, then default.
+        """The one playlist in force: manual choice, schedule, then default."""
+        if self._manual_playlist is not None:
+            return self._manual_playlist
+        return self._scheduled_playlist()
+
+    def _scheduled_playlist(self) -> str:
+        """What the calendar selects now: a matching rule's playlist, else the default.
 
         The default as the compiler resolves it: a saved default may name its
         playlist by name (an older profile, a hand edit, a setup that manages
         ``settings.toml``), and stays a name for the whole session where the
         start can't save the id. It is that playlist's id here, so whoever
-        asks what is in force (the rotation, a page's "playing" mark,
-        ``ctl playlists``) is not left comparing an id with a name. One that
-        names no playlist is passed on as saved, and matches none.
+        asks what is in force (a page's "playing" mark, ``ctl playlists``) is
+        not left comparing an id with a name. One that names no playlist is
+        passed on as saved, and matches none.
+
+        The one place this is worked out: `resume_schedule` stores it as what
+        is in force, and `schedule_changed` compares that with the next
+        answer, so two spellings of one default would read as a change.
         """
-        if self._manual_playlist is not None:
-            return self._manual_playlist
         default = self._settings.active_playlist
         if default and self._playlists.get(default) is None:
             named = self._playlists.by_name(default)
@@ -1988,9 +1996,7 @@ class Session:
 
     def resume_schedule(self) -> None:
         """Release an on-demand choice and return control to the calendar."""
-        wanted = schedules.effective(
-            self._schedules.rules, self._settings.active_playlist, self._now()
-        )
+        wanted = self._scheduled_playlist()
         rotation = self._require_usable_rotation(wanted, label="the scheduled playlist")
         self._manual_playlist = None
         self._in_force = wanted

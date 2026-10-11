@@ -79,6 +79,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -712,6 +713,10 @@ def _latest(action: Action, manifests: _Manifests) -> _Manifest | None:
 
 #: Where an archived item can be, as its journal records it.
 _IN_ARCHIVE: Final = ("moved", "planned")
+#: What a folder that can't be written answers to a move: not "it changed".
+_UNWRITABLE: Final = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+#: How a record says its item never left because a folder couldn't be written.
+_SKIPPED_UNWRITABLE: Final = "skipped: its folder can't be written"
 #: How a record says an Undo moved its item back and a folder sync then failed.
 _PUT_BACK_UNSYNCED: Final = "it was put back, but syncing its folders failed"
 
@@ -1453,7 +1458,10 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
     moved = [record for record in items if record["outcome"] == "moved"]
     noted = [record for record in moved if record.get("note")]
     unchecked = [record for record in items if record["outcome"] == "planned"]
-    skipped = len(items) - len(moved) - len(unchecked)
+    unwritable = [
+        record for record in items if str(record["outcome"]).startswith(_SKIPPED_UNWRITABLE)
+    ]
+    skipped = len(items) - len(moved) - len(unchecked) - len(unwritable)
     message = f"Archived {_plural(len(moved), 'item')} in {archive}."
     if len(noted) == 1:
         message += (
@@ -1472,6 +1480,15 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
         )
     if skipped:
         message += f" {_plural(skipped, 'item')} changed meanwhile and stayed where it was."
+    if unwritable:
+        why = str(unwritable[0]["outcome"]).removeprefix(_SKIPPED_UNWRITABLE).strip()
+        message += (
+            f" {_plural(len(unwritable), 'item')} couldn't be moved, because "
+            f"{'its' if len(unwritable) == 1 else 'their'} folder can't be written {why}. "
+            f"Nothing about {'it' if len(unwritable) == 1 else 'them'} was changed; "
+            f"{'it stays' if len(unwritable) == 1 else 'they stay'} listed, and can be "
+            "archived once the folder can be written."
+        )
     message += _unconfirmed(
         unsynced, "It is recorded as unfinished, not as applied; Undo puts the items back."
     )
@@ -1488,6 +1505,11 @@ def _settle_location(record: dict[str, Any], destination: Path, error: object) -
     found = _look(destination)
     if found is None or isinstance(error, FileExistsError):
         # Nothing arrived, or the name was taken before the move: it never left.
+        if isinstance(error, OSError) and error.errno in _UNWRITABLE:
+            # Nor did it change: a folder (its own, or the archive's) refused
+            # the move. Said as that, so it isn't taken for a changed item.
+            record["outcome"] = f"{_SKIPPED_UNWRITABLE} ({error.strerror or error})"
+            return
         record["outcome"] = f"skipped: {_journal_text(error)}"
         return
     if isinstance(found, OSError):

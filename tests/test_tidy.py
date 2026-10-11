@@ -1493,3 +1493,37 @@ def test_an_undo_that_cannot_be_made_durable_stays_recorded_as_archived(
     assert again.message == "Put back 0 items. 1 item was already back."
     synced = [path for kind, path in events if kind == "sync"]
     assert synced.index(folder.parent) < synced.index(archive / "items")
+
+
+def test_a_leftover_in_a_folder_that_cannot_be_written_is_not_said_to_have_changed(
+    finished: deployed_upgrade_transaction.FinishedClaims,
+) -> None:
+    """The leftover's folder can't be written (a native EACCES), so it can't be
+    moved out of it. Nothing about it changed, and that is not what is said: the
+    journal and the result say the folder can't be written and that nothing was
+    changed. It stays where it is and stays listed, and is archived once the
+    folder can be written."""
+    folder = _claim_folder(paths.app_state_dir(), "entry-aaaaaaaa")
+    preview = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+    assert [change.path for change in preview.changes] == [folder]
+
+    folder.parent.chmod(0o500)
+    try:
+        result = tidy.apply(tidy.LEFTOVERS, preview)
+    finally:
+        folder.parent.chmod(0o700)
+
+    assert result.archive is not None and folder.is_dir(), "it never left"
+    (record,) = json.loads((result.archive / "manifest.json").read_text())["items"]
+    # Failed on 824f750: "... 1 item changed meanwhile and stayed where it was."
+    assert record["outcome"] == "skipped: its folder can't be written (Permission denied)"
+    assert result.message == (
+        f"Archived 0 items in {result.archive}. 1 item couldn't be moved, because its folder "
+        "can't be written (Permission denied). Nothing about it was changed; it stays listed, "
+        "and can be archived once the folder can be written."
+    )
+    assert "changed meanwhile" not in result.message and not result.changed
+
+    again = tidy.plan(roots=()).action(tidy.LEFTOVERS)
+    assert [change.path for change in again.changes] == [folder], "offered again"
+    assert tidy.apply(tidy.LEFTOVERS, again).changed and not folder.exists()

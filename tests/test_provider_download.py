@@ -1011,7 +1011,8 @@ def test_abandoned_transfer_destructor_releases_its_pin_and_stage_is_recoverable
         path=staged,
     )
     retained = transfer._staged_file
-    assert retained is not None and _open_fd_count() == initial_fds + 1
+    # Two descriptors: its pin, and the liveness lock held with it.
+    assert retained is not None and _open_fd_count() == initial_fds + 2
 
     del transfer
     gc.collect()

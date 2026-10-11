@@ -168,6 +168,12 @@ so its Undo goes with it, and a template archive made after that isn't
 checked against it. An archive folder with no `manifest.json` changed nothing
 and is ignored.
 
+A file a download left under a `.wall-in-one-commit-*` name is offered only
+when no download holds it any more: a running download keeps a lock on its
+files, and a locked one is listed as kept ("a download is using this file"),
+however old it looks; Apply checks again. A staging file from 0.2.2 or earlier
+was never locked, so its age is the only test.
+
 Whatever Tidy up moves, it syncs the folder the item went to before the folder
 it left, so a power cut can't leave it in neither. If one of those syncs fails,
 the move has still been made, and the result says that it may not survive a

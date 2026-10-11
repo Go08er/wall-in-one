@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import errno
+import fcntl
 import hashlib
 import os
 import re
@@ -285,6 +286,11 @@ class PinnedPath:
     descriptor: int = field(repr=False)
     expected_file_type: int
     _closed: bool = field(default=False, init=False, repr=False)
+    #: A second descriptor that is closed with this pin, or -1. A pin is a
+    #: path-only descriptor and can't hold a lock, so the descriptor behind an
+    #: advisory lock its maker keeps for as long as the file is pinned rides
+    #: here (`providers.download`'s liveness lock on a stage).
+    liveness: int = field(default=-1, repr=False)
 
     def status(self) -> os.stat_result:
         if self._closed:
@@ -303,12 +309,21 @@ class PinnedPath:
     def close(self) -> None:
         if not self._closed:
             descriptor = self.descriptor
+            liveness = self.liveness
             self._closed = True
             self.descriptor = -1
-            _close_descriptor_preserving_error(
-                descriptor,
-                f"the pinned reference for {self.path}",
-            )
+            self.liveness = -1
+            try:
+                _close_descriptor_preserving_error(
+                    descriptor,
+                    f"the pinned reference for {self.path}",
+                )
+            finally:
+                if liveness >= 0:
+                    _close_descriptor_preserving_error(
+                        liveness,
+                        f"the lock held with the pinned reference for {self.path}",
+                    )
 
     def __enter__(self) -> PinnedPath:
         return self
@@ -839,6 +854,42 @@ def pin_regular_path_beneath(root: Path, path: Path) -> RootScopedPin:
         root_identity=root_identity,
         parent_identity=parent_identity,
     )
+
+
+def locked_elsewhere(path: Path, *, expected_identity: PathIdentity) -> bool | OSError:
+    """Whether another open file holds an exclusive advisory lock (`flock`) on ``path``.
+
+    A shared, unwaited probe, dropped at once, for a reader that only asks:
+    Tidy up, of a download's commit-named file, whose producer holds such a
+    lock for as long as it uses it (`providers.download`). Not for a name a
+    producer may be about to lock: holding even a shared lock for that
+    moment would make it refuse.
+
+    An ``OSError`` when the file can't be opened to ask, which is not "nobody
+    holds it". A file that is no longer ``expected_identity`` is not held
+    (the caller's own checks see the change), and on a filesystem without
+    advisory locks nobody can hold one.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        return error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != expected_identity:
+            return False
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        return False
+    except OSError as error:
+        return error
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
 
 
 def entry_presence(path: Path, *, follow_symlinks: bool = False) -> bool | OSError:

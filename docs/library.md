@@ -380,6 +380,12 @@ folder beside it, never emptied: it may hold something you added. "After 24
 hours" means untouched for that long by both of the file's times: its
 modification time and its change time, which no program can set back. A file
 that was edited, renamed or had its times restored within the day is recent.
+Age is not the only test: a download holds a lock on each of its staging files
+from the moment it creates it until it is done with it (through its commit
+name and its move into place), and a file that is locked is never taken, so a
+clock that jumped forward, or a day spent suspended, can't make a download in
+progress look abandoned. The lock ends with the process, so what a crash left
+is still removed after its day.
 
 A staging file left by 0.2.2 or earlier (`.wall-in-one-media-stage-*`,
 `-sidecar-stage-*`, `-marker-stage-*`, `.wall-in-one-staged-*`,

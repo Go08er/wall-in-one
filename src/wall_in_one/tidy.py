@@ -1058,6 +1058,7 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                     now,
                     movable,
                     name=_COMMIT_NAME,
+                    lockable=True,
                     grace=CLAIM_GRACE_SECONDS,
                     recent="it changed in the last hour and may belong to a download in progress",
                     what="a file a download left while publishing it",
@@ -1219,6 +1220,7 @@ def _survey_download_leftover(
     grace: float,
     recent: str,
     what: str,
+    lockable: bool = False,
 ) -> None:
     """A file a download left under a name no sweep takes, in a managed download folder.
 
@@ -1232,6 +1234,12 @@ def _survey_download_leftover(
     rename to the name sets it to that moment, and nothing in user space can
     set it back, so a file mid-publish always looks recent, even one whose
     bytes (mtime) are old.
+
+    ``lockable``: this version made the file, and whoever is still using it
+    holds its liveness lock (`file_io.locked_elsewhere`). Age alone is not enough
+    there: a clock a day ahead, or a machine suspended mid-download, makes a
+    live download's file look old. A released version's staging file is never
+    locked; the age guard stays the only test for it.
     """
     status = _look(child)
     if status is None:
@@ -1251,6 +1259,23 @@ def _survey_download_leftover(
         )
     elif now - max(status.st_mtime, status.st_ctime) < grace:
         survey.kept.append(Kept(child, recent))
+    elif (
+        lockable
+        and (
+            using := file_io.locked_elsewhere(
+                child, expected_identity=(status.st_dev, status.st_ino)
+            )
+        )
+        is not False
+    ):
+        survey.kept.append(
+            Kept(
+                child,
+                "a download is using this file"
+                if using is True
+                else f"whether a download is using it couldn't be checked ({_why(using)})",
+            )
+        )
     elif reason := movable(child, status):
         survey.kept.append(Kept(child, reason))
     else:
@@ -2888,7 +2913,11 @@ def plan(
     now: float | None = None,
     item_folders: Sequence[Path] = (),
 ) -> Plan:
-    """The exact preview of every action. Reads only; never creates or locks a file.
+    """The exact preview of every action. Reads only; never creates a file.
+
+    The one lock it touches is a download's own: a shared, unwaited probe of
+    a commit-named file, dropped at once, to see whether a download still
+    holds it (`file_io.locked_elsewhere`). Such a file is listed as kept.
 
     ``roots`` are the library roots (default: settings.toml's), whose managed
     folders are searched for leftovers. ``item_folders`` are the folders that

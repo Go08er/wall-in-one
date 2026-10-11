@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fcntl
 import json
 import logging
 import os
@@ -274,14 +275,134 @@ def _operation_path(
 
 
 def _mkstemp(*, prefix: str, directory: Path) -> tuple[int, Path]:
-    """Create a 0600 temporary through retained directory authority when present."""
+    """Create a 0600 temporary through retained directory authority when present.
+
+    It is locked the moment it exists (`_hold_new_stage`).
+    """
     anchor = _anchor_for_directory(directory)
     if anchor is None:
         descriptor, name = tempfile.mkstemp(prefix=prefix, dir=directory)
-        return descriptor, Path(name)
-    anchor.verify_public()
-    descriptor, anchored_name = tempfile.mkstemp(prefix=prefix, dir=anchor.proc_path)
-    return descriptor, directory / Path(anchored_name).name
+        path = Path(name)
+    else:
+        anchor.verify_public()
+        descriptor, anchored_name = tempfile.mkstemp(prefix=prefix, dir=anchor.proc_path)
+        path = directory / Path(anchored_name).name
+    _hold_new_stage(descriptor, path)
+    return descriptor, path
+
+
+def _hold_new_stage(descriptor: int, path: Path) -> None:
+    """Take the liveness lock on a stage just created, through its creation descriptor.
+
+    The sweep's only test was the stage's age, and a clock a day ahead (a
+    jump, or a machine suspended mid-download) makes a live download's stage
+    look abandoned. So whoever is writing a stage holds an exclusive `flock`
+    on it, never waited for, and the sweep (`_abandoned`) and Tidy up
+    (`file_io.locked_elsewhere`) take nothing that is locked. The lock belongs to the open
+    file: it follows the stage through its renames (to a commit name, to its
+    public name), outlives the creation descriptor through the duplicate its
+    pin keeps (`_pin_created_temporary`), and ends with the process, so a
+    stage a crash left is unlocked and still reclaimed.
+
+    Creating and locking are two steps, and a sweep that takes the new, empty
+    file for an old one can get in between. If it holds the lock now, this
+    refuses: nothing has been staged. If it has been and gone, the name no
+    longer leads to this file, and the pin that follows refuses
+    (`_pin_created_temporary` pins the name against this descriptor's inode).
+    A filesystem without advisory locks leaves the stage unlocked, as every
+    stage was before.
+    """
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        _close_descriptor_preserving_error(
+            descriptor, f"the provider creation descriptor for {path}"
+        )
+        raise ProviderError(
+            "local-io",
+            f"a cleanup took the new staging file {path} before it could be locked; "
+            "nothing was written to it",
+        ) from error
+    except OSError:
+        return
+
+
+def _hand_liveness_over(giver: file_io.PinnedPath, keeper: file_io.PinnedPath) -> None:
+    """Let ``keeper`` hold the liveness lock ``giver`` is about to close, unless it has one."""
+    if keeper.liveness < 0 <= giver.liveness:
+        keeper.liveness, giver.liveness = giver.liveness, -1
+
+
+def _hold_retained_stage(pin: file_io.PinnedPath) -> None:
+    """Take the liveness lock on a stage retained by its path alone, if nobody holds it.
+
+    Such a stage was not made through `_pin_created_temporary`, or its maker
+    closed the creation descriptor: it is locked from here on. Best effort:
+    when the lock is already held (by its own maker, still open, or by a
+    cleanup that is taking it) nothing more can be told, and the retention
+    goes on as it did before there was a lock.
+    """
+    try:
+        descriptor = os.open(
+            f"/proc/self/fd/{pin.descriptor}", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+    except OSError:
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        return
+    pin.liveness = descriptor
+
+
+def _abandoned(access: Path, info: os.stat_result) -> tuple[bool, int]:
+    """Whether no live producer holds an aged stage, and the lock taken on it to say so.
+
+    The sweep's liveness test, after its age test: an exclusive, unwaited
+    `flock` on the very file that was looked at. Held by someone else: a
+    download is still using it, however old its clock makes it look, and it
+    is left for a later sweep. Taken: the returned descriptor keeps the lock
+    until the caller has finished with the stage and closes it, so a producer
+    that has only just created the file can't lock it meanwhile (it refuses,
+    `_hold_new_stage`). A stage that can't be opened, or is no longer the
+    file that was looked at, is not taken either. On a filesystem without
+    advisory locks nobody can hold one: the age test decides alone, as it
+    did before (the descriptor is then returned unlocked).
+    """
+    try:
+        descriptor = os.open(access, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False, -1
+    try:
+        opened = os.fstat(descriptor)
+        same = stat.S_ISREG(opened.st_mode) and (opened.st_dev, opened.st_ino) == (
+            info.st_dev,
+            info.st_ino,
+        )
+        if same:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                same = False  # held: a download is still using it
+            except OSError:
+                pass  # no advisory locks here: nobody holds one
+    except OSError:
+        same = False
+    if not same:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        return False, -1
+    return True, descriptor
+
+
+def _released(descriptor: int) -> int:
+    """Close a liveness probe's descriptor, if there is one. Returns -1, to keep in its place."""
+    if descriptor >= 0:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+    return -1
 
 
 @dataclass(slots=True)
@@ -480,6 +601,7 @@ def _retain_staged_file(
                 pinned_source.close()
             raise
         if pinned_source is not None:
+            _hand_liveness_over(pinned_source, existing.pin)
             pinned_source.close()
         return existing
 
@@ -489,6 +611,7 @@ def _retain_staged_file(
         retained_path = _operation_path(path, directory_anchor, verify_public=True)
         if candidate_pin is None:
             candidate_pin = file_io.pin_regular_path(retained_path)
+            _hold_retained_stage(candidate_pin)
             expected_fingerprint = candidate_pin.fingerprint
         if (
             candidate_pin.path != retained_path
@@ -537,6 +660,7 @@ def _retain_staged_file(
         _release_staged_file(existing)
         candidate.pin.close()
         raise
+    _hand_liveness_over(candidate.pin, existing.pin)
     candidate.pin.close()
     return existing
 
@@ -975,6 +1099,9 @@ def recover_abandoned(
     # Never `LEGACY_STAGING_PREFIXES`: see there.
     prefixes = (MEDIA_STAGING_PREFIX, SIDECAR_STAGING_PREFIX, MARKER_STAGING_PREFIX)
     removed: list[Path] = []
+    # The lock `_abandoned` took on the stage being reclaimed. It is kept until
+    # the next entry is looked at, or the sweep ends: over the whole claim.
+    liveness = -1
     try:
         # Opening the proc alias gives scandir an independent directory-stream
         # offset. Passing the retained descriptor itself would share and exhaust
@@ -982,6 +1109,7 @@ def recover_abandoned(
         scan_target = anchor.proc_path if anchor is not None else directory
         with os.scandir(scan_target) as iterator:
             for entry in iterator:
+                liveness = _released(liveness)
                 path = directory / entry.name
                 retained_path = _operation_path(path, anchor)
                 try:
@@ -999,6 +1127,11 @@ def recover_abandoned(
                         removed.append(Path(os.fspath(path)))
                     continue
                 if not _is_owned_staging(entry.name, info, prefixes):
+                    continue
+                # Old is not abandoned: a clock a day ahead makes a download in
+                # progress look old. No stage a producer still holds is taken.
+                unheld, liveness = _abandoned(retained_path, info)
+                if not unheld:
                     continue
                 try:
                     claim = file_io.claim_for_deletion(
@@ -1062,6 +1195,8 @@ def recover_abandoned(
         raise ProviderError(
             "local-io", f"could not inspect provider staging: {error.strerror or error}"
         ) from error
+    finally:
+        _released(liveness)
     if removed:
         try:
             paths.fsync_directory(anchor.proc_path if anchor is not None else directory)
@@ -1636,11 +1771,22 @@ def _pin_created_temporary(descriptor: int, path: Path) -> file_io.PinnedPath:
     try:
         status = os.fstat(descriptor)
         fingerprint = file_io.file_fingerprint(status)
-        return file_io.pin_regular_path(
+        # Also the check after the lock (`_hold_new_stage`): the name must
+        # still lead to the inode this descriptor created and locked.
+        pinned = file_io.pin_regular_path(
             _operation_path(path, verify_public=True),
             expected_identity=fingerprint[:2],
             expected_fingerprint=fingerprint,
         )
+        try:
+            # The lock belongs to the open file behind `descriptor`: this
+            # duplicate keeps it, for as long as the stage is pinned, after
+            # the writer closes the creation descriptor.
+            pinned.liveness = os.dup(descriptor)
+        except BaseException:
+            pinned.close()
+            raise
+        return pinned
     except BaseException as error:
         try:
             if fingerprint is not None:

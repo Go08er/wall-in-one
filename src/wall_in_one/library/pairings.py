@@ -713,6 +713,19 @@ def resolve(
     )
 
 
+def chosen_stills(records: Mapping[str, Pairing]) -> tuple[tuple[str, Path], ...]:
+    """Each still ``records`` choose, by the record's key, in a fixed order.
+
+    What `apply` folds into ``MediaItem.paired_still`` besides what is on
+    disk: a scan keeps it with its library (`Library.chosen_stills`), so a
+    reader of pairings saved later can tell that the library was resolved
+    with other choices.
+    """
+    return tuple(
+        sorted((key, record.still) for key, record in records.items() if record.still is not None)
+    )
+
+
 def apply(
     items: Iterable[MediaItem],
     roots: Sequence[Path] = (),

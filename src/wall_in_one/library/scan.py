@@ -665,4 +665,5 @@ def _scan(
         skipped=tuple(skipped),
         still_inventory=still_inventory,
         adopted_stills=adopted_pairs,
+        chosen_stills=pairings.chosen_stills(records or {}),
     )

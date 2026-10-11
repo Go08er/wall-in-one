@@ -13,7 +13,7 @@ import logging
 import os
 import random
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -212,6 +212,27 @@ def _retained_adoption_paths(
 #: Kind of a Delete/Trash refused because a record store it must clear is
 #: unreadable (a newer file is :data:`state_file.NEWER_VERSION`).
 REMOVAL_BLOCKED_UNREADABLE = "invalid-state"
+
+
+def _resolved_with(library: Library, records: Mapping[str, pairings.Pairing]) -> bool:
+    """Whether ``library``'s stills were resolved with the still choices ``records`` hold.
+
+    A scan folds each record's chosen still into ``MediaItem.paired_still``
+    and keeps the choices it used (`Library.chosen_stills`). A video with no
+    still of its own but a chosen one plays through that choice in the
+    accepted library for as long as the library lives, also after another
+    program has cleared the choice: `pairings.Store.resolve_accepted` then
+    takes the old choice for the worked-out default. So pairings read later
+    are compared with the ones the scan used, for the moving wallpapers the
+    library holds. A library that keeps none (not from the scanner) has
+    nothing to compare.
+    """
+    if library.chosen_stills is None:
+        return True
+    moving = {pairings.Identity.of(item).key for item in library.items if item.is_moving}
+    then = {key: still for key, still in library.chosen_stills if key in moving}
+    now = {key: still for key, still in pairings.chosen_stills(records) if key in moving}
+    return then == now
 
 
 def _removal_cleanup_blocker(
@@ -1236,9 +1257,12 @@ class Session:
 
         Its library is the accepted one while the saved folders and Wallpaper
         Engine scanning are the ones this session holds, which is what that
-        library was scanned from. When another program saved others, the
-        accepted library says nothing about them, so the view's is scanned
-        from disk here instead (`scanned_from_disk`).
+        library was scanned from, and the saved pairings choose the stills
+        its scan folded in (`_resolved_with`). When another program saved
+        other folders, the accepted library says nothing about them; when it
+        cleared or changed a wallpaper's chosen still, the accepted library
+        still plays that wallpaper through the old choice. Either way the
+        view's library is scanned from disk here instead (`scanned_from_disk`).
 
         A file that can't be read does not stop the view being made. It is
         named by `unread`, and whoever asks a question that consults that file
@@ -1292,10 +1316,13 @@ class Session:
                 if store.fault is not None and store.fault_kind != state_file.NEWER_VERSION
             )
             view._unread = unread
+            # The accepted library answers for what is saved only while it
+            # was scanned from the saved folders and resolved with the saved
+            # still choices (`_resolved_with`). Otherwise it is scanned here.
             scanned_for_these = (saved.roots, saved.scan_workshop) == (
                 accepted.roots,
                 accepted.scan_workshop,
-            )
+            ) and _resolved_with(library, view._pairings.records)
             view._confirmable = scanned_for_these
             view.adopt_library(
                 library if scanned_for_these else view.scanned_from_disk(),

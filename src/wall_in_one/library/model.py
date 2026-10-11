@@ -166,6 +166,14 @@ class Library:
     #: deployed application.  These pairs are accepted scan truth: consumers
     #: must not rediscover them later from a filename convention.
     adopted_stills: tuple[tuple[Path, Path], ...] = ()
+    #: The still each pairing record chose when this was scanned, by the
+    #: record's key (`library.pairings.chosen_stills`). Those choices are
+    #: folded into every ``MediaItem.paired_still`` here, which is therefore
+    #: only as current as they are: whoever judges by this library against
+    #: pairings read later compares the two first (`Session.saved_view`).
+    #: None: not built by the scanner (a test's ready library), so there is
+    #: nothing to compare.
+    chosen_stills: tuple[tuple[str, Path], ...] | None = None
 
     def __len__(self) -> int:
         return len(self.items)

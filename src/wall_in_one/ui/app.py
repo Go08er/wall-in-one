@@ -3814,6 +3814,17 @@ class Application(Adw.Application):
             return item
         adopted = current.with_still(effective_still) if current.is_moving else current
         if adopted != current:
+            # The still it now holds was resolved with the choice this
+            # process just saved, and the library says so
+            # (`Library.chosen_stills`).
+            key = pairings.Identity.of(current).key
+            record = self._session.pairings.records.get(key)
+            chosen = library.chosen_stills
+            if chosen is not None:
+                kept = [pair for pair in chosen if pair[0] != key]
+                if record is not None and record.still is not None:
+                    kept.append((key, record.still))
+                chosen = tuple(sorted(kept))
             self._session.adopt_library(
                 Library(
                     roots=library.roots,
@@ -3824,6 +3835,7 @@ class Application(Adw.Application):
                     skipped=library.skipped,
                     still_inventory=library.still_inventory,
                     adopted_stills=library.adopted_stills,
+                    chosen_stills=chosen,
                 ),
                 reconcile_workshop=False,
             )

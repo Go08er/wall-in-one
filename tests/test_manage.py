@@ -2706,3 +2706,67 @@ def test_a_prepared_source_that_cannot_be_looked_at_is_not_said_to_have_changed(
     with pytest.raises(ManageError) as gone:
         manage._require_source_pin(item.path, expected, fingerprint, None)
     assert gone.value.kind == "missing"
+
+
+# -- the first trash: its new folders' names are durable before anything moves --------
+
+
+def test_the_first_trash_syncs_its_new_folders_names_before_the_wallpaper_leaves(
+    root: Path, data_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """There is no trash yet. Its folders are made, and each new folder's parent
+    is synced, top down, before the wallpaper is moved into them: a power cut
+    can't then leave the wallpaper gone from its folder and the trash's own name
+    not yet on disk. (A power cut can't be run; the order is pinned.)"""
+    theirs = root / "holiday.png"
+    theirs.write_bytes(b"image")
+    trash = data_home / "Trash"
+    assert not data_home.exists()
+    events: list[tuple[str, Path]] = []
+    real_sync = paths.fsync_directory
+    real_move = file_io.atomic_move_no_replace
+
+    def sync(folder: Path) -> None:
+        events.append(("sync", Path(folder)))
+        real_sync(folder)
+
+    def move(source: Path, destination: Path, **expected: object) -> None:
+        events.append(("move", Path(destination).parent))
+        real_move(source, destination, **expected)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("wall_in_one.library.manage.paths.fsync_directory", sync)
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", move)
+
+    _trash(item_for(theirs), (root,))
+
+    moved = events.index(("move", trash / "files"))
+    before = [folder for kind, folder in events[:moved] if kind == "sync"]
+    # Failed on 7bdc1a6: none of the three was synced before the move (or at all).
+    assert before.index(tmp_path) < before.index(data_home) < before.index(trash)
+    assert not theirs.exists() and tuple((trash / "files").iterdir())
+
+
+def test_a_new_trash_folder_that_cannot_be_made_durable_refuses_before_anything_moves(
+    root: Path, data_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync of the new trash's own folder fails (the one thing injected). The
+    removal is refused while the wallpaper is still where it was, and says why."""
+    theirs = root / "holiday.png"
+    theirs.write_bytes(b"image")
+    real_sync = paths.fsync_directory
+
+    def fail_the_trash(folder: Path) -> None:
+        if Path(folder) == data_home / "Trash":
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        real_sync(folder)
+
+    monkeypatch.setattr("wall_in_one.library.manage.paths.fsync_directory", fail_the_trash)
+
+    # Failed on 7bdc1a6: no error; the wallpaper moved with the folders' names unsynced.
+    with pytest.raises(ManageError) as caught:
+        _trash(item_for(theirs), (root,))
+
+    assert caught.value.kind == "local-io" and not caught.value.committed
+    assert str(caught.value).endswith("could not prepare the trash: Input/output error")
+    assert theirs.read_bytes() == b"image"
+    assert list((data_home / "Trash" / "files").iterdir()) == []

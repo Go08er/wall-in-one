@@ -2093,6 +2093,24 @@ def recover_removal_claim(
 # -- the freedesktop trash -----------------------------------------------
 
 
+def _ensure_durable_directory(directory: Path) -> None:
+    """Make ``directory`` and what it needs above it, and make the new names durable.
+
+    A folder just made is only a name in its parent until that parent is
+    synced. The wallpaper's move into the trash relies on these names, so each
+    new folder's parent is synced here, top down, before anything is moved;
+    a failure refuses the removal while nothing has left its place.
+    """
+    made: list[Path] = []
+    current = directory
+    while not current.is_dir() and current != current.parent:
+        made.append(current)
+        current = current.parent
+    paths.ensure_directory(directory)
+    for folder in reversed(made):
+        paths.fsync_directory(folder.parent)
+
+
 def trash_directory() -> Path:
     """The home trash, per the freedesktop specification."""
     return paths.data_home() / TRASH_DIRECTORY
@@ -2321,8 +2339,8 @@ def _trash_pinned(
     # trash that can't be prepared, and a wallpaper on another filesystem than
     # the trash (a move there is never a rename).
     try:
-        paths.ensure_directory(files)
-        paths.ensure_directory(info)
+        _ensure_durable_directory(files)
+        _ensure_durable_directory(info)
     except OSError as error:
         raise ManageError(
             "local-io", f"could not prepare the trash: {error.strerror or error}"

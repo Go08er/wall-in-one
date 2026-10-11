@@ -117,6 +117,10 @@ REPAIR_NEEDED: Final = (
     "Wall-in-One couldn\u2019t repair references to playlists that are gone, so the "
     "library isn\u2019t loaded and changes can\u2019t be saved."
 )
+NOT_OPENED: Final = (
+    "Wall-in-One couldn\u2019t open this profile for changes, so the library isn\u2019t "
+    "loaded and nothing can be saved:"
+)
 NO_FOLDER: Final = (
     "There\u2019s no wallpaper folder yet, so the library is empty and nothing is downloaded."
 )
@@ -485,6 +489,9 @@ class NextWindow(ShellWindow):
         if gate == "probe-failed":
             return Banner(OLDER_DATA_UNCHECKED, "Try Again", OLDER_DATA)
         if gate == "repair":
+            reason = application.authoring_gate_reason
+            if reason:
+                return Banner(f"{NOT_OPENED} {reason}", "Try Again", REPAIR)
             return Banner(REPAIR_NEEDED, "Try Again", REPAIR)
         if (
             gate == "open"

@@ -572,9 +572,38 @@ def profile_transaction(*, timeout: float = MIGRATION_LOCK_TIMEOUT_SECONDS) -> I
             )
         except OSError as error:
             stack.close()
-            raise MigrationError(
-                f"cannot lock the legacy migration transaction: {error}"
-            ) from error
+            if error.errno not in state_file.UNWRITABLE_LOCK_ERRNOS:
+                raise MigrationError(
+                    f"cannot lock the legacy migration transaction: {error}"
+                ) from error
+            # The lock file can't be opened for writing by this user (read-only
+            # by its bits, or on a read-only filesystem): waiting cures that
+            # never. Where the file is there, the same lock is taken through
+            # a read-only descriptor (`state_file.read_only_mutation_lock`),
+            # and each write then meets its own store's refusal, with its own
+            # reason. Where it isn't there and can't be made, there is no lock
+            # to take and nothing stands in for it: refused, for that reason.
+            # An import, which writes this folder, is refused at its own lock
+            # either way (`migrate`, `decline`).
+            stack = ExitStack()
+            try:
+                stack.enter_context(
+                    state_file.read_only_mutation_lock(
+                        marker_path(),
+                        description="legacy migration",
+                        timeout=timeout,
+                    )
+                )
+            except FileNotFoundError:
+                stack.close()
+                raise MigrationError(
+                    f"cannot lock the legacy migration transaction: {error}"
+                ) from error
+            except OSError as second:
+                stack.close()
+                raise MigrationError(
+                    f"cannot lock the legacy migration transaction: {second}"
+                ) from second
         with stack:
             _PROFILE_DEPTH.value = 1
             try:

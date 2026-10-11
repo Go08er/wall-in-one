@@ -641,6 +641,9 @@ class Application(Adw.Application):
         #: The left-out default this process has already said, so that a
         #: second pass of the repair doesn't say the same thing again.
         self._unsaved_default_said: tuple[str, str] | None = None
+        #: Why the gate rests at ``repair`` when the repair itself never ran to
+        #: its end (its lane's guard refused it): said with every refusal.
+        self._authoring_gate_reason = ""
         #: Saved repairs whose adoption here failed, adopted again by the next.
         self._unadopted_repairs: tuple[_PlaylistReferenceRepairResult, ...] = ()
         self._headless_authoring_started = False
@@ -892,6 +895,7 @@ class Application(Adw.Application):
         if self._authoring_migration_ready or self._authoring_repair_started:
             return
         self._authoring_gate_state = "checking"
+        self._authoring_gate_reason = ""
         self._authoring_repair_started = True
 
         deferred = self.authoring_off_thread(
@@ -902,8 +906,25 @@ class Application(Adw.Application):
         )
 
         def replied(response: Response) -> None:
-            if not response.ok and not self._authoring_shutdown:
-                self.window_report(response.message)
+            if response.ok or self._authoring_shutdown:
+                return
+            if (
+                self._authoring_gate_state == "checking"
+                and self._authoring_repair_started
+                and not self._authoring_migration_ready
+            ):
+                # The repair never ran to its end: its lane's guard refused it
+                # (the profile lock held past its wait, or not lockable at
+                # all), or its work raised. Nothing else moves the gate, so
+                # left at ``checking`` it would say "still opening; retry
+                # shortly" for good. It rests, with the reason, where Try
+                # again (or a restart) runs the repair once more. First, and
+                # the report last: saying it reaches the window.
+                self._authoring_repair_started = False
+                self._authoring_gate_state = "repair"
+                self._authoring_gate_reason = response.message
+                self._first_run_changed()
+            self.window_report(response.message)
 
         deferred.start(replied)
 
@@ -1926,6 +1947,15 @@ class Application(Adw.Application):
         if self._authoring_migration_ready:
             return "open"
         return self._authoring_gate_state
+
+    @property
+    def authoring_gate_reason(self) -> str:
+        """Why the gate rests at ``repair`` although no repair ran: the profile
+        could not be opened (its lock, say). Empty for a repair that ran and
+        left dangling references, and while the gate is anywhere else."""
+        if self._authoring_migration_ready or self._authoring_gate_state != "repair":
+            return ""
+        return self._authoring_gate_reason
 
     def reconsider_older_data(self) -> bool:
         """Check for older data and ask about it again, now rather than next launch.
@@ -3223,6 +3253,14 @@ class Application(Adw.Application):
                 kind="authoring-busy",
             )
         if self._authoring_gate_state == "repair":
+            if self._authoring_gate_reason:
+                # The repair could not run at all: the reason, and the file
+                # or folder it names, never "dangling playlist references".
+                return Response.failure(
+                    "current-profile authoring could not be opened, so nothing can be "
+                    f"changed until it can: {self._authoring_gate_reason}",
+                    kind="authoring-repair-required",
+                )
             return Response.failure(
                 "current authoring needs repair before changes can be saved; resolve the "
                 "reported dangling playlist references and retry",

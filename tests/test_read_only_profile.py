@@ -1540,37 +1540,27 @@ def test_a_health_save_the_state_folder_refuses_is_said_once(
 
 # -- found: a start that cannot take the migration lock stays "checking" for good ------------------
 
-STUCK_CHECKING: Final = (
-    "FINDING (wedged at the start). The state folder read-only in a way that keeps its "
-    ".legacy-migration-v1.json.mutation.lock from being opened for writing: every file in it "
-    "read-only too, which is what `chmod -R a-w` leaves and what a read-only mount amounts "
-    "to; or the lock file not there (a profile copied without its dot files). The start's "
-    "repair task is given to the authoring lane, whose guard can't take the lock "
-    "(`guarded_work`, ui/app.py:3268). The failure is said once ('MigrationError: cannot lock "
-    "the legacy migration transaction: ... Permission denied') and nothing rests the gate "
-    "(`_open_authoring_after_migration`'s `replied`, ui/app.py:808, only reports): it stays "
-    "'checking' with the repair marked started, so the library is never loaded, and every "
-    "change, ctl's too, is answered 'current-profile authoring is still opening; retry "
-    "shortly' until a restart, which does the same. With the folders read-only and the lock "
-    "file openable, the same start loads the library and refuses each write with its reason"
-)
 
-
-@ro.pinned(STUCK_CHECKING)
-@pytest.mark.parametrize(
-    ("ui", "how"),
-    [
-        ("next", "chmod -R a-w"),
-        *ro.also_in_full(
-            ("next", "no lock file"), ("classic", "chmod -R a-w"), ("classic", "no lock file")
-        ),
-    ],
-)
-def test_a_start_that_cannot_take_the_migration_lock_does_not_stay_checking(
-    profile: ro.Profile, monkeypatch: pytest.MonkeyPatch, ui: str, how: str
+@pytest.mark.parametrize("ui", ["next", *ro.also_in_full("classic")])
+def test_a_start_that_cannot_open_the_migration_lock_for_writing_still_opens(
+    profile: ro.Profile, monkeypatch: pytest.MonkeyPatch, ui: str
 ) -> None:
-    if how == "no lock file":
-        (profile.state / ".legacy-migration-v1.json.mutation.lock").unlink()
+    """The state folder read-only in a way that keeps its
+    ``.legacy-migration-v1.json.mutation.lock`` from being opened for writing:
+    every file in it read-only too, which is what ``chmod -R a-w`` leaves and
+    what a read-only mount amounts to.
+
+    Found here (AC-13): the start's repair is given to the authoring lane,
+    whose guard could not take the lock; that was said once and nothing rested
+    the gate, which stayed "checking" with no library, every change answered
+    "still opening; retry shortly", until a restart that did the same. Now the
+    lock is taken through a read-only descriptor, and the start is the one a
+    read-only state folder with an openable lock always had: the library
+    loads, and each write is refused by its own store, with its reason.
+    Whatever the start says gives a reason; it need say nothing. (The lock
+    itself, and the lock that can't be taken at all, which rests the gate:
+    `tests/test_profile_lock_unwritable.py`, `tests/test_ui_start_profile_lock.py`.)
+    """
     (favourite,) = [change for change in CTL if change.name == "ctl favourite"]
     life = live(
         profile,
@@ -1580,12 +1570,13 @@ def test_a_start_that_cannot_take_the_migration_lock_does_not_stay_checking(
         [favourite],
         idle=0,
         start_within=2.5,
-        files_too=how == "chmod -R a-w",
+        files_too=True,
     )
     print(_story(life))
-    assert life.startup and all(ro.WHY.search(text) for text in life.startup), life.startup
+    assert all(ro.WHY.search(text) for text in life.startup), life.startup
     assert not life.problems, life.problems
     assert not life.probe.violations(), verdict(life.probe)
+    assert life.probe.attempts[0].refused, "the write is refused by its own store"
 
 
 @ro.full_only

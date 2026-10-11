@@ -11,6 +11,7 @@ first run while the others fail closed.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import logging
@@ -1576,6 +1577,92 @@ def mutation_lock(
         finally:
             if gate_acquired:
                 _MUTATION_GATE.release()
+
+
+#: The errors of a lock file that can't be opened for writing, or made, by
+#: this user: read-only by its permission bits, or on a read-only filesystem.
+#: Nobody running as this user gets further, and waiting cures none of them.
+UNWRITABLE_LOCK_ERRNOS: Final = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+
+
+@contextlib.contextmanager
+def read_only_mutation_lock(
+    target: Path,
+    *,
+    description: str,
+    timeout: float = MUTATION_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    """`mutation_lock`'s own lock, taken through a read-only descriptor.
+
+    For the caller `mutation_lock` has just refused with one of
+    `UNWRITABLE_LOCK_ERRNOS`, and only for a lock that guards a transaction
+    rather than one write (the profile-wide one): a store's own write must go
+    on being refused by its own lock in such a folder.
+
+    ``flock`` excludes on the file, whatever way each holder opened it, so
+    this is the very lock every other holder takes, this version's and the
+    released ones' alike: there is still exactly one lock object, the lock
+    file. Nothing is made and nothing is changed (not the file's mode
+    either). A lock file that isn't there raises `FileNotFoundError`: there
+    is then nothing to lock, and no other object stands in for it. One that
+    is not this user's private regular file, or can't be read either, is
+    refused as `mutation_lock` refuses it.
+    """
+    if timeout < 0:
+        raise OSError(f"{description} mutation lock timeout cannot be negative")
+    lock_path = target.absolute().with_name(f".{target.name}.mutation.lock")
+    deadline = time.monotonic() + timeout
+    descriptor = os.open(
+        lock_path,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+    )
+    locked = False
+    try:
+        opened = os.fstat(descriptor)
+        current = lock_path.lstat()
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(
+                _lock_trouble(f"the {description} mutation lock is not a regular file", lock_path)
+            )
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise OSError(
+                _lock_trouble(f"the {description} mutation lock changed while opening", lock_path)
+            )
+        if opened.st_uid != os.getuid() or opened.st_nlink != 1:
+            raise OSError(
+                _lock_trouble(
+                    f"the {description} mutation lock is not a private file owned by this user",
+                    lock_path,
+                )
+            )
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        _lock_trouble(
+                            f"timed out after {timeout:g}s waiting for the {description} "
+                            "mutation lock",
+                            lock_path,
+                        )
+                    ) from None
+                time.sleep(min(MUTATION_LOCK_POLL_SECONDS, remaining))
+        opened = os.fstat(descriptor)
+        current = lock_path.lstat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise OSError(
+                _lock_trouble(f"the {description} mutation lock changed while waiting", lock_path)
+            )
+        yield
+    finally:
+        if locked:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def preserve_faulted(

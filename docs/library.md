@@ -60,11 +60,23 @@ Three properties of the list are worth knowing:
   for a folder that is no longer one. An image you chose for one is still
   found, wherever it is, so that alone is no reason to refuse.
 
-Scanning may still show files reached through an intentionally configured
-symbolic link, but Delete and Move to Trash refuse destructive authority
-through symbolic-link directory components. Configure the real absolute root
-when you want those actions available. This keeps a link swapped between scan
-and removal from redirecting an operation outside the selected library.
+Symbolic links are never followed at the time the app acts, which keeps a link
+swapped between scan and removal from redirecting an operation outside the
+selected library. What that means for each place a link can be:
+
+- **A library folder that is itself a link is not scanned.** When you pick a
+  link in the folder chooser, the app adds the real folder it points to,
+  resolved once at that moment, and says so ("Added /mnt/data/Wallpapers (the
+  folder ~/Wallpapers points to)"). A link already saved in `settings.toml`,
+  from an older version or a hand edit, is left as it is: its row in Settings
+  says it is a symbolic link, that it is not scanned, and which folder to add
+  instead.
+- **A linked folder or file inside a library folder is not followed** and does
+  not appear.
+- **A library folder reached through a link higher up its path is scanned,** but
+  Delete and Move to Trash refuse destructive authority through symbolic-link
+  directory components. Configure the real absolute folder when you want those
+  actions available.
 
 That refusal is for your wallpapers. Wall-in-One's own bookkeeping files (an
 entry it retires into `.wall-in-one-retained`, and the palette template's lock

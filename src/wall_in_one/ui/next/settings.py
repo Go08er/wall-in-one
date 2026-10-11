@@ -531,7 +531,14 @@ class SettingsPage(Page):
     def _folder_row(self, index: int, folder: Folder, blocked: bool) -> Adw.ActionRow:
         row = plain(Adw.ActionRow, title=folder.name, subtitle=folder.path)
         writers: list[Gtk.Widget] = []
-        if folder.missing:
+        if folder.note:
+            # A folder that is a symbolic link is not scanned: said on its row,
+            # with the folder to add instead, never left as an empty library.
+            icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+            icon.add_css_class("st-warning-icon")
+            row.set_subtitle(f"{folder.path} · {folder.note}")
+            row.add_css_class("warning")
+        elif folder.missing:
             # Said plainly rather than dropped: a folder on a drive that is not
             # mounted comes back when it is.
             icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")

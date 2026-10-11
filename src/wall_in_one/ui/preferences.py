@@ -203,7 +203,13 @@ class PreferencesPage(Adw.PreferencesPage):
                 destination.connect("clicked", self._make_root_primary(root))
                 row.add_suffix(destination)
                 writers.append(destination)
-            if not root.is_dir():
+            linked = config.linked_root_note(root)
+            if linked:
+                # A folder that is a symbolic link is not scanned: said on its
+                # row, with the folder to add instead.
+                row.set_subtitle(f"{root} -- {linked}")
+                row.add_css_class("warning")
+            elif not root.is_dir():
                 # Said plainly rather than dropped: a folder on a drive that is
                 # not mounted should come back when it is, not disappear.
                 row.set_subtitle(f"{root} -- not there right now")
@@ -279,12 +285,13 @@ class PreferencesPage(Adw.PreferencesPage):
         if path is None:
             self._report("That folder is not on this machine's filesystem")
             return
-        added = Path(path)
+        edit = config.RootsEdit.adding(Path(path))
+        added = edit.root or Path(path)
         if added in self._app.requested_settings.roots:
             self._report(f"{added.name} is already in the library")
             return
-        if self._edit_roots(config.RootsEdit("add", added)):
-            self._report(f"Scanning {added.name}")
+        if self._edit_roots(edit):
+            self._report(edit.added_words(f"Scanning {added.name}"))
 
     def _build_playback_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(

@@ -152,6 +152,9 @@ class Folder:
     name: str
     #: Not there right now (an unmounted drive): said, never dropped.
     missing: bool = False
+    #: Why it shows nothing though it is there (a symbolic link is not
+    #: scanned), and what to add instead; empty for an ordinary folder.
+    note: str = ""
 
 
 @dataclass(frozen=True, slots=True)

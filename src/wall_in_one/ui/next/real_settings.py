@@ -241,12 +241,17 @@ class _FolderCheck:
     #: None when it couldn't be checked (``problem`` says why).
     scenes: bool | None
     problem: str = ""
+    #: Each folder that is a symbolic link, and what its row says of it.
+    linked: tuple[tuple[Path, str], ...] = ()
 
 
 def _check_folders(roots: tuple[Path, ...]) -> _FolderCheck:
     missing = frozenset(root for root in roots if not root.is_dir())
     found = () if roots else scan.default_roots()
-    return _FolderCheck(roots, missing, str(found[0]) if found else "", scenes.is_available())
+    linked = tuple((root, note) for root in roots if (note := config.linked_root_note(root)))
+    return _FolderCheck(
+        roots, missing, str(found[0]) if found else "", scenes.is_available(), linked=linked
+    )
 
 
 def describe_key() -> KeyStatus:
@@ -869,8 +874,16 @@ class RealSettings:
     def folder_list(self) -> Sequence[Folder]:
         known = self._check()
         missing = known.missing if known is not None else frozenset[Path]()
+        notes = dict(known.linked) if known is not None else {}
         return tuple(
-            Folder(str(root), root.name or str(root), root in missing) for root in self._roots()
+            Folder(
+                str(root),
+                root.name or str(root),
+                # A link is "there" or not by what its row says, not by this.
+                root in missing and root not in notes,
+                notes.get(root, ""),
+            )
+            for root in self._roots()
         )
 
     def suggested_folder(self) -> str:
@@ -904,11 +917,12 @@ class RealSettings:
 
     def add_folder(self, path: str) -> None:
         """Add a folder the user chose; "Scanning" is said only once it is saved."""
-        added = Path(path)
+        edit = config.RootsEdit.adding(Path(path))
+        added = edit.root or Path(path)
         if added in self._backend.requested_settings.roots:
             self._report(f"{added.name or added} is already in the library")
             return
-        self._edit_roots(config.RootsEdit("add", added), f"Scanning {added.name or added}")
+        self._edit_roots(edit, edit.added_words(f"Scanning {added.name or added}"))
 
     def remove_folder(self, path: str) -> None:
         removed = Path(path)

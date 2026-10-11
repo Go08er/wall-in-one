@@ -1818,10 +1818,11 @@ class Application(Adw.Application):
         As an addition: on a first run nothing is saved yet, so this folder
         becomes the library; folders saved meanwhile by something else stay.
         """
+        edit = config.RootsEdit.adding(root)
         self.edit_roots_async(
-            config.RootsEdit("add", root),
+            edit,
             on_success=lambda _settings: self.window_report(
-                f"Using {root} as the wallpaper library"
+                edit.added_words(f"Using {root} as the wallpaper library")
             ),
             on_error=lambda error: self.window_report(
                 f"Library folder was not saved; nothing changed: {error}"

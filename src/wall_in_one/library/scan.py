@@ -430,6 +430,24 @@ def workshop_items(
     return tuple(found)
 
 
+def _unscanned_root(root: Path) -> str:
+    """Why a library folder is skipped whole, for a person.
+
+    A folder that is a symbolic link is never followed: the scan lists what
+    is in the folder it is given, and Delete and Move to Trash refuse to act
+    through a link. It says so, and names the folder to add instead.
+    """
+    try:
+        if root.is_symlink():
+            real = Path(os.path.realpath(root))
+            if real.is_dir():
+                return f"a symbolic link, which is not scanned; add {real} instead"
+            return "a symbolic link that points at no folder"
+    except OSError:
+        pass
+    return "not a directory"
+
+
 def scan(
     roots: Sequence[Path] | None = None,
     records: Mapping[str, pairings.Pairing] | None = None,
@@ -514,7 +532,7 @@ def _scan(
         if cancelled is not None and cancelled():
             raise ScanCancelledError
         if root.is_symlink() or not root.is_dir():
-            skipped.append(f"{root}: not a directory")
+            skipped.append(f"{root}: {_unscanned_root(root)}")
             continue
         for path in _walk(root, budget, skipped, cancelled, gone=seen):
             if len(items) >= MAX_ITEMS:

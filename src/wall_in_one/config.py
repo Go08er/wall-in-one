@@ -25,7 +25,7 @@ import os
 import re
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Self
 
@@ -848,6 +848,32 @@ class RootsEdit:
     kind: str
     root: Path | None = None
     roots: tuple[Path, ...] = ()
+    #: For an ``add`` made by `adding`: the symbolic link the person picked,
+    #: when ``root`` is the folder it pointed to. Said, never saved.
+    link: Path | None = field(default=None, compare=False)
+
+    @classmethod
+    def adding(cls, chosen: Path) -> RootsEdit:
+        """Add the folder a person picked: the folder itself, never a link to it.
+
+        A library folder that is a symbolic link is not scanned (the scan,
+        and Delete and Move to Trash, never follow a link at the time they
+        act), so saving the link would leave a library that is silently
+        empty. The link is resolved here, once, when the person picks it:
+        ``root`` is the real folder it points to and ``link`` what was
+        picked, for the confirmation to say (`added_words`). Swapping the
+        link later changes nothing, because the link was never saved. A link
+        that points at no folder is left as picked, and its row says why it
+        is empty (`linked_root_note`).
+        """
+        real = linked_folder(chosen)
+        return cls("add", chosen if real is None else real, link=None if real is None else chosen)
+
+    def added_words(self, otherwise: str) -> str:
+        """What to say once an ``add`` saved: ``otherwise``, or what the link led to."""
+        if self.link is None or self.root is None:
+            return otherwise
+        return f"Added {self.root} (the folder {self.link} points to)"
 
     def apply(self, current: Sequence[Path]) -> tuple[Path, ...]:
         """``current`` with this gesture applied; unchanged when it has nothing to do."""
@@ -866,6 +892,36 @@ class RootsEdit:
                 return listed
             return (root, *(candidate for candidate in listed if candidate != root))
         raise ValueError(f"unknown folder edit {self.kind!r}")
+
+
+def linked_folder(root: Path) -> Path | None:
+    """The real folder ``root`` points to when it is a symbolic link to one; else None."""
+    try:
+        if not root.is_symlink():
+            return None
+        real = Path(os.path.realpath(root))
+        return real if real.is_dir() else None
+    except OSError:
+        return None
+
+
+def linked_root_note(root: Path) -> str:
+    """Why a saved library folder that is a symbolic link shows nothing; empty otherwise.
+
+    For a folder already in ``settings.toml`` (from an older version, or a
+    hand edit): the settings are the person's and are not rewritten, so the
+    folder's row says what is wrong and what to add instead.
+    """
+    try:
+        linked = root.is_symlink()
+    except OSError:
+        return ""
+    if not linked:
+        return ""
+    real = linked_folder(root)
+    if real is None:
+        return "a symbolic link that points at no folder, so nothing is scanned"
+    return f"a symbolic link, which is not scanned; add {real} instead"
 
 
 def edited_roots(current: Sequence[Path], edits: Sequence[RootsEdit]) -> tuple[Path, ...]:

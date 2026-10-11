@@ -73,7 +73,7 @@ from tests.test_ui_next_window import (  # noqa: E402
     patient,
     run_application,
 )
-from wall_in_one import paths, runtime_config, runtime_health, tidy  # noqa: E402
+from wall_in_one import config, paths, runtime_config, runtime_health, tidy  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import pairings, playlists  # noqa: E402
@@ -1148,7 +1148,9 @@ CLASSIC: Final = (
     Change(
         "add a library folder",
         CONFIG,
-        lambda c: c.window._settings_page._set_roots((c.profile.library, c.profile.other)) and None,
+        lambda c: (
+            c.window._settings_page._edit_roots(config.RootsEdit("add", c.profile.other)) and None
+        ),
     ),
     Change("make a playlist the default", CONFIG, lambda c: _selected(c, "Morning")._set_default()),
     Change("the Schedules page's default playlist", CONFIG, _classic_default),

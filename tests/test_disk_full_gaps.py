@@ -485,14 +485,13 @@ def test_a_full_disk_while_replay_puts_a_record_back(
     assert not findings, "\n".join(sorted(set(findings))[:30])
 
 
-@pytest.mark.xfail(strict=True, reason="AC-5, fixed on r5-ac12")
 def test_replay_names_where_a_record_put_back_without_its_sync_really_is(
     replayed: tuple[Counter[str], list[str], list[str]],
 ) -> None:
     """Replay's move of the record back to its name landed and the sync after it
-    failed. Today it says "the download record kept at <claim>/entry could not
-    be put back (the restoration of <record> could not be made durable ...)":
-    the claim is empty and the record is at its name."""
+    failed. The claim is empty and the record is at its name, and that is what
+    is said: never "the download record kept at <claim>/entry could not be put
+    back" (AC-5)."""
     _outcomes, findings, misnamed = replayed
     assert not findings, "\n".join(sorted(set(findings))[:30])
     assert not misnamed, "\n".join(misnamed[:5])

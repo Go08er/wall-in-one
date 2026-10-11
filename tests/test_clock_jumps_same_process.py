@@ -191,17 +191,12 @@ def test_a_day_forward_while_this_process_downloads(
     assert outcomes and not problems, "\n".join(problems[:20])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the r5-ac3 class (no liveness check): its lock must hold within one process too",
-)
 def test_a_day_forward_does_not_take_this_processs_own_live_stage(
     jumped: tuple[Counter[str], list[str], int],
 ) -> None:
-    """The sweep's only test is a stage's age, so with the clock a day ahead it
-    reclaims a stage this very process's download is still using, and that
-    download then refuses (nothing short is published: the test above). The
-    second-process case is being fixed with a liveness lock; a lock taken per
-    process would not see this one."""
+    """With the clock a day ahead, a stage's age alone would have it reclaimed
+    while this very process's download is still using it. The liveness lock is
+    held on the stage's open file, not per process, so the sweep and Tidy up
+    here see it too and leave the stage alone."""
     _outcomes, problems, interfered = jumped
     assert not problems and not interfered

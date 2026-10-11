@@ -92,7 +92,13 @@ def _a_day_forward(
                     did = act
                 except Exception as error:
                     did = f"{act} refused ({type(error).__name__})"
-                taken = [path for path in live if not path.is_file() or not path.stat().st_size]
+                # Taken: gone from its name, or no longer holding what it held.
+                # Not "empty": a stage the download has just made and not yet
+                # written is empty before anyone looks at it, and the full
+                # campaign pauses there too (ten of its 108 points).
+                taken = [
+                    path for path in live if not path.is_file() or path.read_bytes() != live[path]
+                ]
             (made,) = theirs
         media = root / "Wall-in-One" / "MotionBGS" / "aurora.mp4"
         record = media.with_name(media.name + ".motionbgs.json")

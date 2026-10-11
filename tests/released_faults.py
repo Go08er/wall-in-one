@@ -948,6 +948,11 @@ class Campaign:
         return "\n".join(lines)
 
 
+_KEPT_AT: Final = re.compile(
+    r"\b(?:preserved|kept|left|retained|restored|moved back|moved|remains|is still) (?:at|to) "
+)
+
+
 def _named(message: str, base: Path) -> list[Path]:
     """Every path under ``base`` that ``message`` names.
 
@@ -981,6 +986,7 @@ def campaign(
     | None = None,
     edited_after: Callable[[Mapping[str, object]], bool] | None = None,
     every: int = 1,
+    producer_says: bool = False,
     full: bool = False,
 ) -> Campaign:
     """Run the producer under every plan, and ``consume`` on each distinct state it left.
@@ -1104,6 +1110,18 @@ def campaign(
             continue
         distinct[key] = (job, found)
         result.states.append(found)
+        if producer_says:
+            # What the producer itself said as it stopped: wherever it says a
+            # file was kept, preserved, left, moved or restored, the file is
+            # there. (A path it could not write or lock is rightly not.)
+            for claim in _KEPT_AT.finditer(made.output):
+                for path in _named(made.output[claim.end() :], job.base)[:1]:
+                    if not os.path.lexists(path):
+                        result.findings.append(
+                            f"SAID by the producer {dict(job.plan)}: says {claim.group().strip()} "
+                            f"{path.relative_to(job.base)}, which isn't there: "
+                            f"{made.output.replace(str(job.base), '')[:300]}"
+                        )
         calls = examine(job, first, made, frozenset(), f"{dict(job.plan)}")
         if variants is not None:
             wanted_variants += [

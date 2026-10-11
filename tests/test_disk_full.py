@@ -193,6 +193,7 @@ def _campaign(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ful
         exempt=exempt,
         plans=lambda trace: faults.disk_full(trace, full=full),
         edited_after=lambda _plan: False,
+        producer_says=True,
         full=full,
     )
     print("\n" + found.summary(f"no room: {case}"))

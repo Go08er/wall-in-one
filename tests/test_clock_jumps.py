@@ -199,3 +199,33 @@ def test_a_stage_from_a_day_ahead_is_not_recent_for_ever(
             download.managed_directory(root, download.MOTIONBGS_LOCATION)
         assert not any(stage.is_file() and stage.stat().st_size for stage in stages)
     assert tried
+
+
+def test_an_older_name_is_never_swept_whatever_the_clock_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One of 0.2.x's older names may have been public, so no clock makes this
+    version's sweep take it: two days ahead or two days back, its bytes stay.
+    A v2 stage dated a day ahead is kept as recent meanwhile; whether Tidy
+    up's plan names it is printed, not asserted (it did not, when written)."""
+    monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
+    base = tmp_path / "a00000"
+    downloads._prepare(base)
+    root = Path(faults.profile_environment(base)["HOME"]) / "Wallpapers"
+    with monkeypatch.context() as scoped:
+        faults.scratch_profile(scoped, base)
+        directory, _marker = download.managed_directory(root, download.MOTIONBGS_LOCATION)
+        older = directory / ".wall-in-one-media-stage-abcdefgh"
+        older.write_bytes(b"what 0.2.x left here")
+        ahead = directory / ".wall-in-one-v2-media-stage-abcdefgh"
+        ahead.write_bytes(b"a stage from when the clock was a day ahead")
+        tomorrow = time.time() + DAY
+        os.utime(ahead, (tomorrow, tomorrow))
+        for jump in (2 * DAY, -2 * DAY):
+            _clock(scoped, jump)
+            download.managed_directory(root, download.MOTIONBGS_LOCATION)
+            assert older.read_bytes() == b"what 0.2.x left here", f"clock {jump:+} s"
+        found = tidy.plan(roots=(root,), now=time.time())
+        listed = ahead.name in repr(found)
+        print(f"\na v2 stage dated a day ahead is named in Tidy up's plan: {listed}")
+        assert ahead.is_file() and ahead.stat().st_size, "kept as recent"

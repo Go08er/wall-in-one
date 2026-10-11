@@ -208,15 +208,21 @@ def enter(profile: Profile, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def quiet(application: Application) -> bool:
-    """Nothing is in flight: no write, batch, command, scan, palette work or publication.
+    """Nothing is in flight: no write, batch, command, scan, palette work, poll or publication.
 
     A publication that was refused (the state folder is read-only) has
     finished too: its request stays the newest, with nothing compiling.
+
+    A status poll counts while its answer is being read: what it reports can
+    queue a health save, and a snapshot taken between the two would see that
+    save land later and charge it to whatever change was being judged. (That
+    was the one intermittent failure of this probe under load.)
     """
     with application._settings_authoring_lock:
         settings_waiting = bool(application._settings_authoring_pending)
     return (
-        not application._authoring_active
+        not application._runtime_status_pending
+        and not application._authoring_active
         and not application._authoring_queue
         and not application._settings_authoring_running
         and not settings_waiting

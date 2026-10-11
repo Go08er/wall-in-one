@@ -385,6 +385,10 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
         # And what is in force is that playlist, for the rotation, a page's
         # "playing" mark and `ctl playlists` (failed on edbd327: "evening").
         assert session.active_playlist() == evening.id
+        # The session's own rotation is that playlist's wallpapers, as before:
+        # `playlists.rotation` always looked by id and then by name, so only
+        # the id `active_playlist()` reports changed, not what it selects.
+        assert [item.path for item in session._rotation()] == [shown.dawn.path]
         listed = _verb(shown, "playlists", "").message.splitlines()
         assert [row.split("\t")[-1] for row in listed if row.startswith(evening.id)] == ["yes"]
     else:

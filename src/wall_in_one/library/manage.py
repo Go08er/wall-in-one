@@ -277,6 +277,9 @@ class _WithdrawnAuthority:
     _settled: bool = False
     _removed: tuple[Path, ...] = ()
     _kept: tuple[Path, ...] = ()
+    #: A put-back left a record in its claim (`_put_back`): the pending
+    #: removal record must stay, or nothing would ever look there again.
+    _left_in_claim: bool = False
 
     def consume(self) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
         """The media left its name: destroy each record. (removed, kept); done once."""
@@ -323,8 +326,25 @@ class _WithdrawnAuthority:
         retained = isinstance(error, ManageError) and error.retain_intent
         if self.media_at_risk or retained:
             note = self._keep()
+            if isinstance(error, ManageError):
+                # Kept in their claims, the records are found again only
+                # through the pending removal record: it stays, whichever
+                # exit this was.
+                error.retain_intent = True
         else:
             note = self._put_back(_same_file_moved_on(target, expected_fingerprint))
+            if self._left_in_claim and isinstance(error, ManageError):
+                # A record that could not go back is in a claim only this
+                # removal's token leads to. Cancelling the pending removal
+                # record would leave it there for good, and the wallpaper a
+                # local file from then on: replay looks under pending records
+                # only. Kept, the next start puts the record back
+                # (`settle_record_claims`), or says again why it can't.
+                error.retain_intent = True
+                note = (
+                    f"{note}; its pending removal record was retained, so the next start "
+                    "puts the download record back"
+                )
         if not note:
             return
         if isinstance(error, ManageError) and error.args and isinstance(error.args[0], str):
@@ -361,11 +381,13 @@ class _WithdrawnAuthority:
                         f"be confirmed ({error})"
                     )
                 else:
+                    self._left_in_claim = True
                     notes.append(
                         f"its download record could not be put back ({error}) and was kept "
                         f"at {claim.path}"
                     )
             except OSError as error:
+                self._left_in_claim = True
                 notes.append(
                     f"its download record could not be put back ({_reason(error)}) and was "
                     f"kept at {claim.path}"
@@ -375,6 +397,7 @@ class _WithdrawnAuthority:
                     returned = True
                     record.drop_emptied_folder()
                     continue
+                self._left_in_claim = True
                 notes.append(
                     f"something else is now at {logical}, so its download record was kept "
                     f"at {claim.path}"
@@ -1894,6 +1917,18 @@ def _remove_withdrawn(
             pinned_source=source_pin,
             logical_path=path,
         )
+    except file_io.ClaimNotDurableError as error:
+        # The file is the one that was expected, whole, in the removal's
+        # claim. A sync after the move failed (a full disk, say), so it must
+        # not be destroyed yet. Said as that: nothing changed.
+        raise ManageError(
+            "local-io",
+            f"{path} was moved into its removal\u2019s claim, but that could not be made "
+            f"durable ({error.reason}), so it was not deleted. It is at "
+            f"{error.preserved_path}, and its pending removal record was retained: the "
+            "removal is finished, with what belongs to the wallpaper, at the next start",
+            retain_intent=True,
+        ) from error
     except file_io.PathChangedError as error:
         if error.preserved_path is not None:
             with contextlib.suppress(OSError):

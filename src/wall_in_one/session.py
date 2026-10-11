@@ -1537,9 +1537,17 @@ class Session:
                             failures.append(f"{intent.item.name}: {error}")
                             continue
                         if recovered_claim:
+                            # The removal stopped with the media in its claim
+                            # (a crash, or a sync that failed right after the
+                            # move), before it reached the wallpaper's own
+                            # files: its captured stills and its selector.
+                            # They go with it here, under the folder this
+                            # removal prepared, or are named as left
+                            # (`_cleanup_removed_item`): a finished removal
+                            # leaves no still and selector with no wallpaper.
                             current = self.commit_removal(
                                 intent,
-                                artifacts_already_clean=True,
+                                artifacts_already_clean=False,
                                 artifact_source_root=intent.source_root,
                                 artifact_lookup_root=source_context.root_anchor,
                                 artifact_lookup_parent=source_context.directory_anchor,

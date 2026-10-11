@@ -118,6 +118,23 @@ class UnconfirmedMoveError(PathChangedError):
         super().__init__(f"{source} {self.said}", preserved_path=destination)
 
 
+class ClaimNotDurableError(PathChangedError):
+    """An entry moved into its claim, and the move could not be made durable.
+
+    Nothing about the entry changed: it is the one that was expected, whole,
+    at ``preserved_path``. The sync of a folder after the move failed (a full
+    disk, an I/O error), so the move may not survive a power loss, and the
+    caller must not go on to destroy the entry. ``reason`` is that failure in
+    a person's words. A `PathChangedError` for every caller that only needs
+    to know the entry is not at its name; one that reports it says what
+    happened, which is not that anything changed.
+    """
+
+    def __init__(self, message: str, *, preserved_path: Path | None = None, reason: str) -> None:
+        super().__init__(message, preserved_path=preserved_path)
+        self.reason = reason
+
+
 PathIdentity = tuple[int, int]
 # A persisted regular-file generation.  Device/inode alone are not a
 # generation identifier: after the last reference closes, a filesystem may
@@ -1590,9 +1607,10 @@ def claim_for_deletion(
                     logical_path=public_path.parent,
                 )
             except OSError as error:
-                raise PathChangedError(
+                raise ClaimNotDurableError(
                     f"the atomic claim for {public_path} could not be made durable: {error}",
                     preserved_path=directory_pin.entry,
+                    reason=error.strerror or str(error),
                 ) from error
         finally:
             # Closing an already-synced directory capability cannot make its
@@ -1612,6 +1630,10 @@ def claim_for_deletion(
         if source_spelling is not None:
             detail = respelled(detail, source_spelling, str(public_path.parent))
         preserved = claimed if error.preserved_path is not None else None
+        if isinstance(error, ClaimNotDurableError):
+            raise ClaimNotDurableError(
+                detail, preserved_path=preserved, reason=error.reason
+            ) from error
         raise PathChangedError(detail, preserved_path=preserved) from error
     except (OSError, ValueError) as error:
         try:

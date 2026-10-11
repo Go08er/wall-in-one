@@ -16,11 +16,13 @@ in a real removal, and this process then replays what it left on disk.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,7 +32,7 @@ from tests.test_download_legacy_staging import _folder, _produce
 from tests.test_manage import downloaded
 from tests.test_session import FakeRenderer
 from wall_in_one import config, file_io
-from wall_in_one.library import favourites, manage, pairings, playlists, removals, scan
+from wall_in_one.library import favourites, manage, pairings, playlists, removals, scan, stills
 from wall_in_one.session import Session
 from wall_in_one.wallpaper.applier import Applier
 
@@ -268,6 +270,58 @@ def test_an_interrupt_with_the_media_in_its_claim_keeps_the_record_with_it(
 
     assert not media.exists() and not record.exists()
     assert _whole_copies(media.parent, written) == [] and _pending(journal_path) == 0
+
+
+def test_a_removal_finished_at_the_next_start_takes_the_wallpapers_selector_with_it(
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The removal stopped with the media in its claim, before it reached the
+    wallpaper's own files (here the disk was full at the sync after the move).
+    The next start finishes it. What it finishes is the whole removal: the
+    selector goes too, or is named as left, never left without a word beside
+    no wallpaper."""
+    item = downloaded(root)
+    media = item.path
+    other = root / "other.png"
+    other.write_bytes(b"another picture")
+    selector = stills.write_sidecar(media, other)
+    assert selector in manage.pairing_artifact_paths(
+        item, (root,), legacy_selected_still=None, adopted_authority=None
+    )
+    journal_path = tmp_path / "pending-removals.json"
+    journal = removals.Store.open(journal_path)
+    intent = journal.prepare(item, (root,))
+    claim = file_io.deletion_claim_directory(media, intent.token)
+    sync = file_io._fsync_directory_capability
+    full: list[bool] = []
+
+    def no_room_once(descriptor: int, **options: Any) -> None:
+        if not full and options.get("logical_path") == claim and not media.exists():
+            full.append(True)
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        sync(descriptor, **options)
+
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", no_room_once)
+    with pytest.raises(manage.ManageError) as stopped:
+        manage.remove(
+            item,
+            (root,),
+            expected_source=intent.source_identity,
+            expected_fingerprint=intent.source_fingerprint,
+            operation_token=intent.token,
+        )
+    journal.close()
+    assert stopped.value.retain_intent, "pending, with the media in its claim"
+    assert (claim / "entry").is_file() and selector.is_file()
+
+    left = _replay(tmp_path, root, journal_path)
+
+    assert not media.exists() and not (claim / "entry").exists()
+    # Failed on 651e5f1: nothing was said and the selector stayed.
+    assert not selector.exists() or any(selector.name in said for said in left), left
+    assert other.read_bytes() == b"another picture"
+    if not left:
+        assert _pending(journal_path) == 0
 
 
 def _released_dies(source: Path, root: Path, media: Path, journal: Path, point: str) -> str:

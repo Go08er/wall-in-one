@@ -26,6 +26,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -355,6 +356,19 @@ def _not_persisted(monkeypatch: pytest.MonkeyPatch, item: MediaItem) -> None:
     monkeypatch.setattr(paths, "fsync_directory", fail_once_gone)
 
 
+def _claim_not_durable(monkeypatch: pytest.MonkeyPatch, item: MediaItem) -> None:
+    """Injected: no room at the sync right after the media moves into its claim."""
+    sync = file_io._fsync_directory_capability
+    folder = _claim_folder(item)
+
+    def no_room(descriptor: int, **options: Any) -> None:
+        if options.get("logical_path") == folder and not item.path.exists():
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        sync(descriptor, **options)
+
+    monkeypatch.setattr(file_io, "_fsync_directory_capability", no_room)
+
+
 def _nothing(_monkeypatch: pytest.MonkeyPatch, _item: MediaItem) -> None:
     return None
 
@@ -362,6 +376,7 @@ def _nothing(_monkeypatch: pytest.MonkeyPatch, _item: MediaItem) -> None:
 #: exit, its fault, the token used, (kind, committed, retained), the record's fate.
 _REMOVE_EXITS: list[tuple[str, Arm, str, tuple[str | None, bool, bool], str]] = [
     ("claim-unverified", _claim_unverified, REMOVAL_TOKEN, ("changed", False, True), "kept"),
+    ("claim-not-durable", _claim_not_durable, REMOVAL_TOKEN, ("local-io", False, True), "kept"),
     ("replaced", _replaced_before_the_claim, REMOVAL_TOKEN, ("changed", False, False), "back"),
     ("gone", _gone_before_the_claim, REMOVAL_TOKEN, ("changed", False, False), "back"),
     ("bad-token", _nothing, "not-a-token", ("unrecorded", False, False), "back"),
@@ -504,8 +519,46 @@ def test_a_record_that_cannot_be_put_back_is_kept_whole_and_named(
     (kept,) = _whole_copies(item, written)
     assert _record(item).read_text(encoding="utf-8") == "somebody else's"
     assert caught.value.kind == "local-io" and not caught.value.committed
+    # Failed on 651e5f1: the pending removal record was cancelled, and nothing
+    # would ever look in that claim again.
+    assert caught.value.retain_intent
     assert said.endswith(
-        f"something else is now at {_record(item)}, so its download record was kept at {kept}"
+        f"something else is now at {_record(item)}, so its download record was kept at {kept}; "
+        "its pending removal record was retained, so the next start puts the download record "
+        "back"
+    ), said
+
+
+def test_a_claim_that_could_not_be_made_durable_is_said_as_that(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk is full at the sync right after the media moved into its claim.
+    Nothing changed: the file is whole, in the claim. It is said as a move that
+    could not be made durable, with the system's reason, and not as a file that
+    changed while it was claimed."""
+    item = downloaded(root)
+    original = item.path.read_bytes()
+    _claim_not_durable(monkeypatch, item)
+
+    with pytest.raises(ManageError) as caught:
+        _remove(item, (root,))
+
+    said = str(caught.value)
+    claimed = _claim_folder(item) / "entry"
+    assert claimed.read_bytes() == original and not item.path.exists()
+    assert (caught.value.kind, caught.value.committed, caught.value.retain_intent) == (
+        "local-io",
+        False,
+        True,
+    )
+    # Failed on 651e5f1: "changed while removal claimed it; an unverified entry
+    # was preserved at ...".
+    assert "changed" not in said, said
+    assert said.startswith(
+        f"local-io: {item.path} was moved into its removal\u2019s claim, but that could not be "
+        f"made durable (No space left on device), so it was not deleted. It is at {claimed}, "
+        "and its pending removal record was retained: the removal is finished, with what "
+        "belongs to the wallpaper, at the next start"
     ), said
 
 

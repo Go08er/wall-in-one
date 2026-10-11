@@ -263,7 +263,7 @@ class _RecordBack:
             yield "the record afterwards", "FINDING neither at its name nor whole in a claim"
 
 
-#: The download record left for good in its claim (see the strict xfail below).
+#: The download record left for good in its claim: what 97d97ef stopped.
 STRANDED: Final = "STRANDED whole in its claim"
 
 
@@ -322,18 +322,15 @@ def test_a_full_disk_while_a_removal_puts_its_record_back(put_back: faults.Campa
     assert not put_back.findings, "\n".join(sorted(set(put_back.findings))[:30])
 
 
-@pytest.mark.xfail(
-    strict=True, reason="removal follow-up on r5-ac12b: put-back failure keeps the intent"
-)
 def test_a_record_whose_put_back_failed_is_put_back_by_a_later_start(
     put_back: faults.Campaign,
 ) -> None:
     """The media could not be claimed, and then the record's move back to its
-    name failed for want of room. Today the removal still cancels its pending
-    intent, so no later start looks for the record: it stays in
-    ``.wall-in-one-removal-<token>/entry`` for good, and the wallpaper is a
-    local file from then on. With the intent kept, the next start's replay
-    puts it back."""
+    name failed for want of room. The removal used to cancel its pending
+    intent all the same, so no later start looked for the record: it stayed in
+    ``.wall-in-one-removal-<token>/entry`` for good, and the wallpaper was a
+    local file from then on. The intent is kept now (97d97ef), and the next
+    replay puts the record back."""
     assert not put_back.findings, "\n".join(sorted(set(put_back.findings))[:30])
     assert not [said for said in put_back.outcomes if STRANDED in said]
 

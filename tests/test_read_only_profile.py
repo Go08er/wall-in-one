@@ -1279,19 +1279,15 @@ def test_each_window_the_other_way_out_with_a_read_only_folder(
     assert life.seconds_to_quit < ro.BOUND
 
 
-# -- found: deleting the saved default playlist while settings.toml can't be written ---------------
-
-HALF_DELETED: Final = (
-    "r5-ac12b: FINDING (half-done across two stores). With the configuration folder "
-    "read-only, deleting the playlist that is the saved default removes it from "
-    "playlists.json (and its display assignment from displays.json) and then fails to "
-    "clear active_playlist in settings.toml: `config.require_playlist_deletable` "
-    "(config.py:923) checks unknown keys and readability, not whether settings.toml can "
-    "be written, so `_prepare_playlist_delete` (ui/app.py:5682) deletes first and reports "
-    "'cleanup needs attention' after. settings.toml then names a playlist that is gone: "
-    "every later publication is refused ('default playlist refers to unknown playlist'), "
-    "and the next start can't repair it either"
-)
+# -- found, and fixed: deleting the saved default playlist while settings.toml can't be written ----
+#
+# With the configuration folder read-only, deleting the playlist that is the
+# saved default took it out of playlists.json (and its display assignment out of
+# displays.json) and then could not clear active_playlist in settings.toml. The
+# settings named a playlist that was gone, every later publication was refused,
+# and the next start could not repair it: the gate rested at "repair" and the
+# library was never loaded. Since 6a6a8b3 the delete is refused whole, and a
+# start over such a default opens (57008a4, 7e55112).
 
 
 def _delete_the_default(surface: str) -> Change:
@@ -1300,7 +1296,6 @@ def _delete_the_default(surface: str) -> Change:
     return change
 
 
-@ro.pinned(HALF_DELETED)
 @pytest.mark.parametrize(
     "surface",
     [
@@ -1325,12 +1320,6 @@ def test_deleting_the_default_playlist_with_read_only_settings_is_all_or_nothing
     assert not probe.violations(), verdict(probe)
 
 
-@ro.pinned(
-    HALF_DELETED + ". Here: the start after it, settings.toml still read-only. The repair "
-    "(`_repair_dangling_playlist_references`, ui/app.py:895) can't clear the default, the gate "
-    "rests at 'repair', the library is never loaded and every change is refused, the state "
-    "folder's too, until settings.toml can be written again",
-)
 def test_the_start_after_that_delete_still_loads_the_library(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:

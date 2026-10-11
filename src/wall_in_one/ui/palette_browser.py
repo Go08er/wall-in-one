@@ -1017,11 +1017,13 @@ class _PaletteEditor(Adw.Dialog):
             return
         name = self._name.get_text()
         in_place = self._in_place
+        opened = self._document
         self._save.set_sensitive(False)
 
         def work() -> palettes.PaletteEntry:
             return (
-                palettes.save_edits(in_place, document)
+                # Only over the file as this editor opened it (`save_edits`).
+                palettes.save_edits(in_place, document, opened=opened)
                 if in_place is not None
                 else palettes.write_custom(name, document)
             )

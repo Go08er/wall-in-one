@@ -513,7 +513,8 @@ class RealPalettes:
 
         def work() -> palettes.PaletteEntry:
             if in_place is not None:
-                return palettes.save_edits(in_place, document)
+                # Only over the file as this editor opened it (`save_edits`).
+                return palettes.save_edits(in_place, document, opened=editing.document)
             return palettes.write_custom(chosen, document)
 
         def saved(entry: palettes.PaletteEntry) -> None:

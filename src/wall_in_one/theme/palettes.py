@@ -70,6 +70,15 @@ class PaletteNameTakenError(PaletteWriteError):
     """Another palette a person can pick already has this name; nothing was written."""
 
 
+class PaletteChangedError(PaletteWriteError):
+    """The palette's file no longer holds what the editor opened; nothing was written.
+
+    ``kind`` keeps the reply the sentence alone (`control.server.failed`).
+    """
+
+    kind = "conflict"
+
+
 class Origin(Enum):
     """Where a palette comes from.
 
@@ -926,14 +935,65 @@ def write_custom(
     return PaletteEntry(name=chosen, origin=Origin.CUSTOM, path=target, colours=colours)
 
 
-def save_edits(entry: PaletteEntry, document: Mapping[str, object]) -> PaletteEntry:
-    """Rewrite the file behind ``entry`` in place.
+def _same_document(one: Mapping[str, object], other: Mapping[str, object]) -> bool:
+    """Whether two palette documents say the same thing, key order and spacing aside."""
+    return json.dumps(one, sort_keys=True) == json.dumps(other, sort_keys=True)
+
+
+def _require_as_opened(entry: PaletteEntry, target: Path, opened: Mapping[str, object]) -> None:
+    """Refuse a save over a palette file that isn't the one the editor opened.
+
+    An editor holds the whole document from when it opened, and saving
+    rewrites the whole file from it. Whatever another program (Noctalia, a
+    text editor, a second window) wrote there since would be undone, so the
+    file is read again here, just before it is replaced, and anything but
+    the document that was opened is left alone. One that can't be read back
+    is left alone as well: what it holds is not known. Only a file that is
+    gone is written: nothing is there to lose, and the save puts it back.
+
+    No lock is held, because nothing else that writes these files (Noctalia,
+    an editor) would take one: this narrows the moment in which a change can
+    be lost to the instant between this read and the replacement.
+    """
+    try:
+        current = read_document(target)
+    except PaletteError as error:
+        try:
+            gone = not os.path.lexists(target)
+        except OSError:  # pragma: no cover - lexists reports False rather than raising
+            gone = False
+        if gone:
+            return
+        raise PaletteChangedError(
+            f"{entry.name}\u2019s file could not be read back to see whether it changed "
+            f"since it was opened ({error})"
+        ) from error
+    if not _same_document(current, opened):
+        raise PaletteChangedError(
+            f"{entry.name} changed on disk since it was opened, and saving would undo that "
+            "change; open it again to edit it as it is now"
+        )
+
+
+def save_edits(
+    entry: PaletteEntry,
+    document: Mapping[str, object],
+    *,
+    opened: Mapping[str, object],
+) -> PaletteEntry:
+    """Rewrite the file behind ``entry`` in place, if it still holds what was opened.
+
+    ``opened`` is the document the editor read when it opened (`read_document`)
+    and ``document`` is that with the edits. The file is replaced only while
+    it still says what ``opened`` says (`_require_as_opened`); otherwise
+    `PaletteChangedError`, and nothing is written.
 
     Goes through `target_for`, so a built-in or community entry raises here
     rather than reaching the filesystem.
     """
     target = target_for(entry)
     serialised, colours = _serialise(document, target)
+    _require_as_opened(entry, target, opened)
     _replace_in_place(target, serialised)
     return PaletteEntry(name=entry.name, origin=entry.origin, path=target, colours=colours)
 

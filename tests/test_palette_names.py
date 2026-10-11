@@ -119,7 +119,8 @@ def test_a_duplicate_takes_a_free_name_and_editing_in_place_keeps_its_own() -> N
     again = palettes.unique_name("Osaka Jade copy", palettes.discover().entries)
     assert again == "Osaka Jade copy 2"
 
-    edited = palettes.save_edits(copy, _document())
+    assert copy.path is not None
+    edited = palettes.save_edits(copy, _document(), opened=palettes.read_document(copy.path))
     assert edited.path == copy.path and edited.name == copy.name
 
 
@@ -180,10 +181,9 @@ def test_a_refused_new_palette_leaves_no_temporary_behind() -> None:
 def test_an_in_place_edit_still_replaces_its_own_file() -> None:
     entry = palettes.write_custom("Mine", _document())
     assert entry.path is not None
-    edited = palettes.with_overrides(
-        palettes.read_document(entry.path), {"dark": {"mPrimary": "#ff0000"}}
-    )
-    saved = palettes.save_edits(entry, edited)
+    opened = palettes.read_document(entry.path)
+    edited = palettes.with_overrides(opened, {"dark": {"mPrimary": "#ff0000"}})
+    saved = palettes.save_edits(entry, edited, opened=opened)
     assert saved.path == entry.path
     written = palettes.read_document(entry.path)
     assert written["dark"]["mPrimary"] == "#ff0000"  # type: ignore[index]

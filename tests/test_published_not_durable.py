@@ -261,7 +261,7 @@ def test_an_edited_palette_published_before_the_sync_failed_is_saved(
     failed = _sync_fails_for(monkeypatch, "Mine.json")
     caplog.set_level(logging.WARNING)
 
-    saved = palettes.save_edits(entry, edited)  # before: PaletteWriteError
+    saved = palettes.save_edits(entry, edited, opened=_palette())  # before: PaletteWriteError
 
     assert failed == [entry.path]
     assert saved.path is not None

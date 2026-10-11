@@ -531,7 +531,7 @@ def test_an_edit_preserves_everything_it_does_not_touch(directories: tuple[Path,
 
     document = palettes.read_document(entry.path or Path())
     edited = palettes.with_overrides(document, {"dark": {"mPrimary": "#ff0000"}})
-    palettes.save_edits(entry, edited)
+    palettes.save_edits(entry, edited, opened=document)
 
     written = palettes.read_document(custom / "Mine.json")
     dark = written["dark"]
@@ -577,6 +577,75 @@ def test_builtin_and_community_palettes_have_no_writable_target(
             palettes.target_for(entry)
 
 
+def _opened_and_edited(entry: palettes.PaletteEntry) -> tuple[dict[str, object], dict[str, object]]:
+    assert entry.path is not None
+    opened = palettes.read_document(entry.path)
+    return opened, palettes.with_overrides(opened, {"dark": {"mPrimary": "#ff0000"}})
+
+
+def test_an_edit_is_not_saved_over_a_file_changed_since_it_was_opened(
+    directories: tuple[Path, Path],
+) -> None:
+    """An editor holds the whole document from when it opened. Saving rewrites the
+    file from it, so what another program wrote there since would be undone."""
+    custom, _ = directories
+    entry = palettes.write_custom("Mine", _document(), custom)
+    opened, edited = _opened_and_edited(entry)
+    theirs = _document(mPrimary="#abcdef") | {"terminal": {"note": "theirs"}}
+    _write(custom / "Mine.json", theirs)
+    before = (custom / "Mine.json").read_bytes()
+
+    with pytest.raises(palettes.PaletteChangedError) as refused:
+        palettes.save_edits(entry, edited, opened=opened)
+
+    assert str(refused.value) == (
+        "Mine changed on disk since it was opened, and saving would undo that change; "
+        "open it again to edit it as it is now"
+    )
+    assert (custom / "Mine.json").read_bytes() == before
+    assert sorted(path.name for path in custom.iterdir()) == ["Mine.json"]
+
+
+def test_an_edit_is_saved_over_the_same_document_spelled_another_way(
+    directories: tuple[Path, Path],
+) -> None:
+    custom, _ = directories
+    entry = palettes.write_custom("Mine", _document(), custom)
+    opened, edited = _opened_and_edited(entry)
+    (custom / "Mine.json").write_text(json.dumps(opened, sort_keys=True), encoding="utf-8")
+
+    palettes.save_edits(entry, edited, opened=opened)
+
+    assert palettes.read_document(custom / "Mine.json") == edited
+
+
+def test_an_edit_is_not_saved_over_a_file_that_can_no_longer_be_read(
+    directories: tuple[Path, Path],
+) -> None:
+    """What it holds now is not known, so it is left alone."""
+    custom, _ = directories
+    entry = palettes.write_custom("Mine", _document(), custom)
+    opened, edited = _opened_and_edited(entry)
+    (custom / "Mine.json").write_text("{ half a palette", encoding="utf-8")
+
+    with pytest.raises(palettes.PaletteChangedError, match="could not be read back"):
+        palettes.save_edits(entry, edited, opened=opened)
+
+    assert (custom / "Mine.json").read_text(encoding="utf-8") == "{ half a palette"
+
+
+def test_an_edit_puts_back_a_palette_whose_file_is_gone(directories: tuple[Path, Path]) -> None:
+    """Nothing is there to lose."""
+    custom, _ = directories
+    entry = palettes.write_custom("Mine", _document(), custom)
+    opened, edited = _opened_and_edited(entry)
+    (custom / "Mine.json").unlink()
+
+    palettes.save_edits(entry, edited, opened=opened)
+
+    assert palettes.read_document(custom / "Mine.json") == edited
+
+
 def test_saving_over_a_community_palette_leaves_the_file_alone(
     directories: tuple[Path, Path],
 ) -> None:
@@ -587,7 +656,7 @@ def test_saving_over_a_community_palette_leaves_the_file_alone(
     found = palettes.discover(custom=custom, community=community)
     entry = found.of_origin(Origin.COMMUNITY)[0]
     with pytest.raises(PaletteWriteError):
-        palettes.save_edits(entry, _document(mPrimary="#ff0000"))
+        palettes.save_edits(entry, _document(mPrimary="#ff0000"), opened=_document())
 
     assert original.read_bytes() == before
 

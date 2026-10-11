@@ -962,8 +962,8 @@ class Application(Adw.Application):
         saved_settings: config.Settings | None = None
         unsaved_default: tuple[str, str] | None = None
         try:
-            durable_settings = config.load_strict()
-            active = durable_settings.active_playlist
+            loaded = config.load_strict_document()
+            active = loaded.settings.active_playlist
             if active and active not in valid:
                 target = named(active)
                 try:
@@ -975,14 +975,23 @@ class Application(Adw.Application):
                         )
                     )
                 except config.ConfigError as error:
-                    # settings.toml could not be saved: kept read-only, or it
-                    # holds keys this build doesn't know. That is not this
-                    # start's to wait on. A default by name still names its
-                    # playlist without the id, so nothing is wrong. One that
-                    # names nothing is left out for this process, which says
-                    # so and goes on; the file is the person's to change.
-                    if target is None:
-                        unsaved_default = (active, str(error))
+                    # Only a settings.toml that can't be changed for as long
+                    # as it stays as it is (keys this build doesn't know, or
+                    # kept read-only) is not this start's to wait on. A
+                    # default that names nothing is then left out for this
+                    # process, which says so and goes on
+                    # (`runtime_config.unclearable_default`, the rule the
+                    # unattended compiles follow too); one that still names
+                    # its playlist, by name, has nothing wrong with it. A
+                    # lock held too long or a file that stopped parsing is
+                    # the failure it always was, below.
+                    unsaved_default = runtime_config.unclearable_default(
+                        playlist_store, loaded, refused=error
+                    )
+                    if unsaved_default is None and not config.why_settings_cannot_change(
+                        loaded, refused=error
+                    ):
+                        raise
                 else:
                     if saved_settings is None:
                         durable_settings = config.load_strict()

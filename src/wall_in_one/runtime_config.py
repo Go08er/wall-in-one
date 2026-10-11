@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
 from wall_in_one.library import pairings, state_file
@@ -719,6 +719,52 @@ def find_playlist(reference: str, session: Session) -> Playlist | None:
     """The playlist ``reference`` names, as `runtime_playlist` resolves it: id, then name."""
     found = session.playlists.get(reference)
     return found if found is not None else session.playlists.by_name(reference)
+
+
+class _Listing(Protocol):
+    """The playlists as read from their file: a `playlists.Store`, a session's or a worker's."""
+
+    @property
+    def fault(self) -> str | None: ...
+
+    def get(self, reference: str) -> Playlist | None: ...
+
+    def by_name(self, name: str) -> Playlist | None: ...
+
+
+def unclearable_default(
+    listing: _Listing,
+    loaded: config.LoadedSettings,
+    *,
+    refused: config.ConfigError | None = None,
+    path: Path | None = None,
+) -> tuple[str, str] | None:
+    """A saved default that names no playlist and can't be cleared: ``(reference, why)``.
+
+    The one rule every compiler follows, the app's start and the unattended
+    ones alike. Such a default is left out (`Session.leave_out_default`) and
+    said, and the document is built as with no default, instead of every
+    publication being refused for as long as the file stays as it is. None
+    means the rule doesn't apply, and whoever asked does what it always did:
+
+    * ``listing`` was not read in full (it couldn't be read, is damaged, or
+      was saved by a newer build): nothing is known about what it names, and
+      "couldn't look" is not "no such playlist". The compiler refuses that
+      file itself, naming it;
+    * the default names a playlist, by id or by name, or "All media";
+    * ``settings.toml`` could be changed (`config.why_settings_cannot_change`):
+      the app clears the default at its next start, and until then an
+      unattended compile stays strict.
+    """
+    reference = loaded.settings.active_playlist
+    if not reference or reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
+        return None
+    if listing.fault is not None:
+        return None
+    if listing.get(reference) is not None or listing.by_name(reference) is not None:
+        return None
+    why = config.why_settings_cannot_change(loaded, path, refused=refused)
+    return (reference, why) if why else None
 
 
 def use_refusal(reference: str, session: Session) -> str:

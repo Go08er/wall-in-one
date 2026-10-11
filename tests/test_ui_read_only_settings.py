@@ -22,8 +22,9 @@ fail on d38cb66.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,8 @@ from tests.test_ui_codex030_round1c import (  # noqa: E402, F401
     toolkit,
 )
 from wall_in_one import config, paths, runtime_config  # noqa: E402
-from wall_in_one.library import displays, playlists, schedules  # noqa: E402
+from wall_in_one.library import displays, playlists, schedules, state_file  # noqa: E402
+from wall_in_one.session import Session  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 
 
@@ -220,3 +222,157 @@ def test_a_start_goes_on_past_a_default_it_can_not_save(
         made = _saved(profile, "ghost", [profile.dusk])
         again = runtime_config.render(config.load_strict(), application.session)
         assert f'default_playlist = "{made.id}"' in again
+
+
+# -- which refusals count: only a file that can't be changed for as long as it stays as it is ----
+
+
+def _a_start_over(profile: Profile, reference: str) -> Any:
+    """The profile with ``reference`` as its saved default, as a start finds it."""
+    application = profile.application
+    _saved(profile, "Lone", [profile.dawn])
+    config.update({"active_playlist": reference})
+    application._settings = config.load_strict()
+    application.session.update_settings(application._settings, rescan_library=False)
+    application._authoring_migration_ready = False
+    return application
+
+
+def test_a_default_whose_save_the_system_refuses_is_left_out(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """The look says the folder takes a new file; the save itself is turned away.
+
+    Here by the settings' own lock file, kept read-only (EACCES): what an
+    immutable ``settings.toml`` does too, with EPERM. That is "can't be
+    saved where it is" as much as a read-only folder is.
+    """
+    profile: Profile = profiles()
+    application = _a_start_over(profile, "ghost")
+    saved = paths.settings_path().read_bytes()
+    lock = paths.settings_path().with_name(".settings.toml.mutation.lock")
+    lock.chmod(0o400)
+    try:
+        assert config.why_not_writable() == "", "the folder itself takes a file"
+        result = application._repair_dangling_playlist_references()
+        response = application._finish_playlist_reference_repair(result)
+    finally:
+        lock.chmod(0o600)
+
+    assert result.failures == ()
+    assert result.unsaved_default is not None
+    reference, why = result.unsaved_default
+    assert reference == "ghost" and "Permission denied" in why
+    assert response.ok and application.authoring_ready
+    assert application.session.left_out_default == "ghost"
+    assert paths.settings_path().read_bytes() == saved
+
+
+def _held_too_long(*_arguments: object, **_keywords: object) -> config.Settings | None:
+    """What `config._rewrite_playlist_default` raises when another program keeps the lock."""
+    try:
+        raise TimeoutError("timed out after 5s waiting for the settings mutation lock")
+    except TimeoutError as error:
+        raise config.ConfigError(
+            f"cannot safely update {paths.settings_path()}: {error}"
+        ) from error
+
+
+def _rewritten_meanwhile(real: Callable[..., config.Settings | None]) -> Any:
+    """The real save, after another program has put bytes that don't parse in the file."""
+
+    def save(*arguments: Any, **keywords: Any) -> config.Settings | None:
+        paths.settings_path().write_bytes(b"active_playlist = \n")
+        return real(*arguments, **keywords)
+
+    return save
+
+
+@pytest.mark.parametrize("default", ["ghost", "lone"], ids=["names nothing", "by name"])
+@pytest.mark.parametrize("refusal", ["the lock is held too long", "the file stopped parsing"])
+def test_a_default_whose_save_only_failed_this_time_still_holds_the_start(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: str,
+    default: str,
+) -> None:
+    """Neither is "can't be saved for good", so neither leaves the default out.
+
+    The folder is writable and the file holds only keys this build knows.
+    The gate rests at "repair", as it did before a default could be left out;
+    Try again runs the repair once more.
+    """
+    profile: Profile = profiles()
+    application = _a_start_over(profile, default)
+    for name in ("forget_playlist_default", "repoint_playlist_default"):
+        real = getattr(config, name)
+        failing = _held_too_long if refusal.startswith("the lock") else _rewritten_meanwhile(real)
+        monkeypatch.setattr(config, name, failing)
+
+    result = application._repair_dangling_playlist_references()
+    response = application._finish_playlist_reference_repair(result)
+
+    assert result.unsaved_default is None
+    (failure,) = result.failures
+    assert failure.startswith("saved default: ")
+    assert ("timed out" in failure) is refusal.startswith("the lock"), failure
+    assert not response.ok and response.kind == "authoring-repair-required", response
+    assert not application.authoring_ready
+    assert application._authoring_gate_state == "repair"
+    assert application.session.left_out_default == ""
+    assert not [text for text in profile.window.reports if "couldn\u2019t be cleared" in text]
+
+
+# -- "names no playlist" rests on playlists that were read in full -------------------------------
+
+
+@pytest.mark.parametrize("playlists_file", ["from a newer build", "can't be read"])
+def test_a_default_is_not_left_out_over_playlists_that_were_not_read(
+    profiles: Any,  # noqa: F811
+    playlists_file: str,
+) -> None:
+    """Settings that can't be changed and a default no playlist that was read answers to.
+
+    "Couldn't look" is not "no such playlist": the default is not left out,
+    nothing is said about leaving it out, and the compiler goes on refusing
+    the playlists file, naming it, so the last good ``runtime.toml`` stays.
+    A profile taken back to an older build is exactly this: a newer
+    ``playlists.json``, and settings with keys this build doesn't know.
+    """
+    profile: Profile = profiles()
+    application = _a_start_over(profile, "ghost")
+    target = playlists.state_path()
+    if playlists_file == "from a newer build":
+        newer = {"version": playlists.FORMAT_VERSION + 1, "lists": [{"id": "x", "name": "X"}]}
+        target.write_text(json.dumps(newer), encoding="utf-8")
+    else:
+        target.chmod(0o000)
+    try:
+        with _settings_can_not_be_saved():
+            result = application._repair_dangling_playlist_references()
+            response = application._finish_playlist_reference_repair(result)
+        listing = playlists.Store.open()
+        loaded = config.load_strict_document()
+        with _settings_can_not_be_saved():
+            assert config.why_settings_cannot_change(loaded), "the settings can't be changed"
+            assert runtime_config.unclearable_default(listing, loaded) is None
+    finally:
+        target.chmod(0o600)
+
+    assert result.unsaved_default is None
+    assert application.session.left_out_default == ""
+    assert not [text for text in profile.window.reports if "couldn\u2019t be cleared" in text]
+    if playlists_file == "from a newer build":
+        # Read-only here, not a failure: the gate opens and the compiler refuses the file.
+        assert listing.fault_kind == state_file.NEWER_VERSION
+        assert response.ok and result.failures == ()
+        as_saved = Session(config.load_strict())
+        try:
+            with pytest.raises(runtime_config.RuntimeConfigError, match="playlists"):
+                runtime_config.render(config.load_strict(), as_saved)
+        finally:
+            as_saved.shutdown()
+    else:
+        (failure,) = result.failures
+        assert failure.startswith("playlists: ") and "playlists.json" in failure
+        assert not response.ok and response.kind == "authoring-repair-required"

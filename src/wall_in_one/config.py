@@ -1144,6 +1144,42 @@ def why_not_writable(path: Path | None = None) -> str:
     return ""
 
 
+#: A save refused for where the file is: the folder, or the file, is kept
+#: read-only. A lock that timed out or bytes that no longer parse are not this.
+_KEPT_READ_ONLY: Final = frozenset({errno.EACCES, errno.EROFS, errno.EPERM})
+
+
+def why_settings_cannot_change(
+    loaded: LoadedSettings,
+    path: Path | None = None,
+    *,
+    refused: ConfigError | None = None,
+) -> str:
+    """Why ``settings.toml`` can't be changed for as long as it stays as it is; empty when it can.
+
+    Three things say so. ``loaded`` holds keys this build doesn't know, so
+    every write would drop them (`read_only_message`). The file can't be
+    saved where it is (`why_not_writable`). Or ``refused``, a save just
+    tried, was turned away by the system for the folder or the file being
+    kept read-only (EACCES, EROFS, EPERM: an immutable file is one the look
+    can't see).
+
+    Nothing else is "for good": a lock another program held too long, a file
+    rewritten into bytes that don't parse between two reads, a refusal over
+    what the runtime supports. Those pass, and whoever asked treats them as
+    the failure they are.
+    """
+    if loaded.read_only:
+        return read_only_message(loaded.unknown_keys)
+    why = why_not_writable(path)
+    if why:
+        return why
+    cause = refused.__cause__ if refused is not None else None
+    if isinstance(cause, OSError) and cause.errno in _KEPT_READ_ONLY:
+        return str(refused)
+    return ""
+
+
 def require_playlist_deletable(
     playlist: PlaylistReference, path: Path | None = None, *, also: tuple[str, ...] = ()
 ) -> None:

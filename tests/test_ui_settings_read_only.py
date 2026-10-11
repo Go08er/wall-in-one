@@ -199,19 +199,43 @@ def test_deleting_a_playlist_is_refused_whole_when_the_settings_cannot_be_read(
     assert response.message.endswith(". Nothing was deleted.")
 
 
-def test_startup_repair_of_a_dangling_default_fails_closed_with_the_message(
-    tmp_path: Path,
+def test_startup_repair_leaves_out_a_dangling_default_that_unknown_keys_keep(
+    tmp_path: Path, make_application: Callable[[], Application]
 ) -> None:
-    """Fail-closed by choice: the runtime cannot compile a default naming nothing."""
+    """A default naming nothing, in settings with keys this build doesn't know.
+
+    This used to fail closed, by choice: "the runtime cannot compile a
+    default naming nothing", so the gate rested at "repair" and the library
+    was never loaded. The compiler now builds without a default it is told
+    to leave out (`Session.leave_out_default`), so that reason is gone and
+    the start goes on: no failure, the default left out with the reason
+    naming the keys, the file untouched, the gate open, and it is said.
+    """
     before = _settings_with_unknown_key(tmp_path, active_playlist="deleted")
+    app = make_application()
+    app._authoring_migration_ready = False
+    said: list[str] = []
+    app.activity_log.subscribe(lambda entry: said.append(entry.text))
 
     result = Application._repair_dangling_playlist_references()
 
     assert result.settings is None
-    assert len(result.failures) == 1
-    assert result.failures[0].startswith("saved default: settings.toml has settings")
+    assert result.failures == ()
+    assert result.unsaved_default == ("deleted", config.read_only_message(("future_setting",)))
+    assert paths.settings_path().read_bytes() == before
+
+    response = app._finish_playlist_reference_repair(result)
+    assert response.ok, response
+    assert app.authoring_ready, "the gate opens"
+    assert app.session.left_out_default == "deleted"
+    (told,) = said
+    assert told.startswith("The saved default playlist (deleted) doesn\u2019t exist")
+    assert "future_setting" in told
+    assert f"edit active_playlist in {paths.settings_path()}" in told
     assert paths.settings_path().read_bytes() == before
 
     # With no dangling default there is nothing to write, so nothing to refuse.
     paths.settings_path().write_bytes(before.replace(b'"deleted"', b'""'))
-    assert Application._repair_dangling_playlist_references().failures == ()
+    again = Application._repair_dangling_playlist_references()
+    assert again.failures == ()
+    assert again.unsaved_default is None

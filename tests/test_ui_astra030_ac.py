@@ -45,7 +45,8 @@ from tests.test_ui_codex030_round1c import (  # noqa: E402, F401
     toolkit,
 )
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
-from wall_in_one import config, paths, runtime_config  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
+from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.control import server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules  # noqa: E402
@@ -106,12 +107,13 @@ def _another_program_saves(
 
 
 def _builds_from_what_is_saved(shown: Shown) -> bool:  # noqa: F811
-    """Whether the runtime configuration can be built from ``settings.toml`` as it is."""
-    try:
-        runtime_config.render(config.load_strict(), shown.opened.application.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    """Whether the runtime document is built whole from ``settings.toml`` as it is.
+
+    Nothing left out and no playlist dropped: what "it can be built" meant
+    while one playlist that can't play refused the whole compile
+    (`tests.whole_document`).
+    """
+    return builds_whole(config.load_strict(), shown.opened.application.session)
 
 
 # -- AC-1: folder gestures ------------------------------------------------------------------

@@ -207,9 +207,12 @@ class Installed:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.documents: list[tuple[str, list[str]]] = []
-        install = runtime_config.update
+        # What the application's lanes install through (`ui.app._runtime_installed`).
+        install = runtime_config.publish_changes
 
-        def installed(settings: config.Settings, session: Any, path: Path | None = None) -> bool:
+        def installed(
+            settings: config.Settings, session: Any, path: Path | None = None
+        ) -> runtime_config.Published:
             changed = install(settings, session, path)
             if changed:
                 target = path if path is not None else paths.runtime_config_path()
@@ -217,7 +220,7 @@ class Installed:
                 self.documents.append((document, _missing(document)))
             return changed
 
-        monkeypatch.setattr(runtime_config, "update", installed)
+        monkeypatch.setattr(runtime_config, "publish_changes", installed)
 
 
 @dataclass
@@ -504,6 +507,7 @@ def _run(cell: Cell) -> None:
         assert _missing(document) == []
         assert str(cell.forest) not in document
         assert application.publication_problem == ""
+        assert application.left_out_notice == "", "and was built without nothing"
         if faults.commit == "partial":
             item_now = pairings.Identity.of(item)
             assert pairings.Store.open().get(item_now) is None
@@ -787,6 +791,7 @@ def test_no_installer_installs_from_an_invalid_inventory(
         _publish(application)
         assert len(installed.documents) == 1
         assert application.publication_problem == ""
+        assert application.left_out_notice == "", "and was built without nothing"
     finally:
         _close(application)
 

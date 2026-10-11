@@ -40,7 +40,8 @@ from tests.test_ui_next_editing import hold_the_lane  # noqa: E402
 from tests.test_ui_next_playlists import Shown  # noqa: E402
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _attach, _close  # noqa: E402
-from wall_in_one import config, runtime_config  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
+from wall_in_one import config  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import pairings, playlists  # noqa: E402
@@ -125,12 +126,13 @@ def _entries(profile: Profile, pid: str) -> list[str]:
 
 
 def _builds(profile: Profile) -> bool:
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
     application = profile.application
-    try:
-        runtime_config.render(application.settings, application.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    return builds_whole(application.settings, application.session)
 
 
 def _ctl(profile: Profile, verb: str, argument: str | None = None) -> Response:

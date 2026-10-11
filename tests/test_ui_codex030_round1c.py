@@ -13,6 +13,7 @@ compiler refuses.
 from __future__ import annotations
 
 import json
+import tomllib
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -35,6 +36,7 @@ from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
 from tests.test_ui_playlists_polish import QuietLoader  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _application, _attach  # noqa: E402
 from tests.test_ui_runtime import _close as _close_application  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
@@ -124,12 +126,13 @@ def _playlist(shown: Shown, name: str, items: list[MediaItem]) -> playlists.Play
 
 
 def _builds(shown: Shown) -> bool:
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
     application = shown.opened.application
-    try:
-        runtime_config.render(application.settings, application.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    return builds_whole(application.settings, application.session)
 
 
 # -- the new window ------------------------------------------------------------------------
@@ -364,8 +367,15 @@ def test_deleting_a_playlist_named_by_name_takes_those_references_too(shown: Sho
 def test_a_playlists_files_deleted_outside_the_app_are_reported_and_an_edit_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing can stop it; what follows is honest: the service keeps what worked, the app
-    names the playlist and keeps saying so, and the next valid edit gets through."""
+    """Nothing can stop it; what follows is honest: the app names the playlist and what
+    plays instead, keeps saying so, and the next valid edit puts the default back.
+
+    Until r6 the publication was refused here ("playlist 'Evening' has no
+    playable entries"), the service kept the last document, which still named
+    the deleted file, and every change waited behind it. The document is now
+    published without the playlist, the default plays "All media", and that
+    is what stands under the header.
+    """
     application = _application(tmp_path, monkeypatch)
     window = FakeWindow()
     _attach(application, window)
@@ -406,12 +416,20 @@ def test_a_playlists_files_deleted_outside_the_app_are_reported_and_an_edit_reco
 
         dawn.path.unlink()  # outside the app
         application.refresh_library()
-        spin_until(lambda: bool(application.publication_problem), 10, what="the refusal")
+        spin_until(lambda: bool(application.left_out_notice), 10, what="the publication")
 
-        problem = application.publication_problem
-        assert "'Evening'" in problem and "no playable entries" in problem, problem
-        assert problem in window.reports, "said once, and kept (`publication_problem`)"
-        assert document.read_bytes() == good, "the service keeps the last setup that worked"
+        notice = application.left_out_notice
+        assert notice == (
+            "The default names \u201cEvening\u201d, which has nothing to play, so "
+            "\u201cAll media\u201d plays instead."
+        )
+        assert window.reports.count(notice) == 1, "said once, and kept (`left_out_notice`)"
+        assert application.publication_problem == "", "published, not refused"
+        without = tomllib.loads(document.read_text(encoding="utf-8"))
+        assert without["default_playlist"] == runtime_config.FALLBACK_PLAYLIST_ID
+        assert [playlist["name"] for playlist in without["playlists"]] == ["All media"]
+        assert str(dawn.path).encode() not in document.read_bytes(), "no deleted file is named"
+        assert str(dusk.path).encode() in document.read_bytes(), "what is left plays"
 
         reply: list[Response] = []
         server.dispatch(
@@ -420,23 +438,28 @@ def test_a_playlists_files_deleted_outside_the_app_are_reported_and_an_edit_reco
             reply.append,
         )
         spin_until(
-            lambda: bool(reply) and published() and application.publication_problem == "",
+            lambda: bool(reply) and published() and application.left_out_notice == "",
             10,
             what="the edit to get through",
         )
         assert reply[0].ok, reply
-        assert str(dusk.path).encode() in document.read_bytes()
+        again = tomllib.loads(document.read_text(encoding="utf-8"))
+        assert again["default_playlist"] == evening.id, "the default is its playlist again"
+        assert window.reports.count(notice) == 1, "and was not said again"
     finally:
         _close_application(application)
 
 
 def test_the_new_window_keeps_saying_why_changes_arent_reaching_playback(shown: Shown) -> None:
+    """A publication that was refused (a store file that can't be read, say) stands under
+    the header until one gets through. A playlist that can't play is not that any more."""
     opened = shown.opened
     application = opened.application
     problem = (
-        "default playlist refers to playlist 'Evening', which has no playable entries. "
-        "Add media or choose another playlist; the existing runtime configuration was "
-        "left untouched."
+        "cannot compile runtime configuration because authoring state is unreadable or was "
+        "saved by a newer version of Wall-in-One (playlists: playlists.json can't be read). "
+        "Repair or restore the named file, or use the version that saved it; the existing "
+        "runtime configuration was left untouched."
     )
 
     application._set_publication_problem(problem)

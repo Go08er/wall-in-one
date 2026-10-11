@@ -208,16 +208,19 @@ class Aliased:
         _choose_still(self.application, self.rain, self.alias)
         #: Each generation of the runtime configuration installed, as installed.
         self.loaded: list[str] = []
-        install = runtime_config.update
+        # What the application's lanes install through (`ui.app._runtime_installed`).
+        install = runtime_config.publish_changes
 
-        def installed(settings: config.Settings, session: Any, path: Path | None = None) -> bool:
+        def installed(
+            settings: config.Settings, session: Any, path: Path | None = None
+        ) -> runtime_config.Published:
             changed = install(settings, session, path)
             if changed:
                 target = path if path is not None else paths.runtime_config_path()
                 self.loaded.append(target.read_text(encoding="utf-8"))
             return changed
 
-        monkeypatch.setattr(runtime_config, "update", installed)
+        monkeypatch.setattr(runtime_config, "publish_changes", installed)
         monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
 
     def publish(self) -> str:

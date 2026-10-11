@@ -726,14 +726,15 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
     removed: list[bool] = []
     reloads: list[str] = []
     refreshes: list[bool] = []
-    original_update = runtime_config.update
+    # What the application's lanes install through (`ui.app._runtime_installed`).
+    original_update = runtime_config.publish_changes
     storage_finished = _observe_removal_worker(monkeypatch)
 
     def held_update(
         current: config.Settings,
         session: object,
         path: Path | None = None,
-    ) -> bool:
+    ) -> runtime_config.Published:
         compile_started.set()
         assert release_compile.wait(2)
         return original_update(current, session, path)  # type: ignore[arg-type]
@@ -746,7 +747,7 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
             reloaded.append(paths.runtime_config_path().read_text(encoding="utf-8"))
         return Response.success()
 
-    monkeypatch.setattr(runtime_config, "update", held_update)
+    monkeypatch.setattr(runtime_config, "publish_changes", held_update)
     monkeypatch.setattr(client, "send_runtime", runtime)
     monkeypatch.setattr(application, "refresh_library", lambda: refreshes.append(True))
     try:

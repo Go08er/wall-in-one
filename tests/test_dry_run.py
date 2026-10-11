@@ -29,13 +29,14 @@ import sys
 import threading
 import tomllib
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tests.test_adopted_removal import _case as _adoption_case
+from tests.whole_document import not_in_the_document
 from wall_in_one import config, dry_run, runtime_config
 from wall_in_one.library import adopted, pairing, playlists, scan, stills, workshop
 from wall_in_one.library.model import Kind, Library, MediaItem
@@ -137,6 +138,10 @@ class Outcome:
     favourites: frozenset[Path]
     compiled: str
     compile_error: str
+    #: Of the real outcome only: what the compiler built that document
+    #: without (`tests.whole_document`). The dry run's own word for it is its
+    #: refusals, so this takes no part in comparing the two.
+    built_without: tuple[str, ...] = field(default=(), compare=False)
 
     @classmethod
     def of(cls, verdict: dry_run.Verdict) -> Outcome:
@@ -167,6 +172,7 @@ def _real_outcome(settings: config.Settings) -> Outcome:
             fresh.favourites.paths,
             compiled,
             error,
+            tuple(not_in_the_document(settings, fresh)) if compiled else (),
         )
     finally:
         fresh.shutdown()
@@ -543,14 +549,18 @@ def test_the_dry_run_is_what_the_change_really_leaves(
     assert bool(verdict.refusals) == scenario.refused, verdict.refusals
     for words in scenario.words:
         assert any(words in refusal for refusal in verdict.refusals), verdict.refusals
+    # The compiler builds either way now, without what can't play: a change
+    # the dry run refuses is no longer one that would have stopped publication.
+    assert real.compiled and not real.compile_error
     if scenario.refused:
-        # What the guard is for: the change really leaves a profile the compiler refuses,
+        # What the guard is for: the change really leaves a document built without
+        # something (a rule left out, a playlist none of whose entries resolves),
         # or a used playlist with nothing to play.
-        assert real.compile_error or any(
+        assert real.built_without or any(
             "would have nothing left to play" in refusal for refusal in verdict.refusals
         )
     else:
-        assert real.compiled and not real.compile_error
+        assert not real.built_without, real.built_without
 
 
 def test_a_removal_names_no_deleted_file_in_what_it_leaves(

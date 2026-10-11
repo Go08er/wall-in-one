@@ -27,7 +27,8 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.test_ui_next_settings import Opened, _close, _open  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
-from wall_in_one import config, runtime_compatibility, runtime_config  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
+from wall_in_one import config, runtime_compatibility  # noqa: E402
 from wall_in_one.library import playlists  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.next.playlists import PlaylistPage  # noqa: E402
@@ -71,12 +72,13 @@ def opened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Opened]:
 
 
 def _builds(opened: Opened) -> bool:
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
     application = opened.application
-    try:
-        runtime_config.render(application.settings, application.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    return builds_whole(application.settings, application.session)
 
 
 def test_x1_duplicate_to_edit_of_unresolved_videos_saves_nothing_and_keeps_publishing(

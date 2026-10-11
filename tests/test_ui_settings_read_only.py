@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from wall_in_one import config, paths  # noqa: E402
+from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import server  # noqa: E402
 from wall_in_one.library import playlists  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
@@ -206,10 +206,10 @@ def test_startup_repair_leaves_out_a_dangling_default_that_unknown_keys_keep(
 
     This used to fail closed, by choice: "the runtime cannot compile a
     default naming nothing", so the gate rested at "repair" and the library
-    was never loaded. The compiler now builds without a default it is told
-    to leave out (`Session.leave_out_default`), so that reason is gone and
-    the start goes on: no failure, the default left out with the reason
-    naming the keys, the file untouched, the gate open, and it is said.
+    was never loaded. Every compile now builds a default that names nothing
+    as "All media" and says so (`runtime_config.LeftOut`), so that reason is
+    gone and the start goes on: no failure, the file untouched, the gate
+    open. The repair itself says nothing; the publication that follows does.
     """
     before = _settings_with_unknown_key(tmp_path, active_playlist="deleted")
     app = make_application()
@@ -221,21 +221,25 @@ def test_startup_repair_leaves_out_a_dangling_default_that_unknown_keys_keep(
 
     assert result.settings is None
     assert result.failures == ()
-    assert result.unsaved_default == ("deleted", config.read_only_message(("future_setting",)))
     assert paths.settings_path().read_bytes() == before
 
     response = app._finish_playlist_reference_repair(result)
     assert response.ok, response
     assert app.authoring_ready, "the gate opens"
-    assert app.session.left_out_default == "deleted"
-    (told,) = said
-    assert told.startswith("The saved default playlist (deleted) doesn\u2019t exist")
-    assert "future_setting" in told
-    assert f"edit active_playlist in {paths.settings_path()}" in told
+    assert said == [], "the repair cleared nothing and says nothing"
     assert paths.settings_path().read_bytes() == before
+    # What every compile then does with that default, and says.
+    (left_out,) = runtime_config.compiled(config.load_strict(), app.session).left_out
+    assert left_out == runtime_config.LeftOut(
+        runtime_config.DEFAULT_OWNER, "", "deleted", "", runtime_config.DOES_NOT_EXIST
+    )
+    assert left_out.sentence() == (
+        "The default names a playlist that doesn\u2019t exist (deleted), so "
+        "\u201cAll media\u201d plays instead."
+    )
 
     # With no dangling default there is nothing to write, so nothing to refuse.
     paths.settings_path().write_bytes(before.replace(b'"deleted"', b'""'))
     again = Application._repair_dangling_playlist_references()
     assert again.failures == ()
-    assert again.unsaved_default is None
+    assert runtime_config.compiled(config.load_strict(), app.session).left_out == ()

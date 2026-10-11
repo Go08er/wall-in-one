@@ -8,6 +8,7 @@ asserts the fixed behavior: it fails on the code the review was made against.
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -139,23 +140,40 @@ def test_p3_an_unresolved_video_does_not_count_as_playable_anywhere(
 def test_p3_the_rule_is_the_compilers_entry_resolution(
     backend: FakeApplication, items: tuple[MediaItem, ...]
 ) -> None:
-    """For every item, "compiles" is exactly whether the compiled playlist keeps it."""
+    """For every item, "compiles" is exactly whether the compiled playlist keeps it.
+
+    A playlist of that one item, used by a rule: where the item compiles the
+    playlist and its rule are in the document, and where it doesn't the
+    playlist is not, and the rule is left out and said (it used to refuse the
+    whole compile).
+    """
     session = backend.session
     for item in items:
         made = session.playlists.create(
             f"Only {item.name}", entries=[playlists.Entry("x", str(item.path))]
         )
         compiles = runtime_config.entry_playability(item, session).compiles
-        session.schedules.add(made.id)
-        try:
-            runtime_config.render(session.settings, session)
-        except runtime_config.RuntimeConfigError:
-            built = False
-        else:
-            built = True
-        assert built == compiles, item.name
-        for rule in session.schedules.rules:
-            session.schedules.remove(rule.id)
+        rule = session.schedules.add(made.id)
+        built = runtime_config.compiled(session.settings, session)
+        document = tomllib.loads(built.document)
+        kept = made.id in {playlist["id"] for playlist in document["playlists"]}
+        assert kept == compiles, item.name
+        assert [one["playlist"] for one in document.get("schedules", [])] == [made.id] * compiles
+        assert built.left_out == (
+            ()
+            if compiles
+            else (
+                runtime_config.LeftOut(
+                    runtime_config.SCHEDULE_OWNER,
+                    rule.id,
+                    made.id,
+                    made.name,
+                    runtime_config.NOTHING_TO_PLAY,
+                ),
+            )
+        ), item.name
+        session.schedules.remove(rule.id)
+        session.playlists.delete(made.id)
 
 
 # -- P-4: one rule action, one write -----------------------------------------------------------

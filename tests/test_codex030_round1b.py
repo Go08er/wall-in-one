@@ -13,6 +13,7 @@ the merge this was made on.
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 
 from tests.test_next_editing import EditingApplication, editing_of, wid
 from tests.test_next_state import _library, _session
+from tests.whole_document import builds_whole
 from wall_in_one import runtime_config
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.runtime_config import Playability
@@ -69,11 +71,12 @@ def _video(library: tuple[MediaItem, ...]) -> MediaItem:
 
 
 def _builds(backend: EditingApplication) -> bool:
-    try:
-        runtime_config.render(backend.session.settings, backend.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
+    return builds_whole(backend.session.settings, backend.session)
 
 
 # -- the rule ------------------------------------------------------------------------------
@@ -98,14 +101,23 @@ def test_the_rule_counts_an_unused_playlist_that_would_hold_only_what_the_compil
     assert change_problem([dropped, dropped], [dropped], False) == "", "already broken: tidy it"
 
 
-def test_an_unused_playlist_left_with_only_what_the_compiler_drops_stops_publication(
+def test_an_unused_playlist_left_with_only_what_the_compiler_drops_is_not_published(
     backend: EditingApplication, library: tuple[MediaItem, ...]
 ) -> None:
-    """Why the rule covers unused playlists: the compiler refuses the whole document."""
+    """Why the rule covers unused playlists: such a playlist never reaches playback.
+
+    The compiler used to refuse the whole document over it ("playlist 'Rain
+    only' has no playable entries"), so nothing at all was published. It now
+    builds without that playlist and publishes the rest.
+    """
     session = backend.session
     made = session.playlists.create("Rain only")
     session.playlists.add(made.id, _video(library).path)
-    assert not _builds(backend), "nothing uses it, and still nothing can be published"
+    assert not _builds(backend), "the document is not whole"
+    built = runtime_config.compiled(session.settings, session)
+    emitted = [playlist["name"] for playlist in tomllib.loads(built.document)["playlists"]]
+    assert emitted == [runtime_config.FALLBACK_PLAYLIST_NAME], "built without it"
+    assert built.left_out == (), "nothing uses it, so there is no reference to say"
 
 
 # -- the new window's Playlists page ---------------------------------------------------------

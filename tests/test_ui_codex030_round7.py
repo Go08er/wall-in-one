@@ -318,9 +318,12 @@ def worlds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable
         for path in files.values():
             session.favourites.add(path)  # so a removal's cleanup has a favourite to clear
         installed: list[tuple[str, list[str]]] = []
-        install = runtime_config.update
+        # What the application's lanes install through (`ui.app._runtime_installed`).
+        install = runtime_config.publish_changes
 
-        def recorded(current: config.Settings, snapshot: Any, path: Path | None = None) -> bool:
+        def recorded(
+            current: config.Settings, snapshot: Any, path: Path | None = None
+        ) -> runtime_config.Published:
             changed = install(current, snapshot, path)
             if changed:
                 target = path if path is not None else paths.runtime_config_path()
@@ -328,7 +331,7 @@ def worlds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable
                 installed.append((document, _missing(document)))
             return changed
 
-        monkeypatch.setattr(runtime_config, "update", recorded)
+        monkeypatch.setattr(runtime_config, "publish_changes", recorded)
         scans = _watch_scan_work(application, monkeypatch)
         assert application._publish_runtime_async()
         spin_until(lambda: _quiet(application), BOUND, what="the first publication")
@@ -649,6 +652,7 @@ def _finish_checked(world: World) -> None:
         assert _missing(document) == [], "the recovered runtime names a missing file"
         assert application._inventory_valid
         assert application.publication_problem == ""
+        assert application.left_out_notice == "", "and was built without nothing"
         application.request_quit()
     # Completed at least once (with the real quit the main loop stops there; the
     # recording stand-in lets later callbacks ask again).

@@ -733,10 +733,11 @@ def test_missing_file_backed_media_and_stills_are_preserved_and_reported(
 def test_an_import_says_which_playlists_have_nothing_to_play(isolated_xdg: Path) -> None:
     """After Codex 0.3.0 round 1: the import writes playlists as they were, unchecked.
 
-    One holding only missing files stops every publication: the compiler
-    refuses the document. The import isn't refused for it (it is the user's
-    data, and the files may come back); it says so, naming the playlist and
-    what uses it, in its outcome and its report.
+    One holding only missing files never reaches playback: the compiler
+    builds the document without it and without whatever uses it (it used to
+    refuse the whole document). The import isn't refused for it (it is the
+    user's data, and the files may come back); it says so, naming the
+    playlist and what uses it, in its outcome and its report.
     """
     legacy, _watched, _video, _manual, _automatic = _legacy_fixture(isolated_xdg)
     config_path = legacy / "config.json"
@@ -751,7 +752,7 @@ def test_an_import_says_which_playlists_have_nothing_to_play(isolated_xdg: Path)
 
     assert outcome.changed
     assert outcome.detail.endswith(
-        "; \u201cMoving\u201d has nothing to play yet, so changes won\u2019t reach playback "
+        "; \u201cMoving\u201d has nothing to play yet, so playback goes on without it "
         "until that is fixed (see the report)"
     )
     report = legacy_migration.report_path().read_text(encoding="utf-8")
@@ -759,14 +760,21 @@ def test_an_import_says_which_playlists_have_nothing_to_play(isolated_xdg: Path)
         "\u201cMoving\u201d has nothing to play yet (a display uses it): none of its 1 " in report
     )
     assert "\u201cQuiet\u201d has nothing" not in report, "its picture is there"
-    # What it says is so: the compiler refuses the imported document.
+    assert "playback goes on without this playlist" in report
+    assert "can\u2019t build" not in report and "won\u2019t reach playback" not in report
+    # What it says is so: the compiler builds the imported document without
+    # "Moving", leaves out the display that uses it, and publishes the rest.
     session = Session(config.load())
     try:
         session.refresh()
-        with pytest.raises(runtime_config.RuntimeConfigError, match="'Moving'"):
-            runtime_config.render(session.settings, session)
+        built = runtime_config.compiled(session.settings, session)
     finally:
         session.shutdown()
+    names = {playlist["name"] for playlist in tomllib.loads(built.document)["playlists"]}
+    assert "Moving" not in names and "Quiet" in names
+    assert [(one.owner, one.playlist, one.why) for one in built.left_out] == [
+        (runtime_config.DISPLAY_OWNER, "Moving", runtime_config.NOTHING_TO_PLAY)
+    ]
 
 
 def test_installed_workshop_video_imports_with_file_identity_and_legacy_dynamic_id(

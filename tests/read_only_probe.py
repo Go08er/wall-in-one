@@ -363,7 +363,7 @@ def build(home: Path, monkeypatch: pytest.MonkeyPatch) -> Profile:
         )
         spin_until(lambda: quiet(application), BOUND * 2, what="the profile's default playlist")
         assert problems == [] and window.reports == [], (problems, window.reports)
-        assert application.publication_problem == ""
+        assert application.publication_problem == "" and application.left_out_notice == ""
     finally:
         close(application)
     credentials.save_key(KEY)

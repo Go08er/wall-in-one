@@ -12,8 +12,10 @@ refused. Such a change now looks first whether that save can be made
 (`config.why_not_writable`) and is refused whole when it can't.
 
 And a start that found a default naming nothing could not clear it either,
-rested its gate at "repair", and never loaded the library. It now goes on
-without a default, says so, and names the file to change.
+rested its gate at "repair", and never loaded the library. It now goes on.
+Since r6 every compile builds a default that names nothing as "All media"
+and says so (`runtime_config.LeftOut`), whether or not the file can be
+changed: the start has nothing to tell anybody, and says nothing itself.
 
 Real permission bits throughout; each test restores them. Those that say so
 fail on d38cb66.
@@ -57,6 +59,7 @@ from tests.test_ui_codex030_round1c import (  # noqa: E402, F401
     shown,
     toolkit,
 )
+from tests.whole_document import builds_whole  # noqa: E402
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules, state_file  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
@@ -87,12 +90,20 @@ def _everything_saved() -> dict[Path, bytes | None]:
     return {path: path.read_bytes() if path.exists() else None for path in files}
 
 
+#: What a publication says of a default that names no playlist (`runtime_config.LeftOut`).
+NAMES_NOTHING = (
+    "The default names a playlist that doesn\u2019t exist ({}), so \u201cAll media\u201d "
+    "plays instead."
+)
+
+
 def _builds(application: Any) -> bool:
-    try:
-        runtime_config.render(config.load_strict(), application.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
+    return builds_whole(config.load_strict(), application.session)
 
 
 # -- all or nothing -------------------------------------------------------------------------
@@ -295,8 +306,8 @@ def test_a_start_goes_on_past_a_default_it_can_not_save(
 ) -> None:
     """``settings.toml`` names a default the start would repair: one that names
     nothing (cleared), or one by name (given the id). It can't be saved. Neither
-    is a reason to hold the library back: the first is left out for this
-    process, and said; the second names its playlist as it is."""
+    is a reason to hold the library back: the first is left out by every
+    compile, and said by the publication; the second names its playlist as it is."""
     profile: Profile = profiles()
     application = profile.application
     _saved(profile, "Lone", [profile.dawn])
@@ -314,22 +325,25 @@ def test_a_start_goes_on_past_a_default_it_can_not_save(
         assert response.ok, response
         assert bool(application.authoring_ready)
         assert paths.settings_path().read_bytes() == saved
+        assert profile.window.reports == [], "the repair itself says nothing"
         # What is published is built from the settings as they are saved.
-        built = runtime_config.render(config.load_strict(), application.session)
+        _published(application)
+        built = paths.runtime_config_path().read_text(encoding="utf-8")
         if default == "names nothing":
             assert f'default_playlist = "{runtime_config.FALLBACK_PLAYLIST_ID}"' in built
 
-    about_it = [text for text in profile.window.reports if "default playlist" in text]
+    about_it = [text for text in profile.window.reports if "The default names" in text]
     if default == "by name":
-        assert about_it == []
+        assert about_it == [] and application.left_out_notice == ""
     else:
-        (told,) = about_it
-        assert told.startswith("The saved default playlist (ghost) doesn\u2019t exist")
-        assert f"edit active_playlist in {paths.settings_path()}" in told
+        assert about_it == [NAMES_NOTHING.format("ghost")], "said by the publication, once"
+        assert application.left_out_notice == NAMES_NOTHING.format("ghost")
         # And once a playlist answers to it, it is the default again.
         made = _saved(profile, "ghost", [profile.dusk])
-        again = runtime_config.render(config.load_strict(), application.session)
+        _published(application)
+        again = paths.runtime_config_path().read_text(encoding="utf-8")
         assert f'default_playlist = "{made.id}"' in again
+        assert application.left_out_notice == ""
 
 
 def _combo(widget: Any) -> Any:
@@ -400,7 +414,8 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
         listed = _verb(shown, "playlists", "").message.splitlines()
         assert [row.split("\t")[-1] for row in listed if row.startswith(evening.id)] == ["yes"]
     else:
-        assert session.left_out_default == reference
+        (left_out,) = runtime_config.compiled(application.settings, session).left_out
+        assert (left_out.owner, left_out.reference) == (runtime_config.DEFAULT_OWNER, reference)
         # The new window's row keeps the saved reference and shows it as what
         # it is, so choosing "All media" there is a change the page can save.
         # Classic's row has no entry for it and shows "All media".
@@ -411,10 +426,8 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
         assert chosen == "All media (built-in playlist)"
         assert "the saved default selection" not in playlists_page._deletion_body(session, evening)
         assert runtime_config.default_playlist_id(reference, session) == ""
-        # A default can stop naming a playlist under a running app, where only
-        # the compiles leave it out and the session is never told: the row
-        # shows that one the same way, not by whether the start left it out.
-        session.leave_out_default("")
+        # A default can stop naming a playlist under a running app too: the
+        # row shows that one the same way.
         application._settings = replace(application._settings, active_playlist="phantom")
         assert scheduling.default_playlist == "phantom"
         named = schedule_editor.playlist_name(opened.window.state, "phantom")
@@ -424,21 +437,23 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
 def test_a_left_out_default_is_said_once(
     profiles: Any,  # noqa: F811
 ) -> None:
-    """The start says it left the default out. A second pass of the repair in the
-    same process (Try again, after something else failed) finds the same thing
-    and does not say it again; it would, if what it had to say were different."""
+    """The first publication says the default was left out. Later passes of the
+    repair in the same process (Try again, after something else failed) and later
+    publications find the same thing and do not say it again; one does, when what
+    it has to say is different."""
     profile: Profile = profiles()
     application = _a_start_over(profile, "ghost")
 
     def said() -> list[str]:
-        return [text for text in profile.window.reports if "default playlist" in text]
+        return [text for text in profile.window.reports if "The default names" in text]
 
     with _settings_can_not_be_saved():
         for _pass in range(2):
             partial = application._repair_dangling_playlist_references()
             assert application._finish_playlist_reference_repair(partial).ok
+            _published(application)
         # Failed on 7e55112: said twice.
-        assert len(said()) == 1, said()
+        assert said() == [NAMES_NOTHING.format("ghost")], said()
 
     # Another reference that names nothing is another thing to say.
     paths.settings_path().write_text(
@@ -450,7 +465,8 @@ def test_a_left_out_default_is_said_once(
     with _settings_can_not_be_saved():
         partial = application._repair_dangling_playlist_references()
         assert application._finish_playlist_reference_repair(partial).ok
-    assert len(said()) == 2 and "(phantom)" in said()[-1], said()
+        _published(application)
+    assert said() == [NAMES_NOTHING.format("ghost"), NAMES_NOTHING.format("phantom")], said()
 
 
 # -- which refusals count: only a file that can't be changed for as long as it stays as it is ----
@@ -467,14 +483,16 @@ def _a_start_over(profile: Profile, reference: str) -> Any:
     return application
 
 
-def test_a_default_whose_save_the_system_refuses_is_left_out(
+def test_a_default_whose_save_the_system_refuses_does_not_hold_the_start(
     profiles: Any,  # noqa: F811
 ) -> None:
     """The look says the folder takes a new file; the save itself is turned away.
 
     Here by the settings' own lock file, kept read-only (EACCES): what an
     immutable ``settings.toml`` does too, with EPERM. That is "can't be
-    saved where it is" as much as a read-only folder is.
+    saved where it is" as much as a read-only folder is. The start goes on,
+    and the publication after it leaves the default out and says so, with
+    nobody having to be told which file can't be changed.
     """
     profile: Profile = profiles()
     application = _a_start_over(profile, "ghost")
@@ -485,19 +503,18 @@ def test_a_default_whose_save_the_system_refuses_is_left_out(
         assert config.why_not_writable() == "", "the folder itself takes a file"
         result = application._repair_dangling_playlist_references()
         response = application._finish_playlist_reference_repair(result)
-        # The app's own lanes can't see this by looking, only by having been
-        # told: they build without what the start left out.
+        # The app's own lanes need no telling: every compile leaves it out.
         _published(application)
         assert application.publication_problem == ""
     finally:
         lock.chmod(0o600)
 
     assert result.failures == ()
-    assert result.unsaved_default is not None
-    reference, why = result.unsaved_default
-    assert reference == "ghost" and "Permission denied" in why
     assert response.ok and application.authoring_ready
-    assert application.session.left_out_default == "ghost"
+    assert application.left_out_notice == NAMES_NOTHING.format("ghost")
+    assert profile.window.reports == [NAMES_NOTHING.format("ghost")]
+    document = paths.runtime_config_path().read_text(encoding="utf-8")
+    assert f'default_playlist = "{runtime_config.FALLBACK_PLAYLIST_ID}"' in document
     assert paths.settings_path().read_bytes() == saved
 
 
@@ -529,11 +546,12 @@ def test_a_default_whose_save_only_failed_this_time_still_holds_the_start(
     refusal: str,
     default: str,
 ) -> None:
-    """Neither is "can't be saved for good", so neither leaves the default out.
+    """Neither is "can't be saved for good", so the start is not let past either.
 
     The folder is writable and the file holds only keys this build knows.
-    The gate rests at "repair", as it did before a default could be left out;
-    Try again runs the repair once more.
+    The gate rests at "repair", as it always did; Try again runs the repair
+    once more and has the file put right. A compile would leave the default
+    that names nothing out in the meantime, like any other.
     """
     profile: Profile = profiles()
     application = _a_start_over(profile, default)
@@ -545,15 +563,13 @@ def test_a_default_whose_save_only_failed_this_time_still_holds_the_start(
     result = application._repair_dangling_playlist_references()
     response = application._finish_playlist_reference_repair(result)
 
-    assert result.unsaved_default is None
     (failure,) = result.failures
     assert failure.startswith("saved default: ")
     assert ("timed out" in failure) is refusal.startswith("the lock"), failure
     assert not response.ok and response.kind == "authoring-repair-required", response
     assert not application.authoring_ready
     assert application._authoring_gate_state == "repair"
-    assert application.session.left_out_default == ""
-    assert not [text for text in profile.window.reports if "couldn\u2019t be cleared" in text]
+    assert profile.window.reports == [], "the failure is the lane's reply, and nothing else is said"
 
 
 # -- "names no playlist" rests on playlists that were read in full -------------------------------
@@ -569,11 +585,14 @@ def test_a_default_is_not_left_out_over_playlists_that_were_not_read(
     "Couldn't look" is not "no such playlist": the default is not left out,
     nothing is said about leaving it out, and the compiler goes on refusing
     the playlists file, naming it, so the last good ``runtime.toml`` stays.
-    A profile taken back to an older build is exactly this: a newer
-    ``playlists.json``, and settings with keys this build doesn't know.
+    A ``playlists.json`` a newer build saved is exactly this.
     """
     profile: Profile = profiles()
     application = _a_start_over(profile, "ghost")
+    _published(application)
+    good = paths.runtime_config_path().read_bytes()
+    assert application.left_out_notice == NAMES_NOTHING.format("ghost"), "read in full: left out"
+    said_before = list(profile.window.reports)
     target = playlists.state_path()
     if playlists_file == "from a newer build":
         newer = {"version": playlists.FORMAT_VERSION + 1, "lists": [{"id": "x", "name": "X"}]}
@@ -584,27 +603,30 @@ def test_a_default_is_not_left_out_over_playlists_that_were_not_read(
         with _settings_can_not_be_saved():
             result = application._repair_dangling_playlist_references()
             response = application._finish_playlist_reference_repair(result)
+            # The publication lane reads the stores afresh, and refuses this one.
+            _published(application)
         listing = playlists.Store.open()
-        loaded = config.load_strict_document()
-        with _settings_can_not_be_saved():
-            assert config.why_settings_cannot_change(loaded), "the settings can't be changed"
-            assert runtime_config.unclearable_default(listing, loaded) is None
+        as_saved = Session(config.load_strict())
+        try:
+            with pytest.raises(runtime_config.RuntimeConfigError, match="playlists") as refused:
+                runtime_config.compiled(config.load_strict(), as_saved)
+        finally:
+            as_saved.shutdown()
     finally:
         target.chmod(0o600)
 
-    assert result.unsaved_default is None
-    assert application.session.left_out_default == ""
-    assert not [text for text in profile.window.reports if "couldn\u2019t be cleared" in text]
+    assert "playlists.json" in str(refused.value)
+    assert "playlists" in application.publication_problem, "refused, naming the file"
+    assert "left untouched" in application.publication_problem
+    assert paths.runtime_config_path().read_bytes() == good, "the last good document stays"
+    assert [text for text in profile.window.reports if "The default names" in text] == [
+        NAMES_NOTHING.format("ghost")
+    ], "nothing more was left out, or said to be"
+    assert profile.window.reports[len(said_before) :] == [application.publication_problem]
     if playlists_file == "from a newer build":
         # Read-only here, not a failure: the gate opens and the compiler refuses the file.
         assert listing.fault_kind == state_file.NEWER_VERSION
         assert response.ok and result.failures == ()
-        as_saved = Session(config.load_strict())
-        try:
-            with pytest.raises(runtime_config.RuntimeConfigError, match="playlists"):
-                runtime_config.render(config.load_strict(), as_saved)
-        finally:
-            as_saved.shutdown()
     else:
         (failure,) = result.failures
         assert failure.startswith("playlists: ") and "playlists.json" in failure
@@ -623,16 +645,17 @@ def _published(application: Any) -> None:
     )
 
 
-def test_the_apps_own_lanes_build_without_the_default_the_start_left_out(
+def test_the_apps_own_lanes_build_without_a_default_that_names_nothing(
     profiles: Any,  # noqa: F811
 ) -> None:
     """The start said "playback goes on without a default", and it didn't.
 
     The publication lane and the health lane each compile with a `Session`
-    of their own, made on their worker, that was never told. Every change's
-    publication was refused ("default playlist refers to unknown playlist
-    'ghost'; repair it in the app"), no ``runtime.toml`` was written, and the
-    health lane saved nothing.
+    of their own, made on their worker. Every change's publication was
+    refused ("default playlist refers to unknown playlist 'ghost'; repair it
+    in the app"), no ``runtime.toml`` was written, and the health lane saved
+    nothing. Both now leave the default out, as every compile does, and it
+    is said once between them.
     """
     profile: Profile = profiles()
     application = _a_start_over(profile, "ghost")
@@ -656,29 +679,49 @@ def test_the_apps_own_lanes_build_without_the_default_the_start_left_out(
         health = application._ingest_runtime_health(request)
         assert health.accepted and health.changed == 1, health
         assert health.publication is None or not health.publication.error, health.publication
+        application._apply_runtime_health_result(health)
         assert paths.settings_path().read_bytes() == saved
 
-    told = [text for text in profile.window.reports if "default playlist" in text]
-    assert len(told) == 1 and "couldn\u2019t be cleared" in told[0], told
+    told = [text for text in profile.window.reports if "The default names" in text]
+    assert told == [NAMES_NOTHING.format("ghost")], "by the publication; not again by the poll"
     assert "renderer rejected this wallpaper" in paths.runtime_config_path().read_text("utf-8")
 
 
-def test_the_apps_own_lanes_stay_strict_where_the_settings_can_be_changed(
+def test_the_apps_own_lanes_leave_a_default_out_where_the_settings_can_be_changed_too(
     profiles: Any,  # noqa: F811
 ) -> None:
     """A default that went dangling under a running app, settings writable.
 
-    Nothing is left out: the publication is refused, saying which default,
-    and the next start's repair clears it.
+    This stayed strict until r6: the publication was refused ("default
+    playlist refers to unknown playlist 'ghost'"), the last document was
+    kept, and every later change waited for the next start's repair. It is
+    now left out like any other, and said; the next start's repair still
+    clears it, and then there is nothing left to say.
     """
     profile: Profile = profiles()
     application = profile.application
-    _saved(profile, "Lone", [profile.dawn])
+    lone = _saved(profile, "Lone", [profile.dawn])
+    application.update_settings(active_playlist=lone.id)
     _published(application)
-    good = paths.runtime_config_path().read_bytes()
+    good = paths.runtime_config_path().read_text(encoding="utf-8")
+    assert f'default_playlist = "{lone.id}"' in good and application.left_out_notice == ""
     config.update({"active_playlist": "ghost"})  # another program's edit
 
     _published(application)
 
-    assert "default playlist refers to unknown playlist 'ghost'" in application.publication_problem
-    assert paths.runtime_config_path().read_bytes() == good
+    assert application.publication_problem == ""
+    document = paths.runtime_config_path().read_text(encoding="utf-8")
+    assert f'default_playlist = "{runtime_config.FALLBACK_PLAYLIST_ID}"' in document
+    assert document.count("[[playlists]]") == good.count("[[playlists]]"), "the rest is there"
+    assert application.left_out_notice == NAMES_NOTHING.format("ghost")
+    assert profile.window.reports == [NAMES_NOTHING.format("ghost")]
+
+    # The next start: the settings can be saved, so the default is cleared.
+    application._settings = config.load_strict()
+    application.session.update_settings(application._settings, rescan_library=False)
+    partial = application._repair_dangling_playlist_references()
+    assert application._finish_playlist_reference_repair(partial).ok
+    assert config.load_strict().active_playlist == ""
+    _published(application)
+    assert application.left_out_notice == ""
+    assert profile.window.reports == [NAMES_NOTHING.format("ghost")], "and nothing new is said"

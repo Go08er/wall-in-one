@@ -1,16 +1,18 @@
-"""Astra's 0.3.0 review, X-1: a copy can't stop every publication. No display.
+"""Astra's 0.3.0 review, X-1: a copy holds something that can play. No display.
 
 Copying "All wallpapers" copied every scanned item without asking whether the
 copy could compile. A library of one video with no still yet (its capture
 pending or failed, or no ffmpeg) gave a saved copy with one unresolved entry,
 and the compiler then refused the whole runtime document, so every later
-change stayed off the wallpaper service until the copy was repaired.
+change stayed off the wallpaper service until the copy was repaired. (Since
+r6 the compiler builds without such a playlist instead of refusing; the copy
+is still refused, as a playlist that could never play.)
 
 Here through the Playlists page's part (`RealPlaylists`) over a real `Session`
 with its stores in the test's own XDG dirs and the queue-holding application
 of ``test_next_state``; ``test_ui_astra030_x1`` drives the real application.
-Each scenario test fails on 4018098 (the copy is saved, the document no
-longer builds).
+Each scenario test fails on 4018098 (the copy is saved, and the document is
+no longer whole: `tests.whole_document`).
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_next_state import FakeApplication, _adapter, _library, _session
+from tests.whole_document import builds_whole
 from wall_in_one import runtime_config
 from wall_in_one.library import playlists
 from wall_in_one.library.model import Kind, MediaItem
@@ -70,11 +73,12 @@ def _editing(backend: FakeApplication) -> RealPlaylists:
 
 
 def _builds(session: Session) -> bool:
-    try:
-        runtime_config.render(session.settings, session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
+    return builds_whole(session.settings, session)
 
 
 def _saved_names() -> list[str]:
@@ -100,7 +104,7 @@ def test_x1_copying_all_wallpapers_of_only_unresolved_videos_is_refused(
         f"The copy was not made; nothing changed: \u201cAll wallpapers (copy)\u201d {ONLY_UNUSABLE}"
     )
     assert only_video.playlist_changes == 0, "nothing to publish"
-    assert _builds(session), "every later publication still goes through"
+    assert _builds(session), "nothing was made that the document would be built without"
 
 
 def test_x1_a_copy_with_something_that_compiles_is_made(everything: FakeApplication) -> None:
@@ -119,17 +123,21 @@ def test_x1_a_copy_with_something_that_compiles_is_made(everything: FakeApplicat
 def test_x1_a_copy_of_a_playlist_whose_files_no_longer_compile_is_refused(
     everything: FakeApplication, items: tuple[MediaItem, ...]
 ) -> None:
-    """The same path for a playlist of one's own: no second playlist that blocks publication.
+    """The same path for a playlist of one's own: no second playlist that can't play.
 
     "Videos" got that way from outside the app (only a removed file's entry
-    is left, say); a copy of it would block publication on its own even once
-    "Videos" is mended or deleted.
+    is left, say); a copy of it would be one more playlist the document is
+    built without, even once "Videos" is mended or deleted.
     """
     session = everything.session
     videos = session.playlists.create(
         "Videos", entries=[playlists.Entry("v0", str(_video(items).path))]
     )
-    assert not _builds(session), "the original already blocks publication"
+    assert not _builds(session), "the original is already left out of the document"
+    built = runtime_config.compiled(session.settings, session)
+    assert "Videos" not in built.document and built.left_out == (), (
+        "and stops nothing: the rest is published, with nothing referring to it to say"
+    )
     editing = _editing(everything)
     copy = editing.duplicate_playlist(videos.id)
     everything.run_authoring()

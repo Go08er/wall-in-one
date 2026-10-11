@@ -45,7 +45,8 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_dry_run import _file  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
-from wall_in_one import config, paths, runtime_config  # noqa: E402
+from tests.whole_document import not_in_the_document  # noqa: E402
+from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import playlists, scan  # noqa: E402
@@ -188,7 +189,7 @@ def _publish(profile: Profile) -> None:
     application = profile.application
     assert application._publish_runtime_async()
     spin_until(lambda: _settled(application), BOUND, what="a publication")
-    assert application.publication_problem == ""
+    assert application.publication_problem == "" and application.left_out_notice == ""
 
 
 def _remove_dawn(profile: Profile) -> None:
@@ -230,9 +231,10 @@ def _release(profile: Profile) -> None:
 
 
 def _publishes(profile: Profile) -> None:
-    """Nothing blocks publication: the document builds, and a later change reaches it."""
+    """Nothing is wrong with what is saved: the document builds whole (nothing left out, no
+    playlist dropped; `tests.whole_document`), and a later change reaches it."""
     application = profile.application
-    runtime_config.render(application.settings, application.session)
+    assert not_in_the_document(application.settings, application.session) == []
     wanted = not application.settings.shuffle
     errors: list[str] = []
     assert application.update_settings_async(shuffle=wanted, on_error=errors.append)
@@ -242,6 +244,7 @@ def _publishes(profile: Profile) -> None:
         what="a later settings change",
     )
     assert errors == [] and application.publication_problem == ""
+    assert application.left_out_notice == ""
     document = paths.runtime_config_path().read_text(encoding="utf-8")
     assert f"shuffle = {str(wanted).lower()}" in document
 

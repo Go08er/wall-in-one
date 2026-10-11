@@ -972,19 +972,29 @@ def test_unresolved_playlist_entries_are_omitted_not_looked_up(tmp_path: Path) -
     assert [entry["id"] for entry in entries] == ["entry-video"]
 
 
-def test_playlist_with_no_resolved_entries_preserves_last_known_good(tmp_path: Path) -> None:
+def test_a_default_with_no_resolved_entries_is_built_as_all_media(tmp_path: Path) -> None:
+    """It refused the whole compile ("playlist 'Empty' has no playable entries; all 1 authored
+    entries are missing or unresolved") and kept the last document. The playlist is now left
+    out of the new one, with the default that names it, and the rest is published and said."""
     settings, session = _session(tmp_path)
     empty = session.playlists.create("Empty")
     session.playlists.add(empty.id, tmp_path / "not-in-library.mp4")
     settings = config.Settings(roots=settings.roots, active_playlist=empty.id)
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
-    target.write_text(previous, encoding="utf-8")
+    target.write_text('schema_version = 4\nlast_known_good = "replaced"\n', encoding="utf-8")
 
-    with pytest.raises(runtime_config.RuntimeConfigError, match=r"playlist 'Empty'.*all 1"):
-        runtime_config.update(settings, session, target)
+    published = runtime_config.publish_changes(settings, session, target)
 
-    assert target.read_text(encoding="utf-8") == previous
+    assert published.written == (target,)
+    assert published.left_out == (
+        runtime_config.LeftOut(
+            runtime_config.DEFAULT_OWNER, "", empty.id, "Empty", runtime_config.NOTHING_TO_PLAY
+        ),
+    )
+    document = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert document["default_playlist"] == runtime_config.FALLBACK_PLAYLIST_ID
+    assert [playlist["name"] for playlist in document["playlists"]] == ["All media", "Evening"]
+    assert [rule["playlist"] for rule in document["schedules"]] == ["evening"]
 
 
 def test_an_unreferenced_empty_playlist_remains_a_safe_authoring_draft(tmp_path: Path) -> None:
@@ -997,20 +1007,35 @@ def test_an_unreferenced_empty_playlist_remains_a_safe_authoring_draft(tmp_path:
 
 
 def test_a_schedule_cannot_silently_lose_its_empty_playlist(tmp_path: Path) -> None:
+    """Not silently: the rule is left out and the compile says which and why.
+
+    It used to refuse ("schedule 'draft-rule' refers to playlist 'Draft',
+    which has no playable entries") and keep the last document; the rest is
+    now published.
+    """
     settings, session = _session(tmp_path)
     draft = session.playlists.create("Draft")
     session.schedules.add(draft.id, rule_id="draft-rule")
     target = tmp_path / "runtime.toml"
-    previous = 'schema_version = 4\nlast_known_good = "preserve me"\n'
-    target.write_text(previous, encoding="utf-8")
+    target.write_text('schema_version = 4\nlast_known_good = "replaced"\n', encoding="utf-8")
 
-    with pytest.raises(
-        runtime_config.RuntimeConfigError,
-        match=r"schedule 'draft-rule'.*playlist 'Draft'.*no playable entries",
-    ):
-        runtime_config.update(settings, session, target)
+    published = runtime_config.publish_changes(settings, session, target)
 
-    assert target.read_text(encoding="utf-8") == previous
+    assert published.written == (target,)
+    (lost,) = published.left_out
+    assert lost == runtime_config.LeftOut(
+        runtime_config.SCHEDULE_OWNER,
+        "draft-rule",
+        draft.id,
+        "Draft",
+        runtime_config.NOTHING_TO_PLAY,
+    )
+    assert lost.warning() == (
+        "schedule rule 'draft-rule' names playlist 'Draft', which has nothing to play; "
+        "building without that rule"
+    )
+    document = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert [rule["id"] for rule in document["schedules"]] == ["night"]
 
 
 @pytest.mark.parametrize(

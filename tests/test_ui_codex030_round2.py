@@ -28,7 +28,8 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
-from wall_in_one import config, paths, runtime_config  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
+from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import pairing, scan, workshop  # noqa: E402
@@ -103,11 +104,12 @@ def _lane_idle(application: Application) -> bool:
 
 
 def _builds(application: Application) -> bool:
-    try:
-        runtime_config.render(application.settings, application.session)
-    except runtime_config.RuntimeConfigError:
-        return False
-    return True
+    """Whether the runtime document is built whole: nothing left out, no playlist dropped.
+
+    What "it builds" meant while one playlist that can't play refused the
+    whole compile (`tests.whole_document`).
+    """
+    return builds_whole(application.settings, application.session)
 
 
 def test_real_application_allows_removing_a_retained_videos_only_still(

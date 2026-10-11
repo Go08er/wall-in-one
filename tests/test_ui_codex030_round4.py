@@ -58,9 +58,12 @@ class Installed:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.documents: list[tuple[str, list[str]]] = []
-        install = runtime_config.update
+        # What the application's lanes install through (`ui.app._runtime_installed`).
+        install = runtime_config.publish_changes
 
-        def installed(settings: config.Settings, session: Any, path: Path | None = None) -> bool:
+        def installed(
+            settings: config.Settings, session: Any, path: Path | None = None
+        ) -> runtime_config.Published:
             changed = install(settings, session, path)
             if changed:
                 target = path if path is not None else paths.runtime_config_path()
@@ -68,7 +71,7 @@ class Installed:
                 self.documents.append((document, _missing(document)))
             return changed
 
-        monkeypatch.setattr(runtime_config, "update", installed)
+        monkeypatch.setattr(runtime_config, "publish_changes", installed)
 
     def since(self, count: int) -> list[tuple[str, list[str]]]:
         return self.documents[count:]

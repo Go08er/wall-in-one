@@ -25,6 +25,10 @@ child, in its own scratch profile, under its one plan:
     as well, a later call then fails: the released code finds its publication
     unverifiable and moves the edited entry wherever it does.
 
+``{"pause": n, "gate": path}``
+    Just before call ``n`` the process stops, alive, with whatever it holds
+    (`paused`): another version takes its turn, and then this one carries on.
+
 ``{"meddle": n, "which": k, "how": "flip"}``
     Just before call ``n``, the ``k``-th file then in the profile is edited in
     place (``"how"``: ``"extend"`` or ``"truncate"`` as above; ``"replace"``:
@@ -48,6 +52,7 @@ calls counted, and at one of them an entry made impossible to look at
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -55,6 +60,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -127,6 +133,12 @@ def _numbered(kind, name, where):
             _meddle(index)
         finally:
             _STATE["armed"] = True
+    if _PLAN.get("pause") == index:
+        _STATE["armed"] = False
+        try:
+            _pause()
+        finally:
+            _STATE["armed"] = True
     if kind == "change" and _PLAN.get("kill") == index:
         emit_trace()
         _os._exit(77)
@@ -140,6 +152,16 @@ def had(*paths):
     # What a person already had at a public name before the released code ran.
     for path in paths:
         _STATE["public"].append([0, _os.fspath(path), _os.lstat(path).st_ino])
+
+
+def _pause():
+    # Held just before this call until the other version has had its turn.
+    import time as _time
+
+    gate = _PLAN["gate"]
+    open(gate + ".reached", "w").close()
+    while not _os.path.exists(gate + ".go"):
+        _time.sleep(0.005)
 
 
 def _flipped(data):
@@ -392,10 +414,35 @@ def run(
     """
     if timeout is None:
         timeout = 300.0 + 0.5 * len(jobs)
+    done = subprocess.run(
+        _command(source, script),
+        cwd=source,
+        env=_environment(source),
+        input=_request(jobs),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    assert done.returncode == 0, done.stderr[-4000:]
+    produced = _parse(done.stdout, done.stderr)
+    assert len(produced) == len(jobs), done.stdout[-2000:] + done.stderr[-4000:]
+    return produced
+
+
+def _command(source: Path, script: str) -> list[str]:
+    return [sys.executable, "-c", released._PREAMBLE + TRACER + script, str(source)]
+
+
+def _environment(source: Path) -> dict[str, str]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(source)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    requested = json.dumps(
+    return environment
+
+
+def _request(jobs: Sequence[Job]) -> str:
+    return json.dumps(
         [
             {
                 "plan": dict(job.plan),
@@ -405,21 +452,13 @@ def run(
             for job in jobs
         ]
     )
-    done = subprocess.run(
-        [sys.executable, "-c", released._PREAMBLE + TRACER + script, str(source)],
-        cwd=source,
-        env=environment,
-        input=requested,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    assert done.returncode == 0, done.stderr[-4000:]
+
+
+def _parse(output: str, errors: str) -> list[Produced]:
     produced: list[Produced] = []
     lines: list[str] = []
     traced: dict[str, Any] = {}
-    for line in done.stdout.splitlines():
+    for line in output.splitlines():
         if line.startswith("JOB "):
             lines, traced = [], {}
         elif line.startswith("TRACE "):
@@ -429,7 +468,7 @@ def run(
                 Produced(
                     status=int(line.split()[2]),
                     output="\n".join(lines),
-                    errors=done.stderr,
+                    errors=errors,
                     calls=tuple(Call(*call) for call in traced.get("calls", ())),
                     public=tuple((c, path, inode) for c, path, inode in traced.get("public", ())),
                     edited=tuple((c, path, inode) for c, path, inode in traced.get("edited", ())),
@@ -437,8 +476,51 @@ def run(
             )
         else:
             lines.append(line)
-    assert len(produced) == len(jobs), done.stdout[-2000:] + done.stderr[-4000:]
     return produced
+
+
+@contextlib.contextmanager
+def paused(
+    source: Path, script: str, job: Job, at: int, *, timeout: float = 120.0
+) -> Iterator[list[Produced]]:
+    """``job`` run up to its call ``at`` and held there, alive, while the block runs.
+
+    Then it carries on to its end; the list given holds what it produced once
+    the block is left. A run that ends before call ``at`` was simply not held.
+    """
+    gate = str(job.base) + ".gate"
+    held = Job(job.base, {**job.plan, "pause": at, "gate": gate}, job.arguments)
+    child = subprocess.Popen(
+        _command(source, script),
+        cwd=source,
+        env=_environment(source),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    result: list[Produced] = []
+    try:
+        assert child.stdin is not None
+        child.stdin.write(_request([held]))
+        child.stdin.close()
+        child.stdin = None
+        deadline = time.monotonic() + timeout
+        while not os.path.exists(gate + ".reached") and child.poll() is None:
+            assert time.monotonic() < deadline, "the producer never reached its pause"
+            time.sleep(0.005)
+        yield result
+    finally:
+        Path(gate + ".go").touch()
+        try:
+            output, errors = child.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            output, errors = child.communicate()
+            errors += "\nWEDGED: the held producer did not finish once released"
+        result += _parse(output, errors) or [
+            Produced(status=child.returncode or 1, output=output, errors=errors)
+        ]
 
 
 # -- a scratch profile per probe -------------------------------------------------------------
@@ -1027,4 +1109,104 @@ def campaign(
             )
             if variant.more is not None:
                 wanted_variants += [(job, further) for further in variant.more(calls)]
+    return result
+
+
+def round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+    source: Path,
+    script: str,
+    arguments: tuple[str, ...],
+    base: Path,
+    *,
+    prepare: Callable[[Path], Tree],
+    between: Callable[[Sequence[Path]], Sequence[Produced]],
+    consume: Callable[[Path], Iterator[tuple[str, str]]],
+    exempt_between: Callable[[Entry, Tree, Tree], bool] = lambda _entry, _before, _after: False,
+    exempt: Callable[[Entry, Tree], bool] = lambda _entry, _before: False,
+    judge: Callable[[Path, Tree, Tree, str], str] = lambda _base, _before, _after, _said: "",
+    plans: Callable[[Produced], list[dict[str, object]]] | None = None,
+    full: bool = False,
+) -> Campaign:
+    """A producer under every plan, another version's turn on what it left, then ``consume``.
+
+    Going back and returning: ``script`` is run from ``source`` under each plan
+    (the usual `single_faults`, or ``plans``); ``between(profiles)`` gives each
+    distinct state to the other version, in one batch, and returns what it
+    did; ``consume`` is this checkout's turn after it, as in `campaign`. After
+    the other version's turn and after every step of ours, nothing that was
+    there before, was ever public or was edited has lost its bytes, but for
+    what ``exempt_between(entry, before, after)`` and ``exempt`` allow.
+    ``judge(profile, before, after, what the other version said)`` adds its own
+    words on the other version's turn: a finding if they start ``FINDING``.
+    """
+    result = Campaign()
+    plain = Job(base / "plain", {}, arguments)
+    prepare(plain.base)
+    (trace,) = run(source, script, [plain])
+    assert trace.status == 0, trace.output + trace.errors[-2000:]
+    planned = single_faults(trace, full=full) if plans is None else plans(trace)
+    jobs = [
+        Job(base / f"a{number:05d}", plan, arguments) for number, plan in enumerate([{}, *planned])
+    ]
+    result.faults = len(planned)
+    firsts = [prepare(job.base) for job in jobs]
+    produced = run(source, script, jobs)
+    chosen: list[tuple[Job, Tree, Produced, Tree]] = []
+    seen: set[object] = set()
+    for job, first, made in zip(jobs, firsts, produced, strict=True):
+        assert made.status in (0, KILLED), made.errors[-2000:]
+        state = tree(job.base)
+        key = (shape(state, job.base), made.status)
+        if key not in seen:
+            seen.add(key)
+            chosen.append((job, first, made, state))
+            result.states.append(shape(state, job.base))
+    turns = between([job.base for job, _first, _made, _state in chosen])
+    for (job, first, made, before), turn in zip(chosen, turns, strict=True):
+        label = f"{dict(job.plan)}"
+        protected = (
+            frozenset(entry.inode for entry in first.entries)
+            | made.once_public
+            | frozenset(inode for _call, _path, inode in made.edited)
+        )
+        after = tree(job.base)
+        said = turn.output if turn.status == 0 else f"FINDING it ended {turn.status}: {turn.output}"
+        said = judge(job.base, before, after, said) or said
+        told = _RANDOM.sub("*", said.replace(str(job.base), ""))
+        result.outcomes[f"the other version: {told[:200]}"] += 1
+        if said.startswith("FINDING"):
+            result.findings.append(f"{said} [{label}, at the other version's turn]")
+
+        def spared(entry: Entry, before: Tree = before, after: Tree = after) -> bool:
+            return exempt_between(entry, before, after)
+
+        def kept(entry: Entry, after: Tree = after) -> bool:
+            return exempt(entry, after)
+
+        for entry in lost(before, after, protected, spared):
+            result.findings.append(
+                f"LOST {label}: after the other version's turn, the {entry.size} bytes of "
+                f"{entry.path.relative_to(job.base)} are nowhere (or in fewer places)"
+            )
+        protected |= turn.once_public
+        with monkeypatch.context() as scoped:
+            scratch_profile(scoped, job.base)
+            for name, said in consume(job.base):
+                told = _RANDOM.sub("*", said.replace(str(job.base), ""))
+                result.outcomes[f"{name}: {told[:170]}"] += 1
+                now = tree(job.base)
+                if said.startswith("FINDING"):
+                    result.findings.append(f"{said} [{label}, at {name}]")
+                for entry in lost(after, now, protected, kept):
+                    result.findings.append(
+                        f"LOST {label}: after {name}, the {entry.size} bytes of "
+                        f"{entry.path.relative_to(job.base)} are nowhere (or in fewer places)"
+                    )
+                for path in _named(said, job.base):
+                    if not os.path.lexists(path):
+                        result.findings.append(
+                            f"SAID {label}: {name} names {path.relative_to(job.base)}, which "
+                            f"isn't there: {said.replace(str(job.base), '')}"
+                        )
     return result

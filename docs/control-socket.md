@@ -203,21 +203,27 @@ and `select`, and `still` or `reset-pairing` for a wallpaper a playlist holds,
 are refused with kind `library-not-current`, and nothing is written. Try again
 once the scan has finished (refresh the library if it failed).
 
-Four refusals say the app couldn't check something, never that the thing is
+Five refusals say the app couldn't check something, never that the thing is
 gone, and nothing is written or deleted:
 
 - `playlist-delete` replies with kind `unreadable` while `settings.toml` can't
   be read or is malformed: the app can't tell whether that playlist is the
   default. With no `settings.toml` at all, the playlist is deleted as usual.
 - A change that would leave a playlist with nothing to play (`playlist-remove`
-  of the last wallpaper it plays, `still <video> default`, `reset-pairing`)
-  replies with kind `unreadable` while `settings.toml`, the schedule file or
-  the displays file can't be read or is damaged: whether anything uses that
-  playlist can't be known, and the reply names the file. `remove` says the
-  same with kind `local-io`. Nothing else waits on such a file, and a damaged
-  one is still repaired by the next change saved to it (`schedule-add`,
-  `display-assign`), which keeps the damaged file beside it as `.broken`. A
-  file that isn't there at all is nothing saved, and the change goes ahead.
+  of the last wallpaper it plays, `still <video> default`, `reset-pairing`,
+  `remove`) replies with kind `unreadable` while `settings.toml`, the schedule
+  file or the displays file can't be read or is damaged: whether anything uses
+  that playlist can't be known, and the reply names the file. Nothing else
+  waits on such a file, and a damaged one is still repaired by the next change
+  saved to it (`schedule-add`, `display-assign`), which keeps the damaged file
+  beside it as `.broken`. A file that isn't there at all is nothing saved, and
+  the change goes ahead.
+- A change that asks what a playlist holds (`playlist-remove`, `playlist-delete`,
+  `still <video> default`, `reset-pairing`, and `schedule-add` or
+  `display-assign`, which ask whether the playlist has something to play)
+  replies with kind `unreadable`, naming the file, while the playlists file
+  can't be read or is damaged. `playlist-new` and `playlist-add` are not held
+  up: they are saved to that file, and saving to it is what repairs it.
 - `remove`, whether it deletes the wallpaper or moves it to the trash, replies
   with kind `local-io` when the wallpaper, or its folder, can't be looked at.
   Before 0.3.0 that answered `missing`, "is no longer there".

@@ -465,6 +465,73 @@ def test_a_store_a_newer_build_saved_holds_up_only_its_own_writes(
     assert target.read_bytes() == newer
 
 
+@pytest.mark.parametrize("change", ["a folder leaves", "Wallpaper Engine scanning goes"])
+def test_no_source_is_taken_away_while_the_playlists_can_not_be_read(
+    shown: Shown,  # noqa: F811
+    tmp_path: Path,
+    change: str,
+) -> None:
+    """Which playlists play from a folder is the whole question when it leaves.
+    A store opened on a damaged ``playlists.json`` holds none, so the dry run
+    found nothing to break and let the folder go. Adding a folder takes nothing
+    from any playlist and waits on no file."""
+    opened = shown.opened
+    application = opened.application
+    _playlist(shown, "Wet", [shown.rain])
+    _another_program(files={str(playlists.state_path()): "{ half a file"})
+    access = opened.page.access
+    assert access is not None
+    said: list[str] = []
+
+    if change == "a folder leaves":
+        access.remove_folder(str(shown.walls2))
+        opened.wait("the folder gesture to settle")
+    else:
+        application.update_settings_async(
+            scan_workshop=False,
+            on_success=lambda _settings: said.append("saved"),
+            on_error=said.append,
+        )
+        opened.wait("the change to settle", lambda: bool(said))
+
+    # Failed on d38cb66: allowed, judged against no playlists at all.
+    saved = config.load_strict()
+    assert (saved.roots, saved.scan_workshop) == ((shown.walls, shown.walls2), True)
+    reason = (said or opened.reports)[-1]
+    reason = reason.removeprefix("Library folders were not saved; nothing changed: ")
+    assert reason.startswith("unreadable: playlists can't be read ("), reason
+    assert reason.endswith(", so this change could not be checked")
+    assert reason.count("could not be checked") == 1
+
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    access.add_folder(str(chosen))
+    opened.wait("the addition to settle")
+    assert config.load_strict().roots == (shown.walls, shown.walls2, chosen)
+    spin_until(lambda: application._library_scan_future is None, 10, what="the rescan")
+
+
+def test_a_removal_that_turns_on_uses_it_could_not_read_says_so_once(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """With the kind every such question replies with, and the file's name."""
+    profile: Profile = profiles()
+    _saved(profile, "Lone", [profile.dawn])
+    _another_program(files={str(schedules.state_path()): "{ half a file"})
+
+    reply = _reply(profile, "remove", str(profile.dawn.path))
+
+    # On d38cb66: kind local-io, and "... could not be checked: unreadable: ...
+    # could not be checked".
+    assert not reply.ok and reply.kind == "unreadable", reply
+    assert reply.message.startswith(
+        "unreadable: dawn was not removed: schedules can't be read ("
+    ), reply.message
+    assert reply.message.endswith(", so this change could not be checked")
+    assert reply.message.count("could not be checked") == 1
+    assert profile.dawn.path.exists()
+
+
 # -- the library a judgement goes by -------------------------------------------------------
 
 

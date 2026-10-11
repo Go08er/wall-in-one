@@ -690,6 +690,12 @@ def _dry_run_removal(
             uses=uses,
             scanner=plan.scanner,
         )
+    except config.SettingsUnreadableError as error:
+        # A file the question turns on could not be read: said as that, once,
+        # with its own kind (`runtime_config.unreadable`).
+        raise config.SettingsUnreadableError(
+            f"{plan.item.name} was not removed: {error.args[0]}"
+        ) from error
     except Exception as error:
         raise dry_run.CheckFailed(
             f"{plan.item.name} was not removed: what removing it would leave could not be "

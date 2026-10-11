@@ -53,7 +53,7 @@ from wall_in_one.library import (
 )
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.library.playlists import Playlist
-from wall_in_one.session import SAVED_USES, Scanner, Session
+from wall_in_one.session import SAVED_PLAYLISTS, SAVED_USES, Scanner, Session
 
 
 class CheckFailed(ValueError):  # noqa: N818 - reads as the sentence it carries
@@ -213,7 +213,22 @@ def sources(
     folder is no longer one), is what the next scan will find. Playlist
     entries stay, naming what is no longer there. Uses are counted as
     ``after`` has them.
+
+    A change that takes a source away needs the playlists to have been read
+    (``uses.unread``): refused with kind ``unreadable``, naming the file,
+    when they were not. One that only adds a source takes nothing from any
+    playlist and waits on no file.
     """
+    takes_away = bool(set(before.roots) - set(after.roots)) or (
+        before.scan_workshop and not after.scan_workshop
+    )
+    unread_playlists = [(name, why) for name, why in uses.unread if name == SAVED_PLAYLISTS]
+    if takes_away and unread_playlists:
+        # A folder leaves, or Wallpaper Engine scanning goes: which playlists
+        # play from there is the whole question, and the playlists could not
+        # be read. A store opened on a damaged file holds none, and "no
+        # playlist plays from it" from that would be a guess.
+        raise runtime_config.unreadable(unread_playlists)
     records = dict(pairing_store.records)
     stores = _Stores(pairing_store, playlist_store, favourite_store)
     after_library = (

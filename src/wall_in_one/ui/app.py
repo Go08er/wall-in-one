@@ -6544,6 +6544,10 @@ class Application(Adw.Application):
                     )
                 finally:
                     view.shutdown()
+            except config.SettingsUnreadableError:
+                # A file the question turns on could not be read: said as
+                # that, once, with its own kind (`runtime_config.unreadable`).
+                raise
             except Exception as error:
                 raise dry_run.CheckFailed(
                     f"what {what} would leave could not be checked: {error}"

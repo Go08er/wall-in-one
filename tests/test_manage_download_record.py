@@ -565,8 +565,8 @@ def test_a_record_that_cannot_be_put_back_is_kept_whole_and_named(
     assert caught.value.retain_intent
     assert said.endswith(
         f"something else is now at {_record(item)}, so its download record was kept at {kept}; "
-        "its pending removal record was retained, so the next start puts the download record "
-        "back"
+        "its pending removal record was retained, so the next library scan or start puts the "
+        "download record back"
     ), said
 
 
@@ -599,7 +599,7 @@ def test_a_claim_that_could_not_be_made_durable_is_said_as_that(
         f"local-io: {item.path} was moved into its removal\u2019s claim, but that could not be "
         f"made durable (No space left on device), so it was not deleted. It is at {claimed}, "
         "and its pending removal record was retained: the removal is finished, with what "
-        "belongs to the wallpaper, at the next start"
+        "belongs to the wallpaper, at the next library scan or start"
     ), said
 
 
@@ -650,7 +650,7 @@ def test_a_record_whose_own_claim_could_not_be_made_durable_keeps_the_pending_re
         f"local-io: {_record(item)} was moved into its claim, but that could not be made "
         "durable (No space left on device); the wallpaper was left untouched; its download "
         f"record was kept at {kept}; its pending removal record was retained, so the next "
-        "start puts the download record back"
+        "library scan or start puts the download record back"
     )
     assert not _trash_folder("files").exists() or list(_trash_folder("files").iterdir()) == []
 
@@ -685,7 +685,7 @@ def test_a_record_whose_own_claim_could_not_be_verified_keeps_the_pending_remova
     assert said == (
         f"changed: {_record(item)} changed before removal; the wallpaper was left untouched; "
         f"an unverified entry was preserved at {kept}; its pending removal record was "
-        "retained, so the next start looks at what is there again"
+        "retained, so the next library scan or start looks at what is there again"
     )
 
 
@@ -924,7 +924,7 @@ def test_the_download_record_at_every_exit_of_a_trash_move(
     # wallpaper never left its folder.
     assert _fate(item, written, said) == fate, said
     assert committed == (fate == "consumed")
-    assert "the next start" not in said, "no token: no later start is promised anything"
+    assert "pending removal record" not in said, "no token: nothing later is promised"
     if fate == "back" and item.path.exists() and _fingerprint(item.path) == untouched:
         assert scan.has_download_sidecar(item.path), "untouched, so still a download"
 

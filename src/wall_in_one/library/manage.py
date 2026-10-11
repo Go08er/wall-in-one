@@ -338,13 +338,11 @@ class _WithdrawnAuthority:
                 # removal's token leads to. Cancelling the pending removal
                 # record would leave it there for good, and the wallpaper a
                 # local file from then on: replay looks under pending records
-                # only. Kept, the next start puts the record back
-                # (`settle_record_claims`), or says again why it can't.
+                # only. Kept, the next replay (a library scan, so also the
+                # next start) puts the record back (`settle_record_claims`),
+                # or says again why it can't.
                 error.retain_intent = True
-                note = (
-                    f"{note}; its pending removal record was retained, so the next start "
-                    "puts the download record back"
-                )
+                note = f"{note}; {_RETAINED}, so {_NEXT_REPLAY} puts the download record back"
         if not note:
             return
         if isinstance(error, ManageError) and error.args and isinstance(error.args[0], str):
@@ -1309,6 +1307,13 @@ def _revalidate_adopted_authority(
     return replace(authority, adoption_id="", sidecar_fingerprint=None)
 
 
+#: What a refusal says of a pending removal record it kept, and when that
+#: record is acted on: pending removals are replayed by every library scan
+#: (`Session.refresh`), which a start runs too, not only by the next start.
+_RETAINED: Final = "its pending removal record was retained"
+_NEXT_REPLAY: Final = "the next library scan or start"
+
+
 def _record_claim_failure(
     logical: Path, error: file_io.PathChangedError, *, replayable: bool
 ) -> ManageError:
@@ -1325,7 +1330,7 @@ def _record_claim_failure(
     and the wallpaper a local file from then on, because replay looks under
     pending records only. So the failure keeps the pending record
     (``retain_intent``), which also keeps any record withdrawn before this one
-    in its claim, and the next start settles them all together
+    in its claim, and the next replay settles them all together
     (`settle_record_claims`): a record of the file this removal prepared goes
     back to its name, and anything else is named and left as it is.
 
@@ -1358,7 +1363,7 @@ def _record_claim_failure(
         )
         then = "looks at what is there again"
     if replayable:
-        said += f"; its pending removal record was retained, so the next start {then}"
+        said += f"; {_RETAINED}, so {_NEXT_REPLAY} {then}"
     return ManageError(kind, said, retain_intent=replayable)
 
 
@@ -1971,8 +1976,8 @@ def _remove_withdrawn(
             "local-io",
             f"{path} was moved into its removal\u2019s claim, but that could not be made "
             f"durable ({error.reason}), so it was not deleted. It is at "
-            f"{error.preserved_path}, and its pending removal record was retained: the "
-            "removal is finished, with what belongs to the wallpaper, at the next start",
+            f"{error.preserved_path}, and {_RETAINED}: the removal is finished, with "
+            f"what belongs to the wallpaper, at {_NEXT_REPLAY}",
             retain_intent=True,
         ) from error
     except file_io.PathChangedError as error:

@@ -476,6 +476,20 @@ def _render_block(template_path: Path, output_path: Path, post_hook: str) -> str
     )
 
 
+#: What a folder that can't be written answers: not "missing", and not "changed".
+_UNWRITABLE: Final = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+
+
+class _TemplateFolderUnwritableError(TemplateInstallError):
+    """The template's folder can't be written, so nothing was put there."""
+
+    def __init__(self, folder: Path, error: OSError) -> None:
+        super().__init__(
+            f"{folder} can't be written ({error.strerror or error}), so the palette "
+            "template wasn't installed; nothing was changed"
+        )
+
+
 def _fsync_parent(path: Path) -> None:
     descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
@@ -494,8 +508,15 @@ def _ensure_durable_directory(path: Path) -> None:
         if parent == path:
             raise TemplateInstallError(f"cannot create template directory {path}") from error
         _ensure_durable_directory(parent)
-        with contextlib.suppress(FileExistsError):
-            path.mkdir()
+        try:
+            with contextlib.suppress(FileExistsError):
+                path.mkdir()
+        except OSError as unmade:
+            if unmade.errno in _UNWRITABLE:
+                raise _TemplateFolderUnwritableError(parent, unmade) from unmade
+            raise TemplateInstallError(
+                f"cannot create template directory {path}: {unmade}"
+            ) from unmade
         try:
             status = path.lstat()
         except OSError as error:
@@ -1161,16 +1182,29 @@ def _discard_recovery_regular(
         )
     entry.verify_named(access_path, logical_path=displayed_path)
     try:
-        removed = file_io.discard_regular_if_same(
-            access_path,
-            expected_identity=entry.identity,
-            expected_fingerprint=entry.fingerprint,
-            retained_parent=retained_parent,
-            logical_retained_parent=(
-                retained_parent if logical_retained_parent is None else logical_retained_parent
-            ),
-            said_as=displayed_path,
-        )
+        if (
+            logical_path is None
+            and retained_parent == access_path.parent
+            and logical_retained_parent in (None, retained_parent)
+        ):
+            # An entry beside the settings, by its public name (an orphaned
+            # lock): its folder may be reached through a link.
+            removed = _discard_beside_settings(
+                access_path,
+                expected_identity=entry.identity,
+                expected_fingerprint=entry.fingerprint,
+            )
+        else:
+            removed = file_io.discard_regular_if_same(
+                access_path,
+                expected_identity=entry.identity,
+                expected_fingerprint=entry.fingerprint,
+                retained_parent=retained_parent,
+                logical_retained_parent=(
+                    retained_parent if logical_retained_parent is None else logical_retained_parent
+                ),
+                said_as=displayed_path,
+            )
     except OSError as error:
         raise _cannot_retire("discard transaction entry", displayed_path, error) from error
     if not removed:
@@ -2093,6 +2127,12 @@ def _begin_publication_transaction(
                             logical_path=regular_path,
                         )
                         removed = True
+                    elif regular_path.parent == path.parent:
+                        removed = _discard_beside_settings(
+                            regular_path,
+                            expected_identity=identity,
+                            expected_fingerprint=fingerprint,
+                        )
                     else:
                         removed = file_io.discard_regular_if_same(
                             regular_path,
@@ -2255,6 +2295,54 @@ def _begin_publication_transaction(
     )
 
 
+def _discard_beside_settings(
+    path: Path,
+    *,
+    expected_identity: file_io.PathIdentity,
+    expected_fingerprint: file_io.FileFingerprint | None,
+) -> bool:
+    """`file_io.discard_regular_if_same` for one of this installer's own entries
+    beside Noctalia's settings, also when that folder is reached through a link.
+
+    The discard refuses a folder whose own name is a symbolic link, on
+    purpose: destructive authority is never followed through a link (wallpaper
+    removal relies on that, and is not changed). But Noctalia's folder being a
+    link, with its state kept on another drive, is an ordinary set-up, and
+    there every install and uninstall left its lock file behind.
+
+    So for these entries only (a lock, a record, a candidate this installer
+    made), the folder is opened here, following its name, and accepted only if
+    it holds this exact inode under this exact name now
+    (`file_io._pin_folder_holding`). The discard is then given that
+    descriptor's spelling, so it follows no name at all. A link swapped to
+    another folder does not hold the entry: nothing is discarded there. A
+    folder that is not a link takes the same call as before.
+    """
+    folder = path.parent
+    if not folder.is_symlink():
+        return file_io.discard_regular_if_same(
+            path,
+            expected_identity=expected_identity,
+            expected_fingerprint=expected_fingerprint,
+            retained_parent=folder,
+            logical_retained_parent=folder,
+        )
+    try:
+        held = file_io._pin_folder_holding(folder, path.name, expected_identity)
+    except OSError:
+        return False  # not there, not this entry, or the folder can't be opened
+    with held:
+        anchor = Path(f"/proc/self/fd/{held.descriptor}")
+        return file_io.discard_regular_if_same(
+            anchor / path.name,
+            expected_identity=expected_identity,
+            expected_fingerprint=expected_fingerprint,
+            retained_parent=anchor,
+            logical_retained_parent=folder,
+            said_as=path,
+        )
+
+
 def _discard_candidate_if_owned(
     temporary: Path,
     candidate_identity: file_io.PathIdentity | None,
@@ -2268,6 +2356,15 @@ def _discard_candidate_if_owned(
     if candidate_identity is None:
         return True
     try:
+        if retained_parent in (None, temporary.parent) and logical_retained_parent in (
+            None,
+            temporary.parent,
+        ):
+            return _discard_beside_settings(
+                temporary,
+                expected_identity=candidate_identity,
+                expected_fingerprint=expected_fingerprint,
+            )
         return file_io.discard_regular_if_same(
             temporary,
             expected_identity=candidate_identity,
@@ -2411,12 +2508,10 @@ def _cleanup_publication_transaction(
         return _moved_to(error) or _remainder(transaction.record, transaction.lock)
     _fsync_parent(transaction.record)
     try:
-        file_io.discard_regular_if_same(
+        _discard_beside_settings(
             transaction.lock,
             expected_identity=transaction.lock_identity,
             expected_fingerprint=transaction.lock_fingerprint,
-            retained_parent=transaction.lock.parent,
-            logical_retained_parent=transaction.lock.parent,
         )
     except OSError as error:
         moved = _moved_to(error)
@@ -2722,6 +2817,8 @@ def _write_bytes_atomically(path: Path, document: bytes) -> None:
 
     descriptor = -1
     parent_descriptor = -1
+    #: Whether the template reached its name: until then, nothing was changed.
+    linked = False
     try:
         parent_descriptor = os.open(
             path.parent,
@@ -2753,6 +2850,7 @@ def _write_bytes_atomically(path: Path, document: bytes) -> None:
             dst_dir_fd=parent_descriptor,
             follow_symlinks=True,
         )
+        linked = True
         state_file.record_write(path)
         after = os.fstat(descriptor)
         named = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
@@ -2777,6 +2875,8 @@ def _write_bytes_atomically(path: Path, document: bytes) -> None:
     except TemplateInstallError:
         raise
     except OSError as error:
+        if not linked and error.errno in _UNWRITABLE:
+            raise _TemplateFolderUnwritableError(path.parent, error) from error
         raise TemplateInstallError(f"cannot write {path}: {error}") from error
     finally:
         resources: list[tuple[Callable[[], None], str]] = []
@@ -2827,6 +2927,14 @@ def ensure_installed_template() -> tuple[Path, bool]:
     if template_changed:
         try:
             _write_bytes_atomically(destination, source_document)
+        except _TemplateFolderUnwritableError:
+            # Nothing was written, and with nothing at the name nobody else
+            # wrote it either: the reason is that the folder can't be
+            # written, not that the template "can't be verified".
+            if _present(destination) is False:
+                raise
+            _verify_and_sync_installed_template(destination, source_document)
+            template_changed = False
         except TemplateInstallError:
             # A concurrent installer may have linked and synced the same
             # immutable document after our absence check. Converge only

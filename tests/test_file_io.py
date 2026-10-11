@@ -1863,3 +1863,32 @@ def test_a_folder_that_does_not_hold_the_entry_is_never_the_one_synced(
         )
 
     assert events == [] and source.read_bytes() == b"a record a person added to"
+
+
+def test_a_claim_still_refuses_a_folder_whose_own_name_is_a_link(tmp_path: Path) -> None:
+    """The guard beside the two tests above: taking deletion authority is not
+    relaxed. A claim does not follow a folder's own name through a symbolic link
+    (wallpaper removal relies on that); only a retirement, and the template's
+    own cleanup, accept a folder by what it holds."""
+    real = tmp_path / "another-drive"
+    real.mkdir()
+    folder = tmp_path / "Wallpapers"
+    folder.symlink_to(real)
+    source = folder / "clip.mp4"
+    source.write_bytes(b"a wallpaper")
+    fingerprint = file_io.regular_file_fingerprint(source)
+
+    with pytest.raises(OSError):
+        file_io.claim_for_deletion(
+            source, expected_identity=fingerprint[:2], expected_fingerprint=fingerprint
+        )
+    assert (
+        file_io.discard_regular_if_same(
+            source, expected_identity=fingerprint[:2], expected_fingerprint=fingerprint
+        )
+        is False
+    )
+
+    assert source.read_bytes() == b"a wallpaper"
+    retained = real / file_io.RETAINED_ENTRY_DIRECTORY
+    assert not retained.exists() or list(retained.iterdir()) == [], "nothing was moved"

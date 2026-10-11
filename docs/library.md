@@ -66,6 +66,13 @@ through symbolic-link directory components. Configure the real absolute root
 when you want those actions available. This keeps a link swapped between scan
 and removal from redirecting an operation outside the selected library.
 
+That refusal is for your wallpapers. Wall-in-One's own bookkeeping files (an
+entry it retires into `.wall-in-one-retained`, and the palette template's lock
+and record beside Noctalia's settings) are found by what their folder holds:
+the folder is opened and must contain that exact file under that exact name.
+So a state folder that is itself a link to another drive doesn't leave them
+behind, and a link swapped to another folder is still refused.
+
 Changing the list rescans immediately. Removing a folder from this list (Settings
 asks first) stops scanning it; it does not delete the wallpapers in it.
 

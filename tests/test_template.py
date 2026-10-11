@@ -3499,3 +3499,134 @@ def test_a_moved_back_settings_copy_is_only_called_retired_once_that_is_durable(
     else:
         # Failed on 7bdc1a6: "... was retired intact to <path>".
         assert said == f"; what was at {temporary} was moved to {kept}{sync_faults.UNCONFIRMED}"
+
+
+# -- a folder that can't be written is said as that, not as something missing ----------
+
+
+@pytest.mark.parametrize("state_folder", ["there, read-only", "not there, in a read-only folder"])
+def test_install_says_the_template_folder_cannot_be_written_and_changes_nothing(
+    fake_home: Path, state_folder: str
+) -> None:
+    """Wall-in-One's state folder can't be written (a native EACCES): the
+    template can't be put there. The reason given is that, and that nothing was
+    changed; not "cannot verify ... No such file", which is what the fallback
+    for a concurrent installer said once the write had failed."""
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    before = settings_path.read_bytes()
+    state = paths.app_state_dir()
+    if state_folder == "there, read-only":
+        state.mkdir(parents=True)
+        unwritable = state
+    else:
+        unwritable = state.parent
+    mode = stat.S_IMODE(unwritable.stat().st_mode)
+    unwritable.chmod(0o500)
+    try:
+        # Failed on 824f750: "cannot verify palette template ...: [Errno 2] No such file
+        # or directory", or a bare PermissionError when the folder was to be made.
+        with pytest.raises(template.TemplateInstallError) as refused:
+            template.install()
+    finally:
+        unwritable.chmod(mode)
+
+    assert str(refused.value) == (
+        f"{unwritable} can't be written (Permission denied), so the palette template "
+        "wasn't installed; nothing was changed"
+    )
+    assert settings_path.read_bytes() == before
+    assert sorted(entry.name for entry in settings_path.parent.iterdir()) == ["settings.toml"]
+    assert not state.exists() or list(state.iterdir()) == []
+
+
+# -- Noctalia's folder reached through a symbolic link ----------------------------------
+
+
+def _linked_noctalia_folder(tmp_path: Path) -> Path:
+    """Noctalia's state folder as a link to a folder on "another drive"; the real one."""
+    real = tmp_path / "another-drive" / "noctalia"
+    real.mkdir(parents=True)
+    linked = paths.noctalia_state_dir()
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    linked.symlink_to(real)
+    return real
+
+
+def _transaction_entries(folder: Path) -> list[str]:
+    return sorted(
+        entry.name for entry in folder.iterdir() if "wall-in-one-transaction" in entry.name
+    )
+
+
+def test_installs_and_uninstalls_in_a_linked_noctalia_folder_leave_no_lock(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    """Noctalia's folder being a symbolic link is an ordinary set-up. Each install
+    and uninstall there finishes its own cleanup: no lock file is left, and none
+    ends with "... its recovery cleanup remains at <lock>"."""
+    real = _linked_noctalia_folder(tmp_path)
+    settings_path = _write_noctalia_settings(SAMPLE_SETTINGS)
+    assert settings_path.parent.is_symlink() and settings_path.resolve().parent == real
+
+    for step in (template.install, template.uninstall, template.install, template.uninstall):
+        # Failed on 824f750: TemplateInstallError("... was updated, but its recovery
+        # cleanup remains at <lock>"), and one more lock file each time.
+        step()
+        assert _transaction_entries(real) == [], step.__name__
+
+    assert (
+        tomllib.loads(settings_path.read_text(encoding="utf-8"))["theme"]["source"] == "wallpaper"
+    )
+
+
+def test_locks_left_in_a_linked_noctalia_folder_are_cleaned_by_the_next_install(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    """What earlier versions left: one orphaned lock for every install or
+    uninstall in a linked folder. The next install's reconcile discards them, as
+    it does in a folder that is not a link."""
+    real = _linked_noctalia_folder(tmp_path)
+    _write_noctalia_settings(SAMPLE_SETTINGS)
+    for suffix in ("aaaa1111", "bbbb2222"):
+        left = real / f".settings.toml.wall-in-one-transaction-lock-{suffix}"
+        left.write_bytes(b"")
+        left.chmod(0o600)
+
+    template.install()
+
+    # Failed on 824f750: both stayed, and the install left a third.
+    assert _transaction_entries(real) == []
+
+
+@pytest.mark.parametrize("other_folder", ["holds nothing by that name", "holds another file there"])
+def test_a_link_swapped_to_another_folder_is_still_refused(
+    fake_home: Path, tmp_path: Path, other_folder: str
+) -> None:
+    """What is accepted is the folder that holds this exact entry, not whatever
+    the link leads to. The link is swapped to another folder before the cleanup:
+    nothing is discarded there, nothing is made there, and the entry stays where
+    it really is."""
+    real = _linked_noctalia_folder(tmp_path)
+    linked = paths.noctalia_state_dir()
+    lock = linked / ".settings.toml.wall-in-one-transaction-lock-abcd1234"
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    fingerprint = file_io.regular_file_fingerprint(lock)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    theirs = elsewhere / lock.name
+    if other_folder == "holds another file there":
+        theirs.write_bytes(b"somebody else's")
+    linked.unlink()
+    linked.symlink_to(elsewhere)  # swapped
+
+    removed = template._discard_beside_settings(
+        lock, expected_identity=fingerprint[:2], expected_fingerprint=fingerprint
+    )
+
+    assert removed is False
+    assert file_io.regular_file_fingerprint(real / lock.name)[:2] == fingerprint[:2], "still there"
+    expected = [lock.name] if other_folder == "holds another file there" else []
+    assert sorted(entry.name for entry in elsewhere.iterdir()) == expected, "nothing made there"
+    if expected:
+        assert theirs.read_bytes() == b"somebody else's"

@@ -178,14 +178,23 @@ def _tidied(root: Path) -> str:
 
 
 def _opened_a_day_later(base: Path, *, tidy_up: bool = True) -> Iterator[tuple[str, str]]:
-    """This checkout's turn at the download folder: its sweep, its scan, its Tidy up."""
+    """This checkout's turn at the download folder: its sweep, its scan, its Tidy up.
+
+    A day later: this version's sweep takes only what was left alone for a day
+    by both of a file's times, and a change time can't be set back. So besides
+    dating every file a day back (what the released sweep goes by), the sweep
+    that opening the folder runs is asked what it would do a day and an hour on.
+    """
     root = _root(base)
     old = time.time() - LATER_SECONDS
     for path in root.rglob("*"):
         if path.is_file() and not path.is_symlink():
             os.utime(path, (old, old))
     try:
-        download.managed_directory(root, download.MOTIONBGS_LOCATION)
+        directory, _marker = download.managed_directory(root, download.MOTIONBGS_LOCATION)
+        download.recover_abandoned(
+            directory, download.MOTIONBGS_LOCATION, now=time.time() + LATER_SECONDS
+        )
         yield "open the folder", "opened"
     except ProviderError as error:
         yield "open the folder", f"REFUSED {error}"
@@ -445,8 +454,10 @@ def test_a_v2_stage_a_person_edited_is_reclaimed_a_day_after_the_edit(
 ) -> None:
     """Characterisation of a known case (see `_downloads`): this version's
     download dies leaving a ``.wall-in-one-v2-…-stage-*`` file, and a person
-    appends a note to it. The sweep's age is the file's modification time, so
-    the edit restarts the day: swept now, the edited stage is kept; a day
+    appends a note to it. The sweep's age is the later of the file's two
+    times, and nothing can set its change time back, so the edit restarts the
+    day whatever its modification time is then set to: swept now, the edited
+    stage is kept; with its mtime set back a day, it is still kept; a day
     after the edit it is reclaimed. Nothing at a public name changes."""
     monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
     plain = faults.Job(tmp_path / "plain", {}, ())
@@ -484,7 +495,13 @@ def test_a_v2_stage_a_person_edited_is_reclaimed_a_day_after_the_edit(
             assert stage.read_bytes() == edited, "edited a moment ago: the sweep leaves it"
             old = time.time() - LATER_SECONDS
             os.utime(stage, (old, old))
-            download.managed_directory(root, download.MOTIONBGS_LOCATION)
+            directory, _marker = download.managed_directory(root, download.MOTIONBGS_LOCATION)
+            assert stage.read_bytes() == edited, "its mtime set back: still edited a moment ago"
+            # A change time can't be set back, so the same sweep is asked what
+            # it would do a day and an hour on.
+            download.recover_abandoned(
+                directory, download.MOTIONBGS_LOCATION, now=time.time() + LATER_SECONDS
+            )
         assert not stage.exists() or not stage.stat().st_size, "a day after the edit: reclaimed"
         now = {path: path.read_bytes() for path in public if path.is_file()}
         assert now == public, "nothing at a public name changed"

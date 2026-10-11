@@ -469,6 +469,10 @@ class _RuntimeHealthResult:
     store: pairings.Store | None = None
     publication: _RuntimePublication | None = None
     error: str = ""
+    #: A write to ``pairings.json`` landed in this transaction, whatever became
+    #: of the publication after it. Not a save that found its markers already
+    #: there: that one wrote nothing, so it proves nothing about the folder.
+    saved: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,6 +735,9 @@ class Application(Adw.Application):
         self._runtime_status_again = False
         self._runtime_health_pending = False
         self._runtime_health_request: _RuntimeHealthRequest | None = None
+        #: The health-save failure last said, and the window generation it was
+        #: said to (`_say_health_failure_once`); None once a save lands.
+        self._runtime_health_said: tuple[int, str] | None = None
         #: This session's log, in memory only: what the user was told and what
         #: the runtime's status said as it changed (the new interface shows it).
         self.activity_log = ActivityLog(folders=lambda: self._settings.roots)
@@ -4913,7 +4920,7 @@ class Application(Adw.Application):
 
                 if not self._inventory_installable(request.inventory):
                     # The markers are saved; the next valid publication carries them.
-                    return _RuntimeHealthResult(request)
+                    return _RuntimeHealthResult(request, saved=changed > 0)
                 try:
                     document_changed = _runtime_installed(settings, snapshot)
                 except runtime_config.RuntimeConfigError as error:
@@ -4928,6 +4935,7 @@ class Application(Adw.Application):
                         publication=_RuntimePublication(
                             request.authoring_generation, error=str(error)
                         ),
+                        saved=changed > 0,
                     )
                 # An unchanged compiled document already contains these
                 # markers. Re-sending the same stale/non-durable test reply on
@@ -4969,6 +4977,7 @@ class Application(Adw.Application):
                 accepted=True,
                 store=snapshot.pairings,
                 publication=publication,
+                saved=changed > 0,
             )
         except (
             config.ConfigError,
@@ -5003,10 +5012,21 @@ class Application(Adw.Application):
         result: _RuntimeHealthResult,
         authoring_generation: int | None = None,
     ) -> None:
-        """Apply a completed health transaction without any filesystem work."""
+        """Apply a completed health transaction without any filesystem work.
+
+        A status poll asks for the same transaction again every two seconds,
+        so what it could not do is said once, not on every poll: a save that
+        failed through `_say_health_failure_once`, forgotten once a save lands
+        (`_RuntimeHealthResult.saved`); a publication that failed when it
+        becomes the publication problem. A transaction that tried nothing
+        (the gate was busy, the status was stale, the markers were there
+        already) is neither a failure nor a success, and leaves both as they are.
+        """
         if result.error:
-            self.window_report(result.error)
+            self._say_health_failure_once(result.error)
             return
+        if result.saved:
+            self._runtime_health_said = None
         current_generation = (
             self._runtime_authoring_generation
             if authoring_generation is None
@@ -5033,9 +5053,30 @@ class Application(Adw.Application):
             self._status_model.mark_unavailable(forget=False)
         elif publication.response is not None and not publication.response.ok:
             problem = f"Runtime rejected the new configuration: {publication.response.message}"
-        if problem:
+        # Said when it becomes the problem, not by every poll that meets it
+        # again: it stands (`publication_problem`) until a publication gets
+        # through, this lane's or the compile lane's, and is new after that.
+        if problem and problem != self._publication_problem:
             self.window_report(problem)
         self._set_publication_problem(problem)
+
+    def _say_health_failure_once(self, message: str) -> None:
+        """Report a health save that failed, unless that was just said.
+
+        For as long as the runtime reports a wallpaper it couldn't play,
+        every status poll (one each two seconds) asks for the same save, and
+        what refused one refuses the next the same way: a read-only state
+        folder said "Could not save wallpaper playback availability" in a
+        toast and in the log on every poll, without end. So what was last
+        said is remembered, and said again only when it reads differently
+        (another file, another error: this is no mute), after a save landed
+        in between (`_apply_runtime_health_result`), or to a window that
+        wasn't there when it was said.
+        """
+        said = (self._window_generation, message)
+        if said != self._runtime_health_said:
+            self._runtime_health_said = said
+            self.window_report(message)
 
     def refresh_runtime_status(self) -> bool:
         """Synchronously refresh state for non-GUI compatibility callers."""

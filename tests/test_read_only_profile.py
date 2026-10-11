@@ -1491,25 +1491,24 @@ def test_tidy_up_refuses_whole_when_its_archive_cannot_be_made(profile: ro.Profi
     assert first.exists() and second.exists()
 
 
-# -- found: a health save the state folder refuses is said again on every status poll -------------
-
-SAID_EVERY_POLL: Final = (
-    "FINDING (the same failure, said without end). The state folder read-only and the "
-    "runtime reporting a wallpaper it couldn't play: every status poll (one each two seconds) "
-    "asks the health lane to save the marker in pairings.json, the save is refused, and "
-    "'Could not save wallpaper playback availability: local-io: could not write "
-    ".../pairings.json: Permission denied' is toasted and logged again, for as long as the "
-    "runtime keeps reporting it. `_ingest_runtime_health` returns the error for a "
-    "`PairingError` (ui/app.py:4792) and `_apply_runtime_health_result` reports whatever "
-    "error it is given (ui/app.py:4820); nothing remembers that this one was said"
-)
+# -- a health save the state folder refuses is said once, not on every status poll ----------------
 
 
-@ro.pinned(SAID_EVERY_POLL)
 def test_a_health_save_the_state_folder_refuses_is_said_once(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Three status polls carrying the same failed wallpaper, the published document current."""
+    """Three status polls carrying the same failed wallpaper, the published document current.
+
+    Found here as the same failure said without end: every status poll (one
+    each two seconds) asks the health lane to save the marker in
+    ``pairings.json``, the read-only state folder refuses it, and "Could not
+    save wallpaper playback availability: local-io: could not write
+    .../pairings.json: Permission denied" was toasted and logged again each
+    time, for as long as the runtime kept reporting the wallpaper. Now
+    `Application._apply_runtime_health_result` remembers what it said
+    (`tests.test_ui_health_save_said_once` has the rest: said again after a
+    save that landed, and when the reason changes).
+    """
     with ro.read_only(profile.state):
         ctx = start(profile, "state", monkeypatch)
         application = ctx.application

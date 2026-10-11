@@ -40,6 +40,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.test_runtime_health_sync import _snapshot as _failed_wallpaper  # noqa: E402
 from tests.test_ui_astra030_ac_saved import _reply  # noqa: E402
 from tests.test_ui_codex030_round1b import (  # noqa: E402, F401
     Profile,
@@ -56,6 +57,7 @@ from tests.test_ui_codex030_round1c import (  # noqa: E402, F401
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules, state_file  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
+from wall_in_one.ui.app import _RuntimeHealthRequest  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 
 
@@ -256,6 +258,10 @@ def test_a_default_whose_save_the_system_refuses_is_left_out(
         assert config.why_not_writable() == "", "the folder itself takes a file"
         result = application._repair_dangling_playlist_references()
         response = application._finish_playlist_reference_repair(result)
+        # The app's own lanes can't see this by looking, only by having been
+        # told: they build without what the start left out.
+        _published(application)
+        assert application.publication_problem == ""
     finally:
         lock.chmod(0o600)
 
@@ -376,3 +382,76 @@ def test_a_default_is_not_left_out_over_playlists_that_were_not_read(
         (failure,) = result.failures
         assert failure.startswith("playlists: ") and "playlists.json" in failure
         assert not response.ok and response.kind == "authoring-repair-required"
+
+
+# -- the app's own compiles follow the rule too --------------------------------------------------
+
+
+def _published(application: Any) -> None:
+    assert application._publish_runtime_async()
+    spin_until(
+        lambda: not application._runtime_compile_pending and not application._authoring_active,
+        30,
+        what="the publication lane",
+    )
+
+
+def test_the_apps_own_lanes_build_without_the_default_the_start_left_out(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """The start said "playback goes on without a default", and it didn't.
+
+    The publication lane and the health lane each compile with a `Session`
+    of their own, made on their worker, that was never told. Every change's
+    publication was refused ("default playlist refers to unknown playlist
+    'ghost'; repair it in the app"), no ``runtime.toml`` was written, and the
+    health lane saved nothing.
+    """
+    profile: Profile = profiles()
+    application = _a_start_over(profile, "ghost")
+    saved = paths.settings_path().read_bytes()
+
+    with _settings_can_not_be_saved():
+        result = application._repair_dangling_playlist_references()
+        assert application._finish_playlist_reference_repair(result).ok
+        _published(application)
+
+        assert application.publication_problem == ""
+        document = paths.runtime_config_path().read_text(encoding="utf-8")
+        assert f'default_playlist = "{runtime_config.FALLBACK_PLAYLIST_ID}"' in document
+
+        # The health lane: the runtime couldn't play dawn, and says so.
+        request = _RuntimeHealthRequest(
+            application._runtime_authoring_generation,
+            application.session.library,
+            _failed_wallpaper(profile.dawn).message,
+        )
+        health = application._ingest_runtime_health(request)
+        assert health.accepted and health.changed == 1, health
+        assert health.publication is None or not health.publication.error, health.publication
+        assert paths.settings_path().read_bytes() == saved
+
+    told = [text for text in profile.window.reports if "default playlist" in text]
+    assert len(told) == 1 and "couldn\u2019t be cleared" in told[0], told
+    assert "renderer rejected this wallpaper" in paths.runtime_config_path().read_text("utf-8")
+
+
+def test_the_apps_own_lanes_stay_strict_where_the_settings_can_be_changed(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """A default that went dangling under a running app, settings writable.
+
+    Nothing is left out: the publication is refused, saying which default,
+    and the next start's repair clears it.
+    """
+    profile: Profile = profiles()
+    application = profile.application
+    _saved(profile, "Lone", [profile.dawn])
+    _published(application)
+    good = paths.runtime_config_path().read_bytes()
+    config.update({"active_playlist": "ghost"})  # another program's edit
+
+    _published(application)
+
+    assert "default playlist refers to unknown playlist 'ghost'" in application.publication_problem
+    assert paths.runtime_config_path().read_bytes() == good

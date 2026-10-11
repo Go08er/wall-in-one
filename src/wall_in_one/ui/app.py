@@ -165,6 +165,32 @@ def _settings_published[Saved: (config.Settings, config.Settings | None)](
             return error.settings
 
 
+def _told_the_default_rule(
+    snapshot: Session, loaded: config.LoadedSettings, already_left_out: str
+) -> None:
+    """Tell a compile's own short-lived session the rule every compiler follows.
+
+    The publication lane and the health lane each build a fresh `Session` on
+    their worker, which the start's repair never told to leave the default
+    out. Judged again here against what was just read under the compiler
+    lock (`runtime_config.unclearable_default`): a saved default that names no
+    playlist, in a ``settings.toml`` that can't be changed, is built without.
+
+    ``already_left_out`` is what the start's repair left out, for a file only
+    its save could show can't be changed (an immutable one, or its lock kept
+    read-only, which the look doesn't see). It counts only while the file
+    still names it; the compiler leaves it out only while it names nothing.
+
+    Nothing is said from here: the start says it, and a delete that could not
+    clear its default says so itself.
+    """
+    found = runtime_config.unclearable_default(snapshot.playlists, loaded)
+    if found is not None:
+        snapshot.leave_out_default(found[0])
+    elif already_left_out and already_left_out == loaded.settings.active_playlist:
+        snapshot.leave_out_default(already_left_out)
+
+
 def _playlist_namer(listing: playlists.Store, playlist_id: str) -> Callable[[str], bool]:
     """Whether a reference names the playlist ``playlist_id``, as the compiler resolves one.
 
@@ -4048,7 +4074,8 @@ class Application(Adw.Application):
             legacy_migration.unattended_transaction(),
             runtime_config.compiler_lock(),
         ):
-            settings = config.load_strict()
+            loaded = config.load_strict_document()
+            settings = loaded.settings
             durable_sources = (settings.roots, settings.scan_workshop)
             if request.library_sources != durable_sources:
                 raise _RuntimeLibraryNotReadyError(
@@ -4063,6 +4090,7 @@ class Application(Adw.Application):
                     raise _RuntimeInventoryInvalidError(
                         problem or "the library is being scanned again"
                     )
+                _told_the_default_rule(snapshot, loaded, self._session.left_out_default)
                 return _runtime_installed(settings, snapshot)
             finally:
                 snapshot.shutdown()
@@ -4800,9 +4828,11 @@ class Application(Adw.Application):
                 legacy_migration.unattended_transaction(timeout=0),
                 runtime_config.compiler_lock(timeout=0),
             ):
-                settings = config.load_strict()
+                loaded = config.load_strict_document()
+                settings = loaded.settings
                 snapshot = Session(settings)
                 snapshot.adopt_library(request.library, reconcile_workshop=False)
+                _told_the_default_rule(snapshot, loaded, self._session.left_out_default)
                 faults = snapshot.authoring_faults()
                 if faults:
                     return _RuntimeHealthResult(request)

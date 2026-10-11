@@ -53,7 +53,7 @@ from wall_in_one.library import (
 )
 from wall_in_one.library.model import Library, MediaItem
 from wall_in_one.library.playlists import Playlist
-from wall_in_one.session import Scanner, Session
+from wall_in_one.session import SAVED_USES, Scanner, Session
 
 
 class CheckFailed(ValueError):  # noqa: N818 - reads as the sentence it carries
@@ -76,6 +76,10 @@ class Uses:
     rules: tuple[schedules.Rule, ...] = ()
     assignments: tuple[tuple[str, str], ...] = ()
     beating: frozenset[str] = frozenset()
+    #: Of the files that say what uses a playlist, those the view these were
+    #: taken from could not read, and why (`Session.unread`). A dry run
+    #: refuses on them only where its answer turns on a playlist's uses.
+    unread: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def of(cls, session: Session) -> Uses:
@@ -88,6 +92,7 @@ class Uses:
                 for connector, _playlist in assignments
                 if session.displays.beats_global_rules(connector)
             ),
+            unread=session.unread(*SAVED_USES),
         )
 
 
@@ -327,6 +332,10 @@ def _judge(
             entries_before = previous.entries if previous is not None else ()
             can_before = runtime_config.playlist_playability(entries_before, before, known_before)
             can_after = runtime_config.playlist_playability(playlist.entries, after, known_after)
+            if uses.unread and can_after != can_before and not any(can.plays for can in can_after):
+                # The change leaves this playlist nothing to play: whether
+                # that may be done turns on what uses it, which was not read.
+                raise runtime_config.unreadable(uses.unread)
             used = runtime_config.playlist_uses(playlist.id, settings_after, after)
             refusal = runtime_config.change_refusal(
                 f"\u201c{playlist.name}\u201d", can_before, can_after, used

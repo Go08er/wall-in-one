@@ -843,8 +843,15 @@ def _renderer_for(settings: config.Settings) -> renderer.Renderer:
     )
 
 
-#: `Session.authoring_faults` names of the stores a guard judges by (`Session.saved_view`).
-_JUDGED_STORES: Final = frozenset({"pairings", "playlists", "schedules", "display assignments"})
+#: The files a view of what is saved is read from (`Session.saved_view`), as
+#: `Session.unread` names them. What uses a playlist is all four: the default,
+#: the playlists a reference is resolved against, the rules and the displays'
+#: own.
+SAVED_SETTINGS: Final = "settings"
+SAVED_PLAYLISTS: Final = "playlists"
+SAVED_SCHEDULES: Final = "schedules"
+SAVED_DISPLAYS: Final = "display assignments"
+SAVED_USES: Final = (SAVED_SETTINGS, SAVED_PLAYLISTS, SAVED_SCHEDULES, SAVED_DISPLAYS)
 
 
 class Session:
@@ -939,6 +946,9 @@ class Session:
         #: A guard let a change pass only because a playlist was already
         #: broken, as this session's library has it (`note_already_broken`).
         self._noted_already_broken = False
+        #: For a view of what is saved: each file it could not read, and why
+        #: (`unread`). Empty for every other Session.
+        self._unread: dict[str, str] = {}
 
     # -- state -----------------------------------------------------------
 
@@ -1195,15 +1205,20 @@ class Session:
         accepted library says nothing about them, so the view's is scanned
         from disk here instead (`scanned_from_disk`).
 
-        ``settings.toml`` or a store that can't be read raises
-        `config.ConfigError`: the question could not be answered, so the
-        caller refuses its write. A store that opens as empty because its
-        file is damaged, or was saved by a newer build, holds no rule and no
-        playlist, and "nothing uses it" from that would be a guess; this
-        process may have held the real ones since it started. With no file,
-        nothing was saved by anybody: no settings file leaves this session's
-        settings standing (`config.load_saved`), and no store file is an
-        empty store. The caller shuts the view down.
+        A file that can't be read does not stop the view being made. It is
+        named by `unread`, and whoever asks a question that consults that file
+        refuses on it (`runtime_config.asked_of_what_is_saved`): a schedule
+        store opened on a damaged file holds no rule, and "nothing uses this
+        playlist" from that would be a guess. A question that doesn't consult
+        the file is answered as usual, and a write to the damaged store itself
+        still reaches that store, which is what sets a damaged file aside and
+        replaces it. ``settings.toml`` that can't be read leaves this
+        session's settings in the view. A store file a newer build saved is
+        not unread: it holds what this build understands of it, and only that
+        store's own writes are refused, by the store. With no file, nothing
+        was saved by anybody: no settings file leaves this session's settings
+        standing (`config.load_saved`), and no store file is an empty store.
+        The caller shuts the view down.
         """
         library = self._library
         accepted = self._settings
@@ -1215,7 +1230,11 @@ class Session:
         display_store = self._displays.worker_copy()
 
         def read() -> Session:
-            saved = config.load_saved(accepted)
+            unread: dict[str, str] = {}
+            try:
+                saved = config.load_saved(accepted)
+            except config.ConfigError as error:
+                saved, unread[SAVED_SETTINGS] = accepted, str(error)
             view = Session(
                 saved,
                 scanner=scanner,
@@ -1227,14 +1246,17 @@ class Session:
                 removal_store=removals.Store(),
                 owns_playback=False,
             )
-            # The stores a guard judges by. The favourites decide no playlist's
-            # use or playability, so a damaged star list refuses nothing here.
-            unread = [
-                (name, fault) for name, fault in view.authoring_faults() if name in _JUDGED_STORES
-            ]
-            if unread:
-                view.shutdown()
-                raise config.ConfigError("; ".join(f"{name}: {fault}" for name, fault in unread))
+            stores = (
+                (SAVED_PLAYLISTS, view._playlists),
+                (SAVED_SCHEDULES, view._schedules),
+                (SAVED_DISPLAYS, view._displays),
+            )
+            unread.update(
+                (name, store.fault)
+                for name, store in stores
+                if store.fault is not None and store.fault_kind != state_file.NEWER_VERSION
+            )
+            view._unread = unread
             scanned_for_these = (saved.roots, saved.scan_workshop) == (
                 accepted.roots,
                 accepted.scan_workshop,
@@ -1247,6 +1269,15 @@ class Session:
             return view
 
         return read
+
+    def unread(self, *names: str) -> tuple[tuple[str, str], ...]:
+        """Of the files ``names``, those this view of what is saved could not read, and why.
+
+        Named as `SAVED_USES` names them. Damaged contents and a file that
+        can't be opened are both "could not read": what the file held is not
+        known. Always empty for a Session that is not such a view.
+        """
+        return tuple((name, self._unread[name]) for name in names if name in self._unread)
 
     def scanned_from_disk(self) -> Library:
         """A scan, now, of this session's folders with its pairings; nothing is adopted."""

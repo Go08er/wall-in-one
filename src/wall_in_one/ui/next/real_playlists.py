@@ -881,6 +881,7 @@ class RealPlaylists:
                 chosen,
                 lambda: (store.remove_entries(pid, chosen), removed),
                 self._backend.session,
+                said_by_caller=True,  # the report below says "was not removed; nothing changed"
             )
 
         def saved(

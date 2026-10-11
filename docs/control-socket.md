@@ -209,13 +209,15 @@ gone, and nothing is written or deleted:
 - `playlist-delete` replies with kind `unreadable` while `settings.toml` can't
   be read or is malformed: the app can't tell whether that playlist is the
   default. With no `settings.toml` at all, the playlist is deleted as usual.
-- The changes above that are checked against what is saved (`playlist-remove`,
-  `playlist-add`, `schedule-add`, `display-assign`, `still`, `reset-pairing`)
-  reply with kind `unreadable` while `settings.toml`, or the playlists,
-  schedule, display or pairing file, can't be read: a file that can't be read
-  is not taken as "nothing uses this playlist". `remove` says the same with
-  kind `local-io`. A file that isn't there at all is nothing saved, and the
-  change goes ahead.
+- A change that would leave a playlist with nothing to play (`playlist-remove`
+  of the last wallpaper it plays, `still <video> default`, `reset-pairing`)
+  replies with kind `unreadable` while `settings.toml`, the schedule file or
+  the displays file can't be read or is damaged: whether anything uses that
+  playlist can't be known, and the reply names the file. `remove` says the
+  same with kind `local-io`. Nothing else waits on such a file, and a damaged
+  one is still repaired by the next change saved to it (`schedule-add`,
+  `display-assign`), which keeps the damaged file beside it as `.broken`. A
+  file that isn't there at all is nothing saved, and the change goes ahead.
 - `remove`, whether it deletes the wallpaper or moves it to the trash, replies
   with kind `local-io` when the wallpaper, or its folder, can't be looked at.
   Before 0.3.0 that answered `missing`, "is no longer there".

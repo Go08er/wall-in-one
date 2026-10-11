@@ -1029,6 +1029,10 @@ class _PaletteEditor(Adw.Dialog):
             )
 
         def saved(entry: palettes.PaletteEntry) -> None:
+            if in_place is not None:
+                # The file now holds this: a later save from this editor is
+                # over its own last one, not over a change made elsewhere.
+                self._document = document
             self._save.set_sensitive(True)
             self._on_saved(entry)
             self.close()

@@ -99,6 +99,7 @@ for playlist in wanted.get("rules", []):
 for connector, playlist in wanted.get("assignments", {}).items():
     displays.Store.open().assign(connector, playlist)
 for target, text in wanted.get("files", {}).items():
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
     Path(target).write_text(text, encoding="utf-8")
 """
 
@@ -227,7 +228,11 @@ def test_the_new_window_keeps_the_last_wallpaper_of_a_playlist_put_to_use_elsewh
 
     # Failed on 7bdc1a6: taken out, and the configuration no longer built.
     assert _entries_saved(evening) == [evening.entries[0].id]
-    assert f"(used by {words}) would have nothing left to play" in opened.reports[-1]
+    # Said once: on f2e8afa the reason began "Nothing was removed from" as well.
+    assert opened.reports[-1] == (
+        "\u201cdawn.png\u201d was not removed from \u201cEvening\u201d; nothing changed: "
+        f"\u201cEvening\u201d (used by {words}) would have nothing left to play"
+    )
     assert _builds_from_what_is_saved(shown)
 
 
@@ -354,8 +359,110 @@ def test_a_use_that_can_not_be_read_is_not_taken_as_none(
 
     # Failed on 7bdc1a6: taken out, judged by the rules this process held (none).
     assert not reply.ok and reply.kind == "unreadable", reply
-    assert "what is saved could not be read, so this change could not be checked" in reply.message
+    assert "schedules can't be read (" in reply.message, reply.message
+    assert reply.message.endswith(", so this change could not be checked")
     assert _entries_saved(lone) == ["lone-0"]
+
+
+# -- a file that can't be read holds up only the question that turns on it -----------------
+
+
+@pytest.mark.parametrize("damaged", ["schedules", "displays"])
+def test_a_damaged_store_holds_up_only_what_turns_on_it_and_its_next_write_repairs_it(
+    profiles: Any,  # noqa: F811
+    damaged: str,
+) -> None:
+    """The schedule (or the displays') file is damaged. What uses a playlist can't
+    be known, so the one change that turns on it is refused, naming the file.
+    Nothing else waits on that file, and the next change saved to it is still
+    what repairs it: the damaged file is kept beside as ``.broken`` and a clean
+    one is written, as it always was."""
+    profile: Profile = profiles()
+    lone = _saved(profile, "Lone", [profile.dawn])
+    pair = _saved(profile, "Pair", [profile.dawn, profile.dusk])
+    target = schedules.state_path() if damaged == "schedules" else displays.state_path()
+    _another_program(files={str(target): "{ half a file"})
+
+    # Failed on f2e8afa: every one of these was refused, and the file stayed damaged.
+    added = _reply(profile, "playlist-add", f"{lone.id} {profile.dusk.path}")
+    assert added.ok, added
+    kept_one = _reply(profile, "playlist-remove", f"{pair.id} pair-1")
+    assert kept_one.ok, kept_one  # something still plays: what uses it doesn't matter
+
+    emptied = _reply(profile, "playlist-remove", f"{pair.id} pair-0")
+    assert not emptied.ok and emptied.kind == "unreadable", emptied
+    assert target.name in emptied.message, emptied.message
+    assert _entries_saved(pair) == ["pair-0"]
+    assert target.read_text(encoding="utf-8") == "{ half a file", "none of that touched it"
+
+    verb, argument = (
+        ("schedule-add", f"{lone.id} days=mon")
+        if damaged == "schedules"
+        else ("display-assign", f"DP-1 {lone.id}")
+    )
+    repaired = _reply(profile, verb, argument)
+    assert repaired.ok, repaired
+    assert target.with_name(f"{target.name}.broken").read_text(encoding="utf-8") == "{ half a file"
+    store = schedules.Store.open() if damaged == "schedules" else displays.Store.open()
+    assert store.fault is None
+
+    # And the question has an answer again: nothing uses "Pair".
+    assert _reply(profile, "playlist-remove", f"{pair.id} pair-0").ok
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read anything")
+def test_a_store_that_can_not_be_opened_is_left_alone_and_holds_up_only_what_turns_on_it(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """Not damaged: unreadable (its permission bits). The store refuses its own
+    writes and leaves the file alone, as it always has; a change that turns on
+    what uses a playlist is refused; anything else goes ahead."""
+    profile: Profile = profiles()
+    lone = _saved(profile, "Lone", [profile.dawn])
+    pair = _saved(profile, "Pair", [profile.dawn, profile.dusk])
+    profile.application.session.schedules.add(pair.id)
+    target = schedules.state_path()
+    held = target.read_bytes()
+    target.chmod(0o000)
+    try:
+        # Failed on f2e8afa: refused.
+        added = _reply(profile, "playlist-add", f"{pair.id} {profile.dusk.path}")
+        assert added.ok, added
+        emptied = _reply(profile, "playlist-remove", f"{lone.id} lone-0")
+        assert not emptied.ok and emptied.kind == "unreadable", emptied
+        own = _reply(profile, "schedule-add", f"{lone.id} days=mon")
+        assert not own.ok, own
+    finally:
+        target.chmod(0o600)
+    assert target.read_bytes() == held
+    assert not target.with_name(f"{target.name}.broken").exists()
+    assert _entries_saved(lone) == ["lone-0"]
+
+
+def test_a_store_a_newer_build_saved_holds_up_only_its_own_writes(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """A schedule file from a newer build is read as far as this build
+    understands it, and only its own writes are refused, by the store."""
+    profile: Profile = profiles()
+    pair = _saved(profile, "Pair", [profile.dawn, profile.dusk])
+    profile.application.session.schedules.add(pair.id)
+    target = schedules.state_path()
+    document = json.loads(target.read_text(encoding="utf-8"))
+    document["version"] = int(document["version"]) + 50
+    _another_program(files={str(target): json.dumps(document)})
+    newer = target.read_bytes()
+    assert schedules.Store.open().fault_kind == "newer-version"
+
+    # Failed on f2e8afa: refused, as "could not be read".
+    added = _reply(profile, "playlist-add", f"{pair.id} {profile.dusk.path}")
+    assert added.ok, added
+    kept_some = _reply(profile, "playlist-remove", f"{pair.id} pair-0")
+    assert kept_some.ok, kept_some
+
+    own = _reply(profile, "schedule-add", f"{pair.id} days=mon")
+    assert not own.ok and own.kind == "newer-version", own
+    assert target.read_bytes() == newer
 
 
 # -- the library a judgement goes by -------------------------------------------------------

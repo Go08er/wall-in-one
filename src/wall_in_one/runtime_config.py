@@ -30,7 +30,7 @@ from wall_in_one import config, file_io, paths, runtime_compatibility
 from wall_in_one.library import pairings, state_file
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Entry, Playlist
-from wall_in_one.session import Session
+from wall_in_one.session import SAVED_PLAYLISTS, SAVED_USES, Session
 from wall_in_one.wallpaper import scenes
 
 SCHEMA_VERSION: Final = 4
@@ -882,17 +882,48 @@ def change_refusal(
     return ""
 
 
+def uses_that_decide(
+    playlist: Playlist,
+    after: Sequence[Playability],
+    settings: config.Settings,
+    session: Session,
+) -> tuple[str, ...]:
+    """`playlist_uses` for a change that takes something away from ``playlist``.
+
+    While something still plays afterwards the change is fine, used or not,
+    and what uses the playlist is not asked for. Once nothing would play, the
+    answer turns on whether anything uses it, and a view of what is saved
+    that could not read the default, the rules or the displays' own can't
+    say: that refuses, naming the file (`require_read`). A session that is
+    not such a view has read everything it holds.
+    """
+    if not any(entry.plays for entry in after):
+        require_read(session, SAVED_USES)
+    return playlist_uses(playlist.id, settings, session)
+
+
 def entries_refusal(
     playlist: Playlist,
     after: Sequence[Entry],
     settings: config.Settings,
     session: Session,
+    *,
+    taking_away: bool = True,
 ) -> str:
-    """`change_refusal` for giving ``playlist`` the entries ``after``, against what is saved."""
+    """`change_refusal` for giving ``playlist`` the entries ``after``, against what is saved.
+
+    ``taking_away`` is false for an addition: it takes nothing from what the
+    playlist plays, so its answer never waits on what uses the playlist
+    (`uses_that_decide`).
+    """
     known = library_index(session)
     can_before = playlist_playability(playlist.entries, session, known)
     can_after = playlist_playability(after, session, known)
-    uses = playlist_uses(playlist.id, settings, session)
+    uses = (
+        uses_that_decide(playlist, can_after, settings, session)
+        if taking_away
+        else playlist_uses(playlist.id, settings, session)
+    )
     if allowed_as_already_broken(can_before, can_after, bool(uses)):
         session.note_already_broken()
     return change_refusal(_quoted_name(playlist), can_before, can_after, uses)
@@ -971,7 +1002,7 @@ def pairing_refusal(
             changed if entry.path == item.path else can
             for entry, can in zip(playlist.entries, before, strict=True)
         )
-        uses = playlist_uses(playlist.id, settings, session)
+        uses = uses_that_decide(playlist, after, settings, session)
         if allowed_as_already_broken(before, after, bool(uses)):
             session.note_already_broken()
         refusal = change_refusal(_quoted_name(playlist), before, after, uses)
@@ -998,26 +1029,46 @@ def pairing_refusal(
 # (`judged_on_what_is_saved`).
 
 
-def _what_is_saved(read: Callable[[], Session]) -> Session:
-    """The saved view (`Session.saved_view`), or a refusal when it can't be read."""
-    try:
-        return read()
-    except config.ConfigError as error:
-        raise config.SettingsUnreadableError(
-            f"what is saved could not be read, so this change could not be checked ({error})"
-        ) from error
+def unreadable(unread: Sequence[tuple[str, str]]) -> config.SettingsUnreadableError:
+    """The refusal for a question that consults files which could not be read, naming them.
+
+    In the stores' own words for a file they can't read ("... can't be read
+    (...), so ..."): whichever refuses first, the person reads the same thing.
+    """
+    files = "; ".join(f"{name} can't be read ({fault})" for name, fault in unread)
+    return config.SettingsUnreadableError(f"{files}, so this change could not be checked")
+
+
+def require_read(view: Session, needs: Sequence[str]) -> None:
+    """Refuse, naming the file, when ``view`` could not read one of the files ``needs``.
+
+    ``view`` is a view of what is saved (`Session.saved_view`) and ``needs``
+    the files a question consults, as `wall_in_one.session.SAVED_USES` names
+    them. A file that couldn't be read is not "nothing saved there", so the
+    question can't be answered and the write it guards isn't made. Only the
+    files the question consults count: a damaged schedule file has no say in
+    whether a wallpaper may join a playlist. Any other Session has read all
+    it holds, and nothing is refused.
+    """
+    unread = view.unread(*needs)
+    if unread:
+        raise unreadable(unread)
 
 
 def asked_of_what_is_saved[Answer](
     ask: Callable[[Session], Answer],
     session: Session,
+    *,
+    needs: Sequence[str],
 ) -> Callable[[], Answer]:
     """``ask``, to be put on the worker to what is saved at that moment.
 
     Called on GTK when a write reaches the head of the lane. The function it
     returns is called on the worker just before the write: it reads
     ``settings.toml`` and every store from disk (`Session.saved_view`), puts
-    ``ask`` to that view and lets it go.
+    ``ask`` to that view and lets it go. ``needs`` names the files ``ask``
+    consults; one of them that could not be read refuses the write with kind
+    ``unreadable`` (`require_read`), and no other file does.
 
     The view's library is the one this process accepted, while the saved
     folders are the ones it was scanned from; otherwise it is scanned from
@@ -1029,8 +1080,9 @@ def asked_of_what_is_saved[Answer](
     saved = session.saved_view()
 
     def answer() -> Answer:
-        view = _what_is_saved(saved)
+        view = saved()
         try:
+            require_read(view, needs)
             answered = ask(view)
             # Let pass only because a playlist was already broken, as the
             # library this process holds has it (`allowed_as_already_broken`)?
@@ -1053,6 +1105,8 @@ def judged_on_what_is_saved[Work](
     refuse: Callable[[Session], None],
     work: Callable[[], Work],
     session: Session,
+    *,
+    needs: Sequence[str],
 ) -> Callable[[], Work]:
     """``work``, once ``refuse`` lets it pass here and again on the worker.
 
@@ -1060,12 +1114,13 @@ def judged_on_what_is_saved[Work](
     stands. It is asked at once of ``session``: the early answer, from what
     this process holds, when the write reaches the head of the lane. It is
     asked again on the worker, just before ``work`` writes, of what is saved
-    at that moment (`asked_of_what_is_saved`). That second answer is the one
-    that counts. A playlist that another program made the default since a
-    window opened is in use, whatever the window remembers.
+    at that moment (`asked_of_what_is_saved`, which says what ``needs`` is).
+    That second answer is the one that counts. A playlist that another
+    program made the default since a window opened is in use, whatever the
+    window remembers.
     """
     refuse(session)
-    judge = asked_of_what_is_saved(refuse, session)
+    judge = asked_of_what_is_saved(refuse, session, needs=needs)
 
     def judged() -> Work:
         judge()
@@ -1078,9 +1133,15 @@ def unresolved_on_what_is_saved(item: MediaItem, session: Session) -> Callable[[
     """`pairing_refusals_if_unresolved`, to be asked on the worker of what is saved then.
 
     The function it returns is called once it is known the change would leave
-    ``item`` with no still, just before the write.
+    ``item`` with no still, just before the write. It consults the playlists,
+    to know which hold ``item``, and what uses one only when that playlist
+    would be left with nothing to play (`uses_that_decide`).
     """
-    return asked_of_what_is_saved(lambda view: pairing_refusals_if_unresolved(item, view), session)
+    return asked_of_what_is_saved(
+        lambda view: pairing_refusals_if_unresolved(item, view),
+        session,
+        needs=(SAVED_PLAYLISTS,),
+    )
 
 
 def default_refusal_on_what_is_saved(
@@ -1092,7 +1153,9 @@ def default_refusal_on_what_is_saved(
     when it is written, not only from the ones this process holds.
     """
     wanted = dict(changes)
-    return asked_of_what_is_saved(lambda view: settings_refusal(wanted, view), session)
+    return asked_of_what_is_saved(
+        lambda view: settings_refusal(wanted, view), session, needs=(SAVED_PLAYLISTS,)
+    )
 
 
 def checked_entries_removal[Work](
@@ -1100,8 +1163,16 @@ def checked_entries_removal[Work](
     entry_ids: Iterable[str],
     work: Callable[[], Work],
     session: Session,
+    *,
+    said_by_caller: bool = False,
 ) -> Callable[[], Work]:
-    """``work`` (it takes ``entry_ids`` out of playlist ``reference``), once checked."""
+    """``work`` (it takes ``entry_ids`` out of playlist ``reference``), once checked.
+
+    It consults the playlists, and what uses this one only when it would be
+    left with nothing to play (`uses_that_decide`). With ``said_by_caller``
+    the refusal is the reason alone, for a caller that says "was not removed;
+    nothing changed" itself.
+    """
     chosen = frozenset(entry_ids)
 
     def refuse(view: Session) -> None:
@@ -1114,10 +1185,12 @@ def checked_entries_removal[Work](
         )
         if refusal:
             raise PlaybackGuardError(
-                f"Nothing was removed from {_quoted_name(playlist)}: {refusal}"
+                refusal
+                if said_by_caller
+                else f"Nothing was removed from {_quoted_name(playlist)}: {refusal}"
             )
 
-    return judged_on_what_is_saved(refuse, work, session)
+    return judged_on_what_is_saved(refuse, work, session, needs=(SAVED_PLAYLISTS,))
 
 
 def checked_entries_addition[Work](
@@ -1126,16 +1199,27 @@ def checked_entries_addition[Work](
     work: Callable[[], Work],
     session: Session,
 ) -> Callable[[], Work]:
-    """``work`` (it adds ``sources`` to playlist ``reference``), once checked."""
+    """``work`` (it adds ``sources`` to playlist ``reference``), once checked.
+
+    An addition takes nothing away, so nothing here turns on what uses the
+    playlist, and no file is needed to say so. The playlists themselves are
+    the store ``work`` writes to: when their file can't be read, the question
+    is left to that store, which refuses the write or, for a damaged file,
+    sets it aside as it always has.
+    """
     adding = [Entry(f"adding-{index}", str(source)) for index, source in enumerate(sources)]
 
     def refuse(view: Session) -> None:
+        if view.unread(SAVED_PLAYLISTS):
+            return
         playlist = view.playlists.find(reference)
-        refusal = entries_refusal(playlist, [*playlist.entries, *adding], view.settings, view)
+        refusal = entries_refusal(
+            playlist, [*playlist.entries, *adding], view.settings, view, taking_away=False
+        )
         if refusal:
             raise PlaybackGuardError(f"Nothing was added to {_quoted_name(playlist)}: {refusal}")
 
-    return judged_on_what_is_saved(refuse, work, session)
+    return judged_on_what_is_saved(refuse, work, session, needs=())
 
 
 def new_playlist_refusal(name: str, sources: Iterable[Path | str], session: Session) -> str:
@@ -1171,7 +1255,8 @@ def checked_new_playlist[Work](
         if refusal:
             raise PlaybackGuardError(refusal)
 
-    return judged_on_what_is_saved(refuse, work, session)
+    # Judged by the library alone: no saved file has a say in it.
+    return judged_on_what_is_saved(refuse, work, session, needs=())
 
 
 def checked_playlist_use[Work](
@@ -1187,7 +1272,9 @@ def checked_playlist_use[Work](
         if refusal:
             raise PlaybackGuardError(f"{what}: {refusal}")
 
-    return judged_on_what_is_saved(refuse, work, session)
+    # Whether the playlist has something to play. The rules and the displays'
+    # own are where ``work`` writes, and have no say in that.
+    return judged_on_what_is_saved(refuse, work, session, needs=(SAVED_PLAYLISTS,))
 
 
 def refuse_unresolved_quick_choice(item: MediaItem, session: Session) -> None:

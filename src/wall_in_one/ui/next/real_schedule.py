@@ -60,7 +60,7 @@ from wall_in_one.library.playlists import (
     DISPLAY_QUICK_CHOICE_ID_PREFIX,
     DISPLAY_QUICK_CHOICE_NAME_PREFIX,
 )
-from wall_in_one.session import QUICK_CHOICE_ID, Session
+from wall_in_one.session import QUICK_CHOICE_ID, SAVED_PLAYLISTS, Session
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next import schedule_model
 from wall_in_one.ui.next.displays_settings import settings_edit
@@ -557,7 +557,11 @@ class RealScheduling:
                 if problem:
                     raise ValueError(problem)
 
-            return runtime_config.judged_on_what_is_saved(refuse, work, self._session)
+            # Whether the playlist has something to play; the store written
+            # to has no say in that, and repairs its own damaged file.
+            return runtime_config.judged_on_what_is_saved(
+                refuse, work, self._session, needs=(SAVED_PLAYLISTS,)
+            )
 
         def finish(_result: object) -> None:
             # Saved: settled first, so nothing below that can raise (they reach

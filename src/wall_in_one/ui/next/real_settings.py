@@ -328,9 +328,13 @@ def _colors(document: Mapping[str, object]) -> dict[str, dict[str, str]]:
     return found
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _Editing:
-    """A draft's handle: the document it starts from, and the entry edited in place."""
+    """A draft's handle: the document it starts from, and the entry edited in place.
+
+    ``document`` is what the palette's file holds as far as this draft knows:
+    what it read when it opened, then what each of its own saves wrote there.
+    """
 
     document: Mapping[str, object]
     in_place: palettes.PaletteEntry | None = None
@@ -518,6 +522,10 @@ class RealPalettes:
             return palettes.write_custom(chosen, document)
 
         def saved(entry: palettes.PaletteEntry) -> None:
+            if in_place is not None:
+                # The file now holds this: the draft's next save is over its
+                # own last one, not over a change made elsewhere.
+                editing.document = document
             done(True)  # settled first: what follows reaches the window
             if self._catalog is not None:
                 # The old snapshot holds the old file: not actionable until rescanned.

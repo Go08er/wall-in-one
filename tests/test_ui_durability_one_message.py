@@ -82,10 +82,11 @@ def test_a_delete_saved_without_its_sync_then_stopped_in_cleanup_is_said_once(
         application.playlists_changed()
         yield "the playlist to be published", lambda: settled(application)
 
-        def refused(_store: schedules.Store, _playlist: str) -> bool:
+        def refused(_store: schedules.Store, _names: object) -> int:
             raise schedules.ScheduleError("local-io", "schedule disk is read-only")
 
-        monkeypatch.setattr(schedules.Store, "forget_playlist", refused)
+        # What the delete calls to take a playlist's rules with it.
+        monkeypatch.setattr(schedules.Store, "forget_playlist_where", refused)
         failed = _sync_fails_for(monkeypatch, "playlists.json")
         editing = window.state.playlist_editing
         assert editing is not None
@@ -139,10 +140,11 @@ def test_the_classic_delete_is_said_once_too(
         application.playlists_changed()
         yield "the playlist to be published", lambda: settled(application)
 
-        def refused(_store: displays.Store, _playlist: str) -> int:
+        def refused(_store: displays.Store, _names: object) -> int:
             raise displays.DisplayError("local-io", "display disk is read-only")
 
-        monkeypatch.setattr(displays.Store, "forget_playlist", refused)
+        # What the delete calls to take a playlist's assignments with it.
+        monkeypatch.setattr(displays.Store, "forget_playlist_where", refused)
         failed = _sync_fails_for(monkeypatch, "playlists.json")
         monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
         classic = playlists_page.PlaylistsPage(application)

@@ -11,6 +11,7 @@ fails on 7bdc1a6.
 
 from __future__ import annotations
 
+import functools
 import json
 
 import pytest
@@ -30,6 +31,10 @@ from tests.test_ui_codex030_round1c import Shown, shown, toolkit  # noqa: E402, 
 from wall_in_one.theme import palettes  # noqa: E402
 from wall_in_one.ui import palette_browser  # noqa: E402
 from wall_in_one.ui.next.settings_state import PaletteDraft  # noqa: E402
+
+
+def _settled(saved: list[bool], count: int) -> bool:
+    return len(saved) >= count
 
 
 def _changed_elsewhere(entry: palettes.PaletteEntry) -> bytes:
@@ -80,6 +85,46 @@ def test_the_new_window_does_not_save_a_palette_over_another_programs_change(
         "The palette was not saved: Mine changed on disk since it was opened, and saving "
         "would undo that change; open it again to edit it as it is now"
     )
+    manager.close_palettes()
+
+
+def test_a_second_save_from_the_same_draft_is_over_its_own_first(
+    shown: Shown,  # noqa: F811
+) -> None:
+    """After a save, what the draft opened is what it just wrote. Its next save
+    is not refused as a change made elsewhere."""
+    opened = shown.opened
+    mine = palettes.write_custom("Mine", _palette_document(mPrimary="#112233"))
+    assert mine.path is not None
+    access = opened.page.access
+    assert access is not None
+    manager = access.palette_manager
+    manager.open_palettes()
+    spin_until(
+        lambda: any(item.name == "Mine" for item in manager.palette_list().items),
+        30,
+        what="the palettes",
+    )
+    key = next(item.key for item in manager.palette_list().items if item.name == "Mine")
+    drafts: list[PaletteDraft | None] = []
+    manager.palette_draft(key, copy=False, done=drafts.append)
+    spin_until(lambda: bool(drafts), 30, what="the editor's document")
+    draft = drafts[0]
+    assert draft is not None
+
+    saved: list[bool] = []
+    for count, primary in enumerate(("#445566", "#778899"), start=1):
+        colors = {
+            "dark": {**draft.colors["dark"], "primary": primary},
+            "light": draft.colors["light"],
+        }
+        manager.save_palette_draft(draft, "Mine", colors, saved.append)
+        opened.wait("the save to settle", functools.partial(_settled, saved, count))
+
+    # Failed on f2e8afa: the second was refused as "changed on disk".
+    assert saved == [True, True], opened.reports
+    written = palettes.read_document(mine.path)["dark"]
+    assert isinstance(written, dict) and written["mPrimary"] == "#778899"
     manager.close_palettes()
 
 

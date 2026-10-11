@@ -135,6 +135,14 @@ class SettingsBackend(Protocol):
         **changes: Any,
     ) -> bool: ...
 
+    def edit_roots_async(
+        self,
+        edit: config.RootsEdit,
+        *,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> bool: ...
+
     def authoring_action_async(
         self,
         work: Callable[[], _T],
@@ -868,7 +876,13 @@ class RealSettings:
         known = self._folders
         return known.problem if known is not None and known.roots == self._roots() else ""
 
-    def _set_roots(self, roots: tuple[Path, ...], saved: str = "") -> None:
+    def _edit_roots(self, edit: config.RootsEdit, saved: str = "") -> None:
+        """Save one folder gesture as the operation it is (`config.RootsEdit`).
+
+        Never a whole list built from what this window last saw: the gesture
+        is applied to the folders ``settings.toml`` holds when it is written.
+        """
+
         def succeeded(_settings: config.Settings) -> None:
             if saved:
                 self._report(saved)
@@ -877,28 +891,26 @@ class RealSettings:
             self._host.emit_changed("settings")  # the rows first: the report can raise
             self._report(f"Library folders were not saved; nothing changed: {error}")
 
-        self._backend.update_settings_async(roots=roots, on_success=succeeded, on_error=failed)
+        self._backend.edit_roots_async(edit, on_success=succeeded, on_error=failed)
 
     def add_folder(self, path: str) -> None:
         """Add a folder the user chose; "Scanning" is said only once it is saved."""
         added = Path(path)
-        requested = self._backend.requested_settings.roots
-        if added in requested:
+        if added in self._backend.requested_settings.roots:
             self._report(f"{added.name or added} is already in the library")
             return
-        self._set_roots((*requested, added), f"Scanning {added.name or added}")
+        self._edit_roots(config.RootsEdit("add", added), f"Scanning {added.name or added}")
 
     def remove_folder(self, path: str) -> None:
         removed = Path(path)
-        requested = self._backend.requested_settings.roots
-        if removed in requested:
-            self._set_roots(tuple(root for root in requested if root != removed))
+        if removed in self._backend.requested_settings.roots:
+            self._edit_roots(config.RootsEdit("remove", removed))
 
     def make_download_folder(self, path: str) -> None:
         chosen = Path(path)
         requested = self._backend.requested_settings.roots
         if chosen in requested and requested[0] != chosen:
-            self._set_roots((chosen, *(root for root in requested if root != chosen)))
+            self._edit_roots(config.RootsEdit("first", chosen))
 
     # -- what the runtime and this machine report ------------------------------------
     def battery_note(self) -> str:

@@ -881,6 +881,43 @@ class Store:
 
         return self._mutate(forget, refuse_unreadable=True)
 
+    def forget_playlist_where(self, names: Callable[[str], bool]) -> int:
+        """Drop every rule whose playlist ``names`` says is the deleted one; say how many.
+
+        ``names`` is the compiler's own lookup (id, then name in any letter
+        case), and it judges the rules as they are read under the lock. So a
+        rule another program saved since this store last read the file, and
+        one that names the playlist in a way nobody remembered, go too.
+        """
+
+        def forget(rules: list[Rule]) -> tuple[int, bool]:
+            kept = [rule for rule in rules if not names(rule.playlist)]
+            dropped = len(rules) - len(kept)
+            if dropped:
+                rules[:] = kept
+            return dropped, bool(dropped)
+
+        return self._mutate(forget, refuse_unreadable=True)
+
+    def retarget_where(self, names: Callable[[str], bool], playlist_id: str) -> int:
+        """Point every rule ``names`` picks at ``playlist_id``, in one save; say how many.
+
+        As `retarget_many`, but which rules is judged on the rules read under
+        the lock (see `forget_playlist_where`).
+        """
+        if not playlist_id.strip():
+            raise ScheduleError("no-such-rule", "a rule needs a playlist")
+
+        def retarget(rules: list[Rule]) -> tuple[int, bool]:
+            changed = 0
+            for index, rule in enumerate(rules):
+                if rule.playlist != playlist_id and names(rule.playlist):
+                    rules[index] = replace(rule, playlist=playlist_id)
+                    changed += 1
+            return changed, bool(changed)
+
+        return self._mutate(retarget, refuse_unreadable=True)
+
     def retarget(self, reference: str, playlist_id: str) -> int:
         """Point every rule naming ``reference`` at ``playlist_id``; say how many.
 

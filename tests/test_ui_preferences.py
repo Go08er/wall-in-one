@@ -73,6 +73,19 @@ class SettingsApp:
             on_success(saved)
         return True
 
+    def edit_roots_async(
+        self,
+        edit: config.RootsEdit,
+        *,
+        on_success: Any = None,
+        on_error: Any = None,
+    ) -> bool:
+        return self.update_settings_async(
+            on_success=on_success,
+            on_error=on_error,
+            roots=edit.apply(self.requested_settings.roots),
+        )
+
     def window_report(self, message: str) -> None:
         self.reports.append(message)
 

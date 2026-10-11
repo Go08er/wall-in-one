@@ -125,6 +125,31 @@ class FakeApplication:
         self.authoring.append(run)
         return True
 
+    def edit_roots_async(
+        self,
+        edit: config.RootsEdit,
+        *,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> bool:
+        """As the application does: the gesture, applied to the folders saved at the write."""
+        self.saves.append({"roots": edit})
+        self.requested = replace(self.requested, roots=edit.apply(self.requested.roots)).validated()
+
+        def run() -> None:
+            if self.fail_with:
+                self.requested = self.durable
+                if on_error is not None:
+                    on_error(self.fail_with)
+                return
+            self.durable = config.update({"roots": edit.apply(config.load_strict().roots)})
+            self.requested = self.durable
+            if on_success is not None:
+                on_success(self.durable)
+
+        self.authoring.append(run)
+        return True
+
     def authoring_action_async(
         self,
         work: Callable[[], _T],

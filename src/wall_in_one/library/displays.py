@@ -481,6 +481,45 @@ class Store:
 
         return self._mutate(forget, refuse_unreadable=True)
 
+    def forget_playlist_where(self, names: Callable[[str], bool]) -> int:
+        """Drop every assignment whose playlist ``names`` says is the deleted one.
+
+        ``names`` is the compiler's own lookup (id, then name in any letter
+        case), and it judges the assignments as they are read under the lock:
+        one another program saved since this store last read the file goes
+        too. Their opt-ins go with them, as in `forget_playlist`.
+        """
+
+        def forget(working: _Working) -> tuple[int, bool]:
+            stale = [key for key, value in working.assignments.items() if names(value)]
+            for key in stale:
+                working.drop(key)
+            return len(stale), bool(stale)
+
+        return self._mutate(forget, refuse_unreadable=True)
+
+    def retarget_where(self, names: Callable[[str], bool], playlist_id: str) -> int:
+        """Point every assignment ``names`` picks at ``playlist_id``, in one save.
+
+        As `retarget_many`, but which assignments is judged on what is read
+        under the lock (see `forget_playlist_where`).
+        """
+        replacement = _clean(playlist_id)
+        if not replacement:
+            raise DisplayError("validation", "that is not a playlist name")
+
+        def retarget(working: _Working) -> tuple[int, bool]:
+            stale = [
+                key
+                for key, value in working.assignments.items()
+                if value != replacement and names(value)
+            ]
+            for key in stale:
+                working.assignments[key] = replacement
+            return len(stale), bool(stale)
+
+        return self._mutate(retarget, refuse_unreadable=True)
+
     def retarget(self, reference: str, playlist_id: str) -> int:
         """Point every assignment naming ``reference`` at ``playlist_id``; say how many.
 

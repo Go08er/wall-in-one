@@ -1509,9 +1509,9 @@ def test_source_settings_wait_for_an_active_runtime_publication(
         assert release_compile.wait(2)
         return real_compile(request)
 
-    def observed_update(changes: Any, path: Path | None = None) -> config.Settings:
+    def observed_update(changes: Any, path: Path | None = None, **judged: Any) -> config.Settings:
         settings_write_started.set()
-        return real_update(changes, path)
+        return real_update(changes, path, **judged)
 
     def runtime(verb: str, *_args: object, **_kwargs: object) -> Response:
         reloads.append(verb)

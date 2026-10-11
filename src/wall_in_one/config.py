@@ -151,6 +151,10 @@ class SettingsUnreadableError(ConfigError):
         return f"{self.kind}: {super().__str__()}"
 
 
+class SettingsMovedOnError(ConfigError):
+    """A judged write was not made: settings.toml no longer holds what it was judged on."""
+
+
 class SettingsReadOnlyError(ConfigError):
     """A write was refused because settings.toml has keys this build lacks."""
 
@@ -774,9 +778,59 @@ def _check_runtime_compatibility(settings: Settings, target: Path) -> None:
             raise ConfigError(str(error)) from error
 
 
+@dataclass(frozen=True, slots=True)
+class RootsEdit:
+    """One gesture on the library folders, as an operation rather than a whole list.
+
+    ``roots`` is the one list in ``settings.toml``, and add, remove and "make
+    this the download folder" are relative to whatever it holds. A whole list
+    built from a window's snapshot and saved as the value drops any folder
+    another program (or a hand edit) saved since that snapshot was taken. So
+    a gesture travels as this, and is applied to the list read under the
+    settings lock at the moment of the write (`apply`).
+
+    ``kind``: ``add`` (appended unless there), ``remove``, ``first`` (moved to
+    the front, where downloads go; a folder that is no longer listed is not
+    put back by this), or ``set`` (``roots`` as the whole list: only for a
+    caller that really means every folder).
+    """
+
+    kind: str
+    root: Path | None = None
+    roots: tuple[Path, ...] = ()
+
+    def apply(self, current: Sequence[Path]) -> tuple[Path, ...]:
+        """``current`` with this gesture applied; unchanged when it has nothing to do."""
+        listed = tuple(current)
+        if self.kind == "set":
+            return tuple(self.roots)
+        root = self.root
+        if root is None:
+            raise ValueError(f"a {self.kind!r} folder edit needs a folder")
+        if self.kind == "add":
+            return listed if root in listed else (*listed, root)
+        if self.kind == "remove":
+            return tuple(candidate for candidate in listed if candidate != root)
+        if self.kind == "first":
+            if root not in listed:
+                return listed
+            return (root, *(candidate for candidate in listed if candidate != root))
+        raise ValueError(f"unknown folder edit {self.kind!r}")
+
+
+def edited_roots(current: Sequence[Path], edits: Sequence[RootsEdit]) -> tuple[Path, ...]:
+    """``current`` after each of ``edits``, in the order they were made."""
+    listed = tuple(current)
+    for edit in edits:
+        listed = edit.apply(listed)
+    return listed
+
+
 def update(
     changes: dict[str, Any],
     path: Path | None = None,
+    *,
+    judged_against: Settings | None = None,
 ) -> Settings:
     """Rebase a semantic settings edit on the latest durable document.
 
@@ -789,23 +843,33 @@ def update(
     A present malformed document is refused rather than repaired here.  The
     forgiving :func:`load` remains useful for opening the recovery UI; an edit
     must not silently replace the bytes somebody still needs to repair.
+
+    ``judged_against`` is for a change that was judged before it may be
+    written (a dry run of new library folders, which scans): the settings it
+    was judged on. If the file no longer holds exactly those under the lock,
+    nothing is written and `SettingsMovedOnError` is raised, for the caller to
+    read the file again and judge again.
     """
     target = path if path is not None else paths.settings_path()
     unknown = sorted(set(changes) - set(Settings.__dataclass_fields__))
     if unknown:
         raise ConfigError(f"unknown setting(s): {', '.join(unknown)}")
-    return mutate(lambda current: replace(current, **changes), target)
+    return mutate(
+        lambda current: replace(current, **changes), target, judged_against=judged_against
+    )
 
 
 def mutate(
     change: Callable[[Settings], Settings],
     path: Path | None = None,
+    *,
+    judged_against: Settings | None = None,
 ) -> Settings:
     """Apply one settings transformation to the lock-owned latest snapshot.
 
     Refused with `SettingsReadOnlyError` while the file has keys this build
     does not know: the serializer writes known keys only, so any write would
-    drop them.
+    drop them. ``judged_against``: see `update`.
     """
     target = path if path is not None else paths.settings_path()
     try:
@@ -814,6 +878,10 @@ def mutate(
             if loaded.read_only:
                 raise SettingsReadOnlyError(loaded.unknown_keys)
             current = loaded.settings
+            if judged_against is not None and current != judged_against:
+                raise SettingsMovedOnError(
+                    f"{target.name} changed while this change was being checked"
+                )
             candidate = change(current).validated()
             _validate_strict_mapping(tomllib.loads(candidate.to_toml()), target)
             _check_runtime_compatibility(candidate, target)
@@ -826,39 +894,56 @@ def mutate(
         raise ConfigError(f"cannot safely update {target}: {error}") from error
 
 
+#: How a caller says which saved default it means: the exact string, or a
+#: test of whatever string ``settings.toml`` holds when it is read. The test
+#: is for a playlist about to be deleted or renamed: only the compiler's own
+#: lookup (id, then name, whatever its letter case) says whether a reference
+#: names it, and the reference has to be the one read under the lock, not one
+#: remembered from when a window opened.
+PlaylistReference = str | Callable[[str], bool]
+
+
+def _naming(reference: PlaylistReference, also: Sequence[str] = ()) -> Callable[[str], bool]:
+    if callable(reference):
+        return reference
+    exact = (reference, *also)
+    return lambda saved: saved in exact
+
+
 def forget_playlist_default(
-    playlist: str,
+    playlist: PlaylistReference,
     path: Path | None = None,
 ) -> Settings | None:
     """Clear ``active_playlist`` iff it still names a deleted playlist.
 
-    The condition is evaluated under the settings mutation lock.  A concurrent
-    user choice of a different default therefore survives a delayed playlist
-    deletion instead of being replaced by an unconditional empty value.
+    The condition is evaluated under the settings mutation lock, against the
+    default read there (`PlaylistReference`).  A concurrent user choice of a
+    different default therefore survives a delayed playlist deletion instead
+    of being replaced by an unconditional empty value.
     ``None`` means no settings write was needed. When one is needed but the
     file has keys this build does not know, `SettingsReadOnlyError` is raised
     and nothing is written.
     """
-    return _rewrite_playlist_default(playlist, "", path)
+    return _rewrite_playlist_default(_naming(playlist), "", path)
 
 
 def repoint_playlist_default(
-    reference: str,
+    reference: PlaylistReference,
     playlist_id: str,
     path: Path | None = None,
 ) -> Settings | None:
-    """Give ``active_playlist`` the id ``playlist_id`` iff it still says ``reference``.
+    """Give ``active_playlist`` the id ``playlist_id`` iff it still names ``reference``.
 
     An older profile's default may name its playlist by name, which the
     compiler also resolves (by id first, then by name). Before that playlist
     is renamed, its id is written to the same key: it names the same playlist
     before and after the rename. Otherwise as `forget_playlist_default`.
     """
-    return _rewrite_playlist_default(reference, playlist_id, path)
+    return _rewrite_playlist_default(_naming(reference), playlist_id, path)
 
 
 def _rewrite_playlist_default(
-    reference: str,
+    names: Callable[[str], bool],
     replacement: str,
     path: Path | None,
 ) -> Settings | None:
@@ -867,7 +952,8 @@ def _rewrite_playlist_default(
         with state_file.mutation_lock(target, description="settings"):
             loaded = load_strict_document(target)
             current = loaded.settings
-            if current.active_playlist != reference:
+            saved = current.active_playlist
+            if not saved or saved == replacement or not names(saved):
                 return None
             if loaded.read_only:
                 raise SettingsReadOnlyError(loaded.unknown_keys)
@@ -921,7 +1007,7 @@ def forget_color_source(connector: str, path: Path | None = None) -> tuple[Setti
 
 
 def require_playlist_deletable(
-    playlist: str, path: Path | None = None, *, also: tuple[str, ...] = ()
+    playlist: PlaylistReference, path: Path | None = None, *, also: tuple[str, ...] = ()
 ) -> None:
     """Refuse up front a deletion whose saved default could not then be cleared.
 
@@ -935,16 +1021,37 @@ def require_playlist_deletable(
     the settings can't be read, or can't be parsed: whether they name this
     playlist could not be checked, and "can't look" is not "isn't the
     default" (`SettingsUnreadableError`). A settings file that is not there
-    (a first run) names nothing, and the deletion goes ahead. ``also`` are
-    other references to the same playlist (its name, which an older profile's
-    default may hold).
+    (a first run) names nothing, and the deletion goes ahead.
+
+    ``playlist`` says which default is meant (`PlaylistReference`), judged
+    against the default read here, never one a window remembers: another
+    program may have saved a default, by name, since. ``also`` are further
+    exact references when ``playlist`` is one.
     """
+    _require_default_writable(_naming(playlist, also), path, unchanged="Nothing was deleted.")
+
+
+def require_playlist_renamable(names: Callable[[str], bool], path: Path | None = None) -> None:
+    """Refuse up front a rename whose by-name default could not then be given the id.
+
+    ``names`` says whether a saved default names the playlist other than by
+    its id. As `require_playlist_deletable`: read-only settings that do, and
+    settings that can't be read, refuse the whole rename before anything is
+    written.
+    """
+    _require_default_writable(names, path, unchanged="Nothing was renamed.")
+
+
+def _require_default_writable(
+    names: Callable[[str], bool], path: Path | None, *, unchanged: str
+) -> None:
     try:
         loaded = load_strict_document(path)
     except ConfigError as error:
         raise SettingsUnreadableError(
             "it couldn't be checked whether this playlist is the saved default "
-            f"({error}). Nothing was deleted."
+            f"({error}). {unchanged}"
         ) from error
-    if loaded.read_only and loaded.settings.active_playlist in (playlist, *also):
+    saved = loaded.settings.active_playlist
+    if loaded.read_only and saved and names(saved):
         raise SettingsReadOnlyError(loaded.unknown_keys)

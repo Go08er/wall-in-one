@@ -9,7 +9,7 @@ import re
 import sys
 import threading
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -163,6 +163,64 @@ def _settings_published[Saved: (config.Settings, config.Settings | None)](
             return config.load_strict()
         except config.ConfigError:
             return error.settings
+
+
+def _playlist_namer(listing: playlists.Store, playlist_id: str) -> Callable[[str], bool]:
+    """Whether a reference names the playlist ``playlist_id``, as the compiler resolves one.
+
+    By id first, then by name, case-insensitively and trimmed
+    (`runtime_config.find_playlist`): an older profile's default, rule or
+    display assignment may name its playlist by name, in any letter case.
+    ``listing`` is the playlists as just read from their file on the worker,
+    before the playlist is deleted or renamed. The test this returns is then
+    put to each reference as it is read under its own store's lock, so what
+    another program saved since a window opened is judged too.
+    """
+
+    def names(reference: str) -> bool:
+        if not reference:
+            return False
+        found = listing.get(reference)
+        if found is None:
+            found = listing.by_name(reference)
+        return found is not None and found.id == playlist_id
+
+    return names
+
+
+#: How many times a change to the library sources is judged again because
+#: ``settings.toml`` moved on while it was being judged.
+SOURCE_SAVE_ATTEMPTS: Final = 5
+
+
+def _save_checked_sources(
+    change_map: Mapping[str, Any],
+    roots_edits: Sequence[config.RootsEdit],
+    check: Callable[[config.Settings, config.Settings], None],
+) -> config.Settings:
+    """Save a change to the library sources, judged against what is saved now.
+
+    The settings are read fresh and each folder gesture is applied to the
+    folders they hold (never a list from a window's snapshot: another program
+    may have saved folders of its own since). ``check``, the dry run, judges
+    exactly that candidate, and it is written only if the file still holds
+    what was read (``judged_against``, compared under the settings lock).
+    When another writer got in between, all of it is done again on what they
+    saved.
+    """
+    for _attempt in range(SOURCE_SAVE_ATTEMPTS):
+        durable = config.load_strict()
+        resolved = dict(change_map)
+        if roots_edits:
+            resolved["roots"] = config.edited_roots(durable.roots, roots_edits)
+        check(durable, replace(durable, **resolved).validated())
+        try:
+            return config.update(resolved, judged_against=durable)
+        except config.SettingsMovedOnError:
+            continue
+    raise config.ConfigError(
+        "settings.toml kept changing while this change was being checked; nothing was changed"
+    )
 
 
 #: How often the calendar is re-read. A minute, because that is the
@@ -614,6 +672,11 @@ class Application(Adw.Application):
         self._settings_authoring_lock = threading.Lock()
         self._settings_authoring_generation = 0
         self._settings_authoring_pending: dict[str, tuple[int, Any]] = {}
+        #: Folder gestures not yet saved, each with the generation that
+        #: accepted it (`edit_roots_async`). The pending ``roots`` value is
+        #: only what the window shows meanwhile: what is written is these,
+        #: applied to the folders ``settings.toml`` holds at that moment.
+        self._settings_roots_edits: list[tuple[int, config.RootsEdit]] = []
         self._settings_authoring_running = False
         self._settings_authoring_callbacks: list[
             tuple[
@@ -1721,9 +1784,13 @@ class Application(Adw.Application):
         self._save_initial_library_root(Path(raw))
 
     def _save_initial_library_root(self, root: Path) -> None:
-        """Persist consent before the scan/download/still paths can use it."""
-        self.update_settings_async(
-            roots=(root,),
+        """Persist consent before the scan/download/still paths can use it.
+
+        As an addition: on a first run nothing is saved yet, so this folder
+        becomes the library; folders saved meanwhile by something else stay.
+        """
+        self.edit_roots_async(
+            config.RootsEdit("add", root),
             on_success=lambda _settings: self.window_report(
                 f"Using {root} as the wallpaper library"
             ),
@@ -5664,12 +5731,9 @@ class Application(Adw.Application):
         """Resolve a delete only when it reaches the actor head on GTK."""
         playlist = self._session.playlists.find(reference)
         playlist_store = self._session.playlists
+        listing = playlist_store.worker_copy()
         schedule_store = self._session.schedules
         display_store = self._session.displays
-        # Its id, and its name where an older profile's reference still says
-        # that (the compiler resolves it too): both go with it.
-        named_by = self._references_by_name(playlist)
-        references = (playlist.id, *named_by)
 
         def work() -> _PlaylistDeleteResult:
             # The playlist is the authoritative lifecycle boundary.  Once it
@@ -5679,24 +5743,30 @@ class Application(Adw.Application):
             # first is a saved default that could not then be cleared, because
             # the settings are read-only or can't be read at all: refusing
             # the whole deletion beats a default naming nothing.
-            config.require_playlist_deletable(playlist.id, also=named_by)
+            #
+            # What names the playlist is never taken from what the window
+            # remembers. Each reference is judged where it is read, under its
+            # own store's lock, by the compiler's lookup against the
+            # playlists as they are on disk now (`_playlist_namer`): its id,
+            # or its name in any letter case. So a default another program
+            # saved since the window opened is seen, refused if it can't be
+            # cleared, and cleared if it can.
+            names = _playlist_namer(listing.worker_copy(rebase=True), playlist.id)
+            config.require_playlist_deletable(names)
             playlist_store.delete(playlist.id)
             failures: list[str] = []
             try:
-                for reference in references:
-                    schedule_store.forget_playlist(reference)
+                schedule_store.forget_playlist_where(names)
             except Exception as error:
                 failures.append(f"schedule rules: {error}")
             try:
-                for reference in references:
-                    display_store.forget_playlist(reference)
+                display_store.forget_playlist_where(names)
             except Exception as error:
                 failures.append(f"display assignments: {error}")
             saved_settings: config.Settings | None = None
             try:
-                for reference in references:
-                    forget = functools.partial(config.forget_playlist_default, reference)
-                    saved_settings = _settings_published(forget) or saved_settings
+                forget = functools.partial(config.forget_playlist_default, names)
+                saved_settings = _settings_published(forget)
             except config.ConfigError as error:
                 failures.append(f"saved default: {error}")
             return _PlaylistDeleteResult(
@@ -5707,30 +5777,6 @@ class Application(Adw.Application):
             )
 
         return work
-
-    def _references_by_name(self, playlist: playlists.Playlist) -> tuple[str, ...]:
-        """How the default, rules and display assignments name ``playlist`` other than by id.
-
-        By name, as the compiler resolves it (`runtime_config.find_playlist`):
-        what an older profile may hold. Read on GTK from what is saved.
-        """
-
-        def names_it(reference: str) -> bool:
-            if not reference or reference == playlist.id:
-                return False
-            found = runtime_config.find_playlist(reference, self._session)
-            return found is not None and found.id == playlist.id
-
-        found = (
-            {self._settings.active_playlist} if names_it(self._settings.active_playlist) else set()
-        )
-        found.update(
-            rule.playlist for rule in self._session.schedules.rules if names_it(rule.playlist)
-        )
-        found.update(
-            assigned for _connector, assigned in self._session.displays.all() if names_it(assigned)
-        )
-        return tuple(sorted(found))
 
     def prepare_playlist_rename(
         self, reference: str, name: str
@@ -5756,16 +5802,19 @@ class Application(Adw.Application):
         disk). One after something was saved returns what was saved and why
         it stopped (`PlaylistRenameResult`), never "nothing changed"; the
         callers adopt and publish it (`adopt_playlist_rename`). No new field
-        is stored. A reference added by ``ctl`` between this preparation on
-        GTK and the worker is the head-of-lane boundary every check here has.
+        is stored.
+
+        Which references name the playlist is never taken from what the window
+        remembers. Each is judged where it is read, under its own store's
+        lock, by the compiler's lookup against the playlists as they are on
+        disk when the worker runs (`_playlist_namer`), so a default, rule or
+        assignment another program saved by name since the window opened is
+        given the id too.
         """
         playlist = self._session.playlists.find(reference)
         pid = playlist.id
-        named_by = self._references_by_name(playlist)
-        default = (
-            self._settings.active_playlist if self._settings.active_playlist in named_by else ""
-        )
         store = self._session.playlists
+        listing = store.worker_copy()
         schedule_store = self._session.schedules
         display_store = self._session.displays
 
@@ -5777,29 +5826,30 @@ class Application(Adw.Application):
             ):
                 if problem:
                     raise ValueError(problem)
-            if default:
-                loaded = config.load_strict_document()
-                if loaded.read_only:
-                    raise config.SettingsReadOnlyError(loaded.unknown_keys)
+            names = _playlist_namer(listing.worker_copy(rebase=True), pid)
+
+            def by_name(saved_reference: str) -> bool:
+                """It names the playlist, and not by the id that survives a rename."""
+                return saved_reference != pid and names(saved_reference)
+
+            config.require_playlist_renamable(by_name)
             saved: list[str] = []
             settings: config.Settings | None = None
             try:
-                if default:
-                    repoint = functools.partial(config.repoint_playlist_default, default, pid)
-                    settings = _settings_published(repoint)
-                    if settings is not None:
-                        saved.append("the default playlist")
-                if named_by:
-                    rules = schedule_store.retarget_many(named_by, pid)
-                    if rules:
-                        saved.append(f"{rules} schedule rule{'' if rules == 1 else 's'}")
-                    assigned = display_store.retarget_many(named_by, pid)
-                    if assigned:
-                        saved.append(
-                            f"{assigned} display\u2019s own playlist"
-                            if assigned == 1
-                            else f"{assigned} displays\u2019 own playlists"
-                        )
+                repoint = functools.partial(config.repoint_playlist_default, by_name, pid)
+                settings = _settings_published(repoint)
+                if settings is not None:
+                    saved.append("the default playlist")
+                rules = schedule_store.retarget_where(by_name, pid)
+                if rules:
+                    saved.append(f"{rules} schedule rule{'' if rules == 1 else 's'}")
+                assigned = display_store.retarget_where(by_name, pid)
+                if assigned:
+                    saved.append(
+                        f"{assigned} display\u2019s own playlist"
+                        if assigned == 1
+                        else f"{assigned} displays\u2019 own playlists"
+                    )
                 renamed = store.rename(pid, name)
             except Exception as error:
                 if not saved:
@@ -5821,9 +5871,7 @@ class Application(Adw.Application):
             return
         previous = self._settings
         with self._settings_authoring_lock:
-            pending = {
-                key: value for key, (_gen, value) in self._settings_authoring_pending.items()
-            }
+            pending = self._pending_settings_on(result.settings)
             self._settings_requested = replace(result.settings, **pending).validated()
         self._adopt_settings(previous, result.settings)
 
@@ -5883,12 +5931,8 @@ class Application(Adw.Application):
         saved = result.settings if result is not None else None
         previous = self._settings
         with self._settings_authoring_lock:
-            pending = {
-                key: value for key, (_gen, value) in self._settings_authoring_pending.items()
-            }
-            self._settings_requested = replace(
-                saved if saved is not None else previous, **pending
-            ).validated()
+            base = saved if saved is not None else previous
+            self._settings_requested = replace(base, **self._pending_settings_on(base)).validated()
         if saved is not None:
             self._adopt_settings(previous, saved)
 
@@ -6270,10 +6314,44 @@ class Application(Adw.Application):
         with self._settings_authoring_lock:
             return self._settings_requested
 
+    def _pending_settings_on(self, base: config.Settings) -> dict[str, Any]:
+        """The fields still queued, as they read on top of ``base``. Lock held by the caller.
+
+        A queued folder gesture is re-applied to ``base``'s folders, so what
+        the window shows meanwhile follows what was actually saved (a folder
+        another program added included), and a gesture whose batch failed is
+        not shown as though it were still coming.
+        """
+        pending = {key: value for key, (_gen, value) in self._settings_authoring_pending.items()}
+        if self._settings_roots_edits:
+            shown = config.edited_roots(
+                base.roots, [edit for _gen, edit in self._settings_roots_edits]
+            )
+            newest = max(accepted for accepted, _edit in self._settings_roots_edits)
+            self._settings_authoring_pending["roots"] = (newest, shown)
+            pending["roots"] = shown
+        return pending
+
     @property
     def settings_unknown_keys(self) -> tuple[str, ...]:
         """Unrecognized settings.toml keys; non-empty means settings are read-only."""
         return self._settings_unknown_keys
+
+    def edit_roots_async(
+        self,
+        edit: config.RootsEdit,
+        *,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Save one gesture on the library folders: add, remove, make first.
+
+        The gesture is saved as the operation it is, applied on the worker to
+        the folders ``settings.toml`` holds at that moment, and the dry run
+        judges exactly that list. The window's snapshot only decides what it
+        shows until then: a folder another program saved since stays.
+        """
+        return self._accept_settings({}, roots_edit=edit, on_success=on_success, on_error=on_error)
 
     def update_settings_async(
         self,
@@ -6288,7 +6366,21 @@ class Application(Adw.Application):
         the same semantic field map.  A change arriving during the actual
         write becomes one trailing actor task, so GTK never emits one fsync per
         spin-row tick and unrelated edits made by another process survive.
+
+        Each field is a whole value, which is what a switch or a spin row
+        means. The library folders are a list: a gesture on them goes through
+        `edit_roots_async`. ``roots=`` here replaces the whole list.
         """
+        return self._accept_settings(changes, on_success=on_success, on_error=on_error)
+
+    def _accept_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        roots_edit: config.RootsEdit | None = None,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> bool:
         if not self.require_authoring_ready():
             if on_error is not None:
                 on_error(self._migration_blocked_response().message)
@@ -6304,12 +6396,22 @@ class Application(Adw.Application):
             return False
         try:
             with self._settings_authoring_lock:
+                if roots_edit is None and "roots" in changes:
+                    roots_edit = config.RootsEdit("set", roots=tuple(changes["roots"]))
+                if roots_edit is not None:
+                    # What the window shows until this saves; never what is written.
+                    changes = {
+                        **changes,
+                        "roots": roots_edit.apply(self._settings_requested.roots),
+                    }
                 requested = replace(self._settings_requested, **changes).validated()
                 self._settings_authoring_generation += 1
                 generation = self._settings_authoring_generation
                 self._settings_authoring_pending.update(
                     {key: (generation, value) for key, value in changes.items()}
                 )
+                if roots_edit is not None:
+                    self._settings_roots_edits.append((generation, roots_edit))
                 self._settings_authoring_callbacks.append((generation, on_success, on_error))
                 self._settings_requested = requested
                 if self._settings_authoring_running:
@@ -6373,6 +6475,7 @@ class Application(Adw.Application):
                 (key, field_generation, value)
                 for key, (field_generation, value) in self._settings_authoring_pending.items()
             )
+            roots_edits = tuple(edit for _gen, edit in self._settings_roots_edits)
         change_map = {key: value for key, _gen, value in changes}
         if change_map.get("active_playlist"):
             # A default is judged by the library: never by one the app knows is stale.
@@ -6386,7 +6489,7 @@ class Application(Adw.Application):
             if any(key in {"roots", "scan_workshop"} for key, _gen, _value in changes)
             else None
         )
-        return lambda: self._persist_settings_batch(generation, changes, sources)
+        return lambda: self._persist_settings_batch(generation, changes, sources, roots_edits)
 
     def _sources_check(self) -> Callable[[config.Settings, config.Settings], None]:
         """A worker-side dry run of new library sources (`dry_run.sources`), refusing by raising.
@@ -6441,15 +6544,12 @@ class Application(Adw.Application):
         generation: int,
         changes: tuple[tuple[str, int, Any], ...],
         sources: Callable[[config.Settings, config.Settings], None] | None = None,
+        roots_edits: tuple[config.RootsEdit, ...] = (),
     ) -> _SettingsResult:
         def persist() -> _SettingsResult:
             if not changes:  # pragma: no cover - guarded by the GTK scheduler
                 return _SettingsResult(generation, config.load_strict(), ())
             change_map = {key: value for key, _field_generation, value in changes}
-            if sources is not None:
-                # Before anything is written: the new sources, for pretend.
-                durable = config.load_strict()
-                sources(durable, replace(durable, **change_map).validated())
             wanted_default = change_map.get("active_playlist")
             if (
                 isinstance(wanted_default, str)
@@ -6460,7 +6560,11 @@ class Application(Adw.Application):
                     "the chosen default playlist was deleted before Settings could save"
                 )
             try:
-                saved = config.update(change_map)
+                saved = (
+                    config.update(change_map)
+                    if sources is None
+                    else _save_checked_sources(change_map, roots_edits, sources)
+                )
             except config.SettingsNotDurableError as error:
                 # Published, then the folder sync failed: this is no refusal.
                 # Adopt what the file holds now, not the rejected-looking old
@@ -6531,6 +6635,11 @@ class Application(Adw.Application):
                 pending_field = self._settings_authoring_pending.get(key)
                 if pending_field is not None and pending_field[0] <= field_generation:
                     self._settings_authoring_pending.pop(key, None)
+            self._settings_roots_edits = [
+                (accepted, edit)
+                for accepted, edit in self._settings_roots_edits
+                if accepted > result.generation
+            ]
             callbacks = [
                 callback
                 for callback in self._settings_authoring_callbacks
@@ -6543,7 +6652,7 @@ class Application(Adw.Application):
             ]
             pending = bool(self._settings_authoring_pending)
             self._settings_authoring_running = pending
-            newer = {key: value for key, (_gen, value) in self._settings_authoring_pending.items()}
+            newer = self._pending_settings_on(result.settings)
             try:
                 self._settings_requested = replace(result.settings, **newer).validated()
             except TypeError, ValueError:
@@ -6665,13 +6774,17 @@ class Application(Adw.Application):
                 if field_generation <= failed
             ]:
                 self._settings_authoring_pending.pop(key)
+            self._settings_roots_edits = [
+                (accepted, edit)
+                for accepted, edit in self._settings_roots_edits
+                if accepted > failed
+            ]
             # Before the lane head ``failed`` is the newest generation, so
             # nothing is left; after it, anything left is newer and retried.
             retry = bool(self._settings_authoring_pending or self._settings_authoring_callbacks)
             self._settings_authoring_running = retry
             self._settings_requested = replace(
-                self._settings,
-                **{key: value for key, (_gen, value) in self._settings_authoring_pending.items()},
+                self._settings, **self._pending_settings_on(self._settings)
             ).validated()
             requested = self._settings_requested
         try:
@@ -6710,18 +6823,26 @@ class Application(Adw.Application):
         refusal = runtime_config.settings_refusal(changes, self._session)
         if refusal:
             raise config.ConfigError(refusal)
+        write: Callable[[], config.Settings] = lambda: config.update(changes)  # noqa: E731
         if "roots" in changes or "scan_workshop" in changes:
-            # The same dry run as the batch's, synchronous like everything here.
-            durable = self._settings
-            self._sources_check()(durable, replace(durable, **changes).validated())
+            # The same dry run as the batch's, synchronous like everything
+            # here, and on the same terms: judged against what is saved now,
+            # and written only if that is still what is saved.
+            check = self._sources_check()
+            whole = (
+                (config.RootsEdit("set", roots=tuple(changes["roots"])),)
+                if "roots" in changes
+                else ()
+            )
+            write = lambda: _save_checked_sources(changes, whole, check)  # noqa: E731
         previous = self._settings
         # Explicit legacy-service and non-GUI callers retain a synchronous
         # boundary.  They still rebase semantic fields so a stale process
         # cannot erase unrelated settings authored elsewhere.
         candidate = (
-            self.legacy_authoring_sync(lambda: _settings_published(lambda: config.update(changes)))
+            self.legacy_authoring_sync(lambda: _settings_published(write))
             if self.legacy_service
-            else _settings_published(lambda: config.update(changes))
+            else _settings_published(write)
         )
         self._settings_requested = candidate
         self._adopt_settings(previous, candidate)
@@ -6849,13 +6970,7 @@ class _Commands:
     ) -> Response:
         previous = self._app.settings
         with self._app._settings_authoring_lock:
-            requested = replace(
-                updated,
-                **{
-                    key: value
-                    for key, (_generation, value) in (self._app._settings_authoring_pending.items())
-                },
-            ).validated()
+            requested = replace(updated, **self._app._pending_settings_on(updated)).validated()
             self._app._settings_requested = requested
         self._app._adopt_settings(previous, updated)
         if requested != updated and self._app._window is not None:

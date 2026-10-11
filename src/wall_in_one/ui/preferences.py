@@ -231,26 +231,31 @@ class PreferencesPage(Adw.PreferencesPage):
 
     def _make_root_remover(self, root: Path) -> Any:
         def remove(_button: Gtk.Button) -> None:
-            self._set_roots(tuple(r for r in self._app.requested_settings.roots if r != root))
+            self._edit_roots(config.RootsEdit("remove", root))
 
         return remove
 
     def _make_root_primary(self, root: Path) -> Any:
         def make_primary(_button: Gtk.Button) -> None:
-            roots = self._app.requested_settings.roots
-            self._set_roots((root, *(candidate for candidate in roots if candidate != root)))
+            self._edit_roots(config.RootsEdit("first", root))
 
         return make_primary
 
-    def _set_roots(self, roots: tuple[Path, ...]) -> bool:
+    def _edit_roots(self, edit: config.RootsEdit) -> bool:
+        """Save one folder gesture as the operation it is (`config.RootsEdit`).
+
+        Never a whole list built from what this page last saw: the gesture is
+        applied to the folders ``settings.toml`` holds when it is written.
+        """
+
         def failed(error: str) -> None:
             # What is saved plus any newer edit still queued, which a failed
             # batch leaves pending (`Application._fail_settings_batch`).
             self.apply_settings(self._app.requested_settings)
             self._report(f"Library folders were not saved; nothing changed: {error}")
 
-        return self._app.update_settings_async(
-            roots=roots,
+        return self._app.edit_roots_async(
+            edit,
             on_success=lambda _settings: self._refresh_roots(),
             on_error=failed,
         )
@@ -275,11 +280,10 @@ class PreferencesPage(Adw.PreferencesPage):
             self._report("That folder is not on this machine's filesystem")
             return
         added = Path(path)
-        requested_roots = self._app.requested_settings.roots
-        if added in requested_roots:
+        if added in self._app.requested_settings.roots:
             self._report(f"{added.name} is already in the library")
             return
-        if self._set_roots((*requested_roots, added)):
+        if self._edit_roots(config.RootsEdit("add", added)):
             self._report(f"Scanning {added.name}")
 
     def _build_playback_group(self) -> Adw.PreferencesGroup:

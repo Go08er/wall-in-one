@@ -485,6 +485,20 @@ def settle_record_claims(
                 claim.discard()
                 with contextlib.suppress(OSError):
                     os.rmdir(folder)
+        except file_io.PathChangedError as error:
+            if put_back and error.preserved_path is not None:
+                # The put-back landed, and then could be neither verified nor
+                # made durable: the record has left its claim and is at its
+                # name. Said as that, as `_WithdrawnAuthority._put_back` does.
+                failures.append(
+                    f"its download record was put back at {logical}, but that could not be "
+                    f"confirmed ({error})"
+                )
+            else:
+                doing = "put back" if put_back else "removed"
+                failures.append(
+                    f"the download record kept at {shown} could not be {doing} ({error})"
+                )
         except (OSError, ValueError) as error:
             doing = "put back" if put_back else "removed"
             failures.append(f"the download record kept at {shown} could not be {doing} ({error})")

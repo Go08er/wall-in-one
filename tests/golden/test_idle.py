@@ -37,7 +37,7 @@ from tests.golden.sandbox import (
     runtime_document,
     write_json,
 )
-from wall_in_one import cli, deployed_upgrade_transaction, runtime_config
+from wall_in_one import cli, deployed_upgrade, deployed_upgrade_transaction, runtime_config
 from wall_in_one.library import (
     displays,
     favourites,
@@ -101,6 +101,33 @@ def test_removal_folders_keep_the_names_the_finished_upgrade_gave_them(golden: G
     ):
         names = [path.name.removeprefix(prefix) for path in parent.glob(f"{prefix}*")]
         assert names and set(names) <= tokens, (parent, names)
+
+
+def test_the_fixtures_claims_stay_because_their_journal_is_gone(golden: Golden) -> None:
+    """The fixture's upgrade was completed by an earlier version, which retired
+    its journal and left both claims. Nothing now records what the
+    predecessors' bytes were, so this version infers nothing and removes
+    neither: they stay through every start, for Tidy up to list. (An upgrade
+    this version completes removes its own claims, on its journal's record:
+    tests/test_deployed_upgrade_transaction.py.) That is why the first-start
+    whitelist names no removal folder."""
+    profile = golden.profile
+    assert not (profile.app_state / deployed_upgrade.JOURNAL_FILENAME).exists()
+    entries = sorted(
+        [
+            *profile.app_config.glob(".wall-in-one-removal-*/entry"),
+            *profile.app_state.glob(".wall-in-one-removal-*/entry"),
+        ]
+    )
+    assert len(entries) == 2, "the pre-upgrade settings.toml and runtime.toml"
+    held = {path: path.read_bytes() for path in entries}
+    assert all(held.values())
+
+    harness.run_idle()
+    harness.run_idle()
+
+    assert {path: path.read_bytes() for path in entries} == held
+    assert deployed_upgrade_transaction.finished_claims() is not None
 
 
 def _all_media(profile: Profile) -> list[dict[str, Any]]:

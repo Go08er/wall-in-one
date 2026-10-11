@@ -208,14 +208,30 @@ If the original root should not be restored, leave the journal, claims,
 stage, manifest, and sidecars intact for diagnosis.
 
 Empty or unrelated claim directories are never deleted, trusted, or reused.
-After a replacement is durable, predecessor claims deliberately remain inert:
-they are crash evidence, not user-facing backups, and should not be renamed or
-cleaned by hand. Once the completion marker records the upgrade as finished,
-nothing reads them again, and Settings → Tidy up can move the upgrade's own
-claim folders (only those named for its slots) into a dated folder under
-`~/.config/wall-in-one/tidy-archive`, recording where each came from; its
-Undo moves them back. It never deletes them. Exact journal/stage files are retired only after the completion
-marker is durable; harmless exact residue is cross-checked on later starts.
+While the upgrade is unfinished, a predecessor claim is what a resume
+recovers: it is crash evidence, not a user-facing backup, and should not be
+renamed or cleaned by hand.
+
+Once the completion marker records the upgrade as finished, nothing reads the
+claims again, and the upgrade removes them itself, before it retires its
+journal: the claimed pre-upgrade `settings.toml` and schema-2 `runtime.toml`
+are older copies in the app's own folders, and their contents are what was
+translated. A claim goes only on proof. Its folder must be one of this
+upgrade's own slots and hold that one file and nothing else, and the file's
+bytes must be exactly the predecessor the journal recorded; the journal is
+retired only after each claim was removed or found not to be that. A claim
+that is not provably the predecessor stays where it is: one whose file was
+written to after the upgrade replaced it (an edit that was never translated),
+one with anything else in its folder, an empty one.
+
+An upgrade that 0.2.2 or an earlier version completed has no journal left,
+so nothing records what its predecessors' bytes were, and this version
+removes none of its claims. For those, and for any claim that stayed,
+Settings → Tidy up can move the upgrade's own claim folders (only those named
+for its slots) into a dated folder under `~/.config/wall-in-one/tidy-archive`,
+recording where each came from; its Undo moves them back. It never deletes
+them. Exact journal/stage files are retired only after the completion marker
+is durable; harmless exact residue is cross-checked on later starts.
 
 Before installing the new package, stop Wall-in-One and back up:
 

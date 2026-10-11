@@ -1137,7 +1137,7 @@ class ClaimedPath:
     _retained_logical_parent: Path | None = field(default=None, repr=False, kw_only=True)
     #: A claim made without an operation token: its directory lives in the
     #: shared retained namespace and nothing replays it, so an emptied one
-    #: is removed after a discard (`_remove_emptied_transient_directory`).
+    #: is removed after a discard (`_remove_emptied_directory`).
     _transient: bool = field(default=False, repr=False, kw_only=True)
     _consumed: bool = field(default=False, init=False, repr=False)
 
@@ -1258,7 +1258,28 @@ class ClaimedPath:
         finally:
             retained_pin.close()
 
-    def discard(self) -> None:
+    def status(self) -> os.stat_result:
+        """The claimed file as it is now, through the pin `discard` acts on."""
+        self._verify()
+        return self._pin.status()
+
+    def read_bytes(self, maximum_bytes: int) -> bytes:
+        """The claimed file's bytes, read through the pin `discard` acts on.
+
+        For a caller that must prove what a claim holds before discarding it:
+        what is read here and what `discard` empties are one retained inode,
+        never two looks at a name. A write that lands in the file between the
+        two is not seen.
+        """
+        self._verify()
+        return read_pinned_regular_bytes(self._pin, maximum_bytes)
+
+    def stands_alone(self) -> bool:
+        """Whether the claim's directory holds this entry and nothing else."""
+        with os.scandir(self._directory_pin.anchor) as entries:
+            return [entry.name for entry in entries] == ["entry"]
+
+    def discard(self, *, with_directory: bool = False) -> None:
         """Destroy the exact claimed generation without unlinking by name.
 
         The public name was already removed atomically when the claim was made.
@@ -1269,6 +1290,11 @@ class ClaimedPath:
         unrelated hard link.  In both cases an inert hidden claim entry may
         remain: safe retention is preferable to unlinking an unproven
         replacement.
+
+        ``with_directory`` also removes a replayable claim's own directory
+        once its entry has moved out of it (`_remove_emptied_directory`), for
+        a caller that is retiring that operation token for good. A transient
+        claim's directory is removed either way.
         """
         descriptor, opened = self._open_exact_writable_claim()
         truncated = False
@@ -1340,31 +1366,41 @@ class ClaimedPath:
         with contextlib.suppress(OSError, ValueError):
             self._retain_discarded_inode()
             retained = True
-        if retained and self._transient:
-            self._remove_emptied_transient_directory()
+        if retained and (self._transient or with_directory):
+            self._remove_emptied_directory()
         self._finish()
 
-    def _remove_emptied_transient_directory(self) -> None:
-        """Remove a transient claim's directory once its entry has moved out.
+    def _remove_emptied_directory(self) -> None:
+        """Remove the claim's directory once its entry has moved out.
 
         The directory pin is no cleanup authority (it cannot prove who made
         the directory), and none is needed: ``rmdir`` removes only an empty
         directory. A name that now holds anything fails with ``ENOTEMPTY``,
         a symbolic link or a file with ``ENOTDIR``, and nothing is lost
         either way; such a failure leaves the entry exactly as it is. Only
-        the directory this claim made is named, and only while it is still
-        the generation the pin holds. A replayable claim's directory (an
-        operation token's ``.wall-in-one-removal-*``) is never touched here.
+        the directory this claim was made in is named, and only while it is
+        still the generation the pin holds. A replayable claim's directory
+        (an operation token's ``.wall-in-one-removal-*``) goes only when the
+        caller asked (`discard`, ``with_directory``): replay looks for it by
+        name until its operation is retired.
 
-        The retained namespace is reached as `_retain_discarded_inode` just
-        reached it, and the child is named relative to that open directory:
-        the access path the claim was made through went with its pin.
+        A transient claim's directory is in the retained namespace, reached
+        as `_retain_discarded_inode` just reached it; a replayable one is
+        beside the file it was claimed from. Either way the child is named
+        relative to its open parent: the access path the claim was made
+        through went with its pin.
         """
         parent = self._retained_access_parent or self._original_access.parent
         name = self._directory.name
+        # A replayable claim's parent may be a descriptor's own spelling
+        # (``/proc/self/fd/<n>``), which is a link in its last component: "."
+        # after it names the directory it leads to.
+        container = (
+            str(parent / RETAINED_ENTRY_DIRECTORY) if self._transient else os.path.join(parent, ".")
+        )
         with contextlib.suppress(OSError):
             descriptor = os.open(
-                parent / RETAINED_ENTRY_DIRECTORY,
+                container,
                 os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
             )
             try:

@@ -1132,6 +1132,11 @@ def test_empty_runtime_claim_slot_remains_resumable_and_advances_without_reuse(
     assert deployed_upgrade_transaction.probe().status == "prepared"
 
     monkeypatch.setattr(file_io, "atomic_move_no_replace", original_move)
+    # Completed, with the claims' retirement held back so the slot it used shows.
+    retire = deployed_upgrade_transaction._retire_translated_claims
+    monkeypatch.setattr(
+        deployed_upgrade_transaction, "_retire_translated_claims", lambda _journal: False
+    )
     resumed = deployed_upgrade_transaction.ensure()
 
     assert resumed.status == "complete"
@@ -1139,11 +1144,18 @@ def test_empty_runtime_claim_slot_remains_resumable_and_advances_without_reuse(
     assert tuple(first_slot.iterdir()) == ()
     assert config.load_strict().roots == (profile.root,)
     second_token = deployed_upgrade_transaction._claim_tokens(journal.runtime_token)[1]
-    retained_predecessor = (
-        deployed_upgrade_transaction._claim_path(paths.runtime_config_path(), second_token)
-        / "entry"
+    second_slot = deployed_upgrade_transaction._claim_path(
+        paths.runtime_config_path(), second_token
     )
-    assert _schema(retained_predecessor) == 2
+    assert _schema(second_slot / "entry") == 2
+
+    # The next start removes the claim it can prove, and only that: the empty
+    # slot is still nobody's to remove.
+    monkeypatch.setattr(deployed_upgrade_transaction, "_retire_translated_claims", retire)
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+    assert not second_slot.exists()
+    assert first_slot.is_dir() and tuple(first_slot.iterdir()) == ()
+    assert not deployed_upgrade.journal_path().exists()
 
 
 def test_resume_after_old_settings_are_claimed_before_new_publication(
@@ -1821,7 +1833,10 @@ def test_cleaned_completion_is_historical_after_later_settings_edit(
 def test_finished_claims_name_the_slots_a_completed_upgrade_left_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Tidy up archives only slots this proves; the derivation must not drift."""
+    """Tidy up archives only slots this proves; the derivation must not drift.
+
+    The upgrade is completed the way every version before this one completed
+    it, leaving both claims; one this version completes removes them itself."""
     _profile(tmp_path, monkeypatch, videos=1)
     monkeypatch.setattr(stills, "generate", _forbid_decoder)
     monkeypatch.setattr(stills, "capture_scene", _forbid_decoder)
@@ -1834,7 +1849,7 @@ def test_finished_claims_name_the_slots_a_completed_upgrade_left_behind(
     journal, _raw = journal_record
     assert deployed_upgrade_transaction.finished_claims() is None, "prepared is not finished"
 
-    deployed_upgrade_transaction.ensure()
+    _completed_as_every_earlier_version_left_it(monkeypatch)
     before = _snapshot()
     finished = deployed_upgrade_transaction.finished_claims()
 
@@ -1861,3 +1876,329 @@ def test_finished_claims_name_the_slots_a_completed_upgrade_left_behind(
     assert "roots = []" in (
         finished.settings_parent / f"{file_io.DELETION_CLAIM_PREFIX}{journal.settings_token}"
     ).joinpath("entry").read_text(encoding="utf-8")
+
+
+# -- the predecessors' claims after completion ---------------------------------------------
+#
+# Updates are one-way: once the completion marker is durable, a claimed
+# pre-upgrade settings.toml or schema-2 runtime.toml is only an older copy in
+# the app's own folder. It is removed on positive proof alone (the journal's
+# record of its bytes, authenticated by the marker), before that journal is
+# retired; anything that is not provably the predecessor stays for Tidy up.
+
+
+class _Killed(BaseException):
+    """The process dies here: nothing in the application catches it."""
+
+
+def _slots(parent: Path) -> list[Path]:
+    return sorted(parent.glob(f"{file_io.DELETION_CLAIM_PREFIX}*"))
+
+
+def _tombstones(parent: Path) -> list[Path]:
+    return sorted((parent / file_io.RETAINED_ENTRY_DIRECTORY).glob("entry-*"))
+
+
+def _completed_but_claims_not_yet_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path, bytes, bytes]:
+    """Completion is durable and the journal is still here: the state a stop
+    right after the marker's publication leaves. Returns each predecessor's
+    claimed entry and its bytes."""
+    old_settings = paths.settings_path().read_bytes()
+    old_runtime = paths.runtime_config_path().read_bytes()
+    original = deployed_upgrade_transaction._retire_translated_claims
+    monkeypatch.setattr(
+        deployed_upgrade_transaction, "_retire_translated_claims", lambda _journal: False
+    )
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+    monkeypatch.setattr(deployed_upgrade_transaction, "_retire_translated_claims", original)
+    assert deployed_upgrade.journal_path().is_file(), "an unsettled claim keeps the journal"
+    (settings_slot,) = _slots(paths.settings_path().parent)
+    (runtime_slot,) = _slots(paths.runtime_config_path().parent)
+    assert (settings_slot / "entry").read_bytes() == old_settings
+    assert (runtime_slot / "entry").read_bytes() == old_runtime
+    return settings_slot / "entry", runtime_slot / "entry", old_settings, old_runtime
+
+
+def _completed_as_every_earlier_version_left_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The claims stay and the journal is retired: what 0.1.x to 0.2.2 did."""
+    original = deployed_upgrade_transaction._retire_translated_claims
+    monkeypatch.setattr(
+        deployed_upgrade_transaction, "_retire_translated_claims", lambda _journal: True
+    )
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+    monkeypatch.setattr(deployed_upgrade_transaction, "_retire_translated_claims", original)
+    assert not deployed_upgrade.journal_path().exists()
+
+
+def test_a_completed_upgrade_removes_the_predecessors_it_translated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real upgrade, run to completion: both claims are gone with it, each
+    leaving one empty record, and the journal that proved them goes last."""
+    profile = _profile(tmp_path, monkeypatch, videos=2, named_playlist=True)
+    monkeypatch.setattr(stills, "generate", _forbid_decoder)
+    config_folder = paths.settings_path().parent
+    state_folder = paths.runtime_config_path().parent
+
+    first = deployed_upgrade_transaction.ensure()
+
+    assert first.changed and first.status == "complete"
+    _assert_complete(profile)
+    assert _slots(config_folder) == [] and _slots(state_folder) == []
+    # The discards' own empty records: the settings claim's in the config
+    # folder; the runtime claim's, the journal's and the stage's in the state folder.
+    assert [path.stat().st_size for path in _tombstones(config_folder)] == [0]
+    assert [path.stat().st_size for path in _tombstones(state_folder)] == [0, 0, 0]
+    assert deployed_upgrade_transaction.finished_claims() is not None
+    completed = _snapshot()
+    listing = sorted(
+        path.name for folder in (config_folder, state_folder) for path in folder.iterdir()
+    )
+
+    second = deployed_upgrade_transaction.ensure()
+
+    assert not second.changed and second.status == "complete"
+    assert _snapshot() == completed
+    assert listing == sorted(
+        path.name for folder in (config_folder, state_folder) for path in folder.iterdir()
+    )
+
+
+def _foreign_file(entry: Path, _contents: bytes) -> None:
+    (entry.parent / "notes.txt").write_text("mine\n", encoding="utf-8")
+
+
+def _edited_longer(entry: Path, contents: bytes) -> None:
+    entry.write_bytes(contents + b"# a late edit\n")
+
+
+def _edited_same_size_and_time(entry: Path, contents: bytes) -> None:
+    """An in-place write the file's size and times do not show."""
+    before = entry.stat()
+    changed = bytes([contents[0] ^ 1]) + contents[1:]
+    descriptor = os.open(entry, os.O_WRONLY)
+    try:
+        os.write(descriptor, changed)
+    finally:
+        os.close(descriptor)
+    os.utime(entry, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert entry.stat().st_size == before.st_size and entry.read_bytes() != contents
+
+
+def _second_name(entry: Path, _contents: bytes) -> None:
+    os.link(entry, entry.parent.parent / "another-name-for-it")
+
+
+def _replaced_by_a_copy(entry: Path, contents: bytes) -> None:
+    entry.unlink()
+    entry.write_bytes(contents)
+
+
+def _folder_made_public(entry: Path, _contents: bytes) -> None:
+    entry.parent.chmod(0o755)
+
+
+NOT_THE_EXACT_PREDECESSOR: dict[str, Callable[[Path, bytes], None]] = {
+    "a foreign file beside it": _foreign_file,
+    "edited, longer": _edited_longer,
+    "edited, same size and times": _edited_same_size_and_time,
+    "a second name": _second_name,
+    "replaced by a copy": _replaced_by_a_copy,
+    "its folder no longer private": _folder_made_public,
+}
+
+
+@pytest.mark.parametrize("role", ["settings", "runtime"])
+@pytest.mark.parametrize("what", list(NOT_THE_EXACT_PREDECESSOR))
+def test_a_claim_that_is_not_provably_the_predecessor_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str, what: str
+) -> None:
+    """Nothing is removed on a failed or unavailable proof. The other
+    predecessor's claim, untouched, still goes, and so does the journal: the
+    claim that stays is settled (it is not the predecessor), not pending."""
+    _profile(tmp_path, monkeypatch)
+    settings_entry, runtime_entry, old_settings, old_runtime = (
+        _completed_but_claims_not_yet_retired(monkeypatch)
+    )
+    entry, contents = (
+        (settings_entry, old_settings) if role == "settings" else (runtime_entry, old_runtime)
+    )
+    other = runtime_entry if role == "settings" else settings_entry
+    NOT_THE_EXACT_PREDECESSOR[what](entry, contents)
+    folder = entry.parent
+    before = {
+        path: (path.read_bytes(), path.stat().st_nlink, stat.S_IMODE(path.stat().st_mode))
+        for path in sorted(folder.iterdir())
+    }
+    mode = stat.S_IMODE(folder.stat().st_mode)
+
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+
+    assert folder.is_dir() and stat.S_IMODE(folder.stat().st_mode) == mode
+    assert {
+        path: (path.read_bytes(), path.stat().st_nlink, stat.S_IMODE(path.stat().st_mode))
+        for path in sorted(folder.iterdir())
+    } == before, "every byte, name and link of what was there"
+    assert not other.parent.exists(), "the other, exact, predecessor is removed"
+    assert not deployed_upgrade.journal_path().exists(), "nothing is left to try"
+    finished = deployed_upgrade_transaction.finished_claims()
+    assert finished is not None, "and Tidy up still finds the slot that stayed"
+    tokens = finished.settings_tokens if role == "settings" else finished.runtime_tokens
+    assert folder.name.removeprefix(file_io.DELETION_CLAIM_PREFIX) in tokens
+
+
+def test_slots_that_are_not_this_upgrades_exact_claim_are_never_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slot of another token holding the very same bytes, an empty slot of
+    this upgrade's own, and a file under one of its slot names: all stay."""
+    _profile(tmp_path, monkeypatch)
+    settings_entry, _runtime_entry, old_settings, _old_runtime = (
+        _completed_but_claims_not_yet_retired(monkeypatch)
+    )
+    journal_record = deployed_upgrade_transaction._read_journal()
+    assert journal_record is not None
+    journal, _raw = journal_record
+    folder = paths.settings_path().parent
+    foreign = folder / f"{file_io.DELETION_CLAIM_PREFIX}{'ab' * 16}"
+    foreign.mkdir(mode=0o700)
+    (foreign / "entry").write_bytes(old_settings)
+    own = deployed_upgrade_transaction._claim_tokens(journal.settings_token)
+    empty = deployed_upgrade_transaction._claim_path(paths.settings_path(), own[1])
+    empty.mkdir(mode=0o700)
+    a_file = deployed_upgrade_transaction._claim_path(paths.settings_path(), own[2])
+    a_file.write_bytes(old_settings)
+
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+
+    assert not settings_entry.parent.exists(), "the exact claim went"
+    assert (foreign / "entry").read_bytes() == old_settings
+    assert empty.is_dir() and list(empty.iterdir()) == []
+    assert a_file.read_bytes() == old_settings
+    assert not deployed_upgrade.journal_path().exists()
+
+
+def test_a_stop_between_the_two_claims_is_finished_by_the_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settings claim is removed, the process dies before the runtime
+    claim's turn: the journal is still there, and the next start removes the
+    other claim and only then retires it."""
+    _profile(tmp_path, monkeypatch)
+    settings_entry, runtime_entry, _old_settings, old_runtime = (
+        _completed_but_claims_not_yet_retired(monkeypatch)
+    )
+    original = file_io.ClaimedPath.discard
+    discards = 0
+
+    def die_at_the_second(claim: file_io.ClaimedPath, *, with_directory: bool = False) -> None:
+        nonlocal discards
+        discards += 1
+        if discards == 2:
+            raise _Killed
+        original(claim, with_directory=with_directory)
+
+    monkeypatch.setattr(file_io.ClaimedPath, "discard", die_at_the_second)
+    with pytest.raises(_Killed):
+        deployed_upgrade_transaction.ensure()
+
+    assert not settings_entry.parent.exists()
+    assert runtime_entry.read_bytes() == old_runtime
+    assert deployed_upgrade.journal_path().is_file(), "the proof outlives the stop"
+    assert deployed_upgrade_transaction.probe().status == "complete"
+
+    monkeypatch.setattr(file_io.ClaimedPath, "discard", original)
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+
+    assert not runtime_entry.parent.exists()
+    assert not deployed_upgrade.journal_path().exists()
+
+
+def test_a_stop_between_the_claims_and_the_journal_is_finished_by_the_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both claims are removed and the process dies before the journal is
+    retired: the journal is left, harmless, and the next start retires it."""
+    profile = _profile(tmp_path, monkeypatch)
+    settings_entry, runtime_entry, _old_settings, _old_runtime = (
+        _completed_but_claims_not_yet_retired(monkeypatch)
+    )
+    original = deployed_upgrade_transaction._discard_exact_artifact
+
+    def die_at_the_journal(path: Path, contents: bytes, maximum: int, *, label: str) -> None:
+        if path == deployed_upgrade.journal_path():
+            raise _Killed
+        original(path, contents, maximum, label=label)
+
+    monkeypatch.setattr(deployed_upgrade_transaction, "_discard_exact_artifact", die_at_the_journal)
+    with pytest.raises(_Killed):
+        deployed_upgrade_transaction.ensure()
+
+    assert not settings_entry.parent.exists() and not runtime_entry.parent.exists()
+    assert deployed_upgrade.journal_path().is_file()
+
+    monkeypatch.setattr(deployed_upgrade_transaction, "_discard_exact_artifact", original)
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+
+    assert not deployed_upgrade.journal_path().exists()
+    _assert_complete(profile)
+
+
+def test_a_removal_that_fails_for_a_passing_reason_keeps_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An I/O error at the discard: the claim is as it was, the start goes on,
+    and the journal stays so that a later start can still prove the claim."""
+    _profile(tmp_path, monkeypatch)
+    settings_entry, runtime_entry, old_settings, _old_runtime = (
+        _completed_but_claims_not_yet_retired(monkeypatch)
+    )
+    original = file_io.ClaimedPath.discard
+    failed = False
+
+    def fail_once(claim: file_io.ClaimedPath, *, with_directory: bool = False) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError(5, "Input/output error")
+        original(claim, with_directory=with_directory)
+
+    monkeypatch.setattr(file_io.ClaimedPath, "discard", fail_once)
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+
+    assert settings_entry.read_bytes() == old_settings
+    assert not runtime_entry.parent.exists()
+    assert deployed_upgrade.journal_path().is_file()
+
+    assert deployed_upgrade_transaction.ensure().status == "complete"
+
+    assert not settings_entry.parent.exists()
+    assert not deployed_upgrade.journal_path().exists()
+
+
+def test_claims_of_an_upgrade_an_earlier_version_completed_are_left_for_tidy_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its journal is gone, so nothing records what the predecessors' bytes
+    were: nothing is inferred, and no start of this version removes them."""
+    _profile(tmp_path, monkeypatch)
+    old_settings = paths.settings_path().read_bytes()
+    old_runtime = paths.runtime_config_path().read_bytes()
+    _completed_as_every_earlier_version_left_it(monkeypatch)
+    (settings_slot,) = _slots(paths.settings_path().parent)
+    (runtime_slot,) = _slots(paths.runtime_config_path().parent)
+
+    for _start in range(2):
+        assert deployed_upgrade_transaction.ensure().status == "complete"
+        deployed_upgrade_transaction._housekeep_completed()
+
+    assert (settings_slot / "entry").read_bytes() == old_settings
+    assert (runtime_slot / "entry").read_bytes() == old_runtime
+    finished = deployed_upgrade_transaction.finished_claims()
+    assert finished is not None
+    assert (
+        settings_slot.name.removeprefix(file_io.DELETION_CLAIM_PREFIX) in finished.settings_tokens
+    )
+    assert runtime_slot.name.removeprefix(file_io.DELETION_CLAIM_PREFIX) in finished.runtime_tokens

@@ -24,8 +24,11 @@ The actions
       ``settings.toml`` and ``runtime.toml``, only while
       :func:`deployed_upgrade_transaction.finished_claims` proves the upgrade
       complete and the token is one of its slots. After completion nothing
-      recovers, trusts or reuses those slots; they hold the pre-upgrade copies,
-      which the archive keeps;
+      recovers, trusts or reuses those slots. An upgrade this version
+      completes removes the ones it can prove are the pre-upgrade copies
+      itself; what is left (every slot of an upgrade an earlier version
+      completed, and any that could not be proven) holds those copies, which
+      the archive keeps;
     * an empty ``.wall-in-one-removal-<token>`` beside managed downloads when
       the pending-removal journal reads cleanly, has no ``.broken`` copy and
       no intent with that token. Removal tokens are random, and recovery only

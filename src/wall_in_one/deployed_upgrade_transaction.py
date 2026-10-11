@@ -13,6 +13,11 @@ modified.  Reserved transaction targets are always no-replace publications;
 the two intentional replacements (settings and runtime) first atomically
 claim the exact journaled generation so a crash is resumable without
 overwriting a concurrent repair.
+
+Updates are one-way.  Once completion is durable, the two claimed
+predecessors are older copies in the app's own folders, and are removed on
+the journal's record of their bytes before the journal itself is retired
+(`_retire_translated_claims`).  Nothing here ever puts a predecessor back.
 """
 
 from __future__ import annotations
@@ -1916,10 +1921,16 @@ def finished_claims() -> FinishedClaims | None:
     Completion is the commit boundary, and nothing reads these slots after it:
     :func:`probe_future` reports ``complete`` from the marker and manifest
     without recovering, trusting or allocating a slot; :func:`ensure` then
-    retires only the authenticated journal and stage; and the slot clearance
-    check runs only for a ``ready`` predecessor, which a completion marker
-    rules out because the future probe answers first. The tokens derive from
-    the marker's adoption id exactly as the transaction derived them.
+    retires the authenticated journal and stage, and before them the claims
+    that are provably the predecessors (`_retire_translated_claims`); and
+    the slot clearance check runs only for a ``ready`` predecessor, which a
+    completion marker rules out because the future probe answers first. The
+    tokens derive from the marker's adoption id exactly as the transaction
+    derived them.
+
+    What is still in a slot is therefore what could not be proven: the claims
+    of an upgrade an earlier version completed (its journal is gone), an
+    entry that changed since, an empty slot. Tidy up lists those.
 
     ``None`` whenever :func:`probe` is not ``complete`` or the marker cannot
     be read: then nothing is proven and every slot must stay where it is.
@@ -2082,9 +2093,14 @@ def _install_exact_replacement(
             # fingerprint look like an unrelated generation on the next run.
             claim.close()
             raise
-        # The public target is durable. Keep the predecessor claim inert:
-        # deleting through a retained descriptor could destroy writes made by
-        # an already-open noncooperating FD after the rename.
+        # The public target is durable, and the transaction is not finished:
+        # until the completion marker is, this claim is what a resume
+        # recovers, so it stays as it is. Once completion is durable the
+        # claim is only an older copy in the app's own folder, and it is
+        # removed if it is still, byte for byte, the predecessor this journal
+        # recorded (`_retire_translated_claims`). A claim that a writer with
+        # the old file still open has changed since is not that predecessor:
+        # it holds bytes that were never translated, and it stays.
         claim.close()
         return True
 
@@ -2481,19 +2497,162 @@ def _cutover_locked(journal: _Journal, journal_raw: bytes, stage: bytes) -> bool
         journal_raw,
         stage,
     )
+    # Completion is durable. The predecessors' claims go first, on the
+    # journal's record of them; the journal goes last, and only once no claim
+    # is left to try, so a stop anywhere here leaves the proof for a later
+    # start (`_cleanup_completed_recovery`).
+    claims_settled = _retire_translated_claims(journal)
     _discard_exact_artifact(
         deployed_upgrade.staged_runtime_path(),
         stage,
         runtime_config.MAX_RUNTIME_CONFIG_BYTES,
         label="staged runtime",
     )
-    _discard_exact_artifact(
-        deployed_upgrade.journal_path(),
-        journal_raw,
-        MAX_JOURNAL_BYTES,
-        label="deployed-upgrade journal",
-    )
+    if claims_settled:
+        _discard_exact_artifact(
+            deployed_upgrade.journal_path(),
+            journal_raw,
+            MAX_JOURNAL_BYTES,
+            label="deployed-upgrade journal",
+        )
     return changed
+
+
+def _retire_translated_claim(
+    path: Path,
+    *,
+    old_fingerprint: file_io.FileFingerprint,
+    old_sha256: str,
+    maximum: int,
+    token: str,
+    label: str,
+) -> bool:
+    """Remove the claimed predecessor of ``path`` if it is exactly what was translated.
+
+    Each of this upgrade's own slots beside ``path`` is looked at. A slot goes
+    only on positive proof: it is a private directory holding one entry and
+    nothing else; that entry is the journaled inode, a private regular file
+    with no other name; and its bytes, read through the same pin the discard
+    then acts on, hash to the predecessor the journal recorded. Its contents
+    are then what the upgrade translated, so nothing unique is lost. The
+    entry is emptied through its verified descriptor and the slot's own
+    directory removed (``rmdir``, which removes nothing that holds anything).
+
+    Anything else stays where it is, for Tidy up to list as before: an entry
+    whose bytes differ (a late write to the superseded file is an edit that
+    was never translated), one with a second name, a slot holding anything
+    more, an empty slot, a name that is no private directory.
+
+    ``False`` only when a slot could not be looked at, or its removal did not
+    finish, for a reason that may pass (a folder that can't be written now, an
+    I/O error): the journal is then the only record of the predecessor's
+    bytes and must stay for a later start.
+    """
+    settled = True
+    with _parent_access(path, label=label, missing_ok=True) as retained:
+        if retained is None:
+            return True
+        _context, access = retained
+        for slot in _claim_tokens(token):
+            directory = _claim_path(access, slot)
+            try:
+                found = directory.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                settled = False
+                continue
+            if (
+                not stat.S_ISDIR(found.st_mode)
+                or found.st_uid != os.getuid()
+                or stat.S_IMODE(found.st_mode) != 0o700
+            ):
+                continue
+            try:
+                claim = file_io.recover_deletion_claim(
+                    access,
+                    logical_path=path,
+                    expected_identity=old_fingerprint[:2],
+                    expected_fingerprint=old_fingerprint,
+                    operation_token=slot,
+                )
+            except file_io.PathChangedError:
+                # Not the journaled file, or not alone: not ours to remove.
+                continue
+            except OSError, ValueError:
+                settled = False
+                continue
+            if claim is None:
+                continue
+            try:
+                status = claim.status()
+                if (
+                    status.st_nlink != 1
+                    or status.st_uid != os.getuid()
+                    or stat.S_IMODE(status.st_mode) & 0o022
+                    or status.st_size > maximum
+                    or not claim.stands_alone()
+                ):
+                    continue
+                if _sha256(claim.read_bytes(maximum)) != old_sha256:
+                    continue
+                claim.discard(with_directory=True)
+            except file_io.PathChangedError:
+                # It changed under the proof: no longer the exact predecessor.
+                continue
+            except OSError, ValueError:
+                settled = False
+            finally:
+                with contextlib.suppress(OSError):
+                    claim.close()
+    return settled
+
+
+def _retire_translated_claims(journal: _Journal) -> bool:
+    """Remove both predecessors' claims on the journal's record of them.
+
+    Only ever called with a journal the durable completion marker
+    authenticates, and before that journal is retired: it is the one record
+    of what the predecessors' bytes were. ``True`` once each claim is either
+    removed or found not to be the exact predecessor; ``False`` keeps the
+    journal for a later start (`_retire_translated_claim`).
+
+    An upgrade that completed under an earlier version has no journal left,
+    so nothing proves what its claims hold: they are never removed here, and
+    Tidy up goes on listing them (`finished_claims`).
+    """
+    settled = True
+    for path, fingerprint, digest, maximum, token, label in (
+        (
+            journal.settings_path,
+            journal.settings_old_fingerprint,
+            journal.settings_old_sha256,
+            config.MAX_SETTINGS_BYTES,
+            journal.settings_token,
+            "settings",
+        ),
+        (
+            journal.runtime_path,
+            journal.runtime_old_fingerprint,
+            journal.runtime_old_sha256,
+            runtime_config.MAX_RUNTIME_CONFIG_BYTES,
+            journal.runtime_token,
+            "runtime configuration",
+        ),
+    ):
+        try:
+            if not _retire_translated_claim(
+                path,
+                old_fingerprint=fingerprint,
+                old_sha256=digest,
+                maximum=maximum,
+                token=token,
+                label=label,
+            ):
+                settled = False
+        except OSError, ValueError, TransactionError:
+            settled = False
+    return settled
 
 
 def _cleanup_completed_recovery() -> None:
@@ -2504,6 +2663,10 @@ def _cleanup_completed_recovery() -> None:
     canonical journal to the current completion marker and recovers the exact
     dry-rendered stage expectation from that journal. Any replacement is left
     untouched.
+
+    The predecessors' claims are removed on the same authenticated journal,
+    before it goes (`_retire_translated_claims`): each claim is removed, or
+    found not to be the exact predecessor, or the journal stays.
     """
     try:
         completion_record = _read_completion()
@@ -2521,6 +2684,9 @@ def _cleanup_completed_recovery() -> None:
         _completion_matches_journal(completion, journal)
         if journal.runtime_target_sha256 != completion.runtime_sha256:
             return
+        # The predecessors' claims first, while the journal that records
+        # their bytes is still here; it is retired last, below.
+        claims_settled = _retire_translated_claims(journal)
         stage_raw = _read_private(
             deployed_upgrade.staged_runtime_path(),
             runtime_config.MAX_RUNTIME_CONFIG_BYTES,
@@ -2548,6 +2714,8 @@ def _cleanup_completed_recovery() -> None:
             ):
                 return
         if _read_completion() != (completion, completion_raw):
+            return
+        if not claims_settled:
             return
         _discard_exact_artifact(
             deployed_upgrade.journal_path(),

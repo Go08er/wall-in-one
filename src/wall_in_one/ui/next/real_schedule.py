@@ -851,6 +851,10 @@ class RealScheduling:
                 for problem in (rules.durable_problem(), assignments.durable_problem()):
                     if problem:
                         raise ValueError(problem)
+                if colors is not None:
+                    # Step 4 saves the settings, last. If that save can't be
+                    # made, nothing is forgotten (`config.require_color_source_forgettable`).
+                    config.require_color_source_forgettable(connector)
                 removed = rules.remove_for_display(connector)
                 try:
                     playlist = assignments.forget_display(connector)

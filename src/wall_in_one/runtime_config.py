@@ -1537,9 +1537,19 @@ def _compile(settings: config.Settings, session: Session) -> tuple[str, str | No
             )
         return authored.id
 
+    wanted_default = settings.active_playlist
+    if (
+        wanted_default
+        and wanted_default == session.left_out_default
+        and find_playlist(wanted_default, session) is None
+    ):
+        # Names nothing, and settings.toml could not be saved to clear it
+        # (`Session.leave_out_default`): built as no default, not refused for
+        # as long as the file stays as it is.
+        wanted_default = ""
     default = (
-        runtime_playlist(settings.active_playlist, owner="default playlist")
-        if settings.active_playlist
+        runtime_playlist(wanted_default, owner="default playlist")
+        if wanted_default
         else FALLBACK_PLAYLIST_ID
     )
     schema_version = (

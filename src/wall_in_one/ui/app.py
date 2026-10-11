@@ -524,6 +524,10 @@ class _PlaylistReferenceRepairResult:
     #: References by name, now the playlist's id: (reference, id).
     schedule_retargets: tuple[tuple[str, str], ...] = ()
     display_retargets: tuple[tuple[str, str], ...] = ()
+    #: A saved default that names no playlist and could not be cleared, and
+    #: why: (reference, reason). Not a failure: this process goes on without
+    #: a default (`Session.leave_out_default`) and says so.
+    unsaved_default: tuple[str, str] | None = None
 
 
 class Application(Adw.Application):
@@ -956,27 +960,39 @@ class Application(Adw.Application):
                         repaired_displays.append(playlist_id)
 
         saved_settings: config.Settings | None = None
+        unsaved_default: tuple[str, str] | None = None
         try:
             durable_settings = config.load_strict()
             active = durable_settings.active_playlist
             if active and active not in valid:
                 target = named(active)
-                saved_settings = _settings_published(
-                    lambda: (
-                        config.forget_playlist_default(active)
-                        if target is None
-                        else config.repoint_playlist_default(active, target)
-                    )
-                )
-                if saved_settings is None:
-                    durable_settings = config.load_strict()
-                    if (
-                        durable_settings.active_playlist
-                        and durable_settings.active_playlist not in valid
-                    ):
-                        failures.append(
-                            "saved default changed while dangling playlist repair was running"
+                try:
+                    saved_settings = _settings_published(
+                        lambda: (
+                            config.forget_playlist_default(active)
+                            if target is None
+                            else config.repoint_playlist_default(active, target)
                         )
+                    )
+                except config.ConfigError as error:
+                    # settings.toml could not be saved: kept read-only, or it
+                    # holds keys this build doesn't know. That is not this
+                    # start's to wait on. A default by name still names its
+                    # playlist without the id, so nothing is wrong. One that
+                    # names nothing is left out for this process, which says
+                    # so and goes on; the file is the person's to change.
+                    if target is None:
+                        unsaved_default = (active, str(error))
+                else:
+                    if saved_settings is None:
+                        durable_settings = config.load_strict()
+                        if (
+                            durable_settings.active_playlist
+                            and durable_settings.active_playlist not in valid
+                        ):
+                            failures.append(
+                                "saved default changed while dangling playlist repair was running"
+                            )
         except config.ConfigError as error:
             failures.append(f"saved default: {error}")
 
@@ -987,6 +1003,7 @@ class Application(Adw.Application):
             schedule_retargets=tuple(retargeted_schedules),
             display_retargets=tuple(retargeted_displays),
             failures=tuple(failures),
+            unsaved_default=unsaved_default,
         )
 
     def _finish_playlist_reference_repair(
@@ -1029,6 +1046,8 @@ class Application(Adw.Application):
         self._session.displays.adopt_worker_forget_playlists(result.display_playlists)
         self._session.schedules.adopt_worker_retarget(dict(result.schedule_retargets))
         self._session.displays.adopt_worker_retarget(dict(result.display_retargets))
+        if result.unsaved_default is not None and not again:
+            self._session.leave_out_default(result.unsaved_default[0])
         if result.settings is not None:
             previous = self._settings
             settings = (
@@ -1062,6 +1081,16 @@ class Application(Adw.Application):
             )
 
         self._authoring_migration_ready = True
+        if result.unsaved_default is not None:
+            reference, why = result.unsaved_default
+            # Said, never waited on: the library loads and changes are taken.
+            # Only a change that needs settings.toml saved is refused, by the
+            # save itself.
+            self.window_report(
+                f"The saved default playlist ({reference}) doesn\u2019t exist, and it "
+                f"couldn\u2019t be cleared: {why}. Playback goes on without a default. To "
+                f"change it, edit active_playlist in {paths.settings_path()}."
+            )
         if self._service_start and not self._headless_authoring_started:
             self._headless_authoring_started = True
             # A partial import may already have linked Settings roots while

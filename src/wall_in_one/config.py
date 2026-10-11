@@ -18,8 +18,10 @@ silently drop them.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import math
+import os
 import re
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -148,6 +150,23 @@ class SettingsUnreadableError(ConfigError):
     """
 
     kind: Final = state_file.UNREADABLE
+
+    def __str__(self) -> str:
+        return f"{self.kind}: {super().__str__()}"
+
+
+class SettingsNotWritableError(ConfigError):
+    """A change was refused because it would end in a settings.toml save that can't be made.
+
+    Raised before anything is written anywhere, for a change that spans files
+    and saves the settings last (deleting or renaming the playlist the saved
+    default names, Forget Display while the colors follow that display): the
+    other files are left as they are, instead of changed and then left with a
+    default naming nothing. Carries the stores' ``local-io`` kind and reads
+    ``kind: message`` as their errors do.
+    """
+
+    kind: Final = "local-io"
 
     def __str__(self) -> str:
         return f"{self.kind}: {super().__str__()}"
@@ -1037,6 +1056,38 @@ def forget_color_source(connector: str, path: Path | None = None) -> tuple[Setti
         raise ConfigError(f"cannot safely update {target}: {error}") from error
 
 
+#: What ``open(O_TMPFILE)`` fails with where the filesystem or kernel lacks it.
+_NO_TMPFILE: Final = frozenset({errno.EOPNOTSUPP, errno.EISDIR, errno.EINVAL, errno.ENOSYS})
+
+
+def why_not_writable(path: Path | None = None) -> str:
+    """Why ``settings.toml`` could not be saved where it is; empty when it could.
+
+    A save makes a new file beside the old one and puts it in its place, so
+    what decides is the folder: whether a file can be made in it. That is
+    asked by making one there with no name (``O_TMPFILE``), which leaves
+    nothing behind, and where the filesystem has no such thing, of the system
+    (`os.access`). A folder kept read-only (by its permission bits, a
+    read-only mount, a declarative setup that owns it) says no.
+
+    This is a look before a change that spans files and saves the settings
+    last, so the change can be refused whole. It is no promise that the save
+    will work: a disk can fill in between, and the save still reports its own
+    failure. A folder that isn't there yet is made by the save.
+    """
+    folder = (path if path is not None else paths.settings_path()).parent
+    try:
+        descriptor = os.open(folder, os.O_TMPFILE | os.O_WRONLY | os.O_CLOEXEC, 0o600)
+    except FileNotFoundError:
+        return ""
+    except OSError as error:
+        if error.errno not in _NO_TMPFILE:
+            return f"a file can't be made in {folder}: {error.strerror or error}"
+        return "" if os.access(folder, os.W_OK | os.X_OK) else f"{folder} is not writable"
+    os.close(descriptor)
+    return ""
+
+
 def require_playlist_deletable(
     playlist: PlaylistReference, path: Path | None = None, *, also: tuple[str, ...] = ()
 ) -> None:
@@ -1047,34 +1098,48 @@ def require_playlist_deletable(
     default points at nothing, which stops runtime compilation. Callers check
     this before deleting so the whole operation is refused instead.
 
-    Two cases are refused. The settings are read-only (they hold keys this
-    build does not know) and name this playlist: `SettingsReadOnlyError`. Or
+    Three cases are refused, each only when the saved default names this
+    playlist, or can't be shown not to. The settings are read-only (they hold
+    keys this build does not know): `SettingsReadOnlyError`. The file can't
+    be saved where it is (`why_not_writable`): `SettingsNotWritableError`. Or
     the settings can't be read, or can't be parsed: whether they name this
     playlist could not be checked, and "can't look" is not "isn't the
     default" (`SettingsUnreadableError`). A settings file that is not there
-    (a first run) names nothing, and the deletion goes ahead.
+    (a first run) names nothing, and the deletion goes ahead. So does the
+    deletion of any playlist the saved default does not name: nothing in the
+    settings would change, however read-only they are.
 
     ``playlist`` says which default is meant (`PlaylistReference`), judged
     against the default read here, never one a window remembers: another
     program may have saved a default, by name, since. ``also`` are further
     exact references when ``playlist`` is one.
     """
-    _require_default_writable(_naming(playlist, also), path, unchanged="Nothing was deleted.")
+    _require_default_writable(
+        _naming(playlist, also),
+        path,
+        unchanged="Nothing was deleted.",
+        needed="this playlist is the saved default, which deleting it would clear",
+    )
 
 
 def require_playlist_renamable(names: Callable[[str], bool], path: Path | None = None) -> None:
     """Refuse up front a rename whose by-name default could not then be given the id.
 
     ``names`` says whether a saved default names the playlist other than by
-    its id. As `require_playlist_deletable`: read-only settings that do, and
-    settings that can't be read, refuse the whole rename before anything is
-    written.
+    its id. As `require_playlist_deletable`: settings that do and are
+    read-only or can't be saved, and settings that can't be read, refuse the
+    whole rename before anything is written.
     """
-    _require_default_writable(names, path, unchanged="Nothing was renamed.")
+    _require_default_writable(
+        names,
+        path,
+        unchanged="Nothing was renamed.",
+        needed="the saved default names this playlist by its name, which renaming it would change",
+    )
 
 
 def _require_default_writable(
-    names: Callable[[str], bool], path: Path | None, *, unchanged: str
+    names: Callable[[str], bool], path: Path | None, *, unchanged: str, needed: str
 ) -> None:
     try:
         loaded = load_strict_document(path)
@@ -1084,5 +1149,46 @@ def _require_default_writable(
             f"({error}). {unchanged}"
         ) from error
     saved = loaded.settings.active_playlist
-    if loaded.read_only and saved and names(saved):
+    if not (saved and names(saved)):
+        return  # the settings stay as they are, whether or not they could be saved
+    if loaded.read_only:
         raise SettingsReadOnlyError(loaded.unknown_keys)
+    why = why_not_writable(path)
+    if why:
+        raise SettingsNotWritableError(f"{needed}, and settings.toml can't be changed ({why})")
+
+
+def require_color_source_forgettable(connector: str, path: Path | None = None) -> None:
+    """Refuse up front a Forget Display whose colors step could not then be saved.
+
+    `forget_color_source` is Forget's last step and writes only while the
+    colors still follow ``connector`` and displays are mirrored. When they do
+    and ``settings.toml`` can't be saved where it is (`why_not_writable`),
+    the display's rules and playlist would be forgotten and the colors left
+    following it: `SettingsNotWritableError`, before anything is forgotten.
+
+    Settings this build finds read-only (keys it does not know) are not
+    refused here: the caller knows that at the head of the lane, forgets the
+    display and says the colors still follow it, as it always has. Settings
+    that can't be read are `forget_color_source`'s to report.
+    """
+    target = path if path is not None else paths.settings_path()
+    forgotten = _tidy_connector(connector)
+    try:
+        loaded = load_strict_document(target)
+    except ConfigError:
+        return
+    current = loaded.settings
+    if (
+        not forgotten
+        or loaded.read_only
+        or current.theme_source_connector != forgotten
+        or current.display_mode != DISPLAY_MODE_MIRRORED
+    ):
+        return
+    why = why_not_writable(target)
+    if why:
+        raise SettingsNotWritableError(
+            "the desktop colors follow this display, which forgetting it would stop, "
+            f"and settings.toml can't be changed ({why})"
+        )

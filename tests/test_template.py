@@ -3630,3 +3630,60 @@ def test_a_link_swapped_to_another_folder_is_still_refused(
     assert sorted(entry.name for entry in elsewhere.iterdir()) == expected, "nothing made there"
     if expected:
         assert theirs.read_bytes() == b"somebody else's"
+
+
+@pytest.mark.parametrize(
+    ("target", "said"),
+    [
+        ("can't be searched", "Permission denied"),
+        ("is a file", "Not a directory"),
+    ],
+)
+def test_a_linked_folder_that_cannot_be_looked_into_is_not_taken_for_a_missing_entry(
+    fake_home: Path, tmp_path: Path, target: str, said: str
+) -> None:
+    """Can't look is not "not there". The link's target loses its search
+    permission (a native EACCES), or is not a folder at all: the discard raises,
+    naming the entry by its own path, and nothing is discarded. False is kept
+    for an entry that is known not to be there, or to be another one."""
+    real = _linked_noctalia_folder(tmp_path)
+    linked = paths.noctalia_state_dir()
+    lock = linked / ".settings.toml.wall-in-one-transaction-lock-abcd1234"
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    fingerprint = file_io.regular_file_fingerprint(lock)
+    if target == "is a file":
+        linked.unlink()
+        not_a_folder = tmp_path / "not-a-folder"
+        not_a_folder.write_bytes(b"")
+        linked.symlink_to(not_a_folder)
+    else:
+        real.chmod(0o000)
+    try:
+        # Failed on 32a2306: it returned False, as for an entry that isn't there.
+        with pytest.raises(OSError) as refused:
+            template._discard_beside_settings(
+                lock, expected_identity=fingerprint[:2], expected_fingerprint=fingerprint
+            )
+    finally:
+        real.chmod(0o700)
+
+    assert not isinstance(refused.value, file_io.PathChangedError)
+    assert str(refused.value).endswith(f"cannot inspect {lock}: {said}"), str(refused.value)
+    assert "/proc/" not in str(refused.value)
+    assert file_io.regular_file_fingerprint(real / lock.name)[:2] == fingerprint[:2], "untouched"
+    assert not (real / file_io.RETAINED_ENTRY_DIRECTORY).exists()
+
+
+def test_a_dangling_link_holds_no_entry_to_discard(fake_home: Path, tmp_path: Path) -> None:
+    """The other side: a link that leads nowhere holds nothing. That is known,
+    so it is False, as for any entry that is not there."""
+    linked = paths.noctalia_state_dir()
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    linked.symlink_to(tmp_path / "unplugged-drive" / "noctalia")
+    lock = linked / ".settings.toml.wall-in-one-transaction-lock-abcd1234"
+
+    assert (
+        template._discard_beside_settings(lock, expected_identity=(0, 0), expected_fingerprint=None)
+        is False
+    )

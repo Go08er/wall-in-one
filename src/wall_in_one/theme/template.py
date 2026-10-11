@@ -2317,6 +2317,11 @@ def _discard_beside_settings(
     descriptor's spelling, so it follows no name at all. A link swapped to
     another folder does not hold the entry: nothing is discarded there. A
     folder that is not a link takes the same call as before.
+
+    False is what it is for the discard itself: the entry is not there (nor
+    its folder, when the link dangles), or another entry has its name. A
+    folder or an entry that can't be looked at is not that: it raises, named
+    by the entry's own path.
     """
     folder = path.parent
     if not folder.is_symlink():
@@ -2329,8 +2334,14 @@ def _discard_beside_settings(
         )
     try:
         held = file_io._pin_folder_holding(folder, path.name, expected_identity)
-    except OSError:
-        return False  # not there, not this entry, or the folder can't be opened
+    except FileNotFoundError:
+        return False  # the entry, or the folder a dangling link names, is not there
+    except file_io.PathChangedError:
+        return False  # another entry has its name
+    except OSError as error:
+        # Can't look is not "not there": said, by the entry's own path (the
+        # failure itself may name only a leaf it was looking for).
+        raise OSError(error.errno, f"cannot inspect {path}: {error.strerror or error}") from error
     with held:
         anchor = Path(f"/proc/self/fd/{held.descriptor}")
         return file_io.discard_regular_if_same(

@@ -49,6 +49,12 @@ def _compact_for_width(width: int) -> bool:
     return width < COMPACT_WIDTH
 
 
+def _is_default(session: Session, playlist: playlists.Playlist) -> bool:
+    """Whether the saved default names ``playlist``, by its id or by its name."""
+    saved = session.settings.active_playlist
+    return runtime_config.default_playlist_id(saved, session) == playlist.id
+
+
 def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
     """Describe every authored reference removed with ``playlist``.
 
@@ -68,7 +74,7 @@ def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
         consequences.append(
             f"{assignment_count} display assignment{'s' if assignment_count != 1 else ''}"
         )
-    if session.settings.active_playlist == playlist.id:
+    if _is_default(session, playlist):
         consequences.append("the saved default selection")
     if session.manual_playlist == playlist.id:
         consequences.append("the current manual override")
@@ -1094,7 +1100,7 @@ class PlaylistsPage(Gtk.Box):
             f"{len(playlist)} item{'s' if len(playlist) != 1 else ''}"
             + (f" · {unavailable} unavailable" if unavailable else "")
             + playing
-            + (" · default" if playlist.id == session.settings.active_playlist else "")
+            + (" · default" if _is_default(session, playlist) else "")
         )
 
     def _compare_playlist_rows(self, first: Gtk.ListBoxRow, second: Gtk.ListBoxRow) -> int:
@@ -1326,12 +1332,11 @@ class PlaylistsPage(Gtk.Box):
         if not self._name_entry.has_focus() and self._name_entry.get_text() != playlist.name:
             self._name_entry.set_text(playlist.name)
         self._sync_play_button(session, playlist)
+        is_default = _is_default(session, playlist)
         self._default_button.set_label(
-            "Schedule default"
-            if playlist.id == session.settings.active_playlist
-            else "Use as schedule default"
+            "Schedule default" if is_default else "Use as schedule default"
         )
-        self._default_button.set_sensitive(playlist.id != session.settings.active_playlist)
+        self._default_button.set_sensitive(not is_default)
         self._sync_source_cards(session)
         self._sync_entry_cards(session, playlist)
 

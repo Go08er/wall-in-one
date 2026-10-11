@@ -721,6 +721,25 @@ def find_playlist(reference: str, session: Session) -> Playlist | None:
     return found if found is not None else session.playlists.by_name(reference)
 
 
+def default_playlist_id(reference: str, session: Session) -> str:
+    """The id of the playlist the saved default ``reference`` names; empty when it names none.
+
+    A saved default is a reference: a playlist's id or, from an older
+    profile, a hand edit or a setup that manages ``settings.toml``, its name.
+    The start gives a by-name default its id, unless the file can't be saved;
+    then the name stays for the whole session and still names its playlist
+    here and in the compiler (`find_playlist`). Every page that asks "is this
+    playlist the default?" asks this, never ``reference == playlist.id``, so
+    such a default is shown as the default it is and not as "All media".
+
+    Empty for nothing saved, and for a reference no playlist answers to (one
+    left out, `Session.leave_out_default`, or one the start has not repaired):
+    no playlist is the default then.
+    """
+    found = find_playlist(reference, session) if reference else None
+    return found.id if found is not None else ""
+
+
 class _Listing(Protocol):
     """The playlists as read from their file: a `playlists.Store`, a session's or a worker's."""
 

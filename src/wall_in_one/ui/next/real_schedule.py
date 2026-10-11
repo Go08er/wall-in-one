@@ -383,7 +383,24 @@ class RealScheduling:
 
     @property
     def default_playlist(self) -> str:
-        return self._backend.settings.active_playlist or runtime_config.FALLBACK_PLAYLIST_ID
+        """The default in force, as an id the page can name.
+
+        A default saved by name is its playlist
+        (`runtime_config.default_playlist_id`). One left out because it names
+        nothing and ``settings.toml`` can't be changed to clear it
+        (`Session.leave_out_default`) is not in force: "All media" plays, and
+        that is what is shown, never a row with no name. Any other reference
+        no playlist answers to is passed on as saved; the start repairs it.
+        """
+        saved = self._backend.settings.active_playlist
+        if not saved:
+            return runtime_config.FALLBACK_PLAYLIST_ID
+        named = runtime_config.default_playlist_id(saved, self._session)
+        if named:
+            return named
+        if saved == self._session.left_out_default:
+            return runtime_config.FALLBACK_PLAYLIST_ID
+        return saved
 
     def display_assignments(self) -> Mapping[str, str]:
         return dict(self._session.displays.all())

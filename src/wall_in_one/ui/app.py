@@ -638,6 +638,9 @@ class Application(Adw.Application):
         # may tell a control client to ask the user for a decision.
         self._authoring_gate_state: _AuthoringGateState = "checking"
         self._authoring_repair_started = False
+        #: The left-out default this process has already said, so that a
+        #: second pass of the repair doesn't say the same thing again.
+        self._unsaved_default_said: tuple[str, str] | None = None
         #: Saved repairs whose adoption here failed, adopted again by the next.
         self._unadopted_repairs: tuple[_PlaylistReferenceRepairResult, ...] = ()
         self._headless_authoring_started = False
@@ -1116,11 +1119,16 @@ class Application(Adw.Application):
             )
 
         self._authoring_migration_ready = True
-        if result.unsaved_default is not None:
+        if (
+            result.unsaved_default is not None
+            and result.unsaved_default != self._unsaved_default_said
+        ):
             reference, why = result.unsaved_default
             # Said, never waited on: the library loads and changes are taken.
             # Only a change that needs settings.toml saved is refused, by the
-            # save itself.
+            # save itself. Said once: a later pass (Try again after another
+            # failure) repeats it only if what it would say has changed.
+            self._unsaved_default_said = result.unsaved_default
             self.window_report(
                 f"The saved default playlist ({reference}) doesn\u2019t exist, and it "
                 f"couldn\u2019t be cleared: {why}. Playback goes on without a default. To "

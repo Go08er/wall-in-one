@@ -202,7 +202,13 @@ def _schedule_app(mode: str) -> SimpleNamespace:
             theme_source_connector="DP-9",
         ),
         manual_playlist=None,
-        playlists=SimpleNamespace(all=lambda: (playlist,)),
+        # As much of the store as the page asks: its list, and the two
+        # lookups the saved default is resolved by (id, then name).
+        playlists=SimpleNamespace(
+            all=lambda: (playlist,),
+            get=lambda reference: playlist if reference == playlist.id else None,
+            by_name=lambda name: playlist if name.casefold() == playlist.name.casefold() else None,
+        ),
         displays=_Displays(),
         schedules=SimpleNamespace(rules=(rule,)),
     )

@@ -332,9 +332,15 @@ class RealPlaylists:
         can = runtime_config.entry_playability(item, self._session)
         return "" if can.plays else can.reason
 
+    def _saved_default(self) -> str:
+        """The id of the playlist the saved default names, also when it names it by name."""
+        return runtime_config.default_playlist_id(
+            self._backend.settings.active_playlist, self._session
+        )
+
     def _default_pid(self) -> str:
         pending = self._defaults.get(_DEFAULT)
-        return pending[0] if pending is not None else self._backend.settings.active_playlist
+        return pending[0] if pending is not None else self._saved_default()
 
     def detail(self, pid: str) -> PlaylistDetail | None:
         playlist = self._editable(pid)
@@ -476,7 +482,7 @@ class RealPlaylists:
         a removal queued behind a default that then fails must still find it.
         """
         used = self._usage(pid)
-        asked = self._backend.settings.active_playlist == pid or pid in self._default_asked
+        asked = self._saved_default() == pid or pid in self._default_asked
         if asked and not any(usage.kind == "default" for usage in used):
             used = (Usage("default", "When nothing is scheduled"), *used)
         return used
@@ -750,7 +756,7 @@ class RealPlaylists:
         assigned = sum(playlist_id == pid for _connector, playlist_id in session.displays.all())
         if assigned:
             parts.append(f"{assigned} display assignment{'' if assigned == 1 else 's'}")
-        if self._backend.settings.active_playlist == pid:
+        if self._saved_default() == pid:
             parts.append("the saved default selection")
         if session.manual_playlist == pid:
             parts.append("the current manual override")

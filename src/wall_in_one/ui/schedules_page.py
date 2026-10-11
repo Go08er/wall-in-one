@@ -678,8 +678,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         row = plain(Adw.ComboRow, title="Playlist", model=model)
         selected = 0
+        # By the playlist the saved default names, also when it names it by
+        # name (`runtime_config.default_playlist_id`); "All media" otherwise.
+        default = runtime_config.default_playlist_id(session.settings.active_playlist, session)
         for index, playlist in enumerate(choices, start=1):
-            if playlist.id == session.settings.active_playlist:
+            if playlist.id == default:
                 selected = index
                 break
         row.set_selected(selected)

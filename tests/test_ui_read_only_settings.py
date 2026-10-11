@@ -39,6 +39,8 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
+from gi.repository import Adw  # noqa: E402
+
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_runtime_health_sync import _snapshot as _failed_wallpaper  # noqa: E402
 from tests.test_ui_astra030_ac_saved import _reply  # noqa: E402
@@ -57,6 +59,7 @@ from tests.test_ui_codex030_round1c import (  # noqa: E402, F401
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.library import displays, playlists, schedules, state_file  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
+from wall_in_one.ui import playlists_page, schedules_page  # noqa: E402
 from wall_in_one.ui.app import _RuntimeHealthRequest  # noqa: E402
 from wall_in_one.ui.next.real_schedule import RealScheduling  # noqa: E402
 
@@ -224,6 +227,99 @@ def test_a_start_goes_on_past_a_default_it_can_not_save(
         made = _saved(profile, "ghost", [profile.dusk])
         again = runtime_config.render(config.load_strict(), application.session)
         assert f'default_playlist = "{made.id}"' in again
+
+
+def _combo(widget: Any) -> Any:
+    """The first combo row under ``widget``."""
+    if isinstance(widget, Adw.ComboRow):
+        return widget
+    child = widget.get_first_child()
+    while child is not None:
+        found = _combo(child)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+@pytest.mark.parametrize("default", ["by name", "names nothing"])
+def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
+    shown: Shown,  # noqa: F811
+    default: str,
+) -> None:
+    """A default the start would have repaired, in settings it can't save, stays
+    as it is saved for the whole session. One by name is still its playlist: every
+    page shows that playlist as the default, not "All media" and not a row with
+    no name. One that names nothing is left out, so what is in force, and shown,
+    is "All media"."""
+    opened = shown.opened
+    application = opened.application
+    session = application.session
+    evening = _playlist(shown, "Evening", [shown.dawn])
+    reference = "evening" if default == "by name" else "ghost"
+    config.update({"active_playlist": reference})
+    application._settings = config.load_strict()
+    session.update_settings(application._settings, rescan_library=False)
+    with _settings_can_not_be_saved():
+        partial = application._repair_dangling_playlist_references()
+        assert application._finish_playlist_reference_repair(partial).ok
+    assert application.settings.active_playlist == reference, "nothing could be saved"
+
+    scheduling = opened.window.state.scheduling
+    editing = opened.window.state.playlist_editing
+    assert isinstance(scheduling, RealScheduling) and editing is not None
+    classic = schedules_page.SchedulesPage(application)
+    chosen = _combo(classic._build_defaults(session)).get_selected_item().get_string()
+    if default == "by name":
+        # Each of these failed on 7e55112: the pages compared the playlist's id
+        # with the saved name. The new window's default was "evening", which no
+        # row could name, and classic showed "All media".
+        assert scheduling.default_playlist == evening.id
+        assert scheduling.playlist_label(scheduling.default_playlist) == "Evening"
+        assert "the saved default selection" in editing.delete_warning(evening.id)
+        assert chosen == "Evening"
+        assert "the saved default selection" in playlists_page._deletion_body(session, evening)
+        assert runtime_config.default_playlist_id(reference, session) == evening.id
+    else:
+        assert session.left_out_default == reference
+        # Failed on 7e55112: "ghost", a default row with no name.
+        assert scheduling.default_playlist == runtime_config.FALLBACK_PLAYLIST_ID
+        assert "the saved default selection" not in editing.delete_warning(evening.id)
+        assert chosen == "All media (built-in playlist)"
+        assert "the saved default selection" not in playlists_page._deletion_body(session, evening)
+        assert runtime_config.default_playlist_id(reference, session) == ""
+
+
+def test_a_left_out_default_is_said_once(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """The start says it left the default out. A second pass of the repair in the
+    same process (Try again, after something else failed) finds the same thing
+    and does not say it again; it would, if what it had to say were different."""
+    profile: Profile = profiles()
+    application = _a_start_over(profile, "ghost")
+
+    def said() -> list[str]:
+        return [text for text in profile.window.reports if "default playlist" in text]
+
+    with _settings_can_not_be_saved():
+        for _pass in range(2):
+            partial = application._repair_dangling_playlist_references()
+            assert application._finish_playlist_reference_repair(partial).ok
+        # Failed on 7e55112: said twice.
+        assert len(said()) == 1, said()
+
+    # Another reference that names nothing is another thing to say.
+    paths.settings_path().write_text(
+        paths.settings_path().read_text(encoding="utf-8").replace("ghost", "phantom"),
+        encoding="utf-8",
+    )
+    application._settings = config.load_strict()
+    application.session.update_settings(application._settings, rescan_library=False)
+    with _settings_can_not_be_saved():
+        partial = application._repair_dangling_playlist_references()
+        assert application._finish_playlist_reference_repair(partial).ok
+    assert len(said()) == 2 and "(phantom)" in said()[-1], said()
 
 
 # -- which refusals count: only a file that can't be changed for as long as it stays as it is ----

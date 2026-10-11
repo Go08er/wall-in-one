@@ -712,6 +712,8 @@ def _latest(action: Action, manifests: _Manifests) -> _Manifest | None:
 
 #: Where an archived item can be, as its journal records it.
 _IN_ARCHIVE: Final = ("moved", "planned")
+#: How a record says an Undo moved its item back and a folder sync then failed.
+_PUT_BACK_UNSYNCED: Final = "it was put back, but syncing its folders failed"
 
 
 def _archived_items(manifest: _Manifest) -> list[dict[str, Any]]:
@@ -723,9 +725,21 @@ def _archived_items(manifest: _Manifest) -> list[dict[str, Any]]:
 def _archive_undo(manifest: _Manifest | None) -> Undo | None:
     if manifest is None:
         return None
-    count = len(_archived_items(manifest))
-    if manifest.document.get("partly_undone"):
+    items = _archived_items(manifest)
+    count = len(items)
+    if items and all(
+        str(item.get("undo_error", "")).startswith(_PUT_BACK_UNSYNCED) for item in items
+    ):
+        note = (
+            ". An earlier Undo put these back, but couldn't confirm that it will survive a "
+            "power loss; it can be tried again."
+        )
+    elif manifest.document.get("partly_undone"):
         note = ". An earlier Undo couldn't put these back; it can be tried again."
+    elif manifest.state == "applying" and any(item.get("outcome") == "moved" for item in items):
+        # Outcomes are journalled once, at the end: an apply cut short leaves
+        # every item "planned". This one finished and could not sync.
+        note = " (the move was made, but couldn't be confirmed to survive a power loss)."
     elif manifest.state == "applying":
         note = " (it stopped part way)."
     else:
@@ -1305,10 +1319,40 @@ def _archived_name(index: int, path: Path) -> str:
     return f"{index:04d}-{path.name.lstrip('.') or 'entry'}"
 
 
-def _fsync_all(directories: set[Path]) -> None:
-    for directory in sorted(directories):
-        with contextlib.suppress(OSError):
-            paths.fsync_directory(directory)
+def _fsync_all(
+    destinations: Iterable[Path], sources: Iterable[Path], *, made: Iterable[Path] = ()
+) -> OSError | None:
+    """Sync the folders moves touched, in the order that survives a power cut.
+
+    The parent of a folder just made first (the folder's own name), then
+    where things went (their new links), and only then where they left (the
+    withdrawal of the old ones). The first sync that fails stops it: nothing
+    is confirmed gone from its old place while its new place isn't durable.
+    Returns that failure, or None.
+    """
+    synced: set[Path] = set()
+    for group in (made, destinations, sources):
+        for directory in sorted(set(group) - synced):
+            synced.add(directory)
+            try:
+                paths.fsync_directory(directory)
+            except OSError as error:
+                return error
+    return None
+
+
+def _unconfirmed(error: OSError | None, then: str) -> str:
+    """What to add to a result when `_fsync_all` could not finish, or "".
+
+    The wording the stores use for a write whose folder sync failed
+    (`state_file.PublishedNotDurableError`), and ``then``: what can be done.
+    """
+    if error is None:
+        return ""
+    return (
+        " The move was made, but syncing its folders failed, so it may not survive a "
+        f"power loss ({error.strerror or error}). {then}"
+    )
 
 
 def _move(source: Path, destination: Path, item: Mapping[str, Any]) -> None:
@@ -1368,13 +1412,18 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
     )
     archive = _new_archive(LEFTOVERS)
     _write_manifest(archive, document)
-    touched: set[Path] = {archive / "items"}
+    left: set[Path] = set()
+    unsynced: OSError | None = None
     for record in items:
-        _move_into_archive(archive, record)
-        touched.add(Path(record["original"]).parent)
-    _fsync_all(touched)
-    document["state"] = "applied"
-    document["finished"] = _now_iso()
+        unsynced = _move_into_archive(archive, record, unsynced)
+        left.add(Path(record["original"]).parent)
+    if unsynced is None:
+        unsynced = _fsync_all({archive / "items"}, left)
+    if unsynced is None:
+        document["state"] = "applied"
+        document["finished"] = _now_iso()
+    # Otherwise it stays "applying": the journal says where each item is, and
+    # Undo puts it back, but it is not recorded as applied over a failed sync.
     _write_manifest(archive, document)
     moved = [record for record in items if record["outcome"] == "moved"]
     noted = [record for record in moved if record.get("note")]
@@ -1398,6 +1447,9 @@ def _apply_leftovers(expected: ActionPlan | None, roots: Sequence[Path]) -> Resu
         )
     if skipped:
         message += f" {_plural(skipped, 'item')} changed meanwhile and stayed where it was."
+    message += _unconfirmed(
+        unsynced, "It is recorded as unfinished, not as applied; Undo puts the items back."
+    )
     return Result(LEFTOVERS, bool(moved), message, archive)
 
 
@@ -1431,15 +1483,24 @@ def _settle_location(record: dict[str, Any], destination: Path, error: object) -
     )
 
 
-def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
-    """Move one journaled item into ``archive`` and record its real outcome."""
+def _move_into_archive(
+    archive: Path, record: dict[str, Any], unsynced: OSError | None = None
+) -> OSError | None:
+    """Move one journaled item into ``archive`` and record its real outcome.
+
+    The caller syncs the folders afterwards (`_fsync_all`), except around
+    the one move made in the other direction here: an item put back. That is
+    synced on the spot, each way in its own order. ``unsynced`` is a sync
+    that already failed in this run; it, or one that fails here, is returned,
+    and after it nothing more is put back or synced.
+    """
     source = Path(record["original"])
     destination = archive / record["archived"]
     try:
         _move(source, destination, record)
     except (OSError, ValueError) as error:
         _settle_location(record, destination, error)
-        return
+        return unsynced
     record["outcome"] = "moved"
     gained: bool | OSError = False
     if record["type"] == "dir" and not record["entry_sha256"]:
@@ -1452,11 +1513,23 @@ def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
             "whether it gained contents while it was being archived couldn't be checked "
             f"({gained.strerror or gained}); it's kept in the archive as it is"
         )
-        return
+        return unsynced
     if gained:
         # Something wrote into it while it moved, so it wasn't a leftover after
         # all: put it back. If that can't be done (its name was taken again),
         # it stays archived with its contents and the journal says so.
+        #
+        # This move goes the other way, so the folders' roles swap. Everything
+        # moved so far is made durable in the archive first; then the item is
+        # put back, its old place synced before the archive's.
+        unsynced = unsynced or _fsync_all({destination.parent}, {source.parent})
+        if unsynced is not None:
+            record["note"] = (
+                "it gained contents while it was being archived; it's kept in the archive "
+                "with them, because moving it there couldn't be confirmed durable "
+                f"({unsynced.strerror or unsynced})"
+            )
+            return unsynced
         try:
             file_io.move_directory_no_replace(
                 destination,
@@ -1471,8 +1544,10 @@ def _move_into_archive(archive: Path, record: dict[str, Any]) -> None:
                 )
             else:
                 _settle_location(record, destination, error)
-            return
+            return None
         record["outcome"] = "skipped: it was no longer empty"
+        return _fsync_all({source.parent}, {destination.parent})
+    return unsynced
 
 
 def _undo_archive(manifest: _Manifest) -> Result:
@@ -1489,7 +1564,11 @@ def _undo_archive(manifest: _Manifest) -> Result:
     failed = 0
     missing = 0
     unchecked = 0
-    touched: set[Path] = set()
+    made: set[Path] = set()
+    back: set[Path] = set()
+    left: set[Path] = set()
+    #: What this run found or put back, and how the journal had it before.
+    returned: list[tuple[dict[str, Any], str]] = []
     for record in document.get("items", []):
         if record.get("outcome") not in _IN_ARCHIVE:
             continue
@@ -1514,8 +1593,13 @@ def _undo_archive(manifest: _Manifest) -> Result:
                 unchecked += 1
                 continue
             if at_original is not None and (at_original.st_dev, at_original.st_ino) == identity:
+                # Back already (an earlier Undo whose sync failed, say): its
+                # folders are synced again before it is recorded as restored.
+                returned.append((record, str(record["outcome"])))
                 record["outcome"] = "restored"
                 record.pop("undo_error", None)
+                back.add(original.parent)
+                left.add(archived.parent)
                 continue
             record["outcome"] = "missing"
             missing += 1
@@ -1525,7 +1609,7 @@ def _undo_archive(manifest: _Manifest) -> Result:
         ):
             with contextlib.suppress(FileExistsError):
                 original.parent.mkdir(mode=0o700)
-            touched.add(original.parent.parent)
+            made.add(original.parent.parent)
         try:
             if stat.S_ISDIR(at_archive.st_mode):
                 file_io.move_directory_no_replace(archived, original, expected_identity=identity)
@@ -1539,11 +1623,19 @@ def _undo_archive(manifest: _Manifest) -> Result:
             record["undo_error"] = _journal_text(error)
             failed += 1
             continue
+        returned.append((record, str(record["outcome"])))
         record["outcome"] = "restored"
         record.pop("undo_error", None)
-        touched.update((original.parent, archived.parent))
+        back.add(original.parent)
+        left.add(archived.parent)
         restored += 1
-    _fsync_all(touched)
+    unsynced = _fsync_all(back, left, made=made)
+    if unsynced is not None:
+        # Not recorded as restored over a failed sync: each stays as the
+        # journal had it, so Undo looks again, finds it back, and syncs again.
+        for record, before in returned:
+            record["outcome"] = before
+            record["undo_error"] = f"{_PUT_BACK_UNSYNCED} ({unsynced.strerror or unsynced})"
     remaining = [
         record for record in document.get("items", []) if record.get("outcome") in _IN_ARCHIVE
     ]
@@ -1556,6 +1648,11 @@ def _undo_archive(manifest: _Manifest) -> Result:
         document.pop("partly_undone", None)
     _write_manifest(manifest.directory, document)
     message = f"Put back {_plural(restored, 'item')}."
+    found_back = len(returned) - restored
+    if found_back:
+        message += (
+            f" {_plural(found_back, 'item')} {'was' if found_back == 1 else 'were'} already back."
+        )
     if failed:
         message += (
             f" {_plural(failed, 'item')} couldn't be put back yet (manifest.json in "
@@ -1572,6 +1669,9 @@ def _undo_archive(manifest: _Manifest) -> Result:
             f" {_plural(missing, 'item')} {'is' if missing == 1 else 'are'} in neither place "
             "any more."
         )
+    message += _unconfirmed(
+        unsynced, "The items stay recorded as archived; Undo can be tried again to confirm it."
+    )
     return Result(action, restored > 0, message, manifest.directory)  # type: ignore[arg-type]
 
 
@@ -2340,8 +2440,8 @@ def _retire_created_template(manifest: _Manifest, document: Mapping[str, Any]) -
         )
     except OSError, ValueError:
         return ""
-    _fsync_all({installed.parent, destination.parent})
-    return f" The new template file went into {manifest.directory}."
+    unsynced = _fsync_all({destination.parent}, {installed.parent})
+    return f" The new template file went into {manifest.directory}.{_unconfirmed(unsynced, '')}"
 
 
 def _pending_undo(action: Action, manifests: _Manifests) -> _Manifest | None:
@@ -2566,19 +2666,30 @@ def _apply_old_palette_template(expected: ActionPlan | None) -> Result:
     archive = _new_archive(OLD_PALETTE_TEMPLATE)
     _write_manifest(archive, document)
     record = document["items"][0]
-    _move_into_archive(archive, record)
-    _fsync_all({stale.parent, archive / "items"})
+    unsynced = _move_into_archive(archive, record) or _fsync_all(
+        {archive / "items"}, {stale.parent}
+    )
     if record["outcome"] != "moved":
         document["state"] = "abandoned"
         _write_manifest(archive, document)
         raise TidyError(
             f"The old template file wasn't moved: {record['outcome'].removeprefix('skipped: ')}"
         )
-    document["state"] = "applied"
-    document["finished"] = _now_iso()
+    if unsynced is None:
+        document["state"] = "applied"
+        document["finished"] = _now_iso()
+    # Otherwise it stays "applying", as in `_apply_leftovers`.
     _write_manifest(archive, document)
     note = f" {record['note'][:1].upper()}{record['note'][1:]}." if record.get("note") else ""
-    return Result(OLD_PALETTE_TEMPLATE, True, f"Moved {stale.name} into {archive}.{note}", archive)
+    unconfirmed = _unconfirmed(
+        unsynced, "It is recorded as unfinished, not as applied; Undo puts the file back."
+    )
+    return Result(
+        OLD_PALETTE_TEMPLATE,
+        True,
+        f"Moved {stale.name} into {archive}.{note}{unconfirmed}",
+        archive,
+    )
 
 
 # -- action 3: the retired plugin's settings -------------------------------------------

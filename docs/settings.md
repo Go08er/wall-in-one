@@ -168,6 +168,13 @@ so its Undo goes with it, and a template archive made after that isn't
 checked against it. An archive folder with no `manifest.json` changed nothing
 and is ignored.
 
+Whatever Tidy up moves, it syncs the folder the item went to before the folder
+it left, so a power cut can't leave it in neither. If one of those syncs fails,
+the move has still been made, and the result says that it may not survive a
+power loss: an archive then stays recorded as unfinished rather than applied,
+and after an Undo the items stay recorded as archived, so Undo can be used, or
+tried again to confirm it.
+
 After an update, a card at the top of the window offers the first four once,
 in either interface, when there is something to tidy; Review opens Settings →
 Tidy up. Showing it writes nothing; choosing Review or Not Now records the

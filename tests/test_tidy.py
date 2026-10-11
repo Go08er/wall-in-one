@@ -15,7 +15,7 @@ import stat
 import time
 import tomllib
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Final
 
@@ -1341,3 +1341,155 @@ def test_journal_text_is_bounded_and_keeps_both_ends() -> None:
     assert len(json.dumps(text)) <= tidy.MAX_JOURNAL_TEXT_BYTES
     assert text.startswith("[Errno 5] first-file") and text.endswith("the reason it failed")
     assert tidy._journal_text("short") == "short"
+
+
+# -- moves are durable where they went before where they were (rule 6) ----------------
+
+
+def _moves_and_syncs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail: Callable[[Path], bool] = lambda _folder: False,
+) -> list[tuple[str, Path]]:
+    """Every move Tidy up makes and every folder it syncs from here, in order.
+
+    ``fail(folder)`` chooses a folder whose sync fails with EIO, once something
+    has moved (a real EIO from fsync can't be arranged: the one thing injected).
+    """
+    events: list[tuple[str, Path]] = []
+    real_file = file_io.atomic_move_no_replace
+    real_directory = file_io.move_directory_no_replace
+    real_sync = paths.fsync_directory
+
+    def move_file(source: Path, destination: Path, **expected: object) -> None:
+        real_file(source, destination, **expected)  # type: ignore[arg-type]
+        events.append(("move", destination))
+
+    def move_directory(source: Path, destination: Path, **expected: object) -> None:
+        real_directory(source, destination, **expected)  # type: ignore[arg-type]
+        events.append(("move", destination))
+
+    def sync(folder: Path) -> None:
+        if any(kind == "move" for kind, _path in events) and fail(Path(folder)):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        events.append(("sync", Path(folder)))
+        real_sync(folder)
+
+    monkeypatch.setattr(file_io, "atomic_move_no_replace", move_file)
+    monkeypatch.setattr(file_io, "move_directory_no_replace", move_directory)
+    monkeypatch.setattr(paths, "fsync_directory", sync)
+    return events
+
+
+def _synced_after_the_moves(events: list[tuple[str, Path]]) -> list[Path]:
+    last = max(index for index, (kind, _path) in enumerate(events) if kind == "move")
+    return [path for kind, path in events[last + 1 :] if kind == "sync"]
+
+
+def test_tidy_syncs_where_items_went_before_where_they_were(
+    finished: deployed_upgrade_transaction.FinishedClaims, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A power cut can't be run, so the order is pinned. Archiving: the archive's
+    items folder is synced before the folders the items left. Undo: the folders
+    they go back to, before the archive. One leftover is in the settings folder,
+    whose path sorts before the archive's, and one in the state folder, whose
+    path sorts after it: sorted order, as before, gets one of the two wrong each way."""
+    in_config = _claim_folder(paths.app_config_dir(), "entry-aaaaaaaa")
+    in_state = _claim_folder(paths.app_state_dir(), "entry-bbbbbbbb")
+    events = _moves_and_syncs(monkeypatch)
+
+    archive = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS)).archive
+    assert archive is not None and not in_config.exists() and not in_state.exists()
+    synced = _synced_after_the_moves(events)
+    # Failed on 7bdc1a6: the settings folder's retained folder was synced first.
+    assert synced.index(archive / "items") < synced.index(in_config.parent)
+    assert synced.index(archive / "items") < synced.index(in_state.parent)
+
+    events.clear()
+    assert tidy.undo(tidy.LEFTOVERS).changed and in_config.is_dir() and in_state.is_dir()
+    synced = _synced_after_the_moves(events)
+    # Failed on 7bdc1a6: the archive was synced before the state folder's retained folder.
+    assert synced.index(in_config.parent) < synced.index(archive / "items")
+    assert synced.index(in_state.parent) < synced.index(archive / "items")
+
+
+def test_an_archive_that_cannot_be_made_durable_is_not_recorded_as_applied(
+    finished: deployed_upgrade_transaction.FinishedClaims, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive's items folder can't be synced after the moves. The items are
+    in the archive, whole; the folders they left are not synced after that; the
+    journal stays unfinished, not applied; the message says the move was made and
+    may not survive a power loss; and Undo still puts everything back."""
+    folder = _claim_folder(paths.app_config_dir(), "entry-aaaaaaaa")
+    events = _moves_and_syncs(monkeypatch, fail=lambda synced: synced.name == "items")
+
+    result = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS))
+
+    assert result.archive is not None and not folder.exists()
+    manifest = json.loads((result.archive / "manifest.json").read_text())
+    (record,) = manifest["items"]
+    assert (result.archive / record["archived"]).is_dir(), "it is in the archive"
+    # Failed on 7bdc1a6: "applied", and "Archived 1 item in ..." with nothing more said.
+    assert manifest["state"] == "applying" and record["outcome"] == "moved"
+    assert result.message == (
+        f"Archived 1 item in {result.archive}. The move was made, but syncing its folders "
+        "failed, so it may not survive a power loss (Input/output error). It is recorded as "
+        "unfinished, not as applied; Undo puts the items back."
+    )
+    assert folder.parent not in _synced_after_the_moves(events), "its old place is not confirmed"
+    offered = tidy.plan(roots=()).action(tidy.LEFTOVERS).undo
+    # Not "(it stopped part way)": every move was made.
+    assert offered is not None and offered.detail.endswith(
+        "(the move was made, but couldn't be confirmed to survive a power loss)."
+    )
+
+    monkeypatch.setattr(paths, "fsync_directory", lambda _folder: None)
+    assert tidy.undo(tidy.LEFTOVERS).changed and folder.is_dir()
+
+
+def test_an_undo_that_cannot_be_made_durable_stays_recorded_as_archived(
+    finished: deployed_upgrade_transaction.FinishedClaims, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undo moves the item back, and the folder it went back to can't be synced.
+    The item is back, whole; the archive is not then synced; the journal keeps it
+    as archived with the reason, so Undo stays offered; the message says so. A
+    second Undo finds it back, syncs in the right order, and only then records it."""
+    folder = _claim_folder(paths.app_state_dir(), "entry-bbbbbbbb")
+    archive = tidy.apply(tidy.LEFTOVERS, tidy.plan(roots=()).action(tidy.LEFTOVERS)).archive
+    assert archive is not None and not folder.exists()
+    failing = [True]
+    events = _moves_and_syncs(
+        monkeypatch, fail=lambda synced: failing[0] and synced == folder.parent
+    )
+
+    undone = tidy.undo(tidy.LEFTOVERS)
+
+    manifest = json.loads((archive / "manifest.json").read_text())
+    (record,) = manifest["items"]
+    assert folder.is_dir(), "it is back"
+    # Failed on 7bdc1a6: "restored" and "undone", and "Put back 1 item." with nothing more.
+    assert manifest["state"] == "applied" and record["outcome"] == "moved"
+    assert record["undo_error"] == (
+        "it was put back, but syncing its folders failed (Input/output error)"
+    )
+    assert undone.message == (
+        "Put back 1 item. The move was made, but syncing its folders failed, so it may not "
+        "survive a power loss (Input/output error). The items stay recorded as archived; "
+        "Undo can be tried again to confirm it."
+    )
+    assert archive / "items" not in _synced_after_the_moves(events)
+    offered = tidy.plan(roots=()).action(tidy.LEFTOVERS).undo
+    assert offered is not None and offered.detail.endswith(
+        "An earlier Undo put these back, but couldn't confirm that it will survive a "
+        "power loss; it can be tried again."
+    )
+
+    failing[0] = False  # the folder can be synced again
+    events.clear()
+    again = tidy.undo(tidy.LEFTOVERS)
+
+    manifest = json.loads((archive / "manifest.json").read_text())
+    assert manifest["state"] == "undone" and manifest["items"][0]["outcome"] == "restored"
+    assert again.message == "Put back 0 items. 1 item was already back."
+    synced = [path for kind, path in events if kind == "sync"]
+    assert synced.index(folder.parent) < synced.index(archive / "items")

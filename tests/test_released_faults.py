@@ -39,7 +39,7 @@ def test_the_tracer_kills_fails_and_edits_where_its_plan_says(
     (trace,) = faults.run(released_source, PRODUCER, [plain])
     assert trace.status == 0 and trace.output == "DONE", trace.output + trace.errors
     kinds = {call.kind for call in trace.calls}
-    assert kinds == {"change", "look", "sync"}, "every kind of call is numbered"
+    assert kinds == {"change", "look", "sync", "write"}, "every kind of call is numbered"
     moved = [call for call in trace.changes if call.name == "_rename_noreplace"]
     assert moved, "the released code's own rename is traced"
     broken = next(path for _call, path, _inode in trace.public if path.endswith(".broken"))

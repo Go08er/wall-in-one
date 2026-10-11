@@ -25,6 +25,11 @@ child, in its own scratch profile, under its one plan:
     as well, a later call then fails: the released code finds its publication
     unverifiable and moves the edited entry wherever it does.
 
+``{"short": n, "errno": "ENOSPC"}``
+    Write ``n`` puts half its data in the file and then fails with that error:
+    a disk that fills in the middle of a write. Writes are numbered like any
+    other call (kind ``write``), so ``"fail"`` at one fails it before a byte.
+
 ``{"pause": n, "gate": path}``
     Just before call ``n`` the process stops, alive, with whatever it holds
     (`paused`): another version takes its turn, and then this one carries on.
@@ -280,6 +285,55 @@ def _wrap_open():
     return real
 
 
+class _Sink:
+    # A file the traced code writes through: each write is a numbered call, and
+    # one can be cut short (half the data reaches the file, then the error).
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+
+    def write(self, data):
+        index = _numbered("write", "write", "<file>")
+        if index and _PLAN.get("short") == index:
+            self._real.write(data[: len(data) // 2])
+            self._real.flush()
+            _short()
+        return self._real.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def __enter__(self):
+        self._real.__enter__()
+        return self
+
+    def __exit__(self, *details):
+        return self._real.__exit__(*details)
+
+
+def _short():
+    number = getattr(_errno, _PLAN.get("errno", "ENOSPC"))
+    raise OSError(number, "injected after a short write: " + _os.strerror(number))
+
+
+def _wrap_writes():
+    opened = _os.fdopen
+    written = _os.write
+
+    def fdopen(descriptor, mode="r", *arguments, **keywords):
+        real = opened(descriptor, mode, *arguments, **keywords)
+        return _Sink(real) if any(flag in mode for flag in "wa+") else real
+
+    def write(descriptor, data):
+        index = _numbered("write", "write", "<descriptor>")
+        if index and _PLAN.get("short") == index:
+            written(descriptor, bytes(data)[: len(data) // 2])
+            _short()
+        return written(descriptor, data)
+
+    _os.fdopen = fdopen
+    _os.write = write
+
+
 def _wrap_mkstemp():
     real = _tempfile.mkstemp
 
@@ -297,6 +351,7 @@ def trace_filesystem(*renames):
     _REAL["replace"] = _os.replace
     _REAL["open"] = _wrap_open()
     _wrap_mkstemp()
+    _wrap_writes()
     for attribute in ("replace", "rename", "link"):
         _wrap(_os, attribute, "change", places=(1,))
     for attribute in ("unlink", "remove", "rmdir", "mkdir", "truncate", "ftruncate"):
@@ -1246,3 +1301,22 @@ def round_trip(
                             f"isn't there: {said.replace(str(job.base), '')}"
                         )
     return result
+
+
+def disk_full(trace: Produced, *, full: bool) -> list[dict[str, object]]:
+    """No room, at each place a byte or a name has to land.
+
+    ENOSPC at every write, both before a byte and after half of them, and at
+    changes and syncs: one in three for a gate, every one in full, where
+    EDQUOT is tried the same way.
+    """
+    writes = [call for call in trace.calls if call.kind == "write"]
+    landing = [call for call in trace.calls if call.kind in ("change", "sync")]
+    plans: list[dict[str, object]] = []
+    for number in ("ENOSPC", "EDQUOT") if full else ("ENOSPC",):
+        plans += [{"short": call.index, "errno": number} for call in writes]
+        plans += [{"fail": call.index, "errno": number} for call in writes]
+        plans += [
+            {"fail": call.index, "errno": number} for call in (landing if full else landing[::3])
+        ]
+    return plans

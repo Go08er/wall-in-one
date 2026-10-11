@@ -175,6 +175,26 @@ Classic left no trace in `ui.toml`, exactly like never choosing (0.2.2 wrote
 only New). 0.3.0 therefore opens the new interface once for that profile.
 Choose Classic in its Settings and it stays classic from then on.
 
+Hidden files in your download folders (`<library folder>/Wall-in-One/<provider>/`)
+are handled differently by the two versions:
+
+- **0.3.0's temporary names are invisible to 0.2.x.** 0.3.0 stages a download
+  under `.wall-in-one-v2-…` and publishes it through `.wall-in-one-commit-…`.
+  0.2.x's day-old cleanup matches only its own older names, its library scan
+  skips hidden files, and its Tidy up doesn't look for them. Anything 0.3.0
+  left under those names stays where it is until you return to 0.3.0.
+- **0.2.x still cleans up its own older names.** 0.3.0 never empties a file
+  left under 0.2.x's temporary names (`.wall-in-one-media-stage-…` and the
+  like), because such a file can hold an edit; Tidy up lists them and offers
+  to archive them. 0.2.x's own cleanup does empty them once they are a day
+  old. To keep one, archive it in 0.3.0's Tidy up before going back.
+- **A removal 0.3.0 didn't finish.** If 0.3.0 stopped partway through removing
+  a downloaded wallpaper, the wallpaper's download record waits in a hidden
+  `.wall-in-one-removal-…` folder beside it. 0.2.x cancels the unfinished
+  removal without putting that record back, so the wallpaper counts as a
+  local file there. Nothing is deleted, and both versions' Tidy up keep the
+  folder.
+
 ### Going back to 0.2.1 or 0.2.0 after choosing the new interface or turning GPU acceleration off
 
 0.2.0 and 0.2.1 don't know Settings → Appearance → Interface or GPU

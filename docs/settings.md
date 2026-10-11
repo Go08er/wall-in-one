@@ -51,8 +51,7 @@ runtime document when successful; it is not a read-only settings checker.
 
 `settings.toml` has no version number, so Wall-in-One can't tell a key from a
 newer release apart from a typo. 0.1.4 refuses the whole file, which is why
-0.2.0 writes only the keys 0.1.4 knows (see
-[Going back to 0.1.4](updating.md#going-back-to-014)).
+0.2.0 writes only the keys 0.1.4 knows.
 Since 0.2.0, a key this version doesn't know never stops anything. Instead:
 
 - Every reader uses the keys it knows. The unknown ones are ignored, never
@@ -157,9 +156,8 @@ overwritten, and without it nothing is saved); if that choice is what created
 `ui.toml`, it starts at version 2 and there is no backup, because there was
 nothing to keep. Either way it stays at version 2 after that, even if you
 turn GPU acceleration on again. A profile that never makes either choice
-stays at version 1, which 0.2.0 and 0.2.1 keep reading and writing. See
-[Updating](updating.md#going-back-from-030-to-022-021-or-020) for what older
-releases do with a chosen interface. A row whose change could not be saved goes back to what `ui.toml`
+stays at version 1, which 0.2.0 and 0.2.1 keep reading and writing.
+A row whose change could not be saved goes back to what `ui.toml`
 holds and says why. Keys it doesn't know are
 kept through every save, an invalid value falls back to that preference's
 default, and a missing file means defaults. An unreadable or malformed

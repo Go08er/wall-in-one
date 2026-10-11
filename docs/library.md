@@ -690,13 +690,6 @@ Fields the app does not know, for example ones a newer version added, are kept
 through every save of a file it does understand: at the top level and on each
 playlist, playlist entry, schedule rule, pairing and removal intent.
 
-0.1.4 has neither guard. It reads a newer file as unreadable and drops fields
-it does not know. Its app checks the playlists, schedules and display
-assignments before it saves anything, so while one of them is from 0.2.0 it
-pauses every edit instead, and nothing is moved aside or lost. To go back to
-0.1.4, `wall-in-one-rollback` rewrites those files in 0.1.4's versions first;
-see [Going back to 0.1.4](updating.md#going-back-to-014).
-
 ### Format versions and their backups
 
 A file moves to a newer format only when you first use what that format adds.

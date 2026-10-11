@@ -465,10 +465,10 @@ default, the app leaves the choice to GTK as every earlier release did, and
 GTK uses the GPU when it can. Off starts the window with GTK's software
 renderer by setting `GSK_RENDERER=cairo`, which GTK programs the app starts
 inherit too. A `GSK_RENDERER` you set yourself always wins over the setting.
-It takes effect the next time Wall-in-One starts, is saved in `ui.toml`, and
-0.2.0 and 0.2.1 ignore it. An instance that is already running keeps the
-renderer it started with, a `--service` one included (closing its window
-doesn't end it): quit the app and start it again to switch.
+It takes effect the next time Wall-in-One starts and is saved in `ui.toml`.
+An instance that is already running keeps the renderer it started with, a
+`--service` one included (closing its window doesn't end it): quit the app
+and start it again to switch.
 
 ## Upgrades and migration
 
@@ -490,7 +490,7 @@ Separately, the first graphical launch can detect retired
 is an explicit user choice, leaves every legacy byte untouched, refuses to
 merge with current authoring, and can resume an exact interrupted transaction.
 Start with [`docs/migrating.md`](docs/migrating.md); it covers both boundaries,
-CLI status, schema mapping, known losses, companion compatibility, and rollback.
+CLI status, schema mapping, known losses, and companion compatibility.
 
 ## Development
 
@@ -610,17 +610,6 @@ the new interface.
     status 1.
   - When no app is running, `ctl open` launches the interface chosen in
     Settings.
-
-- **Rolling back.**
-  - 0.2.0 and 0.2.1 don't know the choice and start classic. `--ui=next`
-    still works there.
-  - **0.2.2** knows the choice, but its new interface has only the Library;
-    use classic there for the rest. With nothing chosen it starts classic,
-    its own default. It keeps a saved Classic only until it next saves a
-    window preference; 0.3.0 then opens the new interface again.
-  - Choosing an interface, Classic included, moves `ui.toml` to version 2,
-    which 0.2.0 and 0.2.1 only read. See [docs/updating.md](docs/updating.md)
-    for what that means for them.
 
 - **The seams.**
   - `Application` talks to its window only through the `WindowServices`

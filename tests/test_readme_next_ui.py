@@ -93,7 +93,7 @@ def test_the_readme_says_every_control_follows_the_bar_scope() -> None:
 
 
 def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> None:
-    """The interface is chosen in Settings; --ui overrides it; 0.2.0 and 0.2.1 ignore it.
+    """The interface is chosen in Settings; --ui overrides it.
 
     0.3.0 made the new interface the default, so the README now says how to
     choose Classic (it said how to choose "New (preview)") and that a start
@@ -106,8 +106,6 @@ def test_the_readme_says_how_to_choose_the_interface_and_what_overrides_it() -> 
     assert "takes effect the next time Wall-in-One starts" in section
     assert "`--ui=classic` overrides the saved choice for that start" in section
     assert "When no app is running, `ctl open` launches the interface chosen in Settings" in section
-    assert "0.2.0 and 0.2.1 don't know the choice and start classic" in section
-    assert "It keeps a saved Classic only until it next saves a window preference" in section
     # Codex 0.3.0 round 1, D-1: the order is the flag, the saved choice, then the default.
     assert (
         "Without the flag, the app opens the interface saved in Settings, otherwise the "

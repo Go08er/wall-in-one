@@ -173,7 +173,7 @@ Remove/Move to Trash cleanup may consume an adopted capture only through its
 exact live generation authority; an observed Workshop uninstall remains
 metadata-only.
 
-### Crash recovery, backups, and rollback
+### Crash recovery and backups
 
 Together, the journal, authority document, deterministic stage, and completion
 record bind the original and target settings/runtime evidence, root and
@@ -200,18 +200,12 @@ root again, confirm that `--deployed-upgrade-status` returns `prepared` or
 wallpaper fields may keep their newer values; only `[wallpaper].directory`
 must again name the journal-authorized root.
 
-There is deliberately no deployed-upgrade abort command in this release. A
-crash-safe abort would need a second durable rollback transaction: settings
-may already be in a journal-authorized claim, capture sidecars may live on a
-different filesystem, and an empty private claim directory is not deletion
-authority. If the original root should not be restored, leave the journal,
-claims, stage, manifest, and sidecars intact for diagnosis. With a pre-upgrade
-backup, the supported alternative is to stop and disable the service and
-restore the config directory, state directory, Automatic Stills directory,
-Noctalia settings, app revision, and companion revision together as one unit.
-This restores the whole saved snapshot, including unrelated Noctalia settings.
-Preserve the current files separately first; if changes were made after the
-backup, reconcile them before restoring rather than silently discarding them.
+There is deliberately no deployed-upgrade abort command. A crash-safe abort
+would need a second durable transaction: settings may already be in a
+journal-authorized claim, capture sidecars may live on a different
+filesystem, and an empty private claim directory is not deletion authority.
+If the original root should not be restored, leave the journal, claims,
+stage, manifest, and sidecars intact for diagnosis.
 
 Empty or unrelated claim directories are never deleted, trusted, or reused.
 After a replacement is durable, predecessor claims deliberately remain inert:
@@ -230,14 +224,12 @@ Before installing the new package, stop Wall-in-One and back up:
   ownership marker and captures; and
 - the Noctalia settings and companion revision used by the old installation.
 
-For rollback, stop and disable the new service first, preserve the failed/new
-state for diagnosis, restore those backups as a unit, and restore the prior
-app and companion revisions. Do not combine individual files from before and
-after cutover, delete a resumable journal, or treat a private claim as the
-rollback interface. Restoring the snapshot also rolls back later wallpaper,
-theme and other settings changes; preserve and reconcile those newer files
-first. There is no automatic schema-4-to-schema-2 conversion, nor a converter
-for schema-5 settings/runtime state back to an older app.
+The upgrade is one-way, like every update (see
+[Updates are one-way](updating.md#updates-are-one-way)): there is no
+schema-4-to-schema-2 conversion, nor a converter for schema-5 settings or
+runtime state back to an older app, and a private claim is not a way back.
+Do not combine individual files from before and after cutover, and do not
+delete a resumable journal.
 
 The app and companion remain separate release artifacts. Install the compatible
 app before updating the companion. On the live machine, inspect
@@ -455,7 +447,7 @@ profile:
 Malformed types and unknown scene scaling/clamp values stop the whole import;
 they do not silently select a current default.
 
-### Upgrade and rollback procedure
+### Upgrade procedure
 
 1. Back up the three legacy paths above. If a current profile exists, back up
    `~/.config/wall-in-one` and `~/.local/state/wall-in-one` too.
@@ -470,14 +462,11 @@ they do not silently select a current default.
 5. Enable the packaged `wall-in-one.service` only after the resolved profile
    looks correct.
 
-To roll back, stop and disable the current user service first. Preserve or move
-aside the current config/state directories, then re-enable the old plugin. The
-import deliberately leaves `config.json`, `runtime.json`, Noctalia settings,
-provider markers, and old automatic stills byte-exact. Do not run both
-implementations concurrently.
-
-There is intentionally no automatic reverse conversion from the current split
-stores to legacy `config.json`.
+The import is one-way: there is no conversion from the current split stores
+back to legacy `config.json`. It leaves `config.json`, `runtime.json`,
+Noctalia settings, provider markers, and old automatic stills byte-exact,
+because they are in Noctalia's folder and your wallpaper folders, and the
+import removes nothing there. Do not run both implementations concurrently.
 
 ## Companion Noctalia plugin compatibility
 

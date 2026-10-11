@@ -51,8 +51,8 @@ refuses unresolved legacy data so login cannot silently publish empty defaults.
 
 Back up both profiles first and follow
 [`migrating.md`](migrating.md) for source paths, supported schemas, exact field
-mapping, intentional resets, service handover, companion-plugin limitations and
-rollback. Do not run the retired plugin and `wall-in-one.service` together.
+mapping, intentional resets, service handover and companion-plugin
+limitations. Do not run the retired plugin and `wall-in-one.service` together.
 
 The icon is found the way any themed icon is: `hicolor` is the fallback theme
 every icon lookup ends at, so an SVG at `hicolor/scalable/apps/<id>.svg` under

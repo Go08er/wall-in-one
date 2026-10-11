@@ -570,11 +570,10 @@ predates `runtime-overrides.toml` never opens it, so with the new app and the
 old service still running (between an update and the service restart) the
 setting is saved, `runtime.toml` stays loadable, and the setting starts
 applying once the updated service runs; a page can tell from
-`supported_override_schemas` and say so. After a rollback the older service
-starts on the same `runtime.toml` and simply ignores the file.
+`supported_override_schemas` and say so.
 
 This is deliberately unlike the battery option, which lives in `runtime.toml`
 itself and so needs schema 5, refused while an older service runs. Putting
 these two in `runtime.toml` would have meant a schema 6 that every released
-service refuses to load, leaving a rolled-back or not-yet-restarted service
-unable to start at all.
+service refuses to load, leaving a service that has not been restarted yet
+unable to take it.

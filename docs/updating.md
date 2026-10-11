@@ -37,10 +37,10 @@ to make an existing installation look like a fresh install.
    environment and executable as that installation; if the companion uses an
    **Executable** override, use that full path in these commands. Do not
    force-kill an app with unfinished work.
-3. Back up the app's config and state folders, including hidden files, and keep
-   the previous app/companion revisions available. Defaults are
-   `~/.config/wall-in-one` and `~/.local/state/wall-in-one`; respect custom XDG
-   locations and original library paths. Keep backups of your media too.
+3. Back up the app's config and state folders, including hidden files.
+   Defaults are `~/.config/wall-in-one` and `~/.local/state/wall-in-one`;
+   respect custom XDG locations and original library paths. Keep backups of
+   your media too.
 4. Update the app and companion through their existing installation method.
    For NixOS or Home Manager, update the declaration and activate it normally.
    For manually installed units, refresh only the links owned by that install.
@@ -119,7 +119,7 @@ window shows the error and offers **Open settings file**, **Open app state
 folder**, and **Try again**. Open the named file in your editor, preserve its
 original paths and other values, repair the error, then try again. The recovery
 window never resets or overwrites your files. A conflicting migration journal
-still needs the [migration recovery procedure](migrating.md#crash-recovery-backups-and-rollback).
+still needs the [migration recovery procedure](migrating.md#crash-recovery-and-backups).
 
 For service details:
 
@@ -138,143 +138,38 @@ every start until you choose New there again. `--ui` (listed in
 `wall-in-one --help`) applies only to the start it is given on: an app that is
 already running keeps its window and prints a note, so close it first.
 
-## Returning to an older package
+## Updates are one-way
 
-Package rollback does not roll back application data, and there is no
-automatic data downgrade. An older release can refuse or narrow files that a
-newer one wrote: keep or restore the newer package to repair the
-configuration. There are two kinds of target below. Going back to a 0.2.x
-release involves only `ui.toml`; going back to 0.1.4 needs a tool. Preserve current files before restoring
-any backup, since a whole-folder restore would discard changes made after that
-backup.
+An update translates what older versions left. A profile from 0.1.4 or 0.2.x
+opens in this version with its settings, library folders, playlists,
+schedules, displays, favourites, still choices and downloads intact, and the
+[migration guide](migrating.md) covers the older empty-root app and the
+retired Noctalia plugin.
 
-### Going back from 0.3.0 to 0.2.2, 0.2.1 or 0.2.0
+Nothing goes the other way. Installing an older version over a profile a
+newer one has used is not supported, and no version converts a profile back.
+A system rollback of the package (an earlier NixOS or Home Manager
+generation, `nix profile rollback`, an older package from your distribution)
+is such a downgrade: it replaces the app and its service and leaves the
+profile as the newer version saved it.
 
-0.3.0 opens the new interface unless you choose Classic in Settings →
-Appearance → Interface. The choice is saved as `interface` in
-`~/.config/wall-in-one/ui.toml`, Classic included; until you choose, the key
-is absent and the new interface, the default, opens. The first choice moves
-`ui.toml` to version 2 the way 0.2.2's choices did, keeping the version 1
-file as `ui.toml.v1-backup`. Choosing an interface changes no other file.
+If you do it anyway, the older version does what it always did with files it
+doesn't know, and what it changes or drops does not come back when you update
+again:
 
-- **0.2.2** reads either choice and keeps saving `ui.toml`. With no choice
-  saved it starts classic, its own default. With New saved it starts its new
-  interface, which has only the Library there; choose Classic for the rest.
-  With Classic saved it starts classic, but 0.2.2 saves Classic, its default,
-  by leaving the key out: the next time 0.2.2 saves a window preference (the
-  window style, an opacity or frost dial, the thumbnail size, GPU
-  acceleration, or dismissing the Tidy up card), the saved Classic is gone,
-  and 0.3.0 opens the new interface again. Choose Classic again there, or
-  start it with `--ui=classic`.
-- **0.2.1 and 0.2.0** don't know the choice and start classic. A choice of
-  either interface moved `ui.toml` to version 2, which they read but never
-  save; the next section says how to let them save window preferences again.
-
-One case can't be told apart. In 0.2.2, choosing New and then going back to
-Classic left no trace in `ui.toml`, exactly like never choosing (0.2.2 wrote
-only New). 0.3.0 therefore opens the new interface once for that profile.
-Choose Classic in its Settings and it stays classic from then on.
-
-Hidden files in your download folders (`<library folder>/Wall-in-One/<provider>/`)
-are handled differently by the two versions:
-
-- **0.3.0's temporary names are invisible to 0.2.x.** 0.3.0 stages a download
-  under `.wall-in-one-v2-…` and publishes it through `.wall-in-one-commit-…`.
-  0.2.x's day-old cleanup matches only its own older names, its library scan
-  skips hidden files, and its Tidy up doesn't look for them. Anything 0.3.0
-  left under those names stays where it is until you return to 0.3.0.
-- **0.2.x still cleans up its own older names.** 0.3.0 never empties a file
-  left under 0.2.x's temporary names (`.wall-in-one-media-stage-…` and the
-  like), because such a file can hold an edit; Tidy up lists them and offers
-  to archive them. 0.2.x's own cleanup does empty them once they are a day
-  old. To keep one, archive it in 0.3.0's Tidy up before going back.
-- **A removal 0.3.0 didn't finish.** What 0.2.x does with it at its next start
-  depends on how far 0.3.0 got:
-  - **0.3.0 stopped before it took the wallpaper out of its place.** The
-    wallpaper is still at its own path, and its download record waits in a
-    hidden `.wall-in-one-removal-…` folder beside it. 0.2.x cancels the
-    removal without putting that record back, so the wallpaper counts as a
-    local file there. Nothing is deleted, and both versions' Tidy up keep
-    that folder.
-  - **0.3.0 had already taken the wallpaper out of its place.** 0.2.x
-    finishes the removal you asked for: the wallpaper is deleted, as it would
-    have been in 0.3.0.
-
-### Going back to 0.2.1 or 0.2.0 after choosing the new interface or turning GPU acceleration off
-
-0.2.0 and 0.2.1 don't know Settings → Appearance → Interface or GPU
-acceleration: they start the classic interface (`--ui=next` still works
-there) and leave the renderer to GTK (`GSK_RENDERER=cairo` in the environment
-still works there too). A profile that never chose an interface (New in
-0.2.2, either one in 0.3.0) and never turned GPU acceleration off is
-unaffected.
-
-Either choice moved `~/.config/wall-in-one/ui.toml` to version 2. 0.2.0 and
-0.2.1 read a version 2 `ui.toml` for the preferences they know (window style,
-opacity, frost, thumbnail size, the Tidy up card's dismissal) but never save
-changes to it; nothing is lost. To let them save window preferences again,
-close the app first, then, depending on what you find next to `ui.toml`:
-
-- **`ui.toml.v1-backup` is there.** `ui.toml` existed before the choice, and
-  this is its version 1, kept when the choice was saved. Keep a copy of the
-  current file (`cp ui.toml ui.toml.v2-saved`), then copy the backup over it
-  (`cp ui.toml.v1-backup ui.toml`). Window preferences changed since then are
-  back to what they were.
-- **No `ui.toml.v1-backup`.** The choice is what created `ui.toml`, at version
-  2, so there is no version 1 to go back to. Move it aside
-  (`mv ui.toml ui.toml.v2-saved`): 0.2.0 and 0.2.1 then start with default
-  window preferences and write a new `ui.toml` when you change one.
-
-Don't copy a version 2 file, such as `ui.toml.v2-saved`, back for 0.2.0 or
-0.2.1: they only read it. Never remove the whole `~/.config/wall-in-one` or
-`~/.local/state/wall-in-one` folder for this; only `ui.toml` is involved.
-0.1.4 ignores `ui.toml`.
-
-### Going back to 0.1.4
-
-0.1.4 is the release before 0.2.0 (there is no 0.1.5), and the one rollback
-target that needs more than `ui.toml`. 0.2.0 moved three store formats on, and
-every release since, 0.3.0 included, writes those same formats, so the way back
-to 0.1.4 is the same from any of them. 0.2.0 and later read every 0.1.4 file
-as it is, but move three of them to a newer version the first time you use
-what 0.2.0 added:
-
-- naming a schedule rule moves `schedules.json` from version 2 to 3;
-- giving a playlist its own interval or shuffle moves `playlists.json` from
-  version 1 to 2;
-- letting a display's own playlist beat global schedule rules moves
-  `displays.json` from version 1 to 2.
-
-A profile that never used these is entirely in 0.1.4's formats. Otherwise,
-to go back to 0.1.4, close the app and stop the service, then run the
-rollback tool that comes with 0.2.0 and every later release:
-
-```sh
-systemctl --user stop wall-in-one.service
-wall-in-one-rollback            # shows what it would change; writes nothing
-wall-in-one-rollback --apply    # backs up, then rewrites
-```
-
-It lists what will be dropped, for example `rule "Evening lights" loses its
-name` or `playlist "Evenings" loses its interval (120 s)`, and keeps every
-playlist, entry, rule and display assignment. `--apply` copies the files it
-changes into one dated folder, `~/.local/state/wall-in-one/rollback-to-0.1.4-<date>/`,
-rewrites the three files in the versions 0.1.4 reads, and removes
-`runtime-overrides.toml`, which 0.1.4 never reads. It then prints the two
-commands that put the copies back; if a write fails part way, it says which
-files it already rewrote and prints the same commands. It refuses, writing
-nothing, while the app or the service is running, and when a file is in a
-format newer than the ones 0.2.0 writes. A file that changes after the tool
-read it is never rewritten: the tool stops there and says so. Running it again
-finds nothing to do.
-
-Then install 0.1.4 and start its service. Its first start compiles
-`runtime.toml` again from the rewritten files. Everything else is left as it
-is: `pairings.json`, `favourites.json`, `pending-removals.json` and
-`settings.toml` are already in 0.1.4's formats (no release since writes a
-settings key 0.1.4 doesn't know), and 0.1.4 ignores `ui.toml`, the
-`.v<n>-backup` files and `tidy-archive/`.
-
-Without the tool, 0.1.4's app shows an empty library and saves nothing until
-you update again, but nothing is lost, and the wallpaper keeps running on the
-last `runtime.toml`.
+- **0.2.0, 0.2.1 and 0.2.2** open `playlists.json`, `schedules.json`,
+  `displays.json`, `favourites.json` or `pairings.json` read-only when it is
+  in a format they don't know: they show what they understand of it, refuse
+  every change to it, and the wallpaper service keeps the last setup it was
+  given. A `settings.toml` key they don't know makes Settings read-only, and
+  a newer `ui.toml` is read but never saved. They don't recognise what this
+  version leaves while a download or a removal is unfinished, and their
+  day-old cleanup empties partial downloads left under their own older
+  temporary names, which this version keeps intact and lists in Tidy up.
+- **0.1.4** has no such guard. While `playlists.json`, `schedules.json` or
+  `displays.json` is in a format it doesn't know, its window shows an empty
+  library and saves nothing, and the wallpaper keeps running on the last
+  `runtime.toml`. Where it does save a file, it drops every field it doesn't
+  know, and a file in a newer format is first moved aside as `<file>.broken`
+  and written again in its own. A `settings.toml` key it doesn't know stops
+  its service from starting, or from taking any change.

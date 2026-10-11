@@ -8,8 +8,7 @@ the first save that does use one keeps the old bytes beside the file as
 
 Every check diffs the whole sandbox home, so a stray backup, temporary or
 ``.broken`` copy fails as an unexpected write. Idle never bumps or backs up
-anything, and names never reach ``runtime.toml``. What older builds do with a
-version-3 file (0.1.4 narrows it on its next edit) is in ``test_downgrade``.
+anything, and names never reach ``runtime.toml``.
 """
 
 from __future__ import annotations

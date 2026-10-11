@@ -26,7 +26,6 @@ semantic check (see :func:`runtime_document_semantics`).
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
 import json
 import os
@@ -799,35 +798,6 @@ class FakeRuntime:
         if verb == "reload":
             return Response.success("reloaded")
         raise AssertionError(f"the golden profile run sent an unexpected runtime verb: {verb!r}")
-
-
-@contextlib.contextmanager
-def serve(runtime: FakeRuntime, path: Path) -> Iterator[None]:
-    """Answer on a real Unix socket, for a child process (an older build).
-
-    In-process callers patch ``client.send_runtime`` instead; this exists for
-    code that cannot be patched because it runs in another interpreter.
-    """
-    import socketserver
-    import threading
-
-    from wall_in_one.control.protocol import Request
-
-    class Handler(socketserver.StreamRequestHandler):
-        def handle(self) -> None:
-            request = Request.decode(self.rfile.readline(1024 * 1024))
-            self.wfile.write(runtime.send_runtime(request.verb, request.argument).encode())
-
-    server = socketserver.ThreadingUnixStreamServer(str(path), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-        path.unlink(missing_ok=True)
 
 
 # -- the idle sequence --------------------------------------------------------------

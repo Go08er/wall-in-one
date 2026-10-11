@@ -16,8 +16,7 @@ person sets something. On the golden profile that means:
 * an overrides file from a newer release (a schema this build does not know)
   neither stops the service unit's start nor is touched by this build.
 
-Every check diffs the whole sandbox home. What older builds make of these
-files after a rollback is in ``test_downgrade``.
+Every check diffs the whole sandbox home.
 """
 
 from __future__ import annotations

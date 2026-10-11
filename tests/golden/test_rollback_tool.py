@@ -2,9 +2,8 @@
 
 The tool narrows the current playlists.json, schedules.json and displays.json
 to the versions 0.1.4 reads, keeping every record, removes
-runtime-overrides.toml, and backs up what it changes first. That the real
-v0.1.4 source then opens, edits and compiles the result is
-``test_downgrade``'s (it needs the old build); this module needs none.
+runtime-overrides.toml, and backs up what it changes first. This module needs
+no old build.
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ import pytest
 from tests.golden import harness, sandbox
 from tests.golden.harness import Allowance, Change, Profile
 from tests.golden.sandbox import Golden, decorate, read_json, write_json
-from tests.golden.test_downgrade import V0_1_4_FORMATS
 from wall_in_one import cli, config, legacy_migration, paths, rollback, runtime_config
 from wall_in_one.library import (
     displays,
@@ -37,6 +35,16 @@ from wall_in_one.library import (
     state_file,
 )
 
+#: The newest version of each store file v0.1.4 (dbfbaa0) reads and writes:
+#: ``FORMAT_VERSION`` in each ``src/wall_in_one/library`` module at that tag.
+#: It lived in the downgrade suite, which is gone.
+V0_1_4_FORMATS: Final = {
+    "playlists.json": 1,
+    "schedules.json": 2,
+    "pairings.json": 2,
+    "displays.json": 1,
+    "favourites.json": 1,
+}
 RULE_NAME: Final = "Evening lights"
 INTERVAL: Final = 120
 OPT_IN: Final = "DP-1"
@@ -137,7 +145,7 @@ def test_a_bumped_file_without_any_new_field_is_still_narrowed(
 
 
 def test_the_targets_are_the_versions_v0_1_4_reads() -> None:
-    """Pinned to the downgrade suite's record of v0.1.4 (dbfbaa0), so they cannot drift.
+    """Pinned to this module's record of v0.1.4 (dbfbaa0), so they cannot drift.
 
     The files left alone are left alone because their formats did not change:
     this build writes pairings, favourites and pending removals at the

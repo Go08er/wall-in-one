@@ -3,7 +3,6 @@
 #
 #   tools/isolated.sh python -m pytest tests -q -m "not gui"
 #   tools/isolated.sh python -m pytest tests -q -m gui
-#   tools/isolated.sh tools/golden-downgrade.sh
 #
 # This, or one of the flake's checks, is how to run the tests. The command
 # gets a new temporary HOME and XDG config, state, cache, data and runtime

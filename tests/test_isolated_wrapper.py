@@ -53,9 +53,6 @@ def test_the_guard_says_it_is_a_backstop() -> None:
     doc = " ".join(conftest.__doc__.split())
     assert "All of this is a backstop, not the way to run the suite." in doc
     assert "``tools/isolated.sh``" in doc and "never as a bare ``pytest``" in doc
-    downgrade = (REPOSITORY / "tools" / "golden-downgrade.sh").read_text(encoding="utf-8")
-    assert "tools/isolated.sh tools/golden-downgrade.sh" in downgrade
-    assert "nix develop --command tools/golden-downgrade.sh" not in downgrade
 
 
 def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> None:

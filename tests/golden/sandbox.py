@@ -22,8 +22,6 @@ for:
     display opt-in (displays.json 2); runtime.toml never changes for them,
     runtime-overrides.toml exists only while one is used, and idle with them
     in use writes only the whitelist.
-``test_downgrade`` (``-m downgrade``, needs ``WIO_OLD_SRC``)
-    An older build edits what this build wrote; ``tools/golden-downgrade.sh``.
 ``test_sanitizer``
     ``tools/golden-profile-sanitize.py`` round-trips a profile without secrets.
 

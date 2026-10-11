@@ -92,13 +92,15 @@ read-only mount, or a tool that manages the files in it. Wall-in-One reads
 - A default playlist given by name (`active_playlist = "Evening"`) is that
   playlist, and every page shows it as the default. Where the file can be
   saved, the app replaces the name with the playlist's id at its next start.
-- A default that names no playlist is left out. "All media" plays, and the app
-  says once at start which file and key to change. The wallpaper service's
-  startup check, `--write-config` and the health sync print a `warning:` line
-  and build the runtime document without a default. Once a playlist with that
-  name exists, it is the default again. Where the file can be saved, the app
-  clears such a default at its next start, and `--write-config` refuses it
-  until then.
+- A default that names no playlist is left out, whether or not the file can
+  be saved, and so is one that names a playlist with nothing to play. "All
+  media" plays, and the app says so once and keeps it as a notice. The
+  wallpaper service's startup check, `--write-config` and the health sync
+  print a `warning:` line naming the file and the key, build the runtime
+  document with "All media" as the default, and exit as usual. Once a
+  playlist with that name has something to play, it is the default again.
+  Where the file can be saved, the app clears a default that names no
+  playlist at its next start.
 
 The same holds while the file has [unknown keys](#unknown-keys), which make
 it read-only too.

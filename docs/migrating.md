@@ -389,8 +389,9 @@ The importer preserves, subject to current typed limits:
   named playlists, and absolute sources which are currently unmounted. A
   playlist none of whose wallpapers can play from the imported library
   folders (each missing, or a video with no still) is kept as it was, and the
-  import's message and report name it: until one can, or it is emptied,
-  changes won't reach playback, and the app says so;
+  import's message and report name it: until one can, playback goes on
+  without that playlist and without whatever uses it ("All media" plays in
+  place of a default that names it), and the app says so;
 - shared still and palette pairing metadata, including manually selected
   stills as associations rather than owned files;
 - automatic still associations only when an exact adjacent predecessor

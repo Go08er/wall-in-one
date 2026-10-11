@@ -38,10 +38,19 @@ then a notice under the header says what is waiting, and its button asks
 again. While the import question is open, the library isn't loaded and
 changes can't be saved, and the notice says so.
 
-When changes stop reaching playback (a playlist's files went away outside the
-app, say), the same notice says why, naming the playlist, with a button to
-Playlists; the wallpaper service keeps the last setup that worked until a
-change gets through again.
+The same notice says what playback goes on without. When the default, a
+schedule rule or a display's own playlist names a playlist that doesn't exist
+or has nothing to play (its files went away outside the app, say), that one
+reference is left out and everything else still reaches playback: "All media"
+plays in place of such a default, and a rule or a display's own playlist left
+out simply doesn't apply. The notice names each one and why, with a button to
+Playlists, for as long as that is so. It is said once in a toast and in the
+activity log, and again only when what is left out changes.
+
+When changes stop reaching playback altogether (a file the app saves its
+playlists, rules or displays in can't be read, or the wallpaper service
+rejected the new setup), the notice says why instead, and the wallpaper
+service keeps the last setup that worked until a change gets through again.
 
 ## After an update
 
@@ -174,7 +183,7 @@ Also:
 - A playlist that a schedule rule, the default or a display uses can't lose
   its last wallpaper that plays.
 - No playlist, used or not, can be left holding only wallpapers playback can't
-  use: the service couldn't build its configuration around it. It can be
+  use: it would never reach playback. It can be
   emptied. Nor can one be made like that: a copy of such a playlist, or of All
   wallpapers while nothing in the library can play yet (videos still waiting
   for their stills), is refused, saying why. An empty playlist can always be

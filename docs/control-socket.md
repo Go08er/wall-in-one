@@ -176,24 +176,29 @@ or disable schedule rules. Entries have identities of their own, printed by
 `playlists <name>` and taken back by `playlist-remove`, so reordering never
 renumbers anything and the same wallpaper can appear twice. A list naming
 wallpapers that are not here keeps them -- an unmounted drive is not a deletion.
-If a nonempty playlist has no resolvable entries, compilation reports the
-problem and leaves the last-known-good runtime configuration untouched; it
-does not silently substitute the whole library. Restore the media or repair
-the playlist before retrying. A playlist whose name has a space in it is
-referred to by the id `playlists` prints beside it.
+A playlist with no resolvable entries, like an empty one, is not in the
+runtime configuration. Whatever names it is left out and said, and everything
+else is published: the default plays "All media" instead, and a schedule rule
+or a display's own playlist that names it doesn't apply until the media is
+back or the playlist is repaired. The app says which and why once, and keeps
+it as a notice; `wall-in-one --write-config` prints one `warning:` line for
+each. A playlist whose name has a space in it is referred to by the id
+`playlists` prints beside it.
 
 Whichever window or verb asks, a change is refused when it would leave a
 playlist that the default, a schedule rule or a display uses with nothing to
-play, or any playlist holding only wallpapers playback can't use (the wallpaper
-service could not build its configuration around it): `playlist-remove`, a
-`playlist-add` to an empty playlist, `schedule-add` and `display-assign` with a
+play, or any playlist holding only wallpapers playback can't use (it would
+never reach playback, and whatever uses it would be left out):
+`playlist-remove`, a `playlist-add` to an empty playlist, `schedule-add` and `display-assign` with a
 playlist that has nothing to play, `remove`, `select` of a video waiting for
 its still, and `still <video> default` or `reset-pairing` that would leave a
 video without one. The reply's kind is `nothing-to-play`, and nothing is
 written. The check is made against what is saved at that moment: the default
 in `settings.toml`, the schedule rules, the displays' playlists and the
 playlists themselves as their files read then, whoever saved them, not only
-what the app has held since it started.
+what the app has held since it started. These refusals are a courtesy at the
+gesture: publication does not depend on them. Whatever another program saved
+meanwhile, the runtime configuration is still built, without what can't play.
 
 The same changes wait while the app knows its library isn't current: after a
 removal, until the scan after it has finished, and after the library folders or

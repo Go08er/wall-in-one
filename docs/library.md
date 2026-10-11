@@ -598,10 +598,12 @@ removed deliberately; playback skips it when another usable occurrence exists,
 and **Play now** is off when every entry is missing or skipped.
 
 A playlist's files can still go away outside the app, or with a drive. Its
-entries are kept, and when nothing in a playlist can play any more, the
-wallpaper service keeps the last setup that worked. The app names the
-playlist, and the new interface keeps saying so under its header, with a
-button to Playlists, until a change gets through again. An older profile's
+entries are kept, and when nothing in a playlist can play any more, playback
+goes on without it: where it is the default, "All media" plays instead, and a
+schedule rule or a display's own playlist that names it doesn't apply.
+Everything else still reaches playback. The app names each of those and why,
+once, and the new interface keeps saying so under its header, with a button
+to Playlists, until the playlist has something to play again. An older profile's
 default, schedule rule or display assignment that names a playlist by its
 name, rather than its id, keeps working: it is given the playlist's id at the
 next start, and a rename or delete takes it along.

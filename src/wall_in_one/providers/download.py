@@ -988,7 +988,7 @@ def recover_abandoned(
                     info = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
+                if not stat.S_ISREG(info.st_mode) or _changed_since(info, cutoff):
                     continue
                 if path.name.endswith(location.sidecar_suffix):
                     # A final provider sidecar: public, and maybe an older
@@ -1026,8 +1026,17 @@ def recover_abandoned(
                             "could not revalidate provider staging; "
                             + _put_back_or_say_where(claim, path),
                         ) from error
-                    valid = claimed_info.st_mtime <= cutoff and _is_owned_staging(
-                        path.name, claimed_info, prefixes
+                    # Its age can't be told from its ctime any more: the
+                    # claim's own rename just set that. The claim took exactly
+                    # the generation that passed the age test (its fingerprint,
+                    # ctime included, was verified as it moved), so what is
+                    # checked again is what a rename leaves alone: that its
+                    # size and mtime are still that generation's.
+                    valid = (
+                        claimed_info.st_mtime <= cutoff
+                        and (claimed_info.st_size, claimed_info.st_mtime_ns)
+                        == (info.st_size, info.st_mtime_ns)
+                        and _is_owned_staging(path.name, claimed_info, prefixes)
                     )
                     if not valid:
                         back, where = _put_back(claim, path)
@@ -1064,6 +1073,18 @@ def recover_abandoned(
     if anchor is not None:
         anchor.verify_public()
     return tuple(removed)
+
+
+def _changed_since(info: os.stat_result, cutoff: float) -> bool:
+    """Whether an entry is too recent for the sweep: touched in any way after ``cutoff``.
+
+    By its mtime and by its ctime. User space can set an mtime back (a tool
+    that restores timestamps after an edit does exactly that), but not a
+    ctime, which every write, rename, chmod or utime moves to that moment. So
+    a stage that was just touched always looks recent, whatever its mtime
+    says; the same rule as Tidy up's for a download's leftover names.
+    """
+    return max(info.st_mtime, info.st_ctime) > cutoff
 
 
 def _is_owned_staging(

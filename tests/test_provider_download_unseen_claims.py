@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -18,6 +19,17 @@ import pytest
 from wall_in_one import file_io
 from wall_in_one.providers import download, http
 from wall_in_one.providers.base import ProviderError
+
+
+def _sweep_clock() -> float:
+    """A clock for the sweep, two days ahead of the real one.
+
+    The sweep takes only what was left alone for a day, by mtime and by
+    ctime. A test can set a file's mtime back and cannot set its ctime, so it
+    ages its files by asking the sweep what it would do later instead.
+    """
+    return time.time() + 2 * download.STAGING_MAX_AGE_SECONDS
+
 
 PAYLOAD = b"validated media bytes"
 
@@ -115,7 +127,7 @@ def test_recovery_stops_and_says_where_an_unseen_claim_left_a_staged_file(
     tmp_path: Path, unseen_claims: list[tuple[str, Path]]
 ) -> None:
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     stale = {path.name: path for path in (_staged(directory, "one"), _staged(directory, "two"))}
     for path in stale.values():
@@ -236,7 +248,7 @@ def test_recovery_never_says_an_unseen_claim_still_holds_its_entry(
     isn't known: the error says it "may still be" in the claim and that this
     could not be checked, never that it "remains" there."""
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     staged = _staged(directory, "one")
     os.utime(staged, (old, old))

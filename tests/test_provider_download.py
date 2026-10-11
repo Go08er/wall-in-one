@@ -30,6 +30,16 @@ from wall_in_one.providers import download, http
 from wall_in_one.providers.base import ProviderError
 
 
+def _sweep_clock() -> float:
+    """A clock for the sweep, two days ahead of the real one.
+
+    The sweep takes only what was left alone for a day, by mtime and by
+    ctime. A test can set a file's mtime back and cannot set its ctime, so it
+    ages its files by asking the sweep what it would do later instead.
+    """
+    return time.time() + 2 * download.STAGING_MAX_AGE_SECONDS
+
+
 def _staged(directory: Path, name: str = "payload") -> Path:
     suffix = (name + "00000000")[: download.TEMPORARY_SUFFIX_LENGTH]
     path = directory / f"{download.MEDIA_STAGING_PREFIX}{suffix}"
@@ -491,7 +501,7 @@ def test_bare_path_install_failure_releases_its_borrow_and_remains_recoverable(
     assert download._STAGED_FILES == {}
     assert _open_fd_count() == initial_fds
 
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     os.utime(staged, (old, old))
     assert download.recover_abandoned(
@@ -1013,7 +1023,7 @@ def test_abandoned_transfer_destructor_releases_its_pin_and_stage_is_recoverable
         retained.pin.status()
     assert _open_fd_count() == initial_fds
 
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     os.utime(staged, (old, old))
     assert download.recover_abandoned(
@@ -1117,7 +1127,7 @@ def test_concurrent_transfer_references_consume_and_unregister_exactly_once(
 
 def test_recovery_is_old_owned_files_only(tmp_path: Path) -> None:
     directory, marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
 
     old_stage = _staged(directory, "old")
@@ -1190,12 +1200,39 @@ def test_recovery_is_old_owned_files_only(tmp_path: Path) -> None:
     assert marker.is_file()
 
 
+def test_a_stage_edited_now_with_its_mtime_set_back_is_kept_until_a_day_after_that(
+    tmp_path: Path,
+) -> None:
+    """A staged file is edited now, and its mtime is then set back two days, as a
+    tool that restores timestamps does. Its ctime can't be set back: it says the
+    file was touched just now. The sweep keeps it, and reclaims it only once a
+    day has passed since that touch."""
+    directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
+    staged = _staged(directory, "edited")
+    with staged.open("ab") as handle:
+        handle.write(b" and an edit")
+    edited = staged.read_bytes()
+    two_days_ago = time.time() - 2 * download.STAGING_MAX_AGE_SECONDS
+    os.utime(staged, (two_days_ago, two_days_ago))
+
+    # Failed on efa4e16: reclaimed at once, by its mtime alone.
+    assert download.recover_abandoned(directory, download.MOTIONBGS_LOCATION) == ()
+    assert staged.read_bytes() == edited, "kept, edit and all"
+
+    touched = staged.stat().st_ctime
+    not_yet = touched + download.STAGING_MAX_AGE_SECONDS - 60
+    assert download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=not_yet) == ()
+    a_day_after = touched + download.STAGING_MAX_AGE_SECONDS + 1
+    removed = download.recover_abandoned(directory, download.MOTIONBGS_LOCATION, now=a_day_after)
+    assert removed == (staged,) and not staged.exists()
+
+
 def test_recovery_restores_a_staging_replacement_that_wins_the_claim_race(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     staged = _staged(directory, "race")
     os.utime(staged, (old, old))
@@ -1229,7 +1266,7 @@ def test_an_orphan_sidecar_is_retired_intact_never_emptied(tmp_path: Path) -> No
     """A final provider sidecar whose media is gone is moved, whole, into the
     retained folder: its name is free again and its bytes are kept."""
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     media = directory / "missing.mp4"
     orphan = Path(str(media) + download.MOTIONBGS_LOCATION.sidecar_suffix)
@@ -1287,7 +1324,7 @@ def test_an_orphan_sidecar_edited_after_it_was_read_stays_where_it_is(
     """The record is rewritten between its check and its retirement: it is no
     longer the generation that was read, so it is not moved at all."""
     directory, _marker = download.managed_directory(tmp_path, download.MOTIONBGS_LOCATION)
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     media = directory / "missing.mp4"
     orphan = Path(str(media) + download.MOTIONBGS_LOCATION.sidecar_suffix)
@@ -1356,7 +1393,7 @@ def test_recovery_stays_bound_to_retained_directory_after_a_post_marker_swap(
     outside = tmp_path / "outside"
     outside.mkdir()
     victim = _staged(outside, "outside")
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     os.utime(abandoned, (old, old))
     os.utime(victim, (old, old))
@@ -1636,7 +1673,7 @@ def test_process_death_leaves_only_fail_closed_publication_states(
     if fail_after == 1:
         destination.write_bytes(b"x" * len(b"validated media bytes"))
 
-    now = 10_000_000.0
+    now = _sweep_clock()
     old = now - download.STAGING_MAX_AGE_SECONDS - 1
     for path in directory.iterdir():
         if path not in {marker, destination}:

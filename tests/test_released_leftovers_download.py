@@ -139,7 +139,12 @@ def _campaign(
             if path.is_file():
                 os.utime(path, (old, old))  # untouched for a day and an hour
         try:
-            consumer.managed_directory(root, consumer.MOTIONBGS_LOCATION)
+            directory, _marker = consumer.managed_directory(root, consumer.MOTIONBGS_LOCATION)
+            # The sweep goes by ctime too, which can't be set back: the same
+            # sweep is asked what it would do a day and an hour on.
+            consumer.recover_abandoned(
+                directory, consumer.MOTIONBGS_LOCATION, now=time.time() + LATER
+            )
         except consumer.ProviderError as error:
             yield "open the folder a day later", f"REFUSED {error}"
         else:

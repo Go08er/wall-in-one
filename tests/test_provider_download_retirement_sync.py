@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,7 +23,9 @@ from wall_in_one.providers import download
 from wall_in_one.providers.base import ProviderError
 
 PAYLOAD = b"validated media bytes"
-NOW = 10_000_000.0
+#: The sweep's clock, two days ahead of the real one: it takes only what was left
+#: alone for a day by mtime and by ctime, and a test can't set a ctime back.
+NOW = time.time() + 2 * download.STAGING_MAX_AGE_SECONDS
 OLD = NOW - download.STAGING_MAX_AGE_SECONDS - 1
 
 Event = tuple[str, file_io.PathIdentity | None]

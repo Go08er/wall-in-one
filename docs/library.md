@@ -376,7 +376,10 @@ moved to Trash. This version's own hidden staging files
 are removed after 24 hours; recent entries, symlinks, unknown files and
 visible media are left alone. An unmistakable provider sidecar whose media is
 gone is, after 24 hours, moved whole into the hidden `.wall-in-one-retained`
-folder beside it, never emptied: it may hold something you added.
+folder beside it, never emptied: it may hold something you added. "After 24
+hours" means untouched for that long by both of the file's times: its
+modification time and its change time, which no program can set back. A file
+that was edited, renamed or had its times restored within the day is recent.
 
 A staging file left by 0.2.2 or earlier (`.wall-in-one-media-stage-*`,
 `-sidecar-stage-*`, `-marker-stage-*`, `.wall-in-one-staged-*`,

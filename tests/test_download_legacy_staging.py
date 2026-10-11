@@ -166,6 +166,19 @@ def _aged(path: Path) -> None:
     os.utime(path, (old, old))
 
 
+def _opened_a_day_later(root: Path) -> None:
+    """This app opens the folder as it ordinarily does, a day and an hour on.
+
+    The sweep takes only what was left alone for a day, by mtime and by ctime,
+    and a ctime can't be set back. So the same sweep `managed_directory` runs
+    is asked what it would do then.
+    """
+    directory, _marker_path = download.managed_directory(root, download.MOTIONBGS_LOCATION)
+    download.recover_abandoned(
+        directory, download.MOTIONBGS_LOCATION, now=time.time() + LATER_SECONDS
+    )
+
+
 def _emptied_residue(folder: Path) -> list[Path]:
     retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
     if not retained.is_dir():
@@ -212,7 +225,7 @@ def test_an_edited_file_the_released_version_left_survives_the_new_app(
     assert stat_mode(left) == 0o600 and left.stat().st_nlink == 1
     _aged(left)
 
-    download.managed_directory(root, download.MOTIONBGS_LOCATION)  # this app, as usual
+    _opened_a_day_later(root)
 
     # Failed on 59e6a5d: the sweep claimed the name and truncated this very inode.
     assert left.read_bytes() == surviving, "the edited bytes survive, where they were"
@@ -330,7 +343,7 @@ def test_a_released_sidecar_a_person_added_to_is_retired_intact(
     media.unlink()
     _aged(sidecar)
 
-    download.managed_directory(root, download.MOTIONBGS_LOCATION)  # this app, as usual
+    _opened_a_day_later(root)
 
     assert not sidecar.exists(), "its name is free for the next download"
     retained = folder / file_io.RETAINED_ENTRY_DIRECTORY
@@ -386,7 +399,7 @@ def test_a_partial_download_this_version_crash_left_is_still_reclaimed(tmp_path:
     assert partial.read_bytes() == b"half of a vid"
     _aged(partial)
 
-    download.managed_directory(root, download.MOTIONBGS_LOCATION)
+    _opened_a_day_later(root)
 
     assert not partial.exists(), "reclaimed"
     assert [path.name for path in folder.iterdir() if path.name.startswith(".wall-in-one-v2")] == []

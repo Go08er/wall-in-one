@@ -45,7 +45,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 from urllib.parse import quote
 
 from wall_in_one import file_io, paths
@@ -224,12 +224,34 @@ class CompanionProof:
     nothing about which wallpaper a file at it was written for. A removal that
     is finished later, by replay, has no pin left from before the media moved.
     This is what it has instead (`prove_companions`), kept in the pending
-    removal record: the file's generation and its contents.
+    removal record: the file's generation and its contents. Replay removes
+    only a file that still matches both (`discard_proven_companions`).
     """
 
     path: Path
     fingerprint: SourceFingerprint
     sha256: str
+
+
+#: Why a replayed removal left one of the wallpaper's own files where it is:
+#: something is at the wallpaper's path again; whether something is could not
+#: be checked; the removal was prepared by a version that kept no proof; or
+#: the file is not exactly what the removal proved.
+LeftReason = Literal["occupied", "unchecked", "unrecorded", "unproven"]
+
+
+@dataclass(frozen=True, slots=True)
+class CompanionCleanup:
+    """What the replay of a removal did with the wallpaper's own files."""
+
+    #: Proven to be what the removal prepared, and removed.
+    removed: tuple[Path, ...] = ()
+    #: Proven, or recorded and now out of reach, and not removed.
+    kept: tuple[Path, ...] = ()
+    #: There, and left exactly as it is: never touched.
+    left: tuple[Path, ...] = ()
+    #: Why ``left`` was left (`left_companions_note`).
+    why: LeftReason = "unproven"
 
 
 def _record_claim_token(operation_token: str, suffix: str) -> str:
@@ -1033,12 +1055,16 @@ def discard_pairing_artifacts(
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """Best-effort removal of app-owned stills and pairing sidecars.
 
-    This deliberately does not touch ``item.path`` and is used only by a live
-    explicit remove/trash transaction carrying pre-commit filesystem
-    capabilities. Observed Workshop uninstalls clear authored metadata only;
-    they never rediscover deterministic physical companions. The return is
-    ``(removed, kept)`` so callers and tests can account for cleanup which
-    failed without ever widening deletion authority.
+    This deliberately does not touch ``item.path``. It removes whatever is at
+    the companion names when it runs, so it is only for a caller that knows
+    nothing else can have been written there since the media was the
+    wallpaper's: never the replay of a removal, which a finished download at
+    the same path may have preceded (`discard_proven_companions` is for
+    that). Nothing in the app calls it now. Observed Workshop uninstalls
+    clear authored metadata only; they never rediscover deterministic
+    physical companions. The return is ``(removed, kept)`` so callers and
+    tests can account for cleanup which failed without ever widening
+    deletion authority.
     """
     bounded = tuple(roots)
     try:
@@ -1373,6 +1399,214 @@ def prove_companions(
                 continue
             proofs.append(CompanionProof(candidate.logical, fingerprint, digest))
     return tuple(proofs)
+
+
+def discard_proven_companions(
+    item: MediaItem,
+    roots: Sequence[Path],
+    proofs: Sequence[CompanionProof] | None,
+    *,
+    source_root: Path,
+    source_context: file_io.PinnedDirectoryContext,
+) -> CompanionCleanup:
+    """For the replay of a removal: remove ``item``'s own files that are proven that removal's.
+
+    The replay has just destroyed the media in the removal's claim. What is
+    at the wallpaper's own names now may be what the removal meant to take,
+    or what something wrote there since: a download that finished at the same
+    path while the claim waited, with its own still and selector. A name
+    can't say which, and neither can the folder being the same folder.
+
+    Two things must both hold before a file is removed:
+
+    - Nothing is at the wallpaper's own path. A wallpaper there, whatever it
+      is, uses these names: a download that found the old still and selector
+      in place keeps them as its own without rewriting a byte. If something
+      is there, or the path can't be looked at, nothing is removed.
+    - The file is, right now, one of ``proofs``: the same generation (device,
+      inode, size, both times) and the same contents as when the removal was
+      prepared. A vacant path alone proves nothing about a file that was
+      edited or written since. ``proofs`` of None is a removal prepared by a
+      version that kept none (0.2.2, and 0.3.0 before this): nothing is
+      removed for it, never by a guess.
+
+    Everything else that is there is left exactly as it is and returned as
+    ``left``, with why, for the caller to name once.
+
+    Under the source's lifecycle locks, as the removal's own cleanup is: a
+    capture or download publishing for this path finishes first, or waits.
+    If they can't be taken, nothing is touched.
+    """
+    bounded = tuple(roots)
+    recorded = {proof.path: proof for proof in proofs or ()}
+    unproven: LeftReason = "unrecorded" if proofs is None else "unproven"
+    try:
+        with (
+            stills.media_path_lifecycle_lock(item.path),
+            stills.source_lifecycle_lock(item),
+            contextlib.ExitStack() as access_stack,
+        ):
+            return _discard_proven_companions_locked(
+                item,
+                bounded,
+                recorded,
+                unproven,
+                source_root=source_root,
+                source_context=source_context,
+                access_stack=access_stack,
+            )
+    except OSError:
+        # The locks could not be taken or trusted. Nothing more is touched;
+        # what is there is only looked at, to be said.
+        with contextlib.ExitStack() as fallback_stack:
+            try:
+                candidates, unseen = _own_companions(
+                    item,
+                    bounded,
+                    source_root=source_root,
+                    source_context=source_context,
+                    access_stack=fallback_stack,
+                )
+            except OSError, ValueError:
+                return CompanionCleanup(kept=tuple(recorded))
+            there = [candidate.logical for candidate in candidates]
+            return CompanionCleanup(
+                kept=tuple(path for path in (*there, *unseen) if path in recorded),
+                left=tuple(
+                    path
+                    for path in (*there, *unseen)
+                    if path not in recorded and os.path.lexists(path)
+                ),
+                why=unproven,
+            )
+
+
+def _discard_proven_companions_locked(
+    item: MediaItem,
+    roots: tuple[Path, ...],
+    recorded: dict[Path, CompanionProof],
+    unproven: LeftReason,
+    *,
+    source_root: Path,
+    source_context: file_io.PinnedDirectoryContext,
+    access_stack: contextlib.ExitStack,
+) -> CompanionCleanup:
+    """`discard_proven_companions`, while the source's lifecycle locks are held."""
+    try:
+        candidates, unseen = _own_companions(
+            item,
+            roots,
+            source_root=source_root,
+            source_context=source_context,
+            access_stack=access_stack,
+        )
+    except OSError, ValueError:
+        return CompanionCleanup(kept=tuple(recorded))
+    # Under the media path's lock nothing of the app's can publish at the
+    # wallpaper's path from here on, so what this look finds holds for the
+    # app's own downloads until the files below are dealt with.
+    try:
+        at_source = file_io.entry_presence(source_context.child(item.path.name))
+    except OSError, ValueError:
+        at_source = OSError("the prepared folder is closed")
+    if at_source is not False:
+        return CompanionCleanup(
+            left=tuple(
+                path
+                for path in (*(candidate.logical for candidate in candidates), *unseen)
+                if os.path.lexists(path)
+            ),
+            why="occupied" if at_source is True else "unchecked",
+        )
+    removed: list[Path] = []
+    kept: list[Path] = []
+    left: list[Path] = []
+    for path in unseen:
+        # Not a regular file, or it can't be looked at. Something that is
+        # there is not what was recorded, as far as can be told: left. A
+        # recorded file out of reach (its folder is not there right now) is
+        # said as not removed.
+        if os.path.lexists(path):
+            left.append(path)
+        elif path in recorded:
+            kept.append(path)
+    for candidate in candidates:
+        proof = recorded.get(candidate.logical)
+        if proof is None:
+            left.append(candidate.logical)
+            continue
+        try:
+            pin = file_io.pin_regular_path(
+                candidate.access,
+                expected_identity=proof.fingerprint[:2],
+                expected_fingerprint=proof.fingerprint,
+            )
+        except FileNotFoundError:
+            continue  # it went between the look and the pin: nothing to say
+        except OSError:
+            # Another generation at the name, or one that can't be pinned.
+            left.append(candidate.logical)
+            continue
+        access_stack.callback(pin.close)
+        try:
+            contents = file_io.hash_pinned_regular(
+                pin,
+                expected_fingerprint=proof.fingerprint,
+                maximum_bytes=proof.fingerprint[2],
+            )
+        except OSError, ValueError:
+            left.append(candidate.logical)
+            continue
+        if contents != (proof.fingerprint[2], proof.sha256):
+            # The recorded generation by its times, and other bytes: a file
+            # system with coarse times can show an edit this way.
+            left.append(candidate.logical)
+            continue
+        discarded, retained = _discard_pinned_artifacts(
+            (
+                _PinnedArtifact(
+                    candidate.logical,
+                    candidate.access,
+                    pin,
+                    proof.fingerprint[:2],
+                    proof.fingerprint,
+                ),
+            )
+        )
+        removed.extend(discarded)
+        kept.extend(retained)
+    return CompanionCleanup(tuple(removed), tuple(kept), tuple(left), unproven)
+
+
+_LEFT_BECAUSE: Final[dict[LeftReason, str]] = {
+    "occupied": "another file is at the wallpaper's path now",
+    "unchecked": "whether another file is at the wallpaper's path now could not be checked",
+    "unrecorded": (
+        "this removal was prepared by an older version, which kept no proof of the "
+        "wallpaper's own files"
+    ),
+}
+
+
+def left_companions_note(cleanup: CompanionCleanup) -> str:
+    """What to say, once, of the files a replayed removal left (`CompanionCleanup.left`).
+
+    Why, and each file by its path: every one named is there.
+    """
+    count = len(cleanup.left)
+    shown = ", ".join(str(path) for path in cleanup.left[:3])
+    listed = f"{shown}, and {count - 3} more" if count > 3 else shown
+    if cleanup.why != "unproven":
+        return f"{_LEFT_BECAUSE[cleanup.why]}, so what is there was left as it is: {listed}"
+    if count == 1:
+        return (
+            "one of the wallpaper's own files is not exactly what this removal prepared, "
+            f"so it was left as it is: {listed}"
+        )
+    return (
+        f"{count} of the wallpaper's own files are not exactly what this removal prepared, "
+        f"so they were left as they are: {listed}"
+    )
 
 
 def _revalidate_adopted_authority(

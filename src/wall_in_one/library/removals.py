@@ -13,10 +13,10 @@ cross the missing-media boundary.
 The wallpaper's own files (its selector, its captured stills) are not moved
 into a claim, so an intent also records each one that is there when it is
 prepared, by generation and contents (``companions``,
-`manage.CompanionProof`): what a restart needs to tell the removed
-wallpaper's files from ones written under the same names since. An intent
-with no such record was prepared by a version that kept none (0.2.2, and
-0.3.0 before this field), and it still reads.
+`manage.CompanionProof`). A restart that finishes a media claim removes only
+a file that still matches its record. An intent with no such record was
+prepared by a version that kept none (0.2.2, and 0.3.0 before this field):
+it still reads, and nothing is removed for it at those names.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class Intent:
     parent_device: int | None = None
     parent_inode: int | None = None
     #: Each of the wallpaper's own files that was there when this removal was
-    #: prepared, as proof for a replay (`manage.prove_companions`).
+    #: prepared, as proof for a replay (`manage.discard_proven_companions`).
     #: Empty: none was there, or none could be proven. None: this intent
     #: carries no proof at all (an external uninstall, or one prepared by a
     #: version before the field), and a replay must not act as if it did.

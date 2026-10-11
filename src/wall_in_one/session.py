@@ -9,6 +9,7 @@ surface the Noctalia plugin drives -- be tested directly.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import random
 import threading
@@ -40,6 +41,8 @@ from wall_in_one.library.playlists import Playlist as NamedPlaylist
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
+
+LOGGER = logging.getLogger(__name__)
 
 Scanner = Callable[[Sequence[Path] | None], Library]
 
@@ -123,6 +126,9 @@ class LibraryRefreshResult:
     known_workshop: tuple[tuple[str, MediaItem], ...]
     pending_workshop_cleanup: tuple[tuple[str, _WorkshopCleanup], ...]
     repaired_faults: tuple[tuple[str, str], ...]
+    #: What the replay finished and left in place on purpose
+    #: (`Session.removal_replay_left`). Not failures: nothing is retried.
+    replay_left: tuple[str, ...] = ()
 
 
 class LibraryRefreshCancelledError(Exception):
@@ -804,12 +810,21 @@ class LibraryRefreshPlan:
         snapshot._cleanup_observer = cleanups.append
         try:
             replay_failures = snapshot.retry_removals()
-            self._check_cancelled(cleanups)
+            replay_left = snapshot.removal_replay_left
+            # What a finished removal left in place is said by this result or
+            # by nobody: its pending record is gone, so no later replay says
+            # it. A superseded reconciliation that has such a thing to say
+            # therefore runs on (what remains is short) instead of stopping:
+            # its result is adopted without its Library, and says it.
+            if not replay_left:
+                self._check_cancelled(cleanups)
             snapshot.adopt_library(library)
-            self._check_cancelled(cleanups)
+            if not replay_left:
+                self._check_cancelled(cleanups)
             return LibraryRefreshResult(
                 library=snapshot.library,
                 replay_failures=replay_failures,
+                replay_left=replay_left,
                 cleanups=tuple(cleanups),
                 removed_workshop=snapshot.removed_workshop,
                 workshop_cleanup_failures=snapshot.workshop_cleanup_failures,
@@ -918,6 +933,9 @@ class Session:
         self._removed_workshop: tuple[MediaItem, ...] = ()
         self._pending_workshop_cleanup: dict[str, _WorkshopCleanup] = {}
         self._workshop_cleanup_failures: tuple[str, ...] = ()
+        #: `removal_replay_left`, and what the replay now running has left so far.
+        self._removal_replay_left: tuple[str, ...] = ()
+        self._left_by_cleanup: list[str] = []
         self._cleanup_observer: Callable[[RemovalCleanup], None] | None = None
         #: What the schedule last asked for, so a tick can tell whether the
         #: calendar has moved without rebuilding to find out.
@@ -1163,6 +1181,18 @@ class Session:
     def workshop_cleanup_failures(self) -> tuple[str, ...]:
         """Actionable store/artifact failures still pending after reconciliation."""
         return self._workshop_cleanup_failures
+
+    @property
+    def removal_replay_left(self) -> tuple[str, ...]:
+        """What the last replay of pending removals finished and left in place on purpose.
+
+        A wallpaper's own files (its selector, a captured still) that the
+        replay could not prove were the ones its removal prepared, each named
+        (`manage.discard_proven_companions`). Not failures, and nothing is
+        retried: the removal is finished and its pending record is gone, so
+        the next replay has nothing to say of it and this is empty again.
+        """
+        return self._removal_replay_left
 
     @property
     def removal_journal(self) -> removals.Store:
@@ -1458,6 +1488,7 @@ class Session:
                     intent.item,
                     intent.roots,
                     artifacts_already_clean=artifacts_already_clean,
+                    recorded_companions=intent.companions,
                     adopted_authority=adopted_authority,
                     retained_pairing_artifacts=retained_pairing_artifacts,
                     artifact_cleanup_deferred=artifact_cleanup_deferred,
@@ -1481,7 +1512,26 @@ class Session:
             self._removals.finish_operation(intent)
 
     def retry_removals(self, *, external_only: bool = False) -> tuple[str, ...]:
-        """Replay crash-surviving intents without inferring from missing media."""
+        """Replay crash-surviving intents without inferring from missing media.
+
+        Returns what could not be finished, which stays pending. What a
+        finished removal left in place on purpose is `removal_replay_left`.
+        """
+        self._left_by_cleanup = []
+        try:
+            return self._retry_removals(external_only=external_only)
+        finally:
+            if not external_only:
+                # An external-only pass finishes no media claim and leaves
+                # nothing: it must not clear what the full pass just found.
+                self._removal_replay_left = tuple(self._left_by_cleanup)
+                for left in self._removal_replay_left:
+                    # Where nothing reports a replay (a headless start), the
+                    # log is where this is said, once.
+                    LOGGER.warning("pending removal finished: %s", left)
+            self._left_by_cleanup = []
+
+    def _retry_removals(self, *, external_only: bool) -> tuple[str, ...]:
         intents = self._removals.reload()
         if self._removals.fault is not None:
             return (f"removal journal: {self._removals.fault}",)
@@ -1541,10 +1591,14 @@ class Session:
                             # (a crash, or a sync that failed right after the
                             # move), before it reached the wallpaper's own
                             # files: its captured stills and its selector.
-                            # They go with it here, under the folder this
-                            # removal prepared, or are named as left
-                            # (`_cleanup_removed_item`): a finished removal
-                            # leaves no still and selector with no wallpaper.
+                            # They go with it here, but only while nothing is
+                            # at the wallpaper's path, and only those the
+                            # intent proves are the ones it prepared
+                            # (`manage.discard_proven_companions`): while the
+                            # claim waited, a download may have finished at
+                            # the same path, with a still and selector under
+                            # the same names. What is there and not removed
+                            # is left, and named once (`removal_replay_left`).
                             current = self.commit_removal(
                                 intent,
                                 artifacts_already_clean=False,
@@ -1623,8 +1677,14 @@ class Session:
         artifact_lookup_root: Path | None = None,
         artifact_lookup_parent: Path | None = None,
         artifact_source_context: file_io.PinnedDirectoryContext | None = None,
+        recorded_companions: Sequence[manage.CompanionProof] | None = None,
     ) -> tuple[str, ...]:
-        """Attempt every durable association and deterministic child artifact."""
+        """Attempt every durable association, and the wallpaper's own files it can prove.
+
+        Unless ``artifacts_already_clean``, the files are those
+        ``recorded_companions`` proves (the intent's own record, None when it
+        has none): never whatever is at their names now.
+        """
         failures: list[str] = []
         favourite_succeeded = False
         pairing_succeeded = False
@@ -1666,25 +1726,32 @@ class Session:
             playlist_succeeded = self._playlists.fault is None
             if not playlist_succeeded:
                 failures.append(f"playlists: {self._playlists.fault}")
-        if artifact_cleanup_deferred:
+        if artifact_cleanup_deferred or (
+            not artifacts_already_clean
+            and (artifact_source_root is None or artifact_source_context is None)
+        ):
             failures.append(
                 "pairing files were not inspected because the prepared library filesystem "
                 "is unavailable or changed"
             )
         elif not artifacts_already_clean:
-            _discarded, retained = manage.discard_pairing_artifacts(
+            assert artifact_source_root is not None
+            assert artifact_source_context is not None
+            outcome = manage.discard_proven_companions(
                 item,
                 roots,
-                legacy_selected_still=legacy_selected,
-                adopted_authority=adopted_authority,
+                recorded_companions,
                 source_root=artifact_source_root,
-                lookup_root=artifact_lookup_root,
-                lookup_parent=artifact_lookup_parent,
                 source_context=artifact_source_context,
             )
-            if retained:
-                names = ", ".join(path.name for path in retained[:3])
+            if outcome.kept:
+                names = ", ".join(path.name for path in outcome.kept[:3])
                 failures.append(f"pairing files could not be removed: {names}")
+            if outcome.left:
+                # Not a failure: nothing here is retried, and the pending
+                # record does not wait for it. Said once, by whoever reports
+                # this replay.
+                self._left_by_cleanup.append(f"{item.name}: {manage.left_companions_note(outcome)}")
         if self._cleanup_observer is not None:
             self._cleanup_observer(
                 RemovalCleanup(

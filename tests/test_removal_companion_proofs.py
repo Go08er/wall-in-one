@@ -6,7 +6,7 @@ at those names was the removed wallpaper's. From this version on the intent
 records it when it is prepared (`removals.Intent.companions`): each of those
 files that is there, by generation and contents. Here: what is recorded, how
 it is saved, and that anything other than a well-formed record of it is no
-proof at all.
+proof at all. What replay does with it is `tests/test_removal_replay_companions.py`.
 
 The field is added inside journal version 1. The reader goes by the key's
 presence: absent, the intent was prepared by a version that kept no proof

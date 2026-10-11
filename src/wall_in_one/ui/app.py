@@ -98,8 +98,20 @@ def _unfinished_replay(failures: Sequence[str]) -> str:
     )
 
 
+def _left_by_replay(left: Sequence[str]) -> str:
+    """What a pending removal's replay finished and left in place on purpose, said once.
+
+    Not `_unfinished_replay`: nothing failed and nothing is retried. The
+    removal is finished, its pending record is gone, and a later scan has
+    nothing more to say of it (`Session.removal_replay_left`).
+    """
+    omitted = len(left) - 3
+    more = f"; and {omitted} more" if omitted > 0 else ""
+    return "A pending removal was finished. " + "; ".join(left[:3]) + more + "."
+
+
 def _unfinished_library_cleanup(result: LibraryRefreshResult) -> str:
-    """Everything one reconciliation couldn't clean up, as one message, or empty.
+    """Everything one reconciliation couldn't clean up or left on purpose, as one message, or empty.
 
     For a reconciliation a newer scan superseded: its cleanups are adopted
     without its Library, and nobody else says what it couldn't finish. The
@@ -108,6 +120,8 @@ def _unfinished_library_cleanup(result: LibraryRefreshResult) -> str:
     said = []
     if result.replay_failures:
         said.append(_unfinished_replay(result.replay_failures))
+    if result.replay_left:
+        said.append(_left_by_replay(result.replay_left))
     if result.workshop_cleanup_failures:
         said.append(
             "Workshop uninstall" + manage.metadata_cleanup_note(result.workshop_cleanup_failures)
@@ -2919,6 +2933,8 @@ class Application(Adw.Application):
                 self._adopt_runtime_library_scan(generation)
                 if result.replay_failures:
                     self.window_report(_unfinished_replay(result.replay_failures))
+                if result.replay_left:
+                    self.window_report(_left_by_replay(result.replay_left))
                 self._finish_library_refresh(scan_generation=generation)
             except Exception as error:  # defensive GTK delivery boundary
                 self._library_reconciliation_failed(generation, str(error))

@@ -452,6 +452,24 @@ message names the place when there is one. The next start or library refresh
 finishes that removal: the record goes back to its name if the file is
 untouched, and is destroyed once the file is gone.
 
+The wallpaper's own files are handled differently: the still the app captured
+for a video, and the small `<file>.wall-in-one.json` beside the video that
+records which still represents it. They are not set aside. A removal deletes
+them last, once the file is gone. When a removal was left unfinished and is
+finished later, they go with it only if both of these are true:
+
+- nothing is at the wallpaper's path;
+- each file is still exactly what it was when the removal began. The pending
+  removal keeps a record of each one for this: which file it was, and a
+  checksum of its contents.
+
+Otherwise they are left where they are, and the message names them once. So a
+download that finishes at the same path before the old removal is finished
+keeps its download record, its still and its selector, whether it wrote them
+or found them already there. A removal left unfinished by 0.2.x, or by a 0.3.0
+development build from before this record existed, has no such record:
+finishing it never deletes these files, and names the ones it left.
+
 A downloaded file that can't be opened for writing (a read-only one, say) is
 refused first, with nothing changed. In the rare case where the file had
 already been moved aside and was moved back, the record is put back too but no
@@ -470,7 +488,8 @@ Before a local deletion or trash move can touch the media, Wall-in-One writes a
 bounded removal intent to `pending-removals.json`. If that intent cannot be
 persisted, the operation is refused and the file stays where it was. The
 journal binds a unique transaction token to the pinned source generation and
-the selected library-root/source-parent identities. A replacement at the same
+the selected library-root/source-parent identities, and records each of the
+wallpaper's own files that is there (see above). A replacement at the same
 path is refused, another process cannot borrow or cancel the live transaction,
 and an unmarked missing source is not interpreted as a completed delete while
 its drive is unavailable. Both the live Delete/Trash commit and later crash

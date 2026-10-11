@@ -200,6 +200,18 @@ and `select`, and `still` or `reset-pairing` for a wallpaper a playlist holds,
 are refused with kind `library-not-current`, and nothing is written. Try again
 once the scan has finished (refresh the library if it failed).
 
+Three refusals say the app couldn't check something, never that the thing is
+gone, and nothing is written or deleted:
+
+- `playlist-remove` replies with kind `unreadable` while `settings.toml` can't
+  be read or is malformed: the app can't tell whether that playlist is the
+  default. With no `settings.toml` at all, the playlist is removed as usual.
+- `remove`, whether it deletes the wallpaper or moves it to the trash, replies
+  with kind `local-io` when the wallpaper, or its folder, can't be looked at.
+  Before 0.3.0 that answered `missing`, "is no longer there".
+- `remove` of a downloaded wallpaper the app can't open for writing is refused
+  before anything changes.
+
 Pairing commands use ` :: ` between their two operands. That delimiter is
 required when both sides may contain spaces—for example a video path and a
 representative-still path, or a wallpaper path and `community:Tokyo Night`.

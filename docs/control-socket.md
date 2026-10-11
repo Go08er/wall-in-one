@@ -203,12 +203,19 @@ and `select`, and `still` or `reset-pairing` for a wallpaper a playlist holds,
 are refused with kind `library-not-current`, and nothing is written. Try again
 once the scan has finished (refresh the library if it failed).
 
-Five refusals say the app couldn't check something, never that the thing is
-gone, and nothing is written or deleted:
+These refusals say the app couldn't check something, or couldn't finish what
+the change needs, never that the thing is gone. Unless one says otherwise,
+nothing is written or deleted:
 
 - `playlist-delete` replies with kind `unreadable` while `settings.toml` can't
   be read or is malformed: the app can't tell whether that playlist is the
   default. With no `settings.toml` at all, the playlist is deleted as usual.
+- `playlist-delete` of the playlist that is the saved default is refused while
+  `settings.toml` can't be changed, because deleting it would have to clear
+  the default. The kind is `local-io` when the file can't be saved where it is
+  (its folder is read-only), and `read-only` when the file holds settings this
+  version doesn't know. The reply ends "Nothing was deleted." A playlist the
+  default doesn't name is deleted as usual.
 - A change that would leave a playlist with nothing to play (`playlist-remove`
   of the last wallpaper it plays, `still <video> default`, `reset-pairing`,
   `remove`) replies with kind `unreadable` while `settings.toml`, the schedule
@@ -236,6 +243,12 @@ gone, and nothing is written or deleted:
   Before 0.3.0 that answered `missing`, "is no longer there".
 - `remove` of a downloaded wallpaper the app can't open for writing is refused
   before anything changes.
+- `remove` replies with kind `local-io` when the wallpaper, or its download
+  record, was moved aside for the removal and that move couldn't be confirmed
+  on disk (a full disk, say). This one has moved a file: the reply says where
+  it is, and that the removal is still pending. The next library scan or start
+  finishes it, or puts the download record back when the wallpaper itself was
+  never touched.
 
 Pairing commands use ` :: ` between their two operands. That delimiter is
 required when both sides may contain spaces—for example a video path and a

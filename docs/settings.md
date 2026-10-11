@@ -62,7 +62,7 @@ Since 0.2.0, a key this version doesn't know never stops anything. Instead:
   writes `settings.toml` is off. Any other way of changing a saved setting
   (the default-playlist pickers, the first-run folder choice, `ctl dynamics`
   and `ctl cycle-interval`, deleting the playlist that is the saved default)
-  is refused with the same message. Wall-in-One doesn't write the file while
+  is refused for the same reason. Wall-in-One doesn't write the file while
   the keys are there, because writing it would drop them. Temporary playback
   overrides such as `ctl shuffle` still work.
 - The wallpaper service still starts. Its startup check and `--write-config`
@@ -77,6 +77,37 @@ with that release instead: removing the key throws away what it saved.
 
 None of this applies to a file that isn't valid TOML. That is still damage,
 handled as described above, because its list of keys can't be trusted.
+
+## A settings file that can't be saved
+
+Some setups keep the configuration folder read-only: its permissions, a
+read-only mount, or a tool that manages the files in it. Wall-in-One reads
+`settings.toml` there as usual and can't write it. Then:
+
+- Every change that writes `settings.toml` is refused with the reason, and
+  nothing else is changed along with it. That includes deleting the playlist
+  the saved default names, and renaming a playlist the default names by its
+  name: both are refused before anything is written. A playlist the default
+  doesn't name is deleted or renamed as usual.
+- Other changes still work. Playlists, schedule rules, a display's playlist
+  and favourites are saved in other files.
+- A default playlist given by name (`active_playlist = "Evening"`) is that
+  playlist, and every page shows it as the default. Where the file can be
+  saved, the app replaces the name with the playlist's id at its next start.
+- A default that names no playlist is left out. "All media" plays, and the app
+  says once at start which file and key to change. The wallpaper service's
+  startup check, `--write-config` and the health sync print a `warning:` line
+  and build the runtime document without a default. Once a playlist with that
+  name exists, it is the default again. Where the file can be saved, the app
+  clears such a default at its next start, and `--write-config` refuses it
+  until then.
+
+The same holds while the file has [unknown keys](#unknown-keys), which make
+it read-only too.
+
+`settings.toml` must be a regular file. A symbolic link at that path is not
+followed: it is refused as a settings file that can't be read ("is not a
+regular file"). A setup that manages the file should write a real one.
 
 ## The settings.toml freeze and ui.toml
 

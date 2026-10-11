@@ -489,7 +489,7 @@ def _alone(
     return ctx.probe
 
 
-@faults.full_campaign
+@ro.full_only
 @pytest.mark.parametrize("service", [False, True], ids=["window", "service"])
 @pytest.mark.parametrize("case", ro.CASES)
 @pytest.mark.parametrize("change", CTL, ids=[change.name for change in CTL])
@@ -509,7 +509,7 @@ def test_every_ctl_verb_alone_with_a_read_only_folder(
     assert probe.attempts[0].refused is (case in change.touches), probe.report()
 
 
-@faults.full_campaign
+@ro.full_only
 @pytest.mark.parametrize("case", ro.CASES)
 @pytest.mark.parametrize("change", CTL, ids=[change.name for change in CTL])
 def test_every_ctl_verb_alone_with_only_the_files_read_only(
@@ -1263,7 +1263,7 @@ def test_the_classic_window_lives_with_a_read_only_folder(
     assert life.seconds_to_quit < ro.BOUND
 
 
-@faults.full_campaign
+@ro.full_only
 @pytest.mark.parametrize("case", ro.CASES)
 @pytest.mark.parametrize("ui", ["next", "classic"])
 def test_each_window_the_other_way_out_with_a_read_only_folder(
@@ -1300,13 +1300,12 @@ def _delete_the_default(surface: str) -> Change:
     return change
 
 
-@pytest.mark.xfail(strict=True, reason=HALF_DELETED)
+@ro.pinned(HALF_DELETED)
 @pytest.mark.parametrize(
     "surface",
     [
         "ctl",
-        pytest.param("next", marks=faults.full_campaign),
-        pytest.param("classic", marks=faults.full_campaign),
+        *ro.also_in_full("next", "classic"),
     ],
 )
 def test_deleting_the_default_playlist_with_read_only_settings_is_all_or_nothing(
@@ -1326,9 +1325,8 @@ def test_deleting_the_default_playlist_with_read_only_settings_is_all_or_nothing
     assert not probe.violations(), verdict(probe)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=HALF_DELETED + ". Here: the start after it, settings.toml still read-only. The repair "
+@ro.pinned(
+    HALF_DELETED + ". Here: the start after it, settings.toml still read-only. The repair "
     "(`_repair_dangling_playlist_references`, ui/app.py:895) can't clear the default, the gate "
     "rests at 'repair', the library is never loaded and every change is refused, the state "
     "folder's too, until settings.toml can be written again",
@@ -1350,7 +1348,7 @@ def test_the_start_after_that_delete_still_loads_the_library(
 # -- found, lower severity: a refusal that gives the wrong reason, or none -------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="read-only wording, r5-ac3b")
+@ro.pinned("read-only wording, r5-ac3b")
 def test_a_template_install_the_state_folder_refuses_says_why(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1441,7 +1439,7 @@ def test_a_writable_library_gets_the_videos_still_at_the_start(
     assert len(_made_stills(profile)) == 1, "the start made the video's still"
 
 
-@pytest.mark.xfail(strict=True, reason=SILENT_STILL)
+@ro.pinned(SILENT_STILL)
 def test_a_still_a_read_only_library_cannot_take_is_said(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1462,7 +1460,7 @@ def _leftover(folder: Path) -> Path:
     return entry
 
 
-@pytest.mark.xfail(strict=True, reason="read-only wording, r5-ac3b")
+@ro.pinned("read-only wording, r5-ac3b")
 def test_tidy_up_says_why_a_leftover_in_a_read_only_folder_stayed(profile: ro.Profile) -> None:
     """FINDING (lower severity: the wrong reason).
 
@@ -1520,7 +1518,7 @@ SAID_EVERY_POLL: Final = (
 )
 
 
-@pytest.mark.xfail(strict=True, reason=SAID_EVERY_POLL)
+@ro.pinned(SAID_EVERY_POLL)
 def test_a_health_save_the_state_folder_refuses_is_said_once(
     profile: ro.Profile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1571,14 +1569,14 @@ STUCK_CHECKING: Final = (
 )
 
 
-@pytest.mark.xfail(strict=True, reason=STUCK_CHECKING)
+@ro.pinned(STUCK_CHECKING)
 @pytest.mark.parametrize(
     ("ui", "how"),
     [
         ("next", "chmod -R a-w"),
-        pytest.param("next", "no lock file", marks=faults.full_campaign),
-        pytest.param("classic", "chmod -R a-w", marks=faults.full_campaign),
-        pytest.param("classic", "no lock file", marks=faults.full_campaign),
+        *ro.also_in_full(
+            ("next", "no lock file"), ("classic", "chmod -R a-w"), ("classic", "no lock file")
+        ),
     ],
 )
 def test_a_start_that_cannot_take_the_migration_lock_does_not_stay_checking(
@@ -1603,7 +1601,7 @@ def test_a_start_that_cannot_take_the_migration_lock_does_not_stay_checking(
     assert not life.probe.violations(), verdict(life.probe)
 
 
-@faults.full_campaign
+@ro.full_only
 @pytest.mark.parametrize("case", ["config", "library"])
 @pytest.mark.parametrize("ui", ["next", "classic"])
 def test_each_window_with_every_file_in_the_folder_read_only_too(

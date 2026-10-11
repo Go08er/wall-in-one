@@ -25,6 +25,7 @@ What a probe then looks at, after every attempted change:
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import re
 import stat
@@ -33,7 +34,7 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import pytest
 
@@ -89,6 +90,48 @@ def rebind_download(profile: Profile) -> None:
     path.with_name(path.name + ".wallhaven.json").write_text(
         provenance(path, "Wallhaven"), encoding="utf-8"
     )
+
+
+#: Whether the full campaigns run too (`tests.released_faults.FULL`).
+FULL: Final = bool(os.environ.get("WIO_PROBE_FULL"))
+
+
+def full_only[T: Callable[..., None]](test: T) -> T:
+    """A full campaign: collected only with ``WIO_PROBE_FULL`` set.
+
+    Not a skip mark. These tests run under the display-backed gate, which
+    reads any skipped test as a display it didn't get, and fails.
+    """
+    test.__test__ = FULL  # type: ignore[attr-defined]
+    return test
+
+
+def also_in_full(*parameters: Any) -> tuple[Any, ...]:
+    """More parameters for a test, in a full campaign only (see `full_only`)."""
+    return parameters if FULL else ()
+
+
+def pinned[T: Callable[..., None]](reason: str) -> Callable[[T], T]:
+    """A finding kept as a test that must still fail, and says so once it doesn't.
+
+    What ``xfail(strict=True)`` is, without the "skipped" it puts in a report:
+    the display-backed gate fails on any. The test runs; its failing, however
+    it fails, is the finding still standing, and its passing fails with
+    ``reason``. The fix takes the pin off in its own commit.
+    """
+
+    def decorate(test: T) -> T:
+        @functools.wraps(test)
+        def run(*arguments: Any, **keywords: Any) -> None:
+            try:
+                test(*arguments, **keywords)
+            except Exception, pytest.fail.Exception:
+                return
+            pytest.fail(f"no longer fails, so take its pin off: {reason}")
+
+        return cast(T, run)
+
+    return decorate
 
 
 def skip_as_root() -> None:

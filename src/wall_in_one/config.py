@@ -155,6 +155,17 @@ class SettingsMovedOnError(ConfigError):
     """A judged write was not made: settings.toml no longer holds what it was judged on."""
 
 
+class SettingsBusyError(ConfigError):
+    """A judged write gave up: settings.toml changed under every attempt to check it.
+
+    Nothing was written. The message is the reason alone, for a caller to put
+    after its own "was not saved; nothing changed"; ``kind`` keeps the reply
+    that sentence (`control.server.failed`), with no class name in it.
+    """
+
+    kind: Final = "busy"
+
+
 class SettingsReadOnlyError(ConfigError):
     """A write was refused because settings.toml has keys this build lacks."""
 

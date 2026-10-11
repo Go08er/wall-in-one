@@ -169,6 +169,18 @@ class EditingApplication(FakeApplication):
         self.authoring.append(run)
         return True
 
+    def edit_roots_async(
+        self,
+        edit: config.RootsEdit,
+        *,
+        on_success: Callable[[config.Settings], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> bool:
+        """As the application does: the gesture, applied to the folders that are saved."""
+        return self.update_settings_async(
+            on_success=on_success, on_error=on_error, roots=edit.apply(self.requested.roots)
+        )
+
     def refresh_library(self) -> None:
         self.refreshed += 1
 

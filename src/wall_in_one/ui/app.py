@@ -218,8 +218,8 @@ def _save_checked_sources(
             return config.update(resolved, judged_against=durable)
         except config.SettingsMovedOnError:
             continue
-    raise config.ConfigError(
-        "settings.toml kept changing while this change was being checked; nothing was changed"
+    raise config.SettingsBusyError(
+        "settings.toml kept changing while this change was being checked"
     )
 
 

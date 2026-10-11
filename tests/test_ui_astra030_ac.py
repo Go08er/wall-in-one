@@ -245,6 +245,34 @@ def test_a_folder_gesture_is_judged_again_when_the_file_moves_on_while_it_is_jud
     spin_until(lambda: application._library_scan_future is None, 10, what="the rescan")
 
 
+def test_a_folder_gesture_that_gives_up_says_so_once_and_names_no_class(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each caller puts "... was not saved; nothing changed: " before the reason,
+    so the reason is only the reason, and it reaches a person as that sentence."""
+    from wall_in_one.ui import app as application_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    attempts: list[object] = []
+
+    def moved_on(changes: object, path: object = None, **_judged: object) -> config.Settings:
+        attempts.append(changes)
+        raise config.SettingsMovedOnError("settings.toml changed since it was judged")
+
+    monkeypatch.setattr(config, "update", moved_on)
+    with pytest.raises(config.SettingsBusyError) as gave_up:
+        application_module._save_checked_sources(
+            {}, (config.RootsEdit("add", tmp_path),), lambda _before, _after: None
+        )
+
+    reply = server.failed(gave_up.value)
+    assert len(attempts) == application_module.SOURCE_SAVE_ATTEMPTS
+    assert reply.kind == "busy"
+    # On afa71e5: "ConfigError: settings.toml kept changing ...; nothing was changed".
+    assert reply.message == "settings.toml kept changing while this change was being checked"
+
+
 # -- AC-2: what names a playlist ------------------------------------------------------------
 
 

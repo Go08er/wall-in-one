@@ -137,25 +137,22 @@ def test_a_day_forward_while_a_second_process_downloads(
     assert outcomes and not problems, "\n".join(problems[:20])
 
 
-@pytest.mark.xfail(strict=True, reason="fixed on r5-ac3: liveness lock")
 def test_a_day_forward_does_not_take_a_live_downloads_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sweep's only test is a stage's age, so with the clock a day ahead
-    it reclaims a stage a live download in another process is still using,
-    and that download then refuses. With a liveness lock it must not."""
+    """With the clock a day ahead, the sweep leaves alone a stage that a live
+    download in another process still holds its lock on: age is not the only
+    test, and the download completes."""
     _outcomes, problems, interfered = _a_day_forward(tmp_path, monkeypatch, "sweep")
     assert not problems and not interfered
 
 
-@pytest.mark.xfail(strict=True, reason="fixed on r5-ac3: liveness lock honoured by Tidy")
 def test_a_day_forward_tidy_does_not_archive_a_live_downloads_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Tidy up's age guards are the same kind of test, so with the clock a day
-    ahead it offers, and applies, the archiving of a file a live download in
-    another process is using; the bytes are kept, and that download refuses.
-    With the liveness lock honoured at plan and at apply it must not."""
+    """With the clock a day ahead, Tidy up neither offers nor applies the
+    archiving of a file a live download in another process still holds its
+    lock on, and the download completes."""
     _outcomes, problems, interfered = _a_day_forward(tmp_path, monkeypatch, "tidy")
     assert not problems and not interfered
 

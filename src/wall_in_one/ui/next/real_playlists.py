@@ -533,7 +533,7 @@ class RealPlaylists:
             # The page first (AB-6): it shows "Saving…" and what it asked for
             # until it hears, and the report reaches the window and can raise.
             self._emit_edits()
-            self._backend.window_report(f"{what}; nothing changed: {message}")
+            self._backend.window_report(config.unchanged_report(what, message))
 
         accepted = self._backend.authoring_action_async(
             lambda: prepare()(), finish, prepare=prepare, failure=failed
@@ -784,7 +784,9 @@ class RealPlaylists:
 
         def failed(error: str) -> None:
             self._emit_edits()  # the page first: the report can raise
-            self._backend.window_report(f"{quoted(name)} was not deleted; nothing changed: {error}")
+            self._backend.window_report(
+                config.unchanged_report(f"{quoted(name)} was not deleted", error)
+            )
 
         self._backend.delete_playlist_async(pid, deleted, on_error=failed)
 

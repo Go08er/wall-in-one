@@ -195,6 +195,50 @@ class SettingsReadOnlyError(ConfigError):
         super().__init__(read_only_message(self.unknown_keys))
 
 
+class DefaultReadOnlyError(SettingsReadOnlyError):
+    """`SettingsReadOnlyError` for a change refused because it would rewrite the saved default.
+
+    Deleting the playlist the default names, or renaming one it names by name
+    (`require_playlist_deletable`, `require_playlist_renamable`), while the
+    settings hold keys this build doesn't know. Still a
+    `SettingsReadOnlyError` for whoever catches one. But this refusal is read
+    as it is, with nothing around it (a ``ctl`` reply, a window's report), so
+    it reads ``kind: message`` as the stores' errors and its two siblings do
+    (`SettingsUnreadableError`, `SettingsNotWritableError`), says what the
+    change needed and that nothing was changed, and shows no class name.
+    """
+
+    kind: Final = "read-only"
+
+    def __init__(self, unknown_keys: Sequence[str], *, needed: str, unchanged: str) -> None:
+        super().__init__(unknown_keys)
+        self._said = f"{needed}, and {read_only_message(self.unknown_keys)}. {unchanged}"
+
+    def __str__(self) -> str:
+        return f"{self.kind}: {self._said}"
+
+
+#: How a playlist delete or rename refused before anything was written says so
+#: itself (`_require_default_writable`). `unchanged_report` knows them.
+NOTHING_DELETED: Final = "Nothing was deleted."
+NOTHING_RENAMED: Final = "Nothing was renamed."
+
+
+def unchanged_report(what: str, error: str) -> str:
+    """``what`` and why, saying exactly once that nothing changed.
+
+    ``what`` is a window's own clause ("\u201cEvening\u201d was not deleted")
+    and ``error`` the failure it was handed. Most failures don't say what
+    became of the change, so the window does: "...; nothing changed: ...". A
+    refusal made before anything was written (`require_playlist_deletable`,
+    `require_playlist_renamable`) says so itself, because it is also read with
+    nothing around it (a ``ctl`` reply); it is not told a second time here.
+    """
+    if error.rstrip().endswith((NOTHING_DELETED, NOTHING_RENAMED)):
+        return f"{what}: {error}"
+    return f"{what}; nothing changed: {error}"
+
+
 def _tidy_roots(roots: Sequence[Path]) -> tuple[Path, ...]:
     """Absolute, `~`-expanded, in order, with the duplicates dropped.
 
@@ -1209,7 +1253,7 @@ def require_playlist_deletable(
     _require_default_writable(
         _naming(playlist, also),
         path,
-        unchanged="Nothing was deleted.",
+        unchanged=NOTHING_DELETED,
         needed="this playlist is the saved default, which deleting it would clear",
     )
 
@@ -1225,7 +1269,7 @@ def require_playlist_renamable(names: Callable[[str], bool], path: Path | None =
     _require_default_writable(
         names,
         path,
-        unchanged="Nothing was renamed.",
+        unchanged=NOTHING_RENAMED,
         needed="the saved default names this playlist by its name, which renaming it would change",
     )
 
@@ -1244,10 +1288,12 @@ def _require_default_writable(
     if not (saved and names(saved)):
         return  # the settings stay as they are, whether or not they could be saved
     if loaded.read_only:
-        raise SettingsReadOnlyError(loaded.unknown_keys)
+        raise DefaultReadOnlyError(loaded.unknown_keys, needed=needed, unchanged=unchanged)
     why = why_not_writable(path)
     if why:
-        raise SettingsNotWritableError(f"{needed}, and settings.toml can't be changed ({why})")
+        raise SettingsNotWritableError(
+            f"{needed}, and settings.toml can't be changed ({why}). {unchanged}"
+        )
 
 
 def require_color_source_forgettable(connector: str, path: Path | None = None) -> None:

@@ -43,7 +43,7 @@ from gi.repository import Adw  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_runtime_health_sync import _snapshot as _failed_wallpaper  # noqa: E402
-from tests.test_ui_astra030_ac_saved import _reply  # noqa: E402
+from tests.test_ui_astra030_ac_saved import _reply, _verb  # noqa: E402
 from tests.test_ui_codex030_round1b import (  # noqa: E402, F401
     Profile,
     _lane_idle,
@@ -128,7 +128,8 @@ def test_deleting_the_default_changes_nothing_when_the_settings_can_not_be_saved
     assert _everything_saved() == held
     assert message == (
         "local-io: this playlist is the saved default, which deleting it would clear, and "
-        f"settings.toml can't be changed (a file can't be made in {folder}: Permission denied)"
+        f"settings.toml can't be changed (a file can't be made in {folder}: Permission denied). "
+        "Nothing was deleted."
     )
     assert _builds(application)
 
@@ -180,6 +181,106 @@ def test_forget_display_forgets_nothing_when_its_colors_step_could_not_be_saved(
         "Forgetting DP-7 was not saved; nothing changed: local-io: "
     )
     assert "settings.toml can't be changed" in opened.reports[-1]
+
+
+# -- a refusal says once that nothing changed, on every surface ------------------------------
+
+
+def _told(text: str) -> int:
+    """How often ``text`` says that nothing changed."""
+    sentences = ("nothing changed", config.NOTHING_DELETED, config.NOTHING_RENAMED)
+    return sum(text.count(sentence) for sentence in sentences)
+
+
+@contextlib.contextmanager
+def _settings_that(cause: str) -> Iterator[tuple[str, str]]:
+    """``settings.toml`` as each refusal finds it: (the reply's kind, words of its reason)."""
+    target = paths.settings_path()
+    if cause == "can't be saved":
+        with _settings_can_not_be_saved() as folder:
+            yield "local-io", f"a file can't be made in {folder}: Permission denied"
+    elif cause == "can't be read":
+        target.chmod(0o000)
+        try:
+            yield "unreadable", "Permission denied"
+        finally:
+            target.chmod(0o600)
+    else:
+        held = target.read_bytes()
+        target.write_bytes(held + b"future_setting = 1\n")
+        try:
+            yield "read-only", "doesn't recognize (future_setting)"
+        finally:
+            target.write_bytes(held)
+
+
+@pytest.mark.parametrize("cause", ["can't be saved", "can't be read", "an unknown key"])
+@pytest.mark.parametrize("change", ["delete", "rename"])
+def test_a_refused_delete_or_rename_says_once_that_nothing_changed(
+    shown: Shown,  # noqa: F811
+    cause: str,
+    change: str,
+) -> None:
+    """Deleting the default playlist, or renaming one the default names by name,
+    is refused before anything is written when ``settings.toml`` can't be saved,
+    can't be read, or holds a key this build doesn't know. Whoever reads the
+    refusal reads once that nothing changed: over ``ctl`` and in the classic
+    rename, which pass it on as it is, and in each window's own report, which
+    used to add "nothing changed" to a refusal that already said so. None of
+    them shows a class name, and over ``ctl`` each has a kind."""
+    opened = shown.opened
+    application = opened.application
+    evening = _playlist(shown, "Evening", [shown.dawn])
+    config.update({"active_playlist": "evening"})  # by name: a rename would have to change it
+    application._settings = config.load_strict()
+    application.session.update_settings(application._settings, rescan_library=False)
+    editing = opened.window.state.playlist_editing
+    assert editing is not None
+    sentence = config.NOTHING_DELETED if change == "delete" else config.NOTHING_RENAMED
+    passed_on: list[str] = []
+
+    def unprepared() -> Any:  # pragma: no cover - prepare always replaces it
+        raise RuntimeError("not prepared")
+
+    with _settings_that(cause) as (kind, reason):
+        held = _everything_saved() if cause != "can't be read" else None
+        if change == "delete":
+            # ctl, and (the same text) what the lane hands both windows.
+            reply = _verb(shown, "playlist-delete", evening.id)
+            assert not reply.ok and reply.kind == kind, reply
+            passed_on.append(reply.message)
+            editing.delete_playlist(evening.id)
+        else:
+            # The classic window's rename passes the lane's failure on as it is.
+            application.authoring_action_async(
+                unprepared,
+                lambda _result: passed_on.append("renamed"),
+                prepare=lambda: application.prepare_playlist_rename(evening.id, "Dusk"),
+                failure=passed_on.append,
+            )
+            opened.wait("the classic rename", lambda: bool(passed_on))
+            editing.rename_playlist(evening.id, "Dusk")
+        opened.wait(f"the new window's {change}", lambda: bool(opened.reports))
+        if held is not None:
+            assert _everything_saved() == held, "refused whole"
+
+    (raw,) = passed_on
+    shown_in_the_window = opened.reports[-1]
+    # Failed on 7e55112 in ten of these twelve cells: 0 or 2, and a class name
+    # with no kind for the unknown key.
+    assert raw.startswith(f"{kind}: ") and raw.endswith(sentence), raw
+    assert reason in raw and _told(raw) == 1, raw
+    assert shown_in_the_window == f"\u201cEvening\u201d was not {change}d: {raw}"
+    assert _told(shown_in_the_window) == 1
+    assert "Error" not in raw, raw
+    # The classic window's delete says it the same way.
+    assert _told(config.unchanged_report("Evening was not deleted", raw)) == 1
+    # And a failure that doesn't say it is still told so by the window.
+    assert config.unchanged_report("X was not deleted", "local-io: could not write") == (
+        "X was not deleted; nothing changed: local-io: could not write"
+    )
+    assert playlists.Store.open().get(evening.id) is not None
+    assert playlists.Store.open().get(evening.id).name == "Evening"  # type: ignore[union-attr]
 
 
 # -- a start that still opens ---------------------------------------------------------------

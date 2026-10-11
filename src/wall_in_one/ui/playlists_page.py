@@ -17,7 +17,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Graphene, Gsk, Gtk, Pango
 
-from wall_in_one import runtime_config
+from wall_in_one import config, runtime_config
 from wall_in_one.library import pairings, playlists
 from wall_in_one.library.model import MediaItem
 from wall_in_one.ui import runtime_truth
@@ -2035,7 +2035,7 @@ class PlaylistsPage(Gtk.Box):
             playlist.id,
             deleted,
             on_error=lambda error: self._app.window_report(
-                f"{playlist.name} was not deleted; nothing changed: {error}"
+                config.unchanged_report(f"{playlist.name} was not deleted", error)
             ),
         )
 

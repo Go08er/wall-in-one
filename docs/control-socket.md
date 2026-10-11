@@ -222,8 +222,15 @@ gone, and nothing is written or deleted:
   `still <video> default`, `reset-pairing`, and `schedule-add` or
   `display-assign`, which ask whether the playlist has something to play)
   replies with kind `unreadable`, naming the file, while the playlists file
-  can't be read or is damaged. `playlist-new` and `playlist-add` are not held
-  up: they are saved to that file, and saving to it is what repairs it.
+  can't be read or is damaged. `playlist-new` and `playlist-add` are saved to
+  that file, so they go by which of the two it is. A file that can't be read at
+  all (its permissions, say) refuses them the same way, and is never written
+  over. A damaged one is repaired by the save: the damaged file is kept beside
+  it as `.broken`, and the new file holds what could still be read from it,
+  with the change. `playlist-new` is not held up by a damaged file.
+  `playlist-add` goes ahead when the playlist it names is among what could be
+  read, and is refused as `unreadable` when it isn't; in a file that isn't JSON
+  at all, none is.
 - `remove`, whether it deletes the wallpaper or moves it to the trash, replies
   with kind `local-io` when the wallpaper, or its folder, can't be looked at.
   Before 0.3.0 that answered `missing`, "is no longer there".

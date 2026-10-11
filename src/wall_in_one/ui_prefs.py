@@ -38,12 +38,11 @@ The contract every build keeps:
 * ``interface`` is absent until the user chooses one, and absent means the
   default (`DEFAULT_INTERFACE`): the new interface since 0.3.0, classic in
   0.2.2. So 0.3.0 writes either choice, ``"classic"`` included, while 0.2.2
-  wrote only ``"next"``. ``"classic"`` is not a new value: 0.2.2 reads it as
-  classic and keeps saving the file. But 0.2.2 leaves the key out whenever it
-  saves with classic chosen, so after a 0.2.2 save 0.3.0 finds no choice and
-  starts the new interface. Absence can't tell "never chose" from "0.2.2
-  went back to Classic", and the version can't either (turning GPU
-  acceleration off also makes it 2), so neither is inferred.
+  wrote only ``"next"`` and left the key out with classic chosen. In a file
+  0.2.2 saved, absence can't tell "never chose" from "chose New, then went
+  back to Classic", and the version can't either (turning GPU acceleration
+  off also makes it 2), so neither is inferred: such a profile starts the
+  new interface once.
 """
 
 from __future__ import annotations

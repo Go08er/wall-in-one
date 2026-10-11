@@ -67,8 +67,9 @@ PREVIEW_STEM: Final = "preview"
 MAX_SIDECAR_BYTES: Final = 64 * 1024
 
 # The retired Noctalia plugin used the same sidecar suffix but stored an
-# ownership record beside the generated still itself.  Migration keeps those
-# bytes in place for rollback, so scans and deletion need one narrow reader for
+# ownership record beside the generated still itself.  Migration leaves those
+# bytes in place (they are in a wallpaper folder, where the import removes
+# nothing), so scans and deletion need one narrow reader for
 # that exact predecessor record.  It does not grant ownership to an arbitrary
 # image: directory shape, plugin id, kind, exact path and dynamic identity all
 # have to agree.

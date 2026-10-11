@@ -966,8 +966,8 @@ class Application(Adw.Application):
 
         A store saved by a newer version is skipped rather than failed: it is
         read-only here, so it cannot be repaired, and pausing every write
-        (and the first library scan) for it would turn a rollback into an
-        empty app. A newer ``playlists.json`` skips the whole repair, because
+        (and the first library scan) for it would show an empty app over
+        readable files. A newer ``playlists.json`` skips the whole repair, because
         what this build can parse of it cannot prove which playlists are
         gone; repairing from it would delete the user's rules, display
         assignments and default. This build cannot delete playlists from that

@@ -308,7 +308,7 @@ def _newer_overrides_beside_runtime(profile: Profile) -> Path:
 def test_a_newer_overrides_file_never_stops_the_service_start_and_is_left_alone(
     golden: Golden,
 ) -> None:
-    """After a rollback from a later release, this build's unit still starts."""
+    """A later release's overrides file is beside it: this build's unit still starts."""
     profile = golden.profile
     sidecar = _newer_overrides_beside_runtime(profile)
     before = harness.snapshot(profile.home)

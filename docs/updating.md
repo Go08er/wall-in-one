@@ -158,7 +158,11 @@ this one keeps nothing so that an older one can run again: a file that moves
 to a newer format is saved over, with no copy of the older one, and the
 copies 0.2.x kept for that (the `.v1-backup` and `.v2-backup` files beside
 `playlists.json`, `schedules.json`, `displays.json` and `ui.toml`) are
-removed the next time the app or its service starts.
+removed the next time the app or its service starts. The
+`wall-in-one-rollback` tool that 0.2.0 to 0.2.2 shipped is gone too. A
+`rollback-to-0.1.4-<date>` folder in `~/.local/state/wall-in-one` is the
+copy that tool made when you ran it: it is yours, nothing reads it, and you
+can delete it by hand.
 A system rollback of the package (an earlier NixOS or Home Manager
 generation, `nix profile rollback`, an older package from your distribution)
 is such a downgrade: it replaces the app and its service and leaves the

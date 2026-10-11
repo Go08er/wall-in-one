@@ -11,7 +11,7 @@ and saves through `SettingsAccess.change_settings`, which in the app is the
 classic window's validated path: coalesced on the authoring lane, rolled back
 on failure. What a row shows after a save is what the adapter reports once
 it is durable (the ``settings`` topic); a failed save puts every row back.
-No new key: the keys are 0.1.4's (``tests/test_settings_v0_1_4_keys.py``).
+No new key: every row saves a key the classic Settings page saves.
 
 **Topics.** ``settings`` (any value, the read-only state, folders, the key's
 status, the battery and colour-source notes), ``theme`` (the app's palette)

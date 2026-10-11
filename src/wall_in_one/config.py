@@ -5,14 +5,12 @@ palette and theme mode. Library roots are app-owned because downloads and still
 generation need an explicit write destination; Noctalia's path is only a
 first-run suggestion.
 
-``settings.toml`` is frozen: it has no version field, so no build may add a
-key to it, or a new value to an existing key, ever again. New presentation-only
-preferences belong in the versioned ``ui.toml`` (:mod:`wall_in_one.ui_prefs`);
-new behavior belongs in a versioned authoring store. A file can still contain
-keys this build does not know -- a typo, a hand edit, or a build that broke
-the freeze -- so every reader loads the keys it knows and reports the rest,
-and every writer refuses while they are present. Rewriting the file would
-silently drop them.
+``settings.toml`` has no version field. Presentation-only preferences live in
+the versioned ``ui.toml`` (:mod:`wall_in_one.ui_prefs`). A file can contain
+keys this build does not know -- a typo, a hand edit, or a newer build's --
+so every reader loads the keys it knows and reports the rest, and every
+writer refuses while they are present. Rewriting the file would silently
+drop them.
 """
 
 from __future__ import annotations
@@ -541,8 +539,7 @@ def _roots_line(roots: Sequence[Path]) -> str:
     return f"roots = [{inner}]"
 
 
-#: Every key this build reads and writes. Frozen with the file: see the module
-#: docstring before adding a field to `Settings`.
+#: Every key this build reads and writes.
 KNOWN_KEYS: Final = frozenset(Settings.__dataclass_fields__)
 
 

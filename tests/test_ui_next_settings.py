@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -31,7 +31,6 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.started import started_application  # noqa: E402
-from tests.test_settings_v0_1_4_keys import V0_1_4_SETTINGS_KEYS  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, ui_prefs  # noqa: E402
 from wall_in_one.providers import credentials, registry  # noqa: E402
@@ -199,11 +198,10 @@ def test_ctl_open_settings_reaches_the_real_page(opened: Opened) -> None:
     assert opened.window.content_page.get_title() == "Settings"
 
 
-def test_every_row_saves_its_own_0_1_4_key_and_nothing_else(opened: Opened) -> None:
+def test_every_row_saves_its_own_key_and_nothing_else(opened: Opened) -> None:
     page = opened.page
     keys = {binding.key for binding in page._bindings}
     assert keys == CLASSIC_KEYS
-    assert keys <= V0_1_4_SETTINGS_KEYS, "settings.toml stays as 0.1.4 reads it"
     for binding in page._bindings:
         if binding.key == "display_mode":
             continue  # needs a display to follow: its own test below
@@ -511,10 +509,6 @@ def test_the_classic_window_opacity_sits_in_its_own_labelled_group(opened: Opene
     opened.page._set_query("opacity classic")
     assert row.get_visible() and classic.widget.get_visible(), "search still finds it"
     opened.page._set_query("")
-
-
-def test_the_settings_keys_are_still_0_1_4s() -> None:
-    assert {field.name for field in fields(config.Settings)} == V0_1_4_SETTINGS_KEYS
 
 
 # -- Noctalia's palette template -------------------------------------------------------

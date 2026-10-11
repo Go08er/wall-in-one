@@ -1,8 +1,7 @@
 """The new UI's window preferences, in a versioned ``ui.toml``.
 
-``settings.toml`` is frozen (see :mod:`wall_in_one.config`): it has no version,
-so a new key there would lock older builds out of settings edits. Preferences
-that only the window cares about live here instead, in
+Preferences that only the window cares about live here, not in
+``settings.toml`` (see :mod:`wall_in_one.config`), in
 ``$XDG_CONFIG_HOME/wall-in-one/ui.toml``. The classic UI only reads it, and
 writes it for one reason: the user dismissing the one-time Tidy up card.
 Opening or idling never creates it, and nothing in it may ever affect the

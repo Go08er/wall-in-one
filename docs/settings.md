@@ -50,9 +50,8 @@ runtime document when successful; it is not a read-only settings checker.
 ## Unknown keys
 
 `settings.toml` has no version number, so Wall-in-One can't tell a key from a
-newer release apart from a typo. 0.1.4 refuses the whole file, which is why
-0.2.0 writes only the keys 0.1.4 knows.
-Since 0.2.0, a key this version doesn't know never stops anything. Instead:
+newer release apart from a typo. A key this version doesn't know never stops
+anything. Instead:
 
 - Every reader uses the keys it knows. The unknown ones are ignored, never
   removed.
@@ -108,15 +107,11 @@ it read-only too.
 followed: it is refused as a settings file that can't be read ("is not a
 regular file"). A setup that manages the file should write a real one.
 
-## The settings.toml freeze and ui.toml
+## Window preferences: ui.toml
 
-`settings.toml` is frozen. No release adds a key to it, or a new value to an
-existing key, ever again; an older release would read either one as a typo,
-and 0.1.4 can't use a file with one at all.
-
-- New preferences for the window itself (glass style, opacity, frost,
+- Preferences for the window itself (glass style, opacity, frost,
   thumbnail size, the page to reopen, the interface to start, GPU
-  acceleration) go in `ui.toml`, beside `settings.toml`. A start that opens a
+  acceleration) are in `ui.toml`, beside `settings.toml`. A start that opens a
   window reads it, without writing, for two keys. `interface` (`classic` or
   `next`) is the interface it builds; a missing or unusable value means the
   new interface, the default since 0.3.0 (0.2.2's default was classic), and
@@ -141,8 +136,6 @@ and 0.1.4 can't use a file with one at all.
   save on close: a pending change you made (a dial you had just let go of) is
   flushed when the window closes or the app quits. Neither saves the page to
   reopen or the window size.
-- New wallpaper behavior goes in a versioned authoring store, with a version
-  bump.
 
 `ui.toml` carries a `version`. A release that finds a newer version uses the
 preferences it understands and never writes the file. Version 2 adds

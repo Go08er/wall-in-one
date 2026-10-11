@@ -12,14 +12,13 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import pytest
 
 from tests.gtk_helpers import spin_until
-from tests.test_settings_v0_1_4_keys import V0_1_4_SETTINGS_KEYS
 from wall_in_one import config, paths
 from wall_in_one.library.model import Library
 from wall_in_one.providers import credentials, registry
@@ -283,7 +282,6 @@ def test_a_change_saves_only_its_key_and_a_repeat_saves_nothing(
     assert settings.setting("video_volume") == 40, "the row shows what is being saved"
     backend.run_authoring()
     assert config.load(target).video_volume == 40
-    assert set(backend.saves[0]) <= V0_1_4_SETTINGS_KEYS
     settings.change_settings(video_volume=40)  # durable now: still nothing
     assert len(backend.saves) == 1
 
@@ -537,11 +535,6 @@ def test_using_a_scheme_goes_through_the_application(
     settings, _host = part
     settings.palette_manager.use_scheme("soft", sync_noctalia=True)
     assert backend.schemes == [("soft", True)]
-
-
-def test_the_page_offers_only_settings_keys_that_0_1_4_reads() -> None:
-    names = {field.name for field in fields(config.Settings)}
-    assert names == V0_1_4_SETTINGS_KEYS, "settings.toml is frozen"
 
 
 def test_a_worker_answer_after_close_is_dropped() -> None:

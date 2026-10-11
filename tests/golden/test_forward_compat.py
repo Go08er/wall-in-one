@@ -6,8 +6,8 @@ refused with ``kind == "newer-version"``, never rewritten or moved aside;
 unknown keys, top-level and per record, are carried through every save. A
 store this build once bumped keeps its one-time backup untouched when a newer
 release bumps it again, and while one is newer, neither ``runtime.toml`` nor
-``runtime-overrides.toml`` is republished. ``settings.toml`` is frozen and
-fails safe: with a key this build does not know, every write is refused and
+``runtime-overrides.toml`` is republished. ``settings.toml`` fails safe: with
+a key this build does not know, every write is refused and
 the headless path compiles the known keys. Each case is its own test, so a
 regression names the store and the aspect.
 """

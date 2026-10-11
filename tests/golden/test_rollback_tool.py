@@ -149,8 +149,7 @@ def test_the_targets_are_the_versions_v0_1_4_reads() -> None:
 
     The files left alone are left alone because their formats did not change:
     this build writes pairings, favourites and pending removals at the
-    versions v0.1.4 reads (settings.toml's keys are pinned by
-    tests/test_settings_v0_1_4_keys.py).
+    versions v0.1.4 reads.
     """
     assert {name: V0_1_4_FORMATS[name] for name in NARROWED} == rollback.V0_1_4_FORMATS
     assert V0_1_4_FORMATS["pairings.json"] == pairings.FORMAT_VERSION

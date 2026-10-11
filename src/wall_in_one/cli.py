@@ -482,6 +482,22 @@ def _warn_unknown_settings(unknown_keys: Sequence[str]) -> None:
     )
 
 
+def _warn_left_out(left_out: Sequence[runtime_config.LeftOut]) -> None:
+    """Say what a compile nobody watches was built without: one ``warning:`` line each.
+
+    The compiler never refuses over a playlist that can't play. A default, a
+    schedule rule or a display's own playlist that names one, or names a
+    playlist that doesn't exist, is left out and the rest is published
+    (`runtime_config.LeftOut`), so the command exits as for a clean compile:
+    refusing would stop every publication and, on a profile that has never
+    published, the service with it. Each line says which reference, whose it
+    is and why. A store that could not be read is a different thing: the
+    compiler refuses that file by name.
+    """
+    for one in left_out:
+        print(f"warning: {one.warning()}", file=sys.stderr)
+
+
 def _write_runtime_config() -> int:
     """Compile authoring state for Rust without constructing a GTK application."""
     from wall_in_one import config, runtime_config
@@ -515,6 +531,7 @@ def _write_runtime_config() -> int:
                 # therefore fails publication closed.
                 session.refresh(mutate_removals=False)
                 changed = _update_runtime(settings, session)
+                _warn_left_out(changed.left_out)
             finally:
                 session.shutdown()
     except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
@@ -640,9 +657,11 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                     f"{installed_generation}; reload the runtime and retry; "
                     "no health marker was written"
                 )
-            authored_generation = runtime_config.document_generation(
-                runtime_config.render(settings, session)
-            )
+            built = runtime_config.compiled(settings, session)
+            # Said once here: marking wallpapers as skipped below doesn't
+            # change what compiles, so the later publication leaves out the same.
+            _warn_left_out(built.left_out)
+            authored_generation = runtime_config.document_generation(built.document)
             if status_generation != authored_generation:
                 # The stores changed before their generated document landed,
                 # or a prior health sync saved Pairings but failed to compile.

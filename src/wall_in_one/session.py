@@ -1820,12 +1820,24 @@ class Session:
         return self._schedules
 
     def active_playlist(self) -> str:
-        """The one playlist in force: manual choice, schedule, then default."""
+        """The one playlist in force: manual choice, schedule, then default.
+
+        The default as the compiler resolves it: a saved default may name its
+        playlist by name (an older profile, a hand edit, a setup that manages
+        ``settings.toml``), and stays a name for the whole session where the
+        start can't save the id. It is that playlist's id here, so whoever
+        asks what is in force (the rotation, a page's "playing" mark,
+        ``ctl playlists``) is not left comparing an id with a name. One that
+        names no playlist is passed on as saved, and matches none.
+        """
         if self._manual_playlist is not None:
             return self._manual_playlist
-        return schedules.effective(
-            self._schedules.rules, self._settings.active_playlist, self._now()
-        )
+        default = self._settings.active_playlist
+        if default and self._playlists.get(default) is None:
+            named = self._playlists.by_name(default)
+            if named is not None:
+                default = named.id
+        return schedules.effective(self._schedules.rules, default, self._now())
 
     @property
     def manual_playlist(self) -> str | None:

@@ -383,24 +383,21 @@ class RealScheduling:
 
     @property
     def default_playlist(self) -> str:
-        """The default in force, as an id the page can name.
+        """The default playlist, as an id the page can name.
 
         A default saved by name is its playlist
-        (`runtime_config.default_playlist_id`). One left out because it names
-        nothing and ``settings.toml`` can't be changed to clear it
-        (`Session.leave_out_default`) is not in force: "All media" plays, and
-        that is what is shown, never a row with no name. Any other reference
-        no playlist answers to is passed on as saved; the start repairs it.
+        (`runtime_config.default_playlist_id`). A saved reference no playlist
+        answers to is shown as "All media", as the classic page shows it,
+        never as a row with no name: it is either left out, so "All media" is
+        what plays (`Session.leave_out_default`, and the compiles that leave
+        out one that went dangling while the app ran), or waiting for the
+        start to clear it, with the publication notice saying so meanwhile.
+        Not by ``Session.left_out_default``: only the start sets that, and a
+        default can stop naming a playlist under a running app.
         """
         saved = self._backend.settings.active_playlist
-        if not saved:
-            return runtime_config.FALLBACK_PLAYLIST_ID
         named = runtime_config.default_playlist_id(saved, self._session)
-        if named:
-            return named
-        if saved == self._session.left_out_default:
-            return runtime_config.FALLBACK_PLAYLIST_ID
-        return saved
+        return named or runtime_config.FALLBACK_PLAYLIST_ID
 
     def display_assignments(self) -> Mapping[str, str]:
         return dict(self._session.displays.all())

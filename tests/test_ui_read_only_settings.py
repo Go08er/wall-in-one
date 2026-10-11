@@ -25,6 +25,7 @@ import contextlib
 import json
 import os
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -381,6 +382,11 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
         assert chosen == "Evening"
         assert "the saved default selection" in playlists_page._deletion_body(session, evening)
         assert runtime_config.default_playlist_id(reference, session) == evening.id
+        # And what is in force is that playlist, for the rotation, a page's
+        # "playing" mark and `ctl playlists` (failed on edbd327: "evening").
+        assert session.active_playlist() == evening.id
+        listed = _verb(shown, "playlists", "").message.splitlines()
+        assert [row.split("\t")[-1] for row in listed if row.startswith(evening.id)] == ["yes"]
     else:
         assert session.left_out_default == reference
         # Failed on 7e55112: "ghost", a default row with no name.
@@ -389,6 +395,12 @@ def test_a_default_the_start_could_not_save_is_shown_as_what_is_in_force(
         assert chosen == "All media (built-in playlist)"
         assert "the saved default selection" not in playlists_page._deletion_body(session, evening)
         assert runtime_config.default_playlist_id(reference, session) == ""
+        # A default can stop naming a playlist under a running app, where only
+        # the compiles leave it out and the session is never told: still "All
+        # media" in both windows (failed on edbd327: "phantom", a blank row).
+        session.leave_out_default("")
+        application._settings = replace(application._settings, active_playlist="phantom")
+        assert scheduling.default_playlist == runtime_config.FALLBACK_PLAYLIST_ID
 
 
 def test_a_left_out_default_is_said_once(

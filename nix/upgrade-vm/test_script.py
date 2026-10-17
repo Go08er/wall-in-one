@@ -432,7 +432,7 @@ with subtest("a: v0.1.4 starts on the golden profile and applies a wallpaper"):
     writes("a: v0.1.4 first start", seeded, a_done, shell_first_start=True)
     observe("a: service journal", journal("wall-in-one.service"))
 
-with subtest("b: v0.2.0 installed; the mixed window, then its first start and idle"):
+with subtest("b: v0.3.0 installed; the mixed window, then its first start and idle"):
     b_start = snapshot()
     old_pid = check_running(OLD)
     install(NEW)
@@ -454,7 +454,7 @@ with subtest("b: v0.2.0 installed; the mixed window, then its first start and id
         lambda value: value["runtime_executable"] == f"{NEW}/bin/wall-in-one-service"
         and value["playlist_id"] == EVENINGS,
     )
-    observe("b: v0.2.0 status", updated)
+    observe("b: v0.3.0 status", updated)
     assert "supported_override_schemas" in updated, updated
     assert updated["loaded_overrides_sha256"] is None, updated
     assert updated["cycle_interval_seconds"] == GLOBAL_INTERVAL, updated
@@ -462,7 +462,7 @@ with subtest("b: v0.2.0 installed; the mixed window, then its first start and id
     wait_health_sync(NEW)
     b_first = snapshot()
     observe("b: service journal", journal("wall-in-one.service", mark))
-    first_writes = writes("b: v0.2.0 first start and idle", b_window, b_first)
+    first_writes = writes("b: v0.3.0 first start and idle", b_window, b_first)
     expect(
         "b: the first start writes only the whitelist",
         lambda: harness.check_changes(first_writes, first_start()),
@@ -479,10 +479,10 @@ with subtest("b: v0.2.0 installed; the mixed window, then its first start and id
     )
     wait_health_sync(NEW)
     b_idle = snapshot()
-    idle_writes = writes("b: v0.2.0 idle again", b_first, b_idle)
+    idle_writes = writes("b: v0.3.0 idle again", b_first, b_idle)
     expect("b: a second idle writes nothing", lambda: harness.check_changes(idle_writes, ()))
 
-with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the display opt-in"):
+with subtest("c: v0.3.0 uses a per-playlist interval, a rule name and the display opt-in"):
     c_start = snapshot()
     released = {name: content(c_start, name) for name in STORES}
     assert document(c_start, "displays.json")["displays"].get(OPT_IN), "the fixture assigns DP-1"
@@ -501,9 +501,9 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
         lambda value: value.get("loaded_overrides_sha256") == sidecar_sha
         and value.get("cycle_interval_seconds") == INTERVAL,
     )
-    observe("c: v0.2.0 status with the overrides", applied_overrides)
+    observe("c: v0.3.0 status with the overrides", applied_overrides)
     c_done = snapshot()
-    c_writes = writes("c: v0.2.0 edits", c_start, c_done)
+    c_writes = writes("c: v0.3.0 edits", c_start, c_done)
 
     def bumped(name: str, version: int, check: Callable[[dict[str, Any]], None]) -> Any:
         def verify(change: Any) -> None:
@@ -594,8 +594,8 @@ with subtest("c2: this build's service restarts on the profile c left"):
     # The upgrade direction on a profile with bumped stores and an overrides
     # file: the packaged service starts again, loads the overrides, applies a
     # wallpaper and syncs health, and the start writes only the first-start
-    # whitelist. Nothing c wrote is lost, directly: the stores and the
-    # overrides are byte for byte what c left.
+    # whitelist. Nothing c wrote is lost, directly: the stores, the overrides
+    # and runtime.toml are byte for byte what c left.
     c2_start = snapshot()
     since, mark = len(log_lines()), cursor()
     restart()
@@ -618,7 +618,9 @@ with subtest("c2: this build's service restarts on the profile c left"):
         "c2: the start writes only the first-start whitelist",
         lambda: harness.check_changes(c2_writes, first_start()),
     )
-    for kept in (*STORES, "runtime-overrides.toml"):
+    # runtime.toml too: first_start() would allow it to be rewritten, but this
+    # build compiled the same document, so a restart must not touch the file.
+    for kept in (*STORES, "runtime-overrides.toml", "runtime.toml"):
         expect(f"c2: {kept} is as c left it", partial(unchanged, c_done, c2_done, kept))
 
 with subtest("the session stayed healthy"):

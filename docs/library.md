@@ -712,7 +712,8 @@ and `ui.toml.v1-backup` in the config folder. Nothing reads them, and
 [updates are one-way](updating.md#updates-are-one-way), so the app removes
 a copy at the next start of the app or its service (`ui.toml`'s only when a
 window opens), but only when nothing in it is missing from the file beside
-it. It reads the copy with the same reader as the file, and every playlist,
+it. It reads the copy with the reader each store reads its file with (a repeated
+key or NaN make it unreadable, so the copy stays), and every playlist,
 schedule rule or display assignment in it must still be in the file under the
 same id (or connector); one you have since renamed or changed counts as there.
 For `ui.toml` the file must hold an interface choice. A copy stays where it
@@ -721,7 +722,10 @@ full, if the file beside it is missing, damaged, saved by a newer version or
 otherwise not read in full, or if the file lacks anything the copy holds (for
 example after a damaged file was set aside as `.broken` and only what you
 added since was saved): then it may be the only copy of that. Tidy up lists
-a copy that stays. Nothing else is removed, whatever its name.
+a copy that stays, under "Archive old leftovers" as kept, with the reason it stays; it decides by the
+same check as the removal, only looks, and says you can delete it yourself if
+you don't want it. A copy that may go isn't listed: the next start removes it.
+Nothing else is removed, whatever its name.
 
 ## Where things live
 

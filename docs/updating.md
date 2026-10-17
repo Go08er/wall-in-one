@@ -100,7 +100,7 @@ mean stays the same. The bytes of a few files can change, and it writes only:
   folder and `ui.toml.v1-backup` in the config folder are removed, each
   leaving one empty record in that folder's `.wall-in-one-retained`, but
   only when the file beside it still holds everything the copy does. A copy
-  stays, and Tidy up lists it, when it can't be read in full, when the file
+  stays, and Tidy up lists it with the reason, when it can't be read in full, when the file
   beside it is missing, damaged or from a newer version, or when something
   in the copy is no longer in the file. The app removes the first four at its
   or its service's start, and `ui.toml.v1-backup` when a window opens. See
@@ -165,7 +165,7 @@ copies 0.2.x kept for that (the `.v1-backup` and `.v2-backup` files beside
 `playlists.json`, `schedules.json`, `displays.json` and `ui.toml`) are
 removed at a later start, once the file beside each still holds everything
 the copy does (see [Format versions](library.md#format-versions)); one that
-doesn't stays, and Tidy up lists it. The upgrade from the
+doesn't stays, and Tidy up lists it with the reason it stays. The upgrade from the
 older empty-root app likewise removes its own pre-upgrade copies of
 `settings.toml` and `runtime.toml` once it has finished, when it can prove
 they are exactly what it translated; copies that an earlier version's

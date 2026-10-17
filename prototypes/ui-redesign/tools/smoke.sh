@@ -44,7 +44,7 @@ nix develop --command env -u DBUS_SESSION_BUS_ADDRESS -u WAYLAND_DISPLAY -u WAYL
   XDG_CACHE_HOME="$ISO/cache" XDG_DATA_HOME="$ISO/data" XDG_RUNTIME_DIR="$ISO/run" \
   XDG_DATA_DIRS="$ICONS:${XDG_DATA_DIRS:-/run/current-system/sw/share}" \
   GSK_RENDERER=cairo GDK_BACKEND=wayland GSETTINGS_BACKEND=memory GTK_A11Y=none PYTHONDONTWRITEBYTECODE=1 \
-  "$REPO/tools/headless-wayland.sh" \
+  bash "$REPO/tools/headless-wayland.sh" \
   python "$HERE/tools/smoke.py" "$ISO/failures" 2>&1 \
   | grep -v "^warning: Git tree\|dev shell -- run\|g_settings\|accessibility bus" | tee "$OUT"
 grep -q "failures=0" "$OUT" || exit 1

@@ -207,7 +207,7 @@ run_workload env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u NIRI_SOCKET -u DISPLAY 
   GDK_BACKEND=wayland \
   GSK_RENDERER=cairo \
   PYTHONDONTWRITEBYTECODE=1 \
-  "$repo/tools/headless-wayland.sh" "$@" ||
+  bash "$repo/tools/headless-wayland.sh" "$@" ||
   status=$?
 remove_profile
 exit "$status"

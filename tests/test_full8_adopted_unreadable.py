@@ -234,3 +234,25 @@ def test_an_absent_or_changed_sidecar_still_revokes_the_display_only_hiding(
         assert any(item.path == fixture.capture for item in session.library.items)
     finally:
         session.shutdown()
+
+
+@pytest.mark.parametrize("which", ("sidecar", "marker"))
+def test_a_video_with_an_alternate_still_records_no_skipped_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    """Failed at 2b48044: the video still played, yet "1 skipped" deferred the cleanup."""
+    fixture = _fixture(tmp_path, central=True)
+    settings, session, _ = _profile(fixture, "default")
+    current = stills.destination(fixture.source, fixture.root)
+    current.write_bytes(fixture.capture.read_bytes())
+    _fail_metadata_read(
+        monkeypatch, fixture.authority.sidecar_path if which == "sidecar" else fixture.marker
+    )
+    try:
+        library = scan.scan(settings.roots)
+        item = library.find(fixture.source)
+        assert item is not None and item.paired_still == current
+        assert library.skipped == ()
+        assert library.unseen == ()
+    finally:
+        session.shutdown()

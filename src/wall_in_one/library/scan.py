@@ -712,15 +712,6 @@ def _scan(
     adopted_pairs = tuple(
         (authority.source_path, authority.capture_path) for authority in exact_authorities
     )
-    unusable_roots = {place.path for place in unseen if place.kind is UnseenKind.ROOT_NOT_USABLE}
-    if capture_adoption is not None and capture_adoption.root not in unusable_roots:
-        # A retired root or an unindexed source no longer supplies this scan.
-        # Only an indexed moving item can be missing its adopted still for
-        # want of looking. Missing/unusable roots remain known absences.
-        moving = {item.path for item in items if item.is_moving}
-        for source, why in adoption_unseen:
-            if source in moving:
-                _not_looked(skipped, unseen, source, UnseenKind.UNREADABLE, why)
     if cancelled is not None and cancelled():
         raise ScanCancelledError
     stillless: list[tuple[Path, str]] = []
@@ -735,6 +726,18 @@ def _scan(
         # No still for want of looking: the video's own path, so a playlist
         # entry for it is "couldn't look", not "no still yet".
         _not_looked(skipped, unseen, video, UnseenKind.UNREADABLE, f"its still: {why}")
+    unusable_roots = {place.path for place in unseen if place.kind is UnseenKind.ROOT_NOT_USABLE}
+    if capture_adoption is not None and capture_adoption.root not in unusable_roots:
+        # A retired root or an unindexed source no longer supplies this scan.
+        # Only an indexed moving item left without a still can be missing it for
+        # want of looking: a video that plays through another still is complete.
+        # Missing/unusable roots remain known absences.
+        stillless_moving = {
+            item.path for item in paired if item.is_moving and item.paired_still is None
+        }
+        for source, why in adoption_unseen:
+            if source in stillless_moving:
+                _not_looked(skipped, unseen, source, UnseenKind.UNREADABLE, why)
     # Display-only provenance never enters adopted_mapping/adopted_stills:
     # those relationships can be consumed by destructive operations. Recheck
     # against the walked generation so a later user replacement stays visible.

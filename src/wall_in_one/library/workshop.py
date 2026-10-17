@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
-from wall_in_one.library.model import UnseenKind
+from wall_in_one.library.model import UnseenKind, is_absent
 
 #: Where the scan is told about a place it could not look into: the folder,
 #: why (`UnseenKind`), and the system's words. Optional everywhere below.
@@ -121,10 +121,8 @@ def _is_folder(path: Path, *, follow: bool, on_unseen: OnUnseen | None) -> bool:
     """
     try:
         info = path.stat() if follow else path.lstat()
-    except FileNotFoundError, NotADirectoryError:
-        return False
     except OSError as error:
-        if on_unseen is not None:
+        if on_unseen is not None and not is_absent(error):
             on_unseen(path, UnseenKind.UNREADABLE, error.strerror or str(error))
         return False
     return stat.S_ISDIR(info.st_mode)
@@ -157,10 +155,8 @@ def _unlooked(path: Path) -> bool:
     """Whether a stat of ``path`` fails for a reason other than "not there"."""
     try:
         path.stat()
-    except FileNotFoundError, NotADirectoryError:
-        return False
-    except OSError:
-        return True
+    except OSError as error:
+        return not is_absent(error)
     return False
 
 
@@ -261,10 +257,8 @@ def _beside(directory: Path, name: object, on_unseen: OnUnseen | None = None) ->
     candidate = directory / name.strip()
     try:
         info = candidate.lstat()
-    except FileNotFoundError, NotADirectoryError:
-        return None
     except OSError as error:
-        if on_unseen is not None:
+        if on_unseen is not None and not is_absent(error):
             on_unseen(directory, UnseenKind.UNREADABLE, error.strerror or str(error))
         return None
     return candidate if stat.S_ISREG(info.st_mode) else None
@@ -302,10 +296,8 @@ def scan_content_directories(
     for position, content in enumerate(directories):
         try:
             entries = sorted(content.iterdir())
-        except FileNotFoundError, NotADirectoryError:
-            continue
         except OSError as error:
-            if on_unseen is not None:
+            if on_unseen is not None and not is_absent(error):
                 on_unseen(content, UnseenKind.UNREADABLE, error.strerror or str(error))
             continue
         for directory in entries:

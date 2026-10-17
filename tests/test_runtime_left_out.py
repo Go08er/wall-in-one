@@ -670,6 +670,49 @@ def test_a_video_whose_still_cannot_be_looked_at_refuses_but_one_with_none_is_le
     session.shutdown()
 
 
+LONG_NAMES = ("a" * 240 + ".mp4", "\u591c" * 79 + ".mp4")  # 244 and 241 bytes
+
+
+@pytest.mark.parametrize("name", LONG_NAMES, ids=("ascii-240", "cjk-241"))
+def test_a_stillless_video_with_a_long_name_is_left_out_not_refused(
+    tmp_path: Path, name: str
+) -> None:
+    """The look-up adds a suffix to the name and asks about one that can't exist: not "couldn't
+    look". Failed at 6266024."""
+    from wall_in_one.library import scan
+
+    settings, session = _session(tmp_path)
+    root = tmp_path / "vids"
+    root.mkdir()
+    video = root / name
+    video.write_bytes(b"\x00" * 16)
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, video)
+    settings = replace(settings, active_playlist=deep.id)
+    session._library = scan.scan([root])
+    assert session.library.find(video) is not None and session.library.unseen == ()
+
+    published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
+
+    assert any(one.reference == deep.id for one in published.left_out)
+    session.shutdown()
+
+
+def test_a_root_with_a_component_over_name_max_is_not_usable_not_unreadable(
+    tmp_path: Path,
+) -> None:
+    from wall_in_one import config
+    from wall_in_one.library import scan
+
+    root = tmp_path / ("b" * 300) / "drive"
+    library = scan.scan([root])
+
+    assert [(place.path, place.kind) for place in library.unseen] == [
+        (root, UnseenKind.ROOT_NOT_USABLE)
+    ]
+    assert config.root_trouble(root) == config.ROOT_NOT_THERE
+
+
 def test_the_collector_does_not_outlive_the_scan(tmp_path: Path) -> None:
     from wall_in_one.library import scan
 

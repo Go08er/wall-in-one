@@ -328,6 +328,7 @@ def _note_failed_lookup(path: Path, error: BaseException) -> None:
         errno.ELOOP,
         errno.ENOENT,
         errno.ENOTDIR,
+        errno.ENAMETOOLONG,
     ):
         failures.append(f"{path}: {getattr(error, 'strerror', None) or error}")
 
@@ -343,7 +344,7 @@ def present(path: Path) -> bool:
     except FileNotFoundError, NotADirectoryError:
         return False
     except OSError as error:
-        _note_failed_lookup(path, error)
+        _note_failed_lookup(path, error)  # quiet for a name that can't exist
         return False
     except ValueError:
         return False

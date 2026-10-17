@@ -28,6 +28,7 @@ from wall_in_one.library.model import (
     Unseen,
     UnseenKind,
     classify,
+    is_absent,
 )
 
 #: What a Wallpaper Engine wallpaper is labelled as in the grid.
@@ -489,10 +490,9 @@ def _unscanned_root(root: Path) -> str:
             if real.is_dir():
                 return f"a symbolic link, which is not scanned; add {real} instead"
             return "a symbolic link that points at no folder"
-    except FileNotFoundError, NotADirectoryError:
-        return "not there"
-    except OSError:
-        pass
+    except OSError as error:
+        if is_absent(error):
+            return "not there"
     return "not a directory"
 
 
@@ -582,13 +582,15 @@ def _scan(
             raise ScanCancelledError
         try:
             root_mode = root.lstat().st_mode
-        except FileNotFoundError, NotADirectoryError:
-            _not_looked(skipped, unseen, root, UnseenKind.ROOT_NOT_USABLE, _unscanned_root(root))
-            continue
         except OSError as error:
-            # Not "not there": the stat itself failed (permissions, a dead
-            # mount). `Path.is_dir` would have said False to this as well.
-            _not_looked(skipped, unseen, root, UnseenKind.UNREADABLE, error.strerror or error)
+            if is_absent(error):
+                _not_looked(
+                    skipped, unseen, root, UnseenKind.ROOT_NOT_USABLE, _unscanned_root(root)
+                )
+            else:
+                # Not "not there": the stat itself failed (permissions, a dead
+                # mount). `Path.is_dir` would have said False to this as well.
+                _not_looked(skipped, unseen, root, UnseenKind.UNREADABLE, error.strerror or error)
             continue
         if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
             _not_looked(skipped, unseen, root, UnseenKind.ROOT_NOT_USABLE, _unscanned_root(root))

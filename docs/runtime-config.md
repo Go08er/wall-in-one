@@ -69,7 +69,7 @@ or says `nothing changed`.
 
 The compiler never refuses over a playlist that can't play. A playlist with
 nothing to play (it is empty, or every wallpaper in it is missing or has no
-still yet) is not written. A reference to one, or to a playlist that doesn't
+still yet, as far as the scan could tell) is not written. A reference to one, or to a playlist that doesn't
 exist, is left out and said, and everything else is published: such a
 `default_playlist` is written as `all-media`, and a `[[schedules]]` rule or a
 `[[displays]]` assignment that names one is not written, nor is that
@@ -82,10 +82,14 @@ that matters was unseen. A playlists, schedules, displays, pairings, favourites 
 removals file that can't be read, is damaged or was saved by a newer version
 still refuses the compile, naming the file, and the last document stays. So
 does a playlist with nothing to play that the default, a rule or a display
-names, when the library scan **could not look into** a folder its files may
+names, when the library scan **could not look into** a place its files may
 be in: a listing or stat of the folder (or one above it) failed, or a scan
-limit stopped it (65536 entries examined, 4096 wallpapers, 8 levels deep).
-"Couldn't look" is never "nothing there". The refusal names the folder, and
+limit stopped it (65536 entries examined, 4096 wallpapers, 8 levels deep). The
+same goes for a video with no still only because a place its still would be in
+could not be looked at (a stat or read of its sidecar, a generated still, or
+the folder holding them failed): a video with no still at all is "no still
+yet" and is left out.
+"Couldn't look" is never "nothing there". The refusal names the folder (or the video), and
 the last document stays until the folder can be read (or, past a limit, the
 library made smaller) or the reference is removed. A library folder that is
 absent, not a folder, or a symbolic link (an unmounted drive, or one removed

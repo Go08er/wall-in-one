@@ -30,6 +30,7 @@ from typing import Any, Final, Self
 
 from wall_in_one import file_io, paths, runtime_compatibility
 from wall_in_one.library import state_file
+from wall_in_one.library.model import is_absent
 from wall_in_one.theme.noctalia import ALL_SCHEMES, DEFAULT_SCHEME
 from wall_in_one.wallpaper import renderer, scenes
 
@@ -962,9 +963,9 @@ def root_trouble(root: Path) -> str:
     """
     try:
         mode = root.lstat().st_mode
-    except FileNotFoundError, NotADirectoryError:
-        return ROOT_NOT_THERE
     except OSError as error:
+        if is_absent(error):
+            return ROOT_NOT_THERE
         return f"couldn't be looked at ({error.strerror or error})"
     if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
         return ""

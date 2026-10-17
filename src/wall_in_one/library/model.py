@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -147,6 +148,18 @@ class MediaItem:
         from dataclasses import replace
 
         return replace(self, paired_still=still)
+
+
+def is_absent(error: OSError) -> bool:
+    """Whether a failed stat means the place is not there, rather than could not be looked at.
+
+    A missing entry, something that is not a folder on the way, or a name too
+    long to exist: all "nothing there". Permissions, I/O errors and dead
+    mounts are not.
+    """
+    return isinstance(error, FileNotFoundError | NotADirectoryError) or (
+        error.errno == errno.ENAMETOOLONG
+    )
 
 
 class UnseenKind(Enum):

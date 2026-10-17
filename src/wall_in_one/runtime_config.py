@@ -1682,9 +1682,10 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     playlist, so nothing left out is ever named in either document.
 
     **Except where the scan could not look.** A playlist that plays nothing
-    only because the library scan could not look into a folder its entries
-    may be in (a failed listing or stat, a scan limit; `_unseen_folder`)
-    refuses the build, naming the folder: files may be there now. A library
+    only because the library scan could not look into a place its entries
+    (or their stills) may be in (a failed listing or stat, a scan limit; `_unseen_folder`)
+    refuses the build, naming the folder (or, for a video whose still could not
+    be looked at, the video itself): files may be there now. A library
     folder that is absent, not a folder or a link was looked at, and is left
     out as above.
 

@@ -469,6 +469,28 @@ def test_a_video_whose_generated_still_cannot_be_looked_at_is_not_no_still_yet(
     assert code == (1 if verb == "--write-config" else 0)
 
 
+@pytest.mark.parametrize("verb", COMPILES)
+def test_a_stillless_video_with_a_long_name_is_left_out_by_the_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    """Failed at 6266024: the name the still look-up asks about can't exist, which read as
+    "couldn't look" and refused for good."""
+    item = _media(tmp_path)
+    video = item.path.parent / ("\u591c" * 79 + ".mp4")
+    video.write_bytes(b"\x00" * 16)
+    store = playlists.Store.open()
+    deep = store.add(store.create("Deep").id, video)
+    config.update({"active_playlist": deep.id})
+    capsys.readouterr()
+
+    code = cli.main([verb])
+    said = capsys.readouterr()
+
+    assert code == 0, said.err
+    assert "error:" not in said.err, said.err
+    assert _document()["default_playlist"] == ALL_MEDIA
+
+
 # -- what the released version left on disk ----------------------------------------------------
 
 _RELEASED_SAVES_WHAT_CANNOT_PLAY = r"""

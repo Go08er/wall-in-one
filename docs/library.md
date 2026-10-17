@@ -177,7 +177,10 @@ than silently overwriting each other.
 - It needs `ffmpeg`. The Nix package puts it on the app's `PATH`. Without it,
   a video that already has a representative still (a sibling, a capture made
   earlier, or one you chose) plays as usual. One with none says "No still yet"
-  and can't play until it has one: choose an image for it in its details, or
+  and can't play until it has one (if the only reason is that a place its
+  still would be in couldn't be looked at, a playlist that needs it stops the
+  runtime build instead of being left out; see
+  [the runtime document](runtime-config.md)): choose an image for it in its details, or
   make capture available.
 - Switching dynamics off takes a still from the video playing at that moment
   first, so the wallpaper you were watching is not swapped out from under you.

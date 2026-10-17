@@ -1657,6 +1657,18 @@ def _unseen_advice(place: Unseen) -> str:
     return "make the folder readable, or remove the reference."
 
 
+def _fallback_advice(place: Unseen, *, implicit: bool) -> str:
+    """The way out of a refused All media: make it readable, or stop depending on it."""
+    way = (
+        "make the library smaller"
+        if place.kind is UnseenKind.LIMIT
+        else "make the folder readable"
+    )
+    if implicit:
+        return f"{way}, choose a default playlist, or remove the folder from the library."
+    return f"{way}, or remove the reference."
+
+
 def _owner_phrase(owner: str, owner_id: str) -> str:
     if owner == SCHEDULE_OWNER:
         return f"schedule rule {owner_id!r}"
@@ -1685,7 +1697,10 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     only because the library scan could not look into a place its entries
     (or their stills) may be in (a failed listing or stat, a scan limit; `_unseen_folder`)
     refuses the build, naming the folder (or, for a video whose still could not
-    be looked at, the video itself): files may be there now. A library
+    be looked at, the video itself): files may be there now. So does All media
+    when it resolves nothing (named, implicit, or the fallback for a left-out
+    default) while the scan could not look into a library folder, or, with
+    favourites only, into a starred file's folder. A library
     folder that is absent, not a folder or a link was looked at, and is left
     out as above.
 
@@ -1727,13 +1742,15 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
 
     # All media is a dynamic inventory, not an authored list of paths. If it
     # resolves nothing, an unseen place may still hold something it would
-    # play. A favourites-only subset needs only its selected items' evidence;
-    # an unrelated folder cannot make those items resolve.
+    # play. A favourites-only subset needs only its starred files' evidence,
+    # all of them: a starred file under an unreadable folder is not in the
+    # library, so it is not among `fallback_items`. An unrelated folder
+    # cannot make the starred files resolve.
     fallback_unseen = None
     if not fallback_entries:
         fallback_unseen = (
             _unseen_folder(
-                (Entry(id="", source=str(item.path)) for item in fallback_items),
+                (Entry(id="", source=str(path)) for path in sorted(session.favourites.paths)),
                 session.library.unseen,
             )
             if fallback_narrowed
@@ -1781,16 +1798,34 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     _validate_playlist_identity(playlists)
 
     left_out: list[LeftOut] = []
+    # True only once the default has resolved to nothing named: a named All media
+    # was already judged (and refused) in `runtime_playlist`.
+    implicit_default = False
 
-    def require_known_fallback(owner: str, owner_id: str = "") -> None:
-        if fallback_unseen is not None:
+    def require_known_fallback(owner: str = DEFAULT_OWNER, owner_id: str = "") -> None:
+        """Refuse an All media that plays nothing only because the scan could not look.
+
+        ``owner`` is who names it; the default owner with no ``owner_id`` and
+        no named All media is the implicit case (no default chosen, or the
+        chosen one left out). Nothing is written, whether or not a runtime
+        document exists already.
+        """
+        if fallback_unseen is None:
+            return
+        place = fallback_unseen
+        if owner == DEFAULT_OWNER and implicit_default:
             raise RuntimeConfigError(
-                f"cannot compile runtime configuration because playlist "
-                f"{FALLBACK_PLAYLIST_NAME!r}, which {_owner_phrase(owner, owner_id)} names, "
-                "plays nothing only as far as the library scan could look; "
-                f"{_could_not_look(fallback_unseen)}. The existing runtime "
-                f"configuration was left untouched; {_unseen_advice(fallback_unseen)}"
+                f"cannot compile runtime configuration because All media has nothing to play "
+                f"while {place.path} can't be looked into ({place.note}); it plays when no "
+                f"default playlist is chosen or the chosen one is left out. "
+                f"Nothing was written; {_fallback_advice(place, implicit=True)}"
             )
+        raise RuntimeConfigError(
+            f"cannot compile runtime configuration because {_owner_phrase(owner, owner_id)} "
+            f"names All media, which has nothing to play while {place.path} can't be "
+            f"looked into ({place.note}). Nothing was written; "
+            f"{_fallback_advice(place, implicit=False)}"
+        )
 
     def runtime_playlist(
         reference: str, *, owner: str, owner_id: str = "", quiet: bool = False
@@ -1832,7 +1867,8 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         else None
     ) or FALLBACK_PLAYLIST_ID
     if default == FALLBACK_PLAYLIST_ID:
-        require_known_fallback(DEFAULT_OWNER)
+        implicit_default = True
+        require_known_fallback()
     schema_version = (
         BATTERY_SCHEMA_VERSION if settings.stop_animations_on_battery else SCHEMA_VERSION
     )

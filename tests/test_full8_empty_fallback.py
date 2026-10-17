@@ -56,7 +56,9 @@ def test_an_empty_effective_fallback_refuses_an_incomplete_scan_and_keeps_runtim
             runtime_config.publish_changes(settings, session, target)
 
         assert str(root) in str(refused.value)
-        assert "left untouched" in str(refused.value)
+        assert "can't be looked into" in str(refused.value)
+        assert "nothing was written" in str(refused.value).lower()
+        assert "left untouched" not in str(refused.value)
         assert target.read_bytes() == previous
     finally:
         session.shutdown()
@@ -236,5 +238,120 @@ def test_a_favourites_subset_does_not_refuse_over_an_unrelated_unseen_folder(
 
         assert tomllib.loads(built.document)["default_playlist"] == ALL_MEDIA
         assert built.left_out == ()
+    finally:
+        session.shutdown()
+
+
+def _starred_under_unseen(tmp_path: Path, default: str) -> tuple[config.Settings, Session, Path]:
+    """Favourites only; the visible starred video has no still, the other star is unseen."""
+    root = tmp_path / "library"
+    video = MediaItem(root / "video.mp4", Kind.VIDEO, 1, 1)
+    locked = root / "locked" / "fav.png"
+    settings = config.Settings(
+        roots=(root,),
+        scan_workshop=False,
+        active_playlist=default,
+        cycle_favourites_only=True,
+    )
+    session = Session(
+        settings,
+        favourite_store=favourites.Store(favourites.Favourites((video.path, locked))),
+        pairing_store=pairings.Store(),
+        playlist_store=playlists.Store(),
+        schedule_store=schedules.Store(),
+        display_store=displays.Store(),
+        removal_store=removals.Store(),
+        owns_playback=False,
+    )
+    session.adopt_library(
+        Library(roots=(root,), items=(MediaItem(locked, Kind.STILL, 1, 1), video))
+    )
+    return settings, session, locked
+
+
+@pytest.mark.parametrize("default", ("", ALL_MEDIA))
+def test_a_starred_file_under_an_unseen_folder_refuses_though_it_is_not_in_the_library(
+    tmp_path: Path, default: str
+) -> None:
+    """Failed at 2b48044: only starred files *in* the library were checked for their folder."""
+    settings, session, locked = _starred_under_unseen(tmp_path, default)
+    target = tmp_path / "runtime.toml"
+    try:
+        full = session.library
+        runtime_config.publish_changes(settings, session, target)
+        assert "fav.png" in target.read_text()
+        previous = target.read_bytes()
+        # The folder goes unreadable: its file leaves the library, the video has no still.
+        video = next(item for item in full.items if item.kind is Kind.VIDEO)
+        session.adopt_library(
+            Library(
+                roots=full.roots,
+                items=(video,),
+                unseen=(_unseen(locked.parent, UnseenKind.UNREADABLE),),
+            )
+        )
+
+        with pytest.raises(runtime_config.RuntimeConfigError) as refused:
+            runtime_config.publish_changes(settings, session, target)
+
+        assert str(locked.parent) in str(refused.value)
+        assert target.read_bytes() == previous
+    finally:
+        session.shutdown()
+
+
+def test_a_starred_subset_stays_tolerant_when_the_unseen_folder_holds_no_star(
+    tmp_path: Path,
+) -> None:
+    settings, session, locked = _starred_under_unseen(tmp_path, "")
+    try:
+        video = next(item for item in session.library.items if item.kind is Kind.VIDEO)
+        session.adopt_library(
+            Library(
+                roots=session.library.roots,
+                items=(video,),
+                unseen=(_unseen(locked.parent.parent / "other", UnseenKind.UNREADABLE),),
+            )
+        )
+
+        built = runtime_config.compiled(settings, session)
+
+        assert tomllib.loads(built.document)["default_playlist"] == ALL_MEDIA
+    finally:
+        session.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("default", "words"),
+    (
+        ("", ("choose a default playlist", "remove the folder from the library")),
+        ("missing-default", ("choose a default playlist", "remove the folder from the library")),
+        (ALL_MEDIA, ("remove the reference",)),
+    ),
+)
+def test_the_refusal_says_what_is_true_for_an_implicit_or_a_named_all_media(
+    tmp_path: Path, default: str, words: tuple[str, ...]
+) -> None:
+    root = tmp_path / "library"
+    settings = config.Settings(roots=(root,), scan_workshop=False, active_playlist=default)
+    session = _session(settings)
+    try:
+        session.adopt_library(
+            Library(roots=(root,), items=(), unseen=(_unseen(root, UnseenKind.UNREADABLE),))
+        )
+
+        with pytest.raises(runtime_config.RuntimeConfigError) as refused:
+            runtime_config.compiled(settings, session)
+
+        text = str(refused.value)
+        assert f"All media has nothing to play while {root}" in text or (
+            "names All media, which has nothing to play" in text
+        )
+        assert all(word in text for word in words)
+        if default != ALL_MEDIA:
+            assert "which the default names" not in text
+            assert "remove the reference" not in text
+        assert "Nothing was written" in text
+        assert "left untouched" not in text
     finally:
         session.shutdown()

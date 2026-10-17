@@ -235,9 +235,10 @@ class CompanionProof:
 
 #: Why a replayed removal left one of the wallpaper's own files where it is:
 #: something is at the wallpaper's path again; whether something is could not
-#: be checked; the removal was prepared by a version that kept no proof; or
-#: the file is not exactly what the removal proved.
-LeftReason = Literal["occupied", "unchecked", "unrecorded", "unproven"]
+#: be checked; the removal was prepared by a version that kept no proof; none
+#: of the files could be proven when it was prepared (too large, unreadable, or
+#: not there yet); or a file is not exactly what the removal proved.
+LeftReason = Literal["occupied", "unchecked", "unrecorded", "unprovable", "unproven"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1475,10 +1476,15 @@ def discard_proven_companions(
                 left=tuple(
                     path
                     for path in (*there, *unseen)
-                    if path not in recorded and os.path.lexists(path)
+                    if path not in recorded and _may_be_there(path)
                 ),
                 why=unproven,
             )
+
+
+def _may_be_there(path: Path) -> bool:
+    """False only for a path known to be absent: one that can't be looked at may be there."""
+    return file_io.entry_presence(path) is not False
 
 
 def _discard_proven_companions_locked(
@@ -1514,7 +1520,7 @@ def _discard_proven_companions_locked(
             left=tuple(
                 path
                 for path in (*(candidate.logical for candidate in candidates), *unseen)
-                if os.path.lexists(path)
+                if _may_be_there(path)
             ),
             why="occupied" if at_source is True else "unchecked",
         )
@@ -1523,10 +1529,12 @@ def _discard_proven_companions_locked(
     left: list[Path] = []
     for path in unseen:
         # Not a regular file, or it can't be looked at. Something that is
-        # there is not what was recorded, as far as can be told: left. A
+        # there (or that can't be looked at, when it was not recorded) is
+        # not what was recorded, as far as can be told: left. A
         # recorded file out of reach (its folder is not there right now) is
         # said as not removed.
-        if os.path.lexists(path):
+        presence = file_io.entry_presence(path)
+        if presence is True or (isinstance(presence, OSError) and path not in recorded):
             left.append(path)
         elif path in recorded:
             kept.append(path)
@@ -1575,6 +1583,8 @@ def _discard_proven_companions_locked(
         )
         removed.extend(discarded)
         kept.extend(retained)
+    if left and unproven == "unproven" and not any(path in recorded for path in left):
+        unproven = "unprovable"
     return CompanionCleanup(tuple(removed), tuple(kept), tuple(left), unproven)
 
 
@@ -1585,6 +1595,7 @@ _LEFT_BECAUSE: Final[dict[LeftReason, str]] = {
         "this removal was prepared by an older version, which kept no proof of the "
         "wallpaper's own files"
     ),
+    "unprovable": "the wallpaper's own files could not be proven when this removal was prepared",
 }
 
 

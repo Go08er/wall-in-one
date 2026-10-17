@@ -609,6 +609,45 @@ def test_a_path_that_cannot_be_looked_at_is_not_a_vacant_one(
     _is_finished(wallpaper, journal)
 
 
+def test_a_file_that_cannot_be_looked_at_and_was_not_recorded_is_still_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Can't look" is not "nothing there". The selector is not in the record
+    (it was not provable when the removal was prepared) and an I/O error hides
+    it from every look at it: it is left, and named, though no look can say it
+    is there. The still, proven and readable, goes."""
+    root, journal = tmp_path / "wallpapers", tmp_path / "pending-removals.json"
+    wallpaper = _stopped("sync-failed", tmp_path, root, journal, monkeypatch)
+    document = json.loads(journal.read_text(encoding="utf-8"))
+    (record,) = document["removals"]
+    record["companions"] = [p for p in record["companions"] if p["path"] != str(wallpaper.selector)]
+    journal.write_text(json.dumps(document), encoding="utf-8")
+    mine = _snapshot(wallpaper.selector)
+    stat, lstat = os.stat, os.lstat
+
+    def blind(real: Any) -> Any:
+        def look(path: Any, *arguments: Any, **options: Any) -> Any:
+            if os.fspath(path).endswith(wallpaper.selector.name):
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real(path, *arguments, **options)
+
+        return look
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "stat", blind(stat))
+        patched.setattr(os, "lstat", blind(lstat))
+        failures, left = _replay(tmp_path, root, journal)
+
+    assert _snapshot(*mine) == mine
+    assert not wallpaper.still.exists(), "the still was proven and readable"
+    assert failures == ()
+    assert left == (
+        "aurora: the wallpaper's own files could not be proven when this removal was "
+        f"prepared, so what is there was left as it is: {wallpaper.selector}",
+    )
+    _is_finished(wallpaper, journal)
+
+
 def test_a_still_kept_in_another_library_folder_is_proven_and_goes_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -700,6 +700,11 @@ def record_ids(contents: bytes) -> frozenset[str] | None:
     return None if fault is not None else frozenset(found)
 
 
+def saved_by_newer_version(path: Path | None = None) -> bool:
+    """Whether the file is there and a newer version of this application saved it."""
+    return _read(path if path is not None else state_path()).newer_version
+
+
 def held_record_ids(path: Path | None = None) -> frozenset[str] | None:
     """The identities of the records the file holds, or ``None`` unless it reads in full."""
     reading = _read(path if path is not None else state_path())

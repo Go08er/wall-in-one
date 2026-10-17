@@ -805,8 +805,10 @@ def test_tidy_lists_a_store_copy_that_stays_with_why_and_how_to_remove_it() -> N
     kept = _listed_as_kept()
 
     reason = kept[copy.name]
-    assert "playlists.json lacks 3 records the copy holds" in reason
-    assert reason.endswith("Delete it by hand if you don't want it")
+    assert reason.startswith(
+        "playlists.json.v1-backup stays: playlists.json lacks 3 of the records"
+    )
+    assert reason.endswith("You can delete it yourself if you don't want it.")
     assert _tree(_state().parent) == before, "the survey wrote nothing"
     assert (retired_backups.why_it_stays(_candidate(copy.name)) or "?") in reason
     # And it is the one Tidy up never acts on: it is not among any change.
@@ -823,15 +825,20 @@ def test_tidy_lists_the_ui_copy_in_the_config_folder() -> None:
 
     reason = _listed_as_kept()[copy.name]
 
-    assert "ui.toml lacks 1 interface choice the copy holds" in reason
-    assert reason.endswith("Delete it by hand if you don't want it")
+    assert reason.startswith(
+        "ui.toml.v1-backup stays: ui.toml holds no interface choice yet, so it isn't shown"
+    )
+    assert reason.endswith("You can delete it yourself if you don't want it.")
 
 
 def test_tidy_lists_a_copy_whose_file_cannot_be_read() -> None:
     copy = _put_copy("displays.json.v1-backup", _document(1, "displays", {"DP-1": "a"}))
     (_state() / "displays.json").write_text("{ not json", encoding="utf-8")
 
-    assert "displays.json is missing or could not be read in full" in _listed_as_kept()[copy.name]
+    assert (
+        "displays.json.v1-backup stays: displays.json is missing or could not be read in full"
+        in _listed_as_kept()[copy.name]
+    )
 
 
 def test_tidy_does_not_list_a_copy_that_may_go_the_next_start_removes_it() -> None:
@@ -886,3 +893,179 @@ def test_the_survey_and_the_removal_agree(name: str, how: str) -> None:
     _remove_everything()
 
     assert target.is_symlink() or target.is_file(), "the removal kept it too"
+
+
+# -- the generation that was checked is the one that is removed ------------------------
+
+
+def test_a_copy_rewritten_in_place_after_it_was_checked_is_not_removed() -> None:
+    """The reviewer's probe: between the check and the discard the copy's bytes
+    change under the same inode (two playlists the live file lacks). The
+    discard is pinned to the generation the check read, so it refuses."""
+    _bumped_profile()
+    copy = _put_copy("playlists.json.v1-backup", _three_playlists())
+    (_state() / "playlists.json").write_bytes(
+        _document(
+            2, "playlists", [{"id": n, "name": n, "entries": []} for n in ("a", "b", "c", "d")]
+        )
+    )
+    inode = copy.stat().st_ino
+    edited = _document(
+        1, "playlists", [{"id": n, "name": n, "entries": []} for n in ("a", "b", "c", "x", "y")]
+    )
+    real = playlists.held_record_ids
+
+    def rewrite_then_hold(path: Path | None = None) -> frozenset[str] | None:
+        with copy.open("r+b") as handle:
+            handle.write(edited)
+            handle.truncate()
+        return real(path)
+
+    candidates = tuple(
+        replace(candidate, held=rewrite_then_hold) if candidate.name == copy.name else candidate
+        for candidate in retired_backups.STORE_CANDIDATES
+    )
+
+    assert retired_backups.remove(candidates) == ()
+
+    assert copy.stat().st_ino == inode and copy.read_bytes() == edited
+
+
+# -- every reason, as the person reads it -----------------------------------------------
+
+_DELETE: Final = "You can delete it yourself"
+_LEFT_ALONE: Final = "so it isn't one of Wall-in-One's old copies and is left alone."
+
+
+def _live_for(name: str) -> Path:
+    return _folder(name) / name.rsplit(".v", 1)[0]
+
+
+def _setup_directory(name: str) -> None:
+    (_folder(name) / name).mkdir()
+
+
+def _setup_link(name: str) -> None:
+    _as_link(_folder(name) / name, COPIES[name])
+
+
+def _setup_second_name(name: str) -> None:
+    _with_another_name(_folder(name) / name, COPIES[name])
+
+
+def _setup_too_large(name: str) -> None:
+    (_folder(name) / name).write_bytes(
+        b"x" * (retired_backups.STORE_CANDIDATES[0].maximum_bytes + 1)
+    )
+
+
+def _setup_other_version(name: str) -> None:
+    (_folder(name) / name).write_bytes(_newest(name))
+
+
+def _setup_newer_live(name: str) -> None:
+    (_folder(name) / name).write_bytes(COPIES[name])
+    _from_a_newer_version(_live_for(name))
+
+
+def _setup_live_missing(name: str) -> None:
+    (_folder(name) / name).write_bytes(COPIES[name])
+    _live_for(name).unlink()
+
+
+def _setup_unreadable_copy(name: str) -> None:
+    contents = {
+        "playlists.json.v1-backup": b'{"version": 1, "playlists": [{"id": 7}]}\n',
+        "displays.json.v1-backup": b'{"version": 1, "displays": {"DP-1": 3}}\n',
+        "schedules.json.v1-backup": b'{"rules": [{"id": 7}]}\n',
+        "schedules.json.v2-backup": b'{"version": 2, "rules": [{"id": 7}]}\n',
+    }
+    (_folder(name) / name).write_bytes(contents[name])
+
+
+#: (setup, what the reason says, whether it is a real copy that stays and so is
+#: told it can be deleted by hand)
+REASONS: Final[dict[str, tuple[Callable[[str], None], str, bool]]] = {
+    "a folder": (_setup_directory, f"is a folder, {_LEFT_ALONE}", False),
+    "a link": (_setup_link, f"is a link, {_LEFT_ALONE}", False),
+    "another name": (
+        _setup_second_name,
+        f"belongs to another user or has another name, {_LEFT_ALONE}",
+        False,
+    ),
+    "too large": (_setup_too_large, "is larger than a ", False),
+    "another version": (_setup_other_version, "is not a readable version", False),
+    "newer live file": (_setup_newer_live, "was saved by a newer version.", True),
+    "live file missing": (_setup_live_missing, "is missing or could not be read in full.", True),
+    "copy not readable in full": (
+        _setup_unreadable_copy,
+        "stays: it could not be read in full.",
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", STATE_NAMES)
+@pytest.mark.parametrize("how", list(REASONS))
+def test_each_reason_names_the_copy_and_advises_only_for_a_real_copy(name: str, how: str) -> None:
+    _bumped_profile()
+    setup, says, advises = REASONS[how]
+    setup(name)
+
+    reason = retired_backups.why_it_stays(_candidate(name))
+
+    assert reason is not None and reason.startswith(name), reason
+    assert says in reason, reason
+    assert (_DELETE in reason) is advises, reason
+    assert _listed_as_kept()[name] == reason
+
+
+@pytest.mark.parametrize("name", [*STATE_NAMES, *CONFIG_NAMES])
+def test_the_reasons_for_a_file_that_lacks_what_the_copy_holds(name: str) -> None:
+    _bumped_profile()
+    if name == "ui.toml.v1-backup":
+        (_config() / name).write_bytes(V1_UI)
+        ui_prefs.save(ui_prefs.UiPrefs())
+        says = "ui.toml holds no interface choice yet, so it isn't shown to be in use."
+    else:
+        (_state() / name).write_bytes(
+            {
+                "playlists.json.v1-backup": _three_playlists(),
+                "displays.json.v1-backup": _document(1, "displays", {"DP-9": "z"}),
+                "schedules.json.v1-backup": _document(
+                    None, "rules", [{"id": "o", "playlist": "x"}]
+                ),
+                "schedules.json.v2-backup": _document(2, "rules", [{"id": "o", "playlist": "x"}]),
+            }[name]
+        )
+        says = " of the records it holds."
+
+    reason = retired_backups.why_it_stays(_candidate(name))
+
+    assert reason is not None and reason.startswith(f"{name} stays: ") and says in reason, reason
+    assert _DELETE in reason
+
+
+def test_a_copy_that_cannot_be_looked_at_is_named_and_left_alone() -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root searches any folder")
+    _bumped_profile()
+    copy = _put_copy("playlists.json.v1-backup", _three_playlists())
+    _state().chmod(0o000)
+    try:
+        reason = retired_backups.why_it_stays(_candidate(copy.name))
+    finally:
+        _state().chmod(0o755)
+
+    assert reason is not None and reason.startswith(f"{copy.name} could not be looked at (")
+    assert reason.endswith("so it is left alone.") and _DELETE not in reason
+
+
+def test_the_live_file_vanishing_after_the_read_is_a_reason_too() -> None:
+    _bumped_profile()
+    copy = _put_copy("playlists.json.v1-backup", _three_playlists())
+    candidate = replace(_candidate(copy.name), held=lambda _path: None)
+
+    reason = retired_backups.why_it_stays(candidate)
+
+    assert reason is not None and "is missing or could not be read in full." in reason

@@ -1120,14 +1120,7 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                 # Read-only: a copy that stays is said, never acted on. One that
                 # may go is not listed; the next start removes it.
                 if why := retired_backups.why_it_stays(retired):
-                    survey.kept.append(
-                        Kept(
-                            child,
-                            f"{why}. An older version kept this copy so it could be handed "
-                            "the file back; nothing reads it now. Delete it by hand if "
-                            "you don't want it",
-                        )
-                    )
+                    survey.kept.append(Kept(child, why))
                 continue
             if not child.name.startswith(file_io.DELETION_CLAIM_PREFIX):
                 continue

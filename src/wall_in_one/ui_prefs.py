@@ -373,6 +373,13 @@ def _held_interface(path: Path | None = None) -> frozenset[str] | None:
     return frozenset({"interface"}) if document.prefs.interface is not None else frozenset()
 
 
+def saved_by_newer_version(path: Path | None = None) -> bool:
+    """Whether ui.toml is there and a newer version of this application saved it."""
+    document, existing = _read(path if path is not None else paths.ui_prefs_path())
+    version = document.raw.get("version")
+    return existing is not None and type(version) is int and version > FORMATS.current
+
+
 def retired_backup_candidate() -> retired_backups.Candidate:
     """The copy of ui.toml, as `retired_backups` decides on it (also for Tidy up)."""
     from wall_in_one.library import retired_backups
@@ -386,8 +393,9 @@ def retired_backup_candidate() -> retired_backups.Candidate:
         _declared_version,
         reads_cleanly,
         _chosen_interface,
-        "interface choice",
+        "{live} holds no interface choice yet, so it isn't shown to be in use",
         _held_interface,
+        saved_by_newer_version,
     )
 
 

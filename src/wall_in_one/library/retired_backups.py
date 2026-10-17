@@ -102,10 +102,13 @@ class Candidate:
     #: rule's id, a display's connector), or None when the copy is not read in
     #: full by this store's own reader.
     needed: Callable[[bytes], frozenset[str] | None]
-    #: What `needed` counts, in a person-readable reason ("record", "interface choice").
-    noun: str
+    #: What is missing, as a clause for a person: `{live}` is the file's name and
+    #: `{n}` how many of what the copy holds it lacks.
+    lack: str
     #: The identities of the records `live` holds, or None unless it reads in full.
     held: Callable[[Path], frozenset[str] | None]
+    #: Whether `live` was saved by a newer version (a copy stays then, and says so).
+    newer: Callable[[Path], bool]
 
     def path(self) -> Path:
         return self.live().with_name(self.name)
@@ -114,6 +117,9 @@ class Candidate:
 #: Every copy of a store any version ever made, by name, in the app's state
 #: folder. ``schedules.json`` has two: a version 1 file that was first saved
 #: with a rule name went straight to 3.
+STORE_LACK: Final = "{live} lacks {n} of the records it holds"
+
+
 STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
     Candidate(
         "playlists.json.v1-backup",
@@ -124,8 +130,9 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         _json_version(playlists.FORMATS, playlists.MAX_STATE_BYTES),
         playlists.reads_cleanly,
         playlists.record_ids,
-        "record",
+        STORE_LACK,
         playlists.held_record_ids,
+        playlists.saved_by_newer_version,
     ),
     Candidate(
         "displays.json.v1-backup",
@@ -136,8 +143,9 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         _json_version(displays.FORMATS, displays.MAX_STATE_BYTES),
         displays.reads_cleanly,
         displays.record_ids,
-        "record",
+        STORE_LACK,
         displays.held_record_ids,
+        displays.saved_by_newer_version,
     ),
     Candidate(
         "schedules.json.v1-backup",
@@ -148,8 +156,9 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         _json_version(schedules.FORMATS, schedules.MAX_STATE_BYTES),
         schedules.reads_cleanly,
         schedules.record_ids,
-        "record",
+        STORE_LACK,
         schedules.held_record_ids,
+        schedules.saved_by_newer_version,
     ),
     Candidate(
         "schedules.json.v2-backup",
@@ -160,8 +169,9 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         _json_version(schedules.FORMATS, schedules.MAX_STATE_BYTES),
         schedules.reads_cleanly,
         schedules.record_ids,
-        "record",
+        STORE_LACK,
         schedules.held_record_ids,
+        schedules.saved_by_newer_version,
     ),
 )
 
@@ -171,38 +181,66 @@ def _kept(path: Path, reason: str) -> bool:
     return False
 
 
-def _reason_to_stay(candidate: Candidate, path: Path, pin: file_io.PinnedPath) -> str | None:
-    """Why the pinned copy stays, or None when every check passes. Read-only.
+#: Said after a reason that holds for a real copy that stays, and only then.
+_ADVICE: Final = (
+    " An older version kept it so it could be handed the file back; nothing reads it "
+    "now. You can delete it yourself if you don't want it."
+)
 
-    The one place the stay/go rules are written; `why_it_stays` (the survey)
-    and `_remove` (under the lock, on a pinned generation) both use it.
+
+def _not_regular(candidate: Candidate, mode: int) -> str:
+    what = "a folder" if stat.S_ISDIR(mode) else "a link" if stat.S_ISLNK(mode) else "not a file"
+    return (
+        f"{candidate.name} is {what}, so it isn't one of Wall-in-One's old copies "
+        "and is left alone."
+    )
+
+
+def _reason_to_stay(
+    candidate: Candidate, path: Path, pin: file_io.PinnedPath
+) -> tuple[str | None, file_io.FileFingerprint]:
+    """Why the pinned copy stays (None when every check passes), and the generation checked.
+
+    Read-only. The one place the stay/go rules are written; `why_it_stays`
+    (the survey) and `_remove` (under the lock) both use it. The fingerprint
+    returned is the one the bytes were read under, so a removal that is
+    pinned to it removes exactly what was checked.
+
+    A reason that begins by showing the name is not such a copy says what it
+    is and gives no advice; a copy that stays says why and adds `_ADVICE`.
     """
     live = candidate.live()
+    name = candidate.name
     status = pin.status()
     generation = file_io.file_fingerprint(status)
+    not_a_copy = "so it isn't one of Wall-in-One's old copies and is left alone."
     if status.st_uid != os.getuid() or status.st_nlink != 1:
-        return "it has another owner or another name"
+        return f"{name} belongs to another user or has another name, {not_a_copy}", generation
     if status.st_size > candidate.maximum_bytes:
-        return "it is larger than the file it would be a copy of may be"
+        return f"{name} is larger than a {live.name} may be, {not_a_copy}", generation
     contents = file_io.read_pinned_regular_bytes(
         pin, candidate.maximum_bytes, expected_fingerprint=generation
     )
     if candidate.declared(contents) != candidate.version:
-        return f"it is not a readable version {candidate.version} {live.name}"
+        return (
+            f"{name} is not a readable version {candidate.version} {live.name}, {not_a_copy}",
+            generation,
+        )
+    if candidate.newer(live):
+        return f"{name} stays: {live.name} was saved by a newer version.{_ADVICE}", generation
+    unread = f"{name} stays: {live.name} is missing or could not be read in full.{_ADVICE}"
     if not candidate.reads_cleanly(live):
-        return f"{live.name} is missing or could not be read in full"
+        return unread, generation
     needed = candidate.needed(contents)
     if needed is None:
-        return f"it could not be read in full as a {live.name}"
+        return f"{name} stays: it could not be read in full.{_ADVICE}", generation
     held = candidate.held(live)
     if held is None:
-        return f"{live.name} is missing or could not be read in full"
+        return unread, generation
     if not needed <= held:
-        lacks = len(needed - held)
-        return (
-            f"{live.name} lacks {lacks} {candidate.noun}{'' if lacks == 1 else 's'} the copy holds"
-        )
-    return None
+        lack = candidate.lack.format(live=live.name, n=len(needed - held))
+        return f"{name} stays: {lack}.{_ADVICE}", generation
+    return None, generation
 
 
 def why_it_stays(candidate: Candidate) -> str | None:
@@ -210,8 +248,9 @@ def why_it_stays(candidate: Candidate) -> str | None:
 
     The same decision `remove` makes, by the same code: no lock is taken and
     nothing is written, so Tidy up can list a copy that stays and be right by
-    construction. A copy that may go is not listed there; the next start
-    removes it. Never raises.
+    construction. The text names the copy and is meant to be read as it is;
+    only a real copy that stays is told it can be deleted by hand. A copy
+    that may go is not listed there; the next start removes it. Never raises.
     """
     path = candidate.path()
     try:
@@ -219,18 +258,23 @@ def why_it_stays(candidate: Candidate) -> str | None:
     except FileNotFoundError:
         return None
     except OSError as error:
-        return f"it could not be looked at ({error.strerror or error})"
+        return _unlooked(candidate, error)
     if not stat.S_ISREG(found.st_mode):
-        return "it is not a regular file"
+        return _not_regular(candidate, found.st_mode)
     try:
         pin = file_io.pin_regular_path(path)
         try:
-            return _reason_to_stay(candidate, path, pin)
+            return _reason_to_stay(candidate, path, pin)[0]
         finally:
             with contextlib.suppress(OSError):
                 pin.close()
     except (OSError, TimeoutError, ValueError) as error:
-        return f"it could not be read ({error})"
+        return _unlooked(candidate, error)
+
+
+def _unlooked(candidate: Candidate, error: Exception) -> str:
+    detail = file_io.public_text(str(getattr(error, "strerror", None) or error))
+    return f"{candidate.name} could not be looked at ({detail}), so it is left alone."
 
 
 def _remove(candidate: Candidate, path: Path) -> bool:
@@ -240,17 +284,16 @@ def _remove(candidate: Candidate, path: Path) -> bool:
         # The ordinary case. Nothing is locked, made or written for it.
         return False
     if not stat.S_ISREG(found.st_mode):
-        return _kept(path, "it is not a regular file")
+        return _kept(path, _not_regular(candidate, found.st_mode))
     live = candidate.live()
     with state_file.mutation_lock(
         live, description=candidate.description, timeout=LOCK_TIMEOUT_SECONDS
     ):
         pin = file_io.pin_regular_path(path)
         try:
-            reason = _reason_to_stay(candidate, path, pin)
+            reason, generation = _reason_to_stay(candidate, path, pin)
             if reason is not None:
                 return _kept(path, reason)
-            generation = file_io.file_fingerprint(pin.status())
             if not file_io.discard_regular_if_same(
                 path,
                 expected_identity=generation[:2],

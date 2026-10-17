@@ -75,6 +75,14 @@ class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
 
 
+class FallbackUnseenError(RuntimeConfigError):
+    """All media plays nothing only as far as the scan could look (``place`` is where)."""
+
+    def __init__(self, message: str, place: Unseen) -> None:
+        super().__init__(message)
+        self.place = place
+
+
 #: `LeftOut.why`: no playlist answers to the reference, by id or by name.
 DOES_NOT_EXIST: Final = "doesn't exist"
 #: `LeftOut.why`: the playlist exists but holds nothing the compiler keeps
@@ -1812,17 +1820,19 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
             return
         place = fallback_unseen
         if owner == DEFAULT_OWNER and implicit_default:
-            raise RuntimeConfigError(
+            raise FallbackUnseenError(
                 f"cannot compile runtime configuration because All media has nothing to play "
                 f"while {place.path} can't be looked into ({place.note}); it plays when no "
                 f"default playlist is chosen or the chosen one is left out. "
-                f"Nothing was written; {_fallback_advice(place, implicit=True)}"
+                f"Nothing was written; {_fallback_advice(place, implicit=True)}",
+                place,
             )
-        raise RuntimeConfigError(
+        raise FallbackUnseenError(
             f"cannot compile runtime configuration because {_owner_phrase(owner, owner_id)} "
             f"names All media, which has nothing to play while {place.path} can't be "
             f"looked into ({place.note}). Nothing was written; "
-            f"{_fallback_advice(place, implicit=False)}"
+            f"{_fallback_advice(place, implicit=False)}",
+            place,
         )
 
     def runtime_playlist(

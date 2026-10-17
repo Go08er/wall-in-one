@@ -372,8 +372,18 @@ def _judge(
             ]
             because = "; ".join(dict.fromkeys(reasons))
             found.append(f"{refusal}: {because}" if because else refusal)
+        # What the compiler's refusal is, in a removal's words: a clause like the
+        # playlists' ("would have nothing left to play"), not the compiler's sentence.
+        said = ""
         try:
             compiled, compile_error = runtime_config.render(settings_after, after), ""
+        except runtime_config.FallbackUnseenError as error:
+            compiled, compile_error = "", str(error)
+            said = (
+                f"All media would have nothing to play while {error.place.path} "
+                "can\u2019t be looked into; make the folder readable first, or choose a default "
+                "playlist"
+            )
         except runtime_config.RuntimeConfigError as error:
             compiled, compile_error = "", str(error)
         if compile_error and not found:
@@ -383,7 +393,7 @@ def _judge(
             except runtime_config.RuntimeConfigError:
                 excused = True  # already unbuildable: not this change's doing
             else:
-                found.append(compile_error)
+                found.append(said or compile_error)
         return _Judged(tuple(found), compiled, compile_error, excused)
     finally:
         before.shutdown()

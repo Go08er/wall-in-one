@@ -24,7 +24,8 @@ and stays, for a later start, when any of it does not or cannot be checked:
 * the file it is a copy of is there and reads without a fault, in a version
   this build knows. A damaged, unreadable or missing file, or one a newer
   version saved, keeps its copy: it may be the only good one;
-* the copy itself is read in full by that store's own reader, and nothing in
+* the copy itself is read in full by that store's own reader (the one the
+  file is read with: a repeated key or NaN make it unreadable), and nothing in
   it is missing from the file: every record in it, by its identity (a
   playlist's id, a schedule rule's id, a display's connector), is in the
   file. A record under the same identity with other contents counts as
@@ -33,7 +34,10 @@ and stays, for a later start, when any of it does not or cannot be checked:
   (it may have been recovered from damage with only what was added since).
   For ``ui.toml`` the file must hold an interface choice.
 
-A copy that stays is listed by Tidy up.
+A copy that stays is listed by Tidy up (read-only, with the reason it stays
+and that it may be deleted by hand). The survey asks `why_it_stays`, the one
+function `remove` decides by, so a listed copy is one `remove` would keep.
+A copy that may go is not listed: the next start removes it.
 
 The checks and the removal happen under that file's own mutation lock, on one
 pinned generation of the copy (`file_io.discard_regular_if_same`), so
@@ -48,7 +52,6 @@ is written.
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 import stat
@@ -66,13 +69,14 @@ LOGGER: Final = logging.getLogger(__name__)
 LOCK_TIMEOUT_SECONDS: Final = 1.0
 
 
-def _json_version(formats: state_file.FormatVersions) -> Callable[[bytes], int | None]:
+def _json_version(
+    formats: state_file.FormatVersions, maximum_bytes: int
+) -> Callable[[bytes], int | None]:
     def declared(contents: bytes) -> int | None:
-        try:
-            document = json.loads(contents.decode("utf-8"))
-        except UnicodeDecodeError, ValueError, RecursionError:
-            return None
-        return formats.declared(document) if isinstance(document, dict) else None
+        document, fault = state_file.decode_object(
+            contents, "copy", maximum_bytes=maximum_bytes, description="store"
+        )
+        return formats.declared(document) if document is not None and fault is None else None
 
     return declared
 
@@ -98,6 +102,8 @@ class Candidate:
     #: rule's id, a display's connector), or None when the copy is not read in
     #: full by this store's own reader.
     needed: Callable[[bytes], frozenset[str] | None]
+    #: What `needed` counts, in a person-readable reason ("record", "interface choice").
+    noun: str
     #: The identities of the records `live` holds, or None unless it reads in full.
     held: Callable[[Path], frozenset[str] | None]
 
@@ -115,9 +121,10 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         1,
         "playlists",
         playlists.MAX_STATE_BYTES,
-        _json_version(playlists.FORMATS),
+        _json_version(playlists.FORMATS, playlists.MAX_STATE_BYTES),
         playlists.reads_cleanly,
         playlists.record_ids,
+        "record",
         playlists.held_record_ids,
     ),
     Candidate(
@@ -126,9 +133,10 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         1,
         "display assignments",
         displays.MAX_STATE_BYTES,
-        _json_version(displays.FORMATS),
+        _json_version(displays.FORMATS, displays.MAX_STATE_BYTES),
         displays.reads_cleanly,
         displays.record_ids,
+        "record",
         displays.held_record_ids,
     ),
     Candidate(
@@ -137,9 +145,10 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         1,
         "schedule",
         schedules.MAX_STATE_BYTES,
-        _json_version(schedules.FORMATS),
+        _json_version(schedules.FORMATS, schedules.MAX_STATE_BYTES),
         schedules.reads_cleanly,
         schedules.record_ids,
+        "record",
         schedules.held_record_ids,
     ),
     Candidate(
@@ -148,9 +157,10 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         2,
         "schedule",
         schedules.MAX_STATE_BYTES,
-        _json_version(schedules.FORMATS),
+        _json_version(schedules.FORMATS, schedules.MAX_STATE_BYTES),
         schedules.reads_cleanly,
         schedules.record_ids,
+        "record",
         schedules.held_record_ids,
     ),
 )
@@ -159,6 +169,68 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
 def _kept(path: Path, reason: str) -> bool:
     LOGGER.info("Kept %s: %s", path, reason)
     return False
+
+
+def _reason_to_stay(candidate: Candidate, path: Path, pin: file_io.PinnedPath) -> str | None:
+    """Why the pinned copy stays, or None when every check passes. Read-only.
+
+    The one place the stay/go rules are written; `why_it_stays` (the survey)
+    and `_remove` (under the lock, on a pinned generation) both use it.
+    """
+    live = candidate.live()
+    status = pin.status()
+    generation = file_io.file_fingerprint(status)
+    if status.st_uid != os.getuid() or status.st_nlink != 1:
+        return "it has another owner or another name"
+    if status.st_size > candidate.maximum_bytes:
+        return "it is larger than the file it would be a copy of may be"
+    contents = file_io.read_pinned_regular_bytes(
+        pin, candidate.maximum_bytes, expected_fingerprint=generation
+    )
+    if candidate.declared(contents) != candidate.version:
+        return f"it is not a readable version {candidate.version} {live.name}"
+    if not candidate.reads_cleanly(live):
+        return f"{live.name} is missing or could not be read in full"
+    needed = candidate.needed(contents)
+    if needed is None:
+        return f"it could not be read in full as a {live.name}"
+    held = candidate.held(live)
+    if held is None:
+        return f"{live.name} is missing or could not be read in full"
+    if not needed <= held:
+        lacks = len(needed - held)
+        return (
+            f"{live.name} lacks {lacks} {candidate.noun}{'' if lacks == 1 else 's'} the copy holds"
+        )
+    return None
+
+
+def why_it_stays(candidate: Candidate) -> str | None:
+    """Why this copy would stay, or None when it may go (or is not there). Read-only.
+
+    The same decision `remove` makes, by the same code: no lock is taken and
+    nothing is written, so Tidy up can list a copy that stays and be right by
+    construction. A copy that may go is not listed there; the next start
+    removes it. Never raises.
+    """
+    path = candidate.path()
+    try:
+        found = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return f"it could not be looked at ({error.strerror or error})"
+    if not stat.S_ISREG(found.st_mode):
+        return "it is not a regular file"
+    try:
+        pin = file_io.pin_regular_path(path)
+        try:
+            return _reason_to_stay(candidate, path, pin)
+        finally:
+            with contextlib.suppress(OSError):
+                pin.close()
+    except (OSError, TimeoutError, ValueError) as error:
+        return f"it could not be read ({error})"
 
 
 def _remove(candidate: Candidate, path: Path) -> bool:
@@ -175,27 +247,10 @@ def _remove(candidate: Candidate, path: Path) -> bool:
     ):
         pin = file_io.pin_regular_path(path)
         try:
-            status = pin.status()
-            generation = file_io.file_fingerprint(status)
-            if status.st_uid != os.getuid() or status.st_nlink != 1:
-                return _kept(path, "it has another owner or another name")
-            if status.st_size > candidate.maximum_bytes:
-                return _kept(path, "it is larger than the file it would be a copy of may be")
-            contents = file_io.read_pinned_regular_bytes(
-                pin, candidate.maximum_bytes, expected_fingerprint=generation
-            )
-            if candidate.declared(contents) != candidate.version:
-                return _kept(path, f"it is not a version {candidate.version} {live.name}")
-            if not candidate.reads_cleanly(live):
-                return _kept(path, f"{live.name} is missing or could not be read in full")
-            needed = candidate.needed(contents)
-            if needed is None:
-                return _kept(path, f"it could not be read in full as a {live.name}")
-            held = candidate.held(live)
-            if held is None:
-                return _kept(path, f"{live.name} is missing or could not be read in full")
-            if not needed <= held:
-                return _kept(path, f"{live.name} lacks {len(needed - held)} the copy holds")
+            reason = _reason_to_stay(candidate, path, pin)
+            if reason is not None:
+                return _kept(path, reason)
+            generation = file_io.file_fingerprint(pin.status())
             if not file_io.discard_regular_if_same(
                 path,
                 expected_identity=generation[:2],
@@ -207,7 +262,9 @@ def _remove(candidate: Candidate, path: Path) -> bool:
         finally:
             with contextlib.suppress(OSError):
                 pin.close()
-    LOGGER.info("Removed %s: %s is its translation", path, live.name)
+    LOGGER.info(
+        "Removed %s: nothing in it is missing from %s, which reads in full", path, live.name
+    )
     return True
 
 

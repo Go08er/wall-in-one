@@ -27,7 +27,6 @@ written as version 2; version 1 is still read.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,13 +155,14 @@ def record_ids(contents: bytes) -> frozenset[str] | None:
     """The identities of the records in a document of this store, or ``None``.
 
     ``None`` when ``contents`` is not a document this build reads in full
-    (`_parse` finds a fault), so a copy that fails this is never taken away.
+    (`state_file.decode_object`, the reader the store ends in, or `_parse`
+    finds a fault: a repeated key, NaN, a wrong shape), so a copy that fails
+    this is never taken away.
     """
-    try:
-        document = json.loads(contents.decode("utf-8"))
-    except UnicodeDecodeError, ValueError, RecursionError:
-        return None
-    if not isinstance(document, dict):
+    document, problem = state_file.decode_object(
+        contents, STATE_FILENAME, maximum_bytes=MAX_STATE_BYTES, description="display assignments"
+    )
+    if document is None or problem is not None:
         return None
     found, fault = _parse(Path(STATE_FILENAME), document)
     return None if fault is not None else frozenset(found.assignments)

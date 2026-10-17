@@ -53,10 +53,13 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
+
+if TYPE_CHECKING:
+    from wall_in_one.library import retired_backups
 
 #: Version 1 is what 0.2.0 and 0.2.1 wrote and is still read; version 2 adds
 #: ``interface`` and ``gpu_acceleration`` (0.2.2). Every save is version 2.
@@ -370,6 +373,24 @@ def _held_interface(path: Path | None = None) -> frozenset[str] | None:
     return frozenset({"interface"}) if document.prefs.interface is not None else frozenset()
 
 
+def retired_backup_candidate() -> retired_backups.Candidate:
+    """The copy of ui.toml, as `retired_backups` decides on it (also for Tidy up)."""
+    from wall_in_one.library import retired_backups
+
+    return retired_backups.Candidate(
+        RETIRED_BACKUP_NAME,
+        paths.ui_prefs_path,
+        1,
+        "UI preferences",
+        MAX_BYTES,
+        _declared_version,
+        reads_cleanly,
+        _chosen_interface,
+        "interface choice",
+        _held_interface,
+    )
+
+
 def remove_retired_backup() -> bool:
     """Remove `RETIRED_BACKUP_NAME`, the copy kept for going back; whether it went.
 
@@ -381,17 +402,7 @@ def remove_retired_backup() -> bool:
     """
     from wall_in_one.library import retired_backups
 
-    candidate = retired_backups.Candidate(
-        RETIRED_BACKUP_NAME,
-        paths.ui_prefs_path,
-        1,
-        "UI preferences",
-        MAX_BYTES,
-        _declared_version,
-        reads_cleanly,
-        _chosen_interface,
-        _held_interface,
-    )
+    candidate = retired_backup_candidate()
     return bool(retired_backups.remove((candidate,)))
 
 

@@ -26,7 +26,7 @@ import pytest
 
 from tests import released
 from tests.released import released_source  # noqa: F401 -- a fixture
-from wall_in_one import cli, file_io, paths, ui_prefs
+from wall_in_one import cli, file_io, paths, tidy, ui_prefs
 from wall_in_one.library import displays, playlists, retired_backups, schedules
 
 #: Every name this build removes, by the folder it is removed from.
@@ -724,3 +724,165 @@ def test_a_copy_that_does_not_read_in_full_stays(name: str, contents: bytes) -> 
     assert retired_backups.remove() == ()
 
     assert copy.read_bytes() == contents
+
+
+def test_a_copy_with_a_repeated_key_stays_as_the_store_would_not_read_it() -> None:
+    """Bare ``json.loads`` keeps the last of two ``playlists`` keys (an empty
+    list) and would call the copy empty; the store's reader says "not readable
+    JSON". So a, b and c, which are in no other file, stay."""
+    repeated = (
+        b'{"version": 1, "playlists": ['
+        b'{"id": "a", "name": "A", "entries": []},'
+        b'{"id": "b", "name": "B", "entries": []},'
+        b'{"id": "c", "name": "C", "entries": []}], "playlists": []}\n'
+    )
+    assert playlists.record_ids(repeated) is None
+    assert playlists.record_ids(_three_playlists()) == frozenset({"a", "b", "c"})
+    copy = _put_copy("playlists.json.v1-backup", repeated)
+    playlists.Store.open().create("Fresh")
+    assert playlists.reads_cleanly()
+
+    assert retired_backups.remove() == ()
+
+    assert copy.read_bytes() == repeated
+    assert retired_backups.why_it_stays(_candidate(copy.name)) is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "contents"),
+    [
+        ("displays.json.v1-backup", b'{"version": 1, "displays": {"DP-1": "a"}, "displays": {}}\n'),
+        ("schedules.json.v2-backup", b'{"version": 2, "rules": [], "rules": []}\n'),
+        ("schedules.json.v1-backup", b'{"rules": [], "rules": []}\n'),
+        ("playlists.json.v1-backup", b'{"version": 1, "playlists": [], "x": NaN}\n'),
+    ],
+)
+def test_a_copy_the_stores_reader_refuses_stays_even_when_it_looks_empty(
+    name: str, contents: bytes
+) -> None:
+    _bumped_profile()
+    copy = _put_copy(name, contents)
+
+    assert retired_backups.remove() == ()
+
+    assert copy.read_bytes() == contents
+
+
+# -- Tidy up lists a copy that stays, by the same function that decides -----------------
+
+
+def _candidate(name: str) -> retired_backups.Candidate:
+    if name == ui_prefs.RETIRED_BACKUP_NAME:
+        return ui_prefs.retired_backup_candidate()
+    (found,) = [c for c in retired_backups.STORE_CANDIDATES if c.name == name]
+    return found
+
+
+def _listed_as_kept() -> dict[str, str]:
+    """Every kept row of every action in the Tidy preview, by file name."""
+    found: dict[str, str] = {}
+    for action in tidy.plan(roots=()).actions:
+        for kept in action.kept:
+            found[kept.path.name] = kept.reason
+    return found
+
+
+def _a_recovered_playlists_file_that_lacks_a_playlist() -> Path:
+    copy = _put_copy("playlists.json.v1-backup", _three_playlists())
+    live = _state() / "playlists.json"
+    live.write_text("{ not json", encoding="utf-8")
+    playlists.Store.open().create("New")
+    assert playlists.reads_cleanly()
+    return copy
+
+
+def test_tidy_lists_a_store_copy_that_stays_with_why_and_how_to_remove_it() -> None:
+    """The reviewer's repro: `tidy.plan(roots=())`, a kept copy beside a
+    recovered live file that lacks one of its playlists."""
+    copy = _a_recovered_playlists_file_that_lacks_a_playlist()
+    before = _tree(_state().parent)
+
+    kept = _listed_as_kept()
+
+    reason = kept[copy.name]
+    assert "playlists.json lacks 3 records the copy holds" in reason
+    assert reason.endswith("Delete it by hand if you don't want it")
+    assert _tree(_state().parent) == before, "the survey wrote nothing"
+    assert (retired_backups.why_it_stays(_candidate(copy.name)) or "?") in reason
+    # And it is the one Tidy up never acts on: it is not among any change.
+    assert all(
+        copy.name != change.path.name for a in tidy.plan(roots=()).actions for change in a.changes
+    )
+    assert copy.read_bytes() == _three_playlists()
+
+
+def test_tidy_lists_the_ui_copy_in_the_config_folder() -> None:
+    copy = _put_copy("ui.toml.v1-backup", V1_UI)
+    ui_prefs.update({"window_style": "frosted"})
+    assert ui_prefs.load().prefs.interface is None
+
+    reason = _listed_as_kept()[copy.name]
+
+    assert "ui.toml lacks 1 interface choice the copy holds" in reason
+    assert reason.endswith("Delete it by hand if you don't want it")
+
+
+def test_tidy_lists_a_copy_whose_file_cannot_be_read() -> None:
+    copy = _put_copy("displays.json.v1-backup", _document(1, "displays", {"DP-1": "a"}))
+    (_state() / "displays.json").write_text("{ not json", encoding="utf-8")
+
+    assert "displays.json is missing or could not be read in full" in _listed_as_kept()[copy.name]
+
+
+def test_tidy_does_not_list_a_copy_that_may_go_the_next_start_removes_it() -> None:
+    """Nothing is lost by it, so there is nothing to tell the person: it is
+    not Tidy up's to offer, and it is not a "kept" row either."""
+    _bumped_profile()
+    _keep_copies()
+    assert all(retired_backups.why_it_stays(_candidate(name)) is None for name in COPIES)
+
+    assert not [name for name in _listed_as_kept() if name in COPIES]
+
+    assert len(_remove_everything()) == 5
+
+
+def test_tidy_lists_only_the_exact_names_in_their_own_folder() -> None:
+    copy = _a_recovered_playlists_file_that_lacks_a_playlist()
+    _config().mkdir(parents=True, exist_ok=True)
+    decoys = (
+        _config() / "playlists.json.v1-backup",
+        _state() / "ui.toml.v1-backup",
+        _state() / "playlists.json.v1-backup~",
+        _state() / "playlists.json.v3-backup",
+    )
+    for decoy in decoys:
+        decoy.write_bytes(_three_playlists())
+
+    kept = [kept.path for action in tidy.plan(roots=()).actions for kept in action.kept]
+
+    assert copy in kept
+    assert not set(decoys) & set(kept)
+
+
+@pytest.mark.parametrize("name", [*STATE_NAMES, *CONFIG_NAMES])
+@pytest.mark.parametrize("how", ["live missing", "live damaged", "not the copy", "link"])
+def test_the_survey_and_the_removal_agree(name: str, how: str) -> None:
+    """Listed exactly when `remove` keeps it: both ask `why_it_stays`."""
+    _bumped_profile()
+    target = _folder(name) / name
+    live = target.with_name(name.rsplit(".v", 1)[0])
+    if how == "link":
+        _as_link(target, COPIES[name])
+    else:
+        target.write_bytes(_newest(name) if how == "not the copy" else COPIES[name])
+        if how == "live missing":
+            live.unlink()
+        elif how == "live damaged":
+            live.write_bytes(b"{ no")
+    expected = retired_backups.why_it_stays(_candidate(name))
+    assert expected is not None
+    assert expected in _listed_as_kept()[name]
+
+    _remove_everything()
+
+    assert target.is_symlink() or target.is_file(), "the removal kept it too"

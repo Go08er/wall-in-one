@@ -184,6 +184,19 @@ def _decode_object(
     return document, None
 
 
+def decode_object(
+    encoded: bytes, name: str, *, maximum_bytes: int, description: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Decode bytes with the stores' own reader: ``(document, None)`` or ``(None, fault)``.
+
+    The reader `read_object` ends in: it rejects a repeated key and NaN or
+    infinity, and a document that could not be written back as JSON. For
+    bytes already read (a retired copy), which must not be judged by a
+    looser reader than the file beside it. Never raises.
+    """
+    return _decode_object(encoded, Path(name), maximum_bytes=maximum_bytes, description=description)
+
+
 def read_object(
     path: Path, *, maximum_bytes: int, description: str
 ) -> tuple[dict[str, Any] | None, str | None]:

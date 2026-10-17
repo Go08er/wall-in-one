@@ -102,8 +102,9 @@ from wall_in_one import (
     legacy_migration,
     paths,
     thumbnails,
+    ui_prefs,
 )
-from wall_in_one.library import manage, removals, state_file
+from wall_in_one.library import manage, removals, retired_backups, state_file
 from wall_in_one.library import pairing as pairing_conventions
 from wall_in_one.theme import noctalia, template
 
@@ -936,6 +937,32 @@ def _kept_beside_items(
                 survey.kept.append(Kept(entry, "Tidy up doesn't recognize this entry"))
 
 
+def _retired_copies(
+    name: str,
+    parent: os.stat_result | None,
+    config_dir: os.stat_result | None,
+    state_dir: os.stat_result | None,
+) -> retired_backups.Candidate | None:
+    """The retired-copy candidate with exactly this name, in exactly its own folder.
+
+    The stores' names only in the state folder, ui.toml's only in the config
+    folder. Never a pattern, never another folder.
+    """
+
+    def is_dir(other: os.stat_result | None) -> bool:
+        return (
+            parent is not None
+            and other is not None
+            and (parent.st_dev, parent.st_ino) == (other.st_dev, other.st_ino)
+        )
+
+    if is_dir(state_dir):
+        return next((c for c in retired_backups.STORE_CANDIDATES if c.name == name), None)
+    if is_dir(config_dir) and name == ui_prefs.RETIRED_BACKUP_NAME:
+        return ui_prefs.retired_backup_candidate()
+    return None
+
+
 def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()) -> _Survey:
     survey = _Survey()
     finished = deployed_upgrade_transaction.finished_claims()
@@ -1088,6 +1115,19 @@ def _survey(roots: Sequence[Path], now: float, item_folders: Sequence[Path] = ()
                         "a file an older version's download left behind, which may have been public"
                     ),
                 )
+                continue
+            if retired := _retired_copies(child.name, parent_status, config_dir, state_dir):
+                # Read-only: a copy that stays is said, never acted on. One that
+                # may go is not listed; the next start removes it.
+                if why := retired_backups.why_it_stays(retired):
+                    survey.kept.append(
+                        Kept(
+                            child,
+                            f"{why}. An older version kept this copy so it could be handed "
+                            "the file back; nothing reads it now. Delete it by hand if "
+                            "you don't want it",
+                        )
+                    )
                 continue
             if not child.name.startswith(file_io.DELETION_CLAIM_PREFIX):
                 continue

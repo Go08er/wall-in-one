@@ -10,7 +10,8 @@
 # unset, GLib would look for a bus of its own); no portals; none of your
 # session's Wayland, niri or X11 display addresses; no LD_LIBRARY_PATH (see the
 # README); and a headless Wayland compositor of its own
-# (tools/headless-wayland.sh) with the cairo renderer, as the gui-tests check
+# (tools/headless-wayland.sh, whose directory is inside the throwaway root, so
+# that even a KILL leaves nothing behind) with the cairo renderer, as the gui-tests check
 # uses. Nothing here uses X11.
 #
 # tests/conftest.py sandboxes the test process as well, and refuses and
@@ -193,6 +194,7 @@ run_workload env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u NIRI_SOCKET -u DISPLAY 
   -u WIO_TEST_SESSION_ROOT -u WIO_TEST_SESSION_PID -u WIO_TEST_WAYLAND_SOCKET \
   -u WIO_TEST_WAYLAND_REFUSAL \
   WIO_TEST_LIVE_RUNTIME_DIRS="$live_runtime_dirs" \
+  WIO_WAYLAND_PARENT="$root" \
   HOME="$root/home" \
   XDG_CONFIG_HOME="$root/config" \
   XDG_STATE_HOME="$root/state" \

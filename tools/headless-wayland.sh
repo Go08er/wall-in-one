@@ -16,7 +16,7 @@
 # other shells do not map an ordinary window at all.
 #
 # Its socket is in a new private directory of its own (mode 700) below
-# ${TMPDIR:-/tmp}: never in $XDG_RUNTIME_DIR and never in /run/user. The
+# $WIO_WAYLAND_PARENT, which defaults to ${TMPDIR:-/tmp}: never in $XDG_RUNTIME_DIR and never in /run/user. The
 # command gets the socket's absolute path as WAYLAND_DISPLAY and as
 # WIO_TEST_WAYLAND_SOCKET (tests/conftest.py takes only the latter, and only
 # after checking it), and GDK_BACKEND=wayland, so that a missing compositor
@@ -31,6 +31,13 @@
 # after a grace period, and its directory is removed. The exit status is the
 # command's (128 + the number of a TERM, INT or HUP this script caught); a
 # compositor that died during a run the command passed makes it 1.
+#
+# A KILL sent to this script itself (`timeout -s KILL`, or anything else that
+# cannot be caught) stops Weston and its client but leaves the directory
+# behind: nothing can run after a KILL. tools/isolated.sh therefore sets
+# WIO_WAYLAND_PARENT to its throwaway profile root, which it removes on every
+# exit path. Used bare, this script leaves wio-wl.* in the parent after a KILL
+# and does not sweep other runs' directories (one may be live).
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
@@ -40,6 +47,12 @@ fi
 if ! command -v weston >/dev/null; then
   echo "headless-wayland: weston is not on PATH (it is in the dev shell and the gui-tests check)" >&2
   exit 127
+fi
+
+parent=${WIO_WAYLAND_PARENT:-${TMPDIR:-/tmp}}
+if [[ ! -d $parent ]]; then
+  echo "headless-wayland: WIO_WAYLAND_PARENT/TMPDIR $parent is not a directory" >&2
+  exit 1
 fi
 
 unset DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET NIRI_SOCKET WIO_TEST_WAYLAND_SOCKET
@@ -98,13 +111,13 @@ trap 'caught=15' TERM
 trap 'caught=2' INT
 trap 'caught=1' HUP
 
-dir="$(mktemp -d "${TMPDIR:-/tmp}/wio-wl.XXXXXX")"
+dir="$(mktemp -d "$parent/wio-wl.XXXXXX")"
 chmod 700 "$dir"
 socket="$dir/wayland-0"
 # A Unix socket's path holds at most 107 bytes; Weston would fail to bind a
 # longer one and the wait below would only see a socket that never appears.
 if ((${#socket} > 107)); then
-  echo "headless-wayland: $socket is too long for a Unix socket; set TMPDIR to a shorter directory" >&2
+  echo "headless-wayland: $socket is too long for a Unix socket; set WIO_WAYLAND_PARENT (or TMPDIR) to a shorter directory" >&2
   exit 1
 fi
 
@@ -163,10 +176,11 @@ status=0
 WAYLAND_DISPLAY="$socket" WIO_TEST_WAYLAND_SOCKET="$socket" GDK_BACKEND=wayland "$@" ||
   status=$?
 
-if ! alive "$compositor"; then
+# A TERM, INT or HUP to the group reaches Weston as well: that is not a crash.
+if ((caught == 0)) && ! alive "$compositor"; then
   echo "headless-wayland: the compositor exited during the run" >&2
   show_log
-  if ((status == 0 && caught == 0)); then
+  if ((status == 0)); then
     status=1
   fi
 fi

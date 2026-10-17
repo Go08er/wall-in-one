@@ -15,7 +15,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
@@ -25,6 +27,19 @@ from tests import conftest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 WRAPPER = REPOSITORY / "tools" / "isolated.sh"
+
+
+@pytest.fixture
+def temporary() -> Iterator[Path]:
+    """A TMPDIR short enough for the compositor's socket below the wrapper's root.
+
+    A Unix socket's path holds 107 bytes and pytest's own directories are long.
+    """
+    path = Path(tempfile.mkdtemp(prefix="wio-t", dir="/tmp"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _development_commands() -> list[str]:
@@ -87,7 +102,7 @@ def _stub_weston(stubs: Path) -> None:
     weston.chmod(0o755)
 
 
-def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> None:
+def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path, temporary: Path) -> None:
     """Started from a stand-in desktop shell, inside a Nix shell, with a stand-in
     Weston: the command sees none of that shell, and draws only on that Weston,
     which saw none of it either."""
@@ -98,8 +113,6 @@ def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> 
     _stub_weston(stubs)
     weston_report = tmp_path / "weston.json"
     shell = tmp_path / "desktop"
-    temporary = tmp_path / "tmp"
-    temporary.mkdir()
     environment = {
         name: value
         for name, value in os.environ.items()
@@ -173,7 +186,8 @@ def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> 
     assert seen[conftest.TEST_WAYLAND_ENV] == str(socket_path)
     assert socket_path.is_absolute() and socket_path.name == "wayland-0", socket_path
     compositor = socket_path.parent
-    assert compositor.parent == temporary and compositor.name.startswith("wio-wl."), compositor
+    assert compositor.parent == root and compositor.name.startswith("wio-wl."), compositor
+    assert compositor != root / "run", "never below the replaced runtime directory"
     assert seen["WIO_TEST_LIVE_RUNTIME_DIRS"].split(os.pathsep)[0] == str(shell / "run")
     # Weston: headless, in that directory, and handed none of the shell's addresses.
     weston = json.loads(weston_report.read_text(encoding="utf-8"))
@@ -272,7 +286,7 @@ def _still_running(pid: int, started: str) -> bool:
 @pytest.mark.gui
 @pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
 def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goes(
-    tmp_path: Path, number: signal.Signals
+    tmp_path: Path, temporary: Path, number: signal.Signals
 ) -> None:
     """Sweep 4 T-3, Codex's case: a real compositor and a sleeping command,
     and the signal sent only to the wrapper's own PID, as a task runner does.
@@ -284,8 +298,6 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
     if bash is None or weston is None:  # pragma: no cover - the gui-tests check has both
         pytest.skip("needs bash and weston")
     report = tmp_path / "report.json"
-    temporary = tmp_path / "tmp"
-    temporary.mkdir()
     environment = {
         name: value
         for name, value in os.environ.items()
@@ -321,7 +333,7 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
         assert seen["pid"] in owned, names
         assert "weston" in names and "weston-desktop-" in names, names
         assert not [name for name in names if name.startswith("X")], names
-        assert [path.name[:7] for path in temporary.iterdir()].count("wio-wl.") == 1
+        assert [path.name[:7] for path in root.iterdir()].count("wio-wl.") == 1
 
         os.kill(wrapper.pid, number)
         status = wrapper.wait(timeout=30)
@@ -342,6 +354,71 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
         wrapper.wait(timeout=30)
         if wrapper.stderr is not None:
             wrapper.stderr.close()
+
+
+#: Like SLEEPER, but ignores TERM, so only the wrapper's KILL stops it.
+DEAF: Final = SLEEPER.replace("import json, os, sys, time", "import json, os, signal, sys, time").replace(
+    "report = {", "signal.signal(signal.SIGTERM, signal.SIG_IGN)\nreport = {", 1
+)
+
+
+@pytest.mark.gui
+def test_a_kill_after_the_grace_period_leaves_no_compositor_directory(tmp_path: Path, temporary: Path) -> None:
+    """A KILL cannot be caught, so the helper cannot remove its own directory.
+
+    The command ignores TERM, so the wrapper's TERM waits out the grace period
+    and then KILLs the whole group, the helper included. Before, the helper's
+    ``wio-wl.*`` directory (socket, lock, ini, logs) stayed in TMPDIR; now it
+    is inside the throwaway root, which the wrapper removes.
+    """
+    bash = shutil.which("bash")
+    if bash is None:  # pragma: no cover - every supported build has bash
+        pytest.skip("no bash")
+    stubs = tmp_path / "bin"
+    _stub_weston(stubs)
+    report = tmp_path / "report.json"
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in (conftest.SESSION_ROOT_ENV, "WIO_TEST_SESSION_PID")
+    }
+    environment.update(
+        IN_NIX_SHELL="impure",
+        TMPDIR=str(temporary),
+        PATH=f"{stubs}{os.pathsep}{os.environ.get('PATH', '')}",
+        WIO_ISOLATED_GRACE_TENTHS="5",
+    )
+    wrapper = subprocess.Popen(
+        (bash, str(WRAPPER), sys.executable, "-c", DEAF, str(report)),
+        env=environment,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    owned: dict[int, tuple[str, str]] = {}
+    try:
+        deadline = time.monotonic() + 60
+        while not report.exists() and wrapper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert report.exists(), "the command never started"
+        root = Path(json.loads(report.read_text(encoding="utf-8"))["home"]).parent
+        assert [path.name[:7] for path in root.iterdir()].count("wio-wl.") == 1
+        owned = _session(wrapper.pid)
+        os.kill(wrapper.pid, signal.SIGTERM)
+        assert wrapper.wait(timeout=30) == 128 + signal.SIGTERM
+        survivors = {
+            pid: name for pid, (started, name) in owned.items() if _still_running(pid, started)
+        }
+        assert survivors == {}, f"left running: {survivors}"
+        assert list(temporary.iterdir()) == [], "no profile and no compositor directory"
+    finally:
+        for pid, (started, _name) in owned.items():
+            if pid != wrapper.pid and _still_running(pid, started):
+                os.kill(pid, signal.SIGKILL)
+        if wrapper.poll() is None:
+            wrapper.kill()
+        wrapper.wait(timeout=30)
 
 
 # -- the workload's process group: known by more than its number (sweep 5 U-2) ----------
@@ -367,12 +444,10 @@ os._exit(3)
 """
 
 
-def _stubbed_wrapper_environment(tmp_path: Path, grace_tenths: int) -> dict[str, str]:
+def _stubbed_wrapper_environment(tmp_path: Path, temporary: Path, grace_tenths: int) -> dict[str, str]:
     """The wrapper inside a Nix shell, with a stand-in Weston."""
     stubs = tmp_path / "bin"
     _stub_weston(stubs)
-    temporary = tmp_path / "tmp"
-    temporary.mkdir()
     environment = {
         name: value
         for name, value in os.environ.items()
@@ -392,7 +467,7 @@ def _stubbed_wrapper_environment(tmp_path: Path, grace_tenths: int) -> dict[str,
     [("polite", "1.0", 50), ("stubborn", "300", 5), ("polite", "300", 5)],
 )
 def test_the_profile_goes_only_after_the_whole_group_has(
-    tmp_path: Path, kind: str, seconds: str, grace_tenths: int
+    tmp_path: Path, temporary: Path, kind: str, seconds: str, grace_tenths: int
 ) -> None:
     """A member the command leaves behind is waited for, then stopped, before the profile goes.
 
@@ -407,7 +482,7 @@ def test_the_profile_goes_only_after_the_whole_group_has(
     started = time.monotonic()
     completed = subprocess.run(
         (bash, str(WRAPPER), sys.executable, "-c", LEAVER, str(report), kind, seconds),
-        env=_stubbed_wrapper_environment(tmp_path, grace_tenths),
+        env=_stubbed_wrapper_environment(tmp_path, temporary, grace_tenths),
         capture_output=True,
         text=True,
         timeout=60,

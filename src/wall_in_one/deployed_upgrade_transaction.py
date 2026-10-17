@@ -2617,9 +2617,12 @@ def _retire_translated_claims(journal: _Journal) -> bool:
     removed or found not to be the exact predecessor; ``False`` keeps the
     journal for a later start (`_retire_translated_claim`).
 
-    An upgrade that completed under an earlier version has no journal left,
-    so nothing proves what its claims hold: they are never removed here, and
-    Tidy up goes on listing them (`finished_claims`).
+    An upgrade that completed under an earlier version usually has no journal
+    left, so nothing proves what its claims hold: they are never removed here,
+    and Tidy up goes on listing them (`finished_claims`). Not always: 0.2.2
+    can leave its journal (its removal of it swallows errors, and a stop
+    between its completion marker and that removal leaves it), in the same
+    format, and then this runs on it like on this version's own.
     """
     settled = True
     for path, fingerprint, digest, maximum, token, label in (

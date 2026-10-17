@@ -224,9 +224,13 @@ that is not provably the predecessor stays where it is: one whose file was
 written to after the upgrade replaced it (an edit that was never translated),
 one with anything else in its folder, an empty one.
 
-An upgrade that 0.2.2 or an earlier version completed has no journal left,
-so nothing records what its predecessors' bytes were, and this version
-removes none of its claims. For those, and for any claim that stayed,
+An upgrade that 0.2.2 or an earlier version completed usually has no journal
+left, so nothing records what its predecessors' bytes were, and this version
+removes none of its claims. Those versions did not always manage to remove
+the journal: if a stop came between their completion marker and the
+journal's removal, the journal is still there, in the same format, and this
+version then removes the claims on the same proof and retires the journal. For
+the first kind, and for any claim that stayed,
 Settings → Tidy up can move the upgrade's own claim folders (only those named
 for its slots) into a dated folder under `~/.config/wall-in-one/tidy-archive`,
 recording where each came from; its Undo moves them back. It never deletes

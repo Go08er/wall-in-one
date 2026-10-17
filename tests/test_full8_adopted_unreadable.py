@@ -83,7 +83,9 @@ def test_unreadable_adopted_proof_refuses_instead_of_leaving_out_its_playlist(
     _fail_metadata_read(monkeypatch, blocked, error_number)
     try:
         session.adopt_library(scan.scan(settings.roots))
-        with pytest.raises(runtime_config.RuntimeConfigError, match="could not look"):
+        with pytest.raises(
+            runtime_config.RuntimeConfigError, match="could not look|can.t be looked into"
+        ):
             runtime_config.publish_changes(settings, session, target)
         assert target.read_bytes() == before
         assert any(
@@ -158,5 +160,77 @@ def test_absent_or_changed_adoption_proof_still_revokes_without_an_unreadable_pl
         published = runtime_config.publish_changes(settings, session, target)
         assert len(published.left_out) == 1
         assert published.left_out[0].why == runtime_config.NOTHING_TO_PLAY
+    finally:
+        session.shutdown()
+
+
+def _implicit_profile(fixture: Fixture) -> tuple[config.Settings, Session, Path]:
+    """No default playlist: All media is what plays."""
+    settings = config.Settings(roots=(fixture.root,), scan_workshop=False)
+    session = Session(settings, owns_playback=False)
+    session.adopt_library(scan.scan(settings.roots))
+    target = fixture.root.parent / "runtime.toml"
+    runtime_config.publish_changes(settings, session, target)
+    return settings, session, target
+
+
+def test_a_denied_sidecar_keeps_the_capture_hidden_and_the_implicit_runtime_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Failed at 2b48044: the capture became a still of its own and replaced the video."""
+    fixture = _fixture(tmp_path, central=True)
+    settings, session, target = _implicit_profile(fixture)
+    before = target.read_bytes()
+    assert 'kind = "video"' in target.read_text(encoding="utf-8")
+    sidecar = fixture.authority.sidecar_path
+    sidecar.chmod(0)
+    try:
+        session.adopt_library(scan.scan(settings.roots))
+        assert all(item.path != fixture.capture for item in session.library.items)
+        with pytest.raises(runtime_config.RuntimeConfigError, match="can't be looked into"):
+            runtime_config.publish_changes(settings, session, target)
+        assert target.read_bytes() == before
+    finally:
+        sidecar.chmod(0o600)
+        session.shutdown()
+
+
+def test_a_denied_sidecar_does_not_add_the_capture_to_a_mixed_all_media(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, central=True)
+    other = fixture.root / "other.png"
+    other.write_bytes(fixture.capture.read_bytes())
+    settings, session, target = _implicit_profile(fixture)
+    sidecar = fixture.authority.sidecar_path
+    sidecar.chmod(0)
+    try:
+        session.adopt_library(scan.scan(settings.roots))
+        assert [item.path for item in session.library.items if item.path == fixture.capture] == []
+        runtime_config.publish_changes(settings, session, target)
+        text = target.read_text(encoding="utf-8")
+        assert str(other) in text
+        assert str(fixture.capture) not in text
+    finally:
+        sidecar.chmod(0o600)
+        session.shutdown()
+
+
+@pytest.mark.parametrize("change", ("absent", "changed"))
+def test_an_absent_or_changed_sidecar_still_revokes_the_display_only_hiding(
+    tmp_path: Path, change: str
+) -> None:
+    """Only a failed look keeps the capture hidden; absent or changed proof is revocation."""
+    fixture = _fixture(tmp_path, central=True)
+    settings, session, _ = _implicit_profile(fixture)
+    sidecar = fixture.authority.sidecar_path
+    if change == "absent":
+        sidecar.unlink()
+    else:
+        sidecar.write_bytes(b"{}\n")
+    try:
+        session.adopt_library(scan.scan(settings.roots))
+        assert session.library.unseen == ()
+        assert any(item.path == fixture.capture for item in session.library.items)
     finally:
         session.shutdown()

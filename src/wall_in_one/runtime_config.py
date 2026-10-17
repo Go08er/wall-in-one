@@ -1660,9 +1660,7 @@ def _unseen_advice(place: Unseen) -> str:
 def _fallback_advice(place: Unseen, *, implicit: bool) -> str:
     """The way out of a refused All media: make it readable, or stop depending on it."""
     way = (
-        "make the library smaller"
-        if place.kind is UnseenKind.LIMIT
-        else "make the folder readable"
+        "make the library smaller" if place.kind is UnseenKind.LIMIT else "make the folder readable"
     )
     if implicit:
         return f"{way}, choose a default playlist, or remove the folder from the library."

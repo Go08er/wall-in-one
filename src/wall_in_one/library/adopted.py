@@ -763,6 +763,47 @@ def _read_manifest(target: Path) -> bytes | None:
         pin.close()
 
 
+def _is_failed_look(error: BaseException) -> bool:
+    """Whether ``error`` is an actual failed look, not missing, changed or invalid proof.
+
+    `_same_public_file` wraps a failed lstat as a changed-proof error, so its
+    native cause counts. Absence, a generation mismatch (a `PathChangedError`
+    without an errno) and invalid metadata are not failed looks.
+    """
+    failure = error.__cause__ if isinstance(error, _ChangedAdoptionError) else error
+    return isinstance(failure, OSError) and failure.errno is not None and not is_absent(failure)
+
+
+def _check_capture_sidecar(
+    adoption: Adoption,
+    authority: Authority,
+    capture_pin: file_io.PinnedPath,
+    generation: file_io.FileFingerprint,
+) -> None:
+    """Prove the capture's canonical sidecar, or raise (failed look, change or invalid)."""
+    with _pin_absolute_regular(authority.sidecar_path) as sidecar_pin:
+        _owned_regular(sidecar_pin, label="capture sidecar", private_authority=True)
+        sidecar_generation = sidecar_pin.fingerprint
+        sidecar = file_io.read_pinned_regular_bytes(
+            sidecar_pin,
+            MAX_SIDECAR_BYTES,
+            expected_fingerprint=sidecar_generation,
+        )
+        _validate_sidecar_document(sidecar, authority.sidecar_path, authority, adoption.adoption_id)
+        _same_public_file(
+            capture_pin,
+            authority.capture_path,
+            label="internal capture",
+            expected_fingerprint=generation,
+        )
+        _same_public_file(
+            sidecar_pin,
+            authority.sidecar_path,
+            label="capture sidecar",
+            expected_fingerprint=sidecar_generation,
+        )
+
+
 def _with_internal_captures(adoption: Adoption, exact: tuple[Authority, ...]) -> Adoption:
     """Retain display-only provenance when a strict binding has expired.
 
@@ -779,36 +820,22 @@ def _with_internal_captures(adoption: Adoption, exact: tuple[Authority, ...]) ->
         if authority.capture_path in exact_paths:
             continue
         try:
-            with (
-                _pin_absolute_regular(authority.capture_path) as capture_pin,
-                _pin_absolute_regular(authority.sidecar_path) as sidecar_pin,
-            ):
+            with _pin_absolute_regular(authority.capture_path) as capture_pin:
                 _owned_regular(capture_pin, label="internal capture")
-                _owned_regular(sidecar_pin, label="capture sidecar", private_authority=True)
                 generation = capture_pin.fingerprint
                 if generation[1:] != authority.capture_fingerprint[1:]:
                     continue
-                sidecar_generation = sidecar_pin.fingerprint
-                sidecar = file_io.read_pinned_regular_bytes(
-                    sidecar_pin,
-                    MAX_SIDECAR_BYTES,
-                    expected_fingerprint=sidecar_generation,
-                )
-                _validate_sidecar_document(
-                    sidecar, authority.sidecar_path, authority, adoption.adoption_id
-                )
-                _same_public_file(
-                    capture_pin,
-                    authority.capture_path,
-                    label="internal capture",
-                    expected_fingerprint=generation,
-                )
-                _same_public_file(
-                    sidecar_pin,
-                    authority.sidecar_path,
-                    label="capture sidecar",
-                    expected_fingerprint=sidecar_generation,
-                )
+                try:
+                    _check_capture_sidecar(adoption, authority, capture_pin, generation)
+                except (OSError, _ChangedAdoptionError) as error:
+                    if not _is_failed_look(error):
+                        raise
+                    # The capture is the one this adoption made, and only the
+                    # look at its proof failed (denied, I/O error): that is
+                    # "couldn't look", not "no longer proven". Keep it hidden,
+                    # as the proof's last good reading would have. Showing it
+                    # would turn a generated frame into a wallpaper of its own
+                    # and take the video's still away.
                 internal.append((authority.capture_path, generation))
         except OSError, ValueError, _ChangedAdoptionError:
             continue
@@ -835,8 +862,7 @@ def _note_unreadable_proof(
     """
     if on_unseen is None:
         return
-    failure = error.__cause__ if isinstance(error, _ChangedAdoptionError) else error
-    if not isinstance(failure, OSError) or failure.errno is None or is_absent(failure):
+    if not _is_failed_look(error):
         return
     for authority in authorities:
         on_unseen(

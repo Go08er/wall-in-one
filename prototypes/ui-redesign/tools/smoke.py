@@ -517,25 +517,18 @@ def window_actions(state, window) -> None:
     state.set_scope("all")
 
 
-def close_popovers(window) -> None:
-    """Pop down every open popover in ``window``, as the click on another page does.
+def finish_page_change(window) -> None:
+    """Let the shell's page crossfade end before the new page's scene runs.
 
-    A person reaches another page with a click, and on Wayland the compositor
-    dismisses an open menu at the first click outside it. The demo scenes
-    open menus with no click at all, so a menu from an earlier page stayed
-    open, and Wayland allows a new menu only on top of the last one: GTK
-    refused to map the next page's ("Tried to map a grabbing popup with a
-    non-top most parent").
+    The old page stays mapped, with any menu it has open, for the 120 ms of the
+    crossfade, and steps are only 60 ms apart. Wayland allows a new menu only
+    on top of the last one, so a scene that opened its menu inside that window
+    made GTK refuse it ("Tried to map a grabbing popup with a non-top most
+    parent"). A person's next click comes after the crossfade; this waits for
+    it, boundedly. A menu left open after the page has gone would still show
+    here: it stays open and the next scene's menu then warns.
     """
-    pending = [window]
-    while pending:
-        widget = pending.pop()
-        if isinstance(widget, Gtk.Popover) and widget.get_mapped():
-            widget.popdown()
-        child = widget.get_first_child()
-        while child is not None:
-            pending.append(child)
-            child = child.get_next_sibling()
+    settle(lambda: not window.stack.get_transition_running(), 5.0)
 
 
 def build_steps(app, holder):
@@ -659,9 +652,8 @@ def build_steps(app, holder):
                 dialog = w().get_visible_dialog()
                 if dialog is not None:
                     dialog.force_close()
-                if w().pages[p.partition(":")[0]] is not w().current_page:
-                    close_popovers(w())
                 w().navigate(p)
+                finish_page_change(w())
                 w().pages[p.partition(":")[0]].demo(sc)
 
             steps.append((f"{page}+{scene}", run))

@@ -1901,6 +1901,11 @@ class Session:
     def _scheduled_playlist(self) -> str:
         """What the calendar selects now: a matching rule's playlist, else the default.
 
+        A rule the runtime compiler leaves out must not override the default
+        (or an earlier matching rule) in compatibility playback either. This
+        asks whether its entries compile, not whether health lets them play:
+        an emitted playlist whose entries are Borked still owns its rule.
+
         The default as the compiler resolves it: a saved default may name its
         playlist by name (an older profile, a hand edit, a setup that manages
         ``settings.toml``), and stays a name for the whole session where the
@@ -1918,7 +1923,33 @@ class Session:
             named = self._playlists.by_name(default)
             if named is not None:
                 default = named.id
-        return schedules.effective(self._schedules.rules, default, self._now())
+        # Local to avoid the compiler's import of Session becoming a cycle.
+        from wall_in_one import runtime_config
+
+        at = self._now()
+        known = runtime_config.library_index(self)
+        compiles: dict[str, bool] = {}
+        kept: list[schedules.Rule] = []
+        for rule in self._schedules.rules:
+            if not rule.matches(at):
+                continue
+            if rule.playlist in (
+                runtime_config.FALLBACK_PLAYLIST_ID,
+                runtime_config.FALLBACK_PLAYLIST_NAME,
+            ):
+                kept.append(rule)
+                continue
+            authored = runtime_config.find_playlist(rule.playlist, self)
+            if authored is None:
+                continue
+            if authored.id not in compiles:
+                compiles[authored.id] = any(
+                    runtime_config.entry_playability(known.get(entry.path), self).compiles
+                    for entry in authored.entries
+                )
+            if compiles[authored.id]:
+                kept.append(rule)
+        return schedules.effective(kept, default, at)
 
     @property
     def manual_playlist(self) -> str | None:

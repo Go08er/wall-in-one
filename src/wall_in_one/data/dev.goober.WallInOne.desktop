@@ -7,10 +7,9 @@
 # and the Nix store; the Nix package rewrites it to the wrapped binary's
 # absolute path at install time.
 #
-# No StartupWMClass either. That key matches X11's WM_CLASS, which GTK takes
-# from the program name rather than from the application id, so under XWayland
-# it would have to say "wall-in-one" and under Wayland it is not consulted at
-# all -- the filename above already does that job.
+# No StartupWMClass either. That key matches X11's WM_CLASS; Wall-in-One
+# supports only Wayland, where it is not consulted -- the filename above
+# already does that job.
 #
 # No DBusActivatable. The app does export org.gtk.Actions on the session bus,
 # because GtkApplication always does, but activation over D-Bus additionally

@@ -91,7 +91,7 @@ invocation rather than by its command line, the service file and the key go in
 together.
 
 **`StartupWMClass`.** That key exists to match X11's `WM_CLASS`. Wall-in-One
-runs only on Wayland, where it is not consulted: the filename already does the
+supports only Wayland, where it is not consulted: the filename already does the
 job. X11 sessions are not supported.
 
 ## Outside Nix

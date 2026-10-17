@@ -5,8 +5,8 @@
 > completed a long-running soak or physical multi-monitor validation. Back up
 > your wallpaper library and settings before trying it. Supported upgrade paths
 > are described in the [migration guide](docs/migrating.md); other early formats
-> may not migrate automatically. Updates are one-way: an older version can't be
-> installed over a profile a newer one has used (see the
+> may not migrate automatically. Updates are one-way: installing an older version
+> over a profile a newer one has used isn't supported (see the
 > [update guide](docs/updating.md#updates-are-one-way)).
 
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.

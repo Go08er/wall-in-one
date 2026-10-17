@@ -55,6 +55,20 @@ from wall_in_one.ui import playlists_page  # noqa: E402
 from wall_in_one.ui.next.real_playlists import RealPlaylists  # noqa: E402
 
 
+def _without_pointer(text: str) -> str:
+    """``text`` less the pointer a default in a file that can't be changed ends with.
+
+    "The settings file can't be changed: <why>. To change the default, edit
+    active_playlist in <path>." The pointer is asserted, then removed.
+    """
+    sentence, found, pointer = text.partition(" The settings file can\u2019t be changed: ")
+    assert found, text
+    assert pointer.endswith(
+        f"To change the default, edit active_playlist in {paths.settings_path()}."
+    )
+    return sentence
+
+
 @contextlib.contextmanager
 def _settings_can_not_be_saved() -> Iterator[None]:
     """The folder ``settings.toml`` is in, read-only for as long as this lasts."""
@@ -92,7 +106,9 @@ def test_ad4_an_empty_playlist_under_a_left_out_defaults_name_stops_nothing(
         partial = application._repair_dangling_playlist_references()
         assert application._finish_playlist_reference_repair(partial).ok
         assert _publish(shown)["default_playlist"] == ALL_MEDIA
-        assert opened.reports == [DEFAULT_NAMES_NOTHING.format("Dusk")]
+        assert [_without_pointer(text) for text in opened.reports] == [
+            DEFAULT_NAMES_NOTHING.format("Dusk")
+        ]
 
         if via == "the new window":
             editing = opened.window.state.playlist_editing
@@ -120,8 +136,8 @@ def test_ad4_an_empty_playlist_under_a_left_out_defaults_name_stops_nothing(
         document = _document()
         assert document["default_playlist"] == ALL_MEDIA
         assert [playlist["name"] for playlist in document["playlists"]] == ["All media"]
-        assert application.left_out_notice == DEFAULT_HAS_NOTHING.format("Dusk")
-        assert opened.reports == [
+        assert _without_pointer(application.left_out_notice) == DEFAULT_HAS_NOTHING.format("Dusk")
+        assert [_without_pointer(text) for text in opened.reports] == [
             DEFAULT_NAMES_NOTHING.format("Dusk"),
             DEFAULT_HAS_NOTHING.format("Dusk"),
         ], "said again, because why it is left out changed"

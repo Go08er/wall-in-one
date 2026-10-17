@@ -289,7 +289,7 @@ def test_scan_says_so_when_a_folders_files_cannot_be_looked_at(tmp_path: Path) -
 def test_scan_reports_a_missing_root_instead_of_failing(tmp_path: Path) -> None:
     library = scan.scan([tmp_path / "nope"])
     assert library.items == ()
-    assert any("not a directory" in note for note in library.skipped)
+    assert any("not there" in note for note in library.skipped)
 
 
 def test_scan_uses_the_explicit_workshop_root_snapshot(
@@ -298,7 +298,7 @@ def test_scan_uses_the_explicit_workshop_root_snapshot(
     asked: list[tuple[tuple[Path, ...], bool]] = []
 
     def installed(
-        roots: tuple[Path, ...] = (), *, include_defaults: bool = True
+        roots: tuple[Path, ...] = (), *, include_defaults: bool = True, on_unseen: object = None
     ) -> tuple[object, ...]:
         asked.append((tuple(roots), include_defaults))
         return ()

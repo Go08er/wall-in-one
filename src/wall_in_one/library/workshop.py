@@ -26,12 +26,18 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Sequence
+import stat
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
+from wall_in_one.library.model import UnseenKind
+
+#: Where the scan is told about a place it could not look into: the folder,
+#: why (`UnseenKind`), and the system's words. Optional everywhere below.
+OnUnseen = Callable[[Path, UnseenKind, str], None]
 
 #: Wallpaper Engine's Steam application id.
 APP_ID: Final = "431960"
@@ -105,6 +111,25 @@ class WorkshopItem:
         return self.preview if self.preview.suffix.lower() in _STILL_SUFFIXES else None
 
 
+def _is_folder(path: Path, *, follow: bool, on_unseen: OnUnseen | None) -> bool:
+    """Whether ``path`` is a folder; a stat that fails for another reason is said.
+
+    ``Path.is_dir`` answers False to any OSError, which would make "couldn't
+    look" read as "not there". Absent (or under something that is not a
+    folder) is quiet; anything else (permissions, a dead mount) goes to
+    ``on_unseen`` as unreadable.
+    """
+    try:
+        info = path.stat() if follow else path.lstat()
+    except FileNotFoundError, NotADirectoryError:
+        return False
+    except OSError as error:
+        if on_unseen is not None:
+            on_unseen(path, UnseenKind.UNREADABLE, error.strerror or str(error))
+        return False
+    return stat.S_ISDIR(info.st_mode)
+
+
 def steam_roots(extra: Sequence[Path] = (), *, include_defaults: bool = True) -> tuple[Path, ...]:
     """Steam installations to look in, in order, without duplicates.
 
@@ -120,12 +145,26 @@ def steam_roots(extra: Sequence[Path] = (), *, include_defaults: bool = True) ->
     candidates = (*extra, *default_steam_roots()) if include_defaults else tuple(extra)
     for candidate in candidates:
         expanded = Path(candidate).expanduser()
-        if expanded.is_dir():
+        # A root that can't be looked at is kept: the scan that follows it
+        # says so where it fails (`content_directories`), instead of this
+        # dropping it as if it were not there.
+        if _is_folder(expanded, follow=True, on_unseen=None) or _unlooked(expanded):
             seen.setdefault(expanded, None)
     return tuple(seen)
 
 
-def library_folders(root: Path) -> tuple[Path, ...]:
+def _unlooked(path: Path) -> bool:
+    """Whether a stat of ``path`` fails for a reason other than "not there"."""
+    try:
+        path.stat()
+    except FileNotFoundError, NotADirectoryError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
+def library_folders(root: Path, on_unseen: OnUnseen | None = None) -> tuple[Path, ...]:
     """Every library folder Steam knows about, including ``root`` itself.
 
     Steam spreads installations across drives, and Workshop content follows the
@@ -139,29 +178,34 @@ def library_folders(root: Path) -> tuple[Path, ...]:
         if raw is not None:
             for match in _PATH_LINE.finditer(raw):
                 candidate = Path(match.group(1))
-                if not candidate.is_symlink() and candidate.is_dir():
+                if _is_folder(candidate, follow=False, on_unseen=on_unseen):
                     found.setdefault(candidate, None)
-    except OSError:
+    except OSError as error:
         # An unreadable index is not a reason to find nothing: the root itself
-        # is still a library folder.
-        pass
+        # is still a library folder. But which other folders it named is not
+        # known, so it is said, at the folder that holds the index.
+        if on_unseen is not None and getattr(error, "errno", None) is not None:
+            on_unseen(index.parent, UnseenKind.UNREADABLE, error.strerror or str(error))
     return tuple(found)
 
 
 def content_directories(
-    extra_roots: Sequence[Path] = (), *, include_defaults: bool = True
+    extra_roots: Sequence[Path] = (),
+    *,
+    include_defaults: bool = True,
+    on_unseen: OnUnseen | None = None,
 ) -> tuple[Path, ...]:
     """Every directory that could hold installed Wallpaper Engine content."""
     found: dict[Path, None] = {}
     for root in steam_roots(extra_roots, include_defaults=include_defaults):
-        for folder in library_folders(root):
+        for folder in library_folders(root, on_unseen):
             content = folder / "steamapps" / "workshop" / "content" / APP_ID
-            if content.is_dir():
+            if _is_folder(content, follow=True, on_unseen=on_unseen):
                 found.setdefault(content, None)
     return tuple(found)
 
 
-def _read_project(directory: Path) -> WorkshopItem | None:
+def _read_project(directory: Path, on_unseen: OnUnseen | None = None) -> WorkshopItem | None:
     """One item from its `project.json`, or ``None`` if it is not one.
 
     Never raises: a Workshop directory is written by Steam and edited by
@@ -172,7 +216,11 @@ def _read_project(directory: Path) -> WorkshopItem | None:
         raw = file_io.read_regular_text(
             project, MAX_PROJECT_BYTES, encoding="utf-8", errors="replace"
         )
-    except OSError:
+    except OSError as error:
+        # Not a project that is malformed (no errno): one that could not be
+        # opened, so it is not known whether this is a wallpaper.
+        if on_unseen is not None and getattr(error, "errno", None) is not None:
+            on_unseen(directory, UnseenKind.UNREADABLE, error.strerror or str(error))
         return None
     if raw is None:
         return None
@@ -185,8 +233,8 @@ def _read_project(directory: Path) -> WorkshopItem | None:
 
     kind = document.get("type")
     title = document.get("title")
-    entry = _beside(directory, document.get("file"))
-    preview = _beside(directory, document.get("preview"))
+    entry = _beside(directory, document.get("file"), on_unseen)
+    preview = _beside(directory, document.get("preview"), on_unseen)
     return WorkshopItem(
         id=directory.name,
         directory=directory,
@@ -199,7 +247,7 @@ def _read_project(directory: Path) -> WorkshopItem | None:
     )
 
 
-def _beside(directory: Path, name: object) -> Path | None:
+def _beside(directory: Path, name: object, on_unseen: OnUnseen | None = None) -> Path | None:
     """A file named by `project.json`, resolved inside its own directory.
 
     A name with a separator in it is refused rather than joined: these files
@@ -211,11 +259,22 @@ def _beside(directory: Path, name: object) -> Path | None:
     if "/" in name or "\\" in name or name.strip() in (".", ".."):
         return None
     candidate = directory / name.strip()
-    return candidate if not candidate.is_symlink() and candidate.is_file() else None
+    try:
+        info = candidate.lstat()
+    except FileNotFoundError, NotADirectoryError:
+        return None
+    except OSError as error:
+        if on_unseen is not None:
+            on_unseen(directory, UnseenKind.UNREADABLE, error.strerror or str(error))
+        return None
+    return candidate if stat.S_ISREG(info.st_mode) else None
 
 
 def scan(
-    extra_roots: Sequence[Path] = (), *, include_defaults: bool = True
+    extra_roots: Sequence[Path] = (),
+    *,
+    include_defaults: bool = True,
+    on_unseen: OnUnseen | None = None,
 ) -> tuple[WorkshopItem, ...]:
     """Every installed Wallpaper Engine wallpaper, by id.
 
@@ -224,12 +283,14 @@ def scan(
     results rather than an error.
     """
     return scan_content_directories(
-        content_directories(extra_roots, include_defaults=include_defaults)
+        content_directories(extra_roots, include_defaults=include_defaults, on_unseen=on_unseen),
+        on_unseen,
     )
 
 
 def scan_content_directories(
     directories: Sequence[Path],
+    on_unseen: OnUnseen | None = None,
 ) -> tuple[WorkshopItem, ...]:
     """Scan exact Wallpaper Engine content directories without rediscovery.
 
@@ -241,17 +302,20 @@ def scan_content_directories(
     for content in directories:
         try:
             entries = sorted(content.iterdir())
-        except OSError:
+        except FileNotFoundError, NotADirectoryError:
+            continue
+        except OSError as error:
+            if on_unseen is not None:
+                on_unseen(content, UnseenKind.UNREADABLE, error.strerror or str(error))
             continue
         for directory in entries:
             if len(found) >= MAX_ITEMS:
+                if on_unseen is not None:
+                    on_unseen(content, UnseenKind.LIMIT, f"stopped at {MAX_ITEMS} Workshop items")
                 return tuple(found.values())
-            try:
-                if directory.is_symlink() or not directory.is_dir():
-                    continue
-            except OSError:
+            if not _is_folder(directory, follow=False, on_unseen=on_unseen):
                 continue
-            item = _read_project(directory)
+            item = _read_project(directory, on_unseen)
             if item is not None and item.id not in found:
                 found[item.id] = item
     return tuple(found.values())

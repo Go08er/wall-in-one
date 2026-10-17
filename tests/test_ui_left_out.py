@@ -258,6 +258,45 @@ def test_a_library_folder_that_is_not_there_is_left_out_and_said_not_a_publicati
     assert DEFAULT_HAS_NOTHING.format("Deep") in application.left_out_notice
 
 
+def test_a_library_root_whose_stat_fails_is_a_publication_problem_not_something_left_out(
+    profiles: Any,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Failed at c73f539: the root read as "not there" and the good document was replaced."""
+    if os.geteuid() == 0:
+        pytest.skip("root searches a folder with no permission bits")
+    profile: Profile = profiles()
+    application = profile.application
+    mnt = tmp_path / "mnt"
+    drive = mnt / "drive"
+    drive.mkdir(parents=True)
+    (drive / "deep.png").write_bytes(b"media")
+    settings = replace(application.settings, roots=(tmp_path / "wallpapers", drive)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.refresh(mutate_removals=False)
+    deep = _saved(profile, "Deep", [], used=True)
+    application.session.playlists.add(deep.id, drive / "deep.png")
+    config.update({"active_playlist": deep.id})
+    document = _published(application)
+    assert document["default_playlist"] == deep.id
+    good = paths.runtime_config_path().read_bytes()
+
+    mnt.chmod(0o600)
+    try:
+        application.session.refresh(mutate_removals=False)
+        _published(application)
+    finally:
+        mnt.chmod(0o700)
+
+    problem = application.publication_problem
+    assert str(drive) in problem and "nothing to play" not in problem, problem
+    assert paths.runtime_config_path().read_bytes() == good
+    assert application.left_out_notice == ""
+
+
 def test_a_rule_that_is_turned_off_leaves_no_standing_notice(
     profiles: Any,  # noqa: F811
 ) -> None:

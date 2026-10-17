@@ -392,6 +392,45 @@ def test_a_library_folder_that_is_not_there_is_left_out_not_refused(
     assert not any(rule["playlist"] == deep.id for rule in document.get("schedules", []))
 
 
+@pytest.mark.parametrize("verb", COMPILES)
+def test_a_library_root_whose_stat_fails_is_not_nothing_to_play(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    """A drive under ``mnt``, which stops being searchable (as a dead mount would be).
+
+    Failed at c73f539: the root read as "not there", Deep was left out, and the
+    good ``runtime.toml`` was replaced (``--service-startup-prepare`` exited 0).
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root searches a folder with no permission bits")
+    item = _media(tmp_path)
+    mnt = tmp_path / "mnt"
+    drive = mnt / "drive"
+    drive.mkdir(parents=True)
+    (drive / "deep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    config.save(config.Settings(roots=(item.path.parent, drive), scan_workshop=False))
+    store = playlists.Store.open()
+    deep = store.add(store.create("Deep").id, drive / "deep.png")
+    schedules.Store.open().add(deep.id, rule_id="deep-rule")
+    config.update({"active_playlist": deep.id})
+    assert cli.main(["--write-config"]) == 0
+    good = paths.runtime_config_path().read_bytes()
+    assert deep.id.encode() in good
+    capsys.readouterr()
+
+    mnt.chmod(0o600)
+    try:
+        code = cli.main([verb])
+        said = capsys.readouterr()
+    finally:
+        mnt.chmod(0o700)
+
+    assert "error:" in said.err and str(drive) in said.err, said.err
+    assert [line for line in _warnings(said.err) if "building" in line] == []
+    assert paths.runtime_config_path().read_bytes() == good
+    assert code == (1 if verb == "--write-config" else 0)
+
+
 # -- what the released version left on disk ----------------------------------------------------
 
 _RELEASED_SAVES_WHAT_CANNOT_PLAY = r"""

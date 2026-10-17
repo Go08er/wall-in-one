@@ -569,6 +569,119 @@ def test_a_real_scan_that_hit_a_limit_refuses_and_an_absent_root_does_not(
     session.shutdown()
 
 
+def _scan_publish_root(session: Session, tmp_path: Path, roots: list[Path]) -> None:
+    from wall_in_one.library import scan
+
+    session._library = scan.scan(roots)
+
+
+@pytest.mark.parametrize("use", ("default", "rule"))
+def test_a_root_whose_stat_fails_is_not_left_out_it_refuses(tmp_path: Path, use: str) -> None:
+    """A drive under a folder that can't be searched (or a dead mount) is "couldn't look".
+
+    ``Path.is_dir`` answers False to any OSError; the build then read
+    "not there" and replaced the good document. Failed at c73f539.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root searches a folder with no permission bits")
+    settings, session = _session(tmp_path)
+    mnt = tmp_path / "mnt"
+    drive = mnt / "drive"
+    drive.mkdir(parents=True)
+    (drive / "deep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, drive / "deep.png")
+    if use == "default":
+        settings = replace(settings, active_playlist=deep.id)
+    else:
+        session.schedules.add(deep.id, rule_id="deep-rule", start="08:00", end="09:00")
+    target = tmp_path / "runtime.toml"
+    target.write_text("# good\n", encoding="utf-8")
+    mnt.chmod(0o600)
+    try:
+        _scan_publish_root(session, tmp_path, [tmp_path / "library", drive])
+        with pytest.raises(runtime_config.RuntimeConfigError) as refused:
+            runtime_config.publish_changes(settings, session, target)
+    finally:
+        mnt.chmod(0o700)
+
+    assert str(drive) in str(refused.value)
+    assert target.read_text(encoding="utf-8") == "# good\n"
+    session.shutdown()
+
+
+# -- the Workshop scan says what it could not look into too -------------------------------------
+
+
+def _steam(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A fake Steam with one video: ``(steam root, content folder, the video)``."""
+    steam = tmp_path / "steam"
+    content = steam / "steamapps" / "workshop" / "content" / "431960"
+    item = content / "111"
+    item.mkdir(parents=True)
+    (item / "project.json").write_text(
+        '{"type": "video", "title": "Frog", "file": "v.mp4"}', encoding="utf-8"
+    )
+    (item / "v.mp4").write_bytes(b"\x00" * 16)
+    return steam, content, item / "v.mp4"
+
+
+def _workshop_playlist_refuses(tmp_path: Path, steam: Path, video: Path, *, refuses: bool) -> None:
+    from wall_in_one.library import scan
+
+    settings, session = _session(tmp_path)
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, video)
+    settings = replace(settings, active_playlist=deep.id)
+    session._library = scan.scan(
+        [tmp_path / "library"], include_workshop=True, workshop_roots=(steam,)
+    )
+    if refuses:
+        with pytest.raises(runtime_config.RuntimeConfigError, match="could not look"):
+            runtime_config.render(settings, session)
+    else:
+        published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
+        assert any(one.reference == deep.id for one in published.left_out)
+    session.shutdown()
+
+
+@pytest.mark.parametrize("which", ("content", "item", "steam"))
+def test_a_workshop_playlist_whose_folder_cannot_be_looked_into_refuses(
+    tmp_path: Path, which: str
+) -> None:
+    """Failed at c73f539: the Workshop scan recorded nothing, so Deep was left out."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    steam, content, video = _steam(tmp_path)
+    closed = {"content": content, "item": video.parent, "steam": steam}[which]
+    closed.chmod(0o000)
+    try:
+        _workshop_playlist_refuses(tmp_path, steam, video, refuses=True)
+    finally:
+        closed.chmod(0o700)
+
+
+def test_a_workshop_playlist_past_the_item_cap_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one.library import workshop
+
+    steam, content, _video = _steam(tmp_path)
+    last = content / "222"
+    last.mkdir()
+    (last / "project.json").write_text('{"type": "video", "file": "v.mp4"}', encoding="utf-8")
+    (last / "v.mp4").write_bytes(b"\x00" * 16)
+    monkeypatch.setattr(workshop, "MAX_ITEMS", 1)
+    _workshop_playlist_refuses(tmp_path, steam, last / "v.mp4", refuses=True)
+
+
+@pytest.mark.parametrize("which", ("steam", "content"))
+def test_a_workshop_that_is_not_there_is_left_out_not_refused(tmp_path: Path, which: str) -> None:
+    steam, content, video = _steam(tmp_path)
+    shutil.rmtree(steam if which == "steam" else content)
+    _workshop_playlist_refuses(tmp_path, steam, video, refuses=False)
+
+
 def test_a_sibling_whose_name_starts_the_same_is_not_an_ancestor(tmp_path: Path) -> None:
     """``/lib/a`` does not cover ``/lib/ab/x.png``; ``/lib/ab`` does."""
     entries = [playlists.Entry(id="e", source=str(tmp_path / "lib" / "ab" / "x.png"))]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -406,6 +407,7 @@ def workshop_items(
     steam_roots: Sequence[Path] | None = None,
     *,
     content_directories: Sequence[Path] | None = None,
+    on_unseen: workshop.OnUnseen | None = None,
 ) -> tuple[MediaItem, ...]:
     """Installed Wallpaper Engine wallpapers, videos and scenes alike.
 
@@ -417,17 +419,21 @@ def workshop_items(
     if steam_roots is not None and content_directories is not None:
         raise ValueError("Workshop scan cannot mix Steam roots and exact content directories")
     if content_directories is not None:
-        installed = workshop.scan_content_directories(content_directories)
+        installed = workshop.scan_content_directories(content_directories, on_unseen)
     elif steam_roots is None:
-        installed = workshop.scan()
+        installed = workshop.scan(on_unseen=on_unseen)
     else:
-        installed = workshop.scan(steam_roots, include_defaults=False)
+        installed = workshop.scan(steam_roots, include_defaults=False, on_unseen=on_unseen)
     for item in installed:
         entry = item.entry
         if item.is_video and entry is not None:
             try:
                 info = entry.stat()
-            except OSError:
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                if on_unseen is not None:
+                    on_unseen(entry, UnseenKind.UNREADABLE, error.strerror or str(error))
                 continue
             found.append(
                 MediaItem(
@@ -448,7 +454,11 @@ def workshop_items(
             # scene at one end of the grid.
             try:
                 info = item.directory.stat()
-            except OSError:
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                if on_unseen is not None:
+                    on_unseen(item.directory, UnseenKind.UNREADABLE, error.strerror or str(error))
                 continue
             found.append(
                 MediaItem(
@@ -474,11 +484,13 @@ def _unscanned_root(root: Path) -> str:
     through a link. It says so, and names the folder to add instead.
     """
     try:
-        if root.is_symlink():
+        if stat.S_ISLNK(root.lstat().st_mode):
             real = Path(os.path.realpath(root))
             if real.is_dir():
                 return f"a symbolic link, which is not scanned; add {real} instead"
             return "a symbolic link that points at no folder"
+    except FileNotFoundError, NotADirectoryError:
+        return "not there"
     except OSError:
         pass
     return "not a directory"
@@ -568,7 +580,17 @@ def _scan(
     for root in resolved_roots:
         if cancelled is not None and cancelled():
             raise ScanCancelledError
-        if root.is_symlink() or not root.is_dir():
+        try:
+            root_mode = root.lstat().st_mode
+        except FileNotFoundError, NotADirectoryError:
+            _not_looked(skipped, unseen, root, UnseenKind.ROOT_NOT_USABLE, _unscanned_root(root))
+            continue
+        except OSError as error:
+            # Not "not there": the stat itself failed (permissions, a dead
+            # mount). `Path.is_dir` would have said False to this as well.
+            _not_looked(skipped, unseen, root, UnseenKind.UNREADABLE, error.strerror or error)
+            continue
+        if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
             _not_looked(skipped, unseen, root, UnseenKind.ROOT_NOT_USABLE, _unscanned_root(root))
             continue
         for path in _walk(root, budget, skipped, unseen, cancelled, gone=seen):
@@ -643,6 +665,7 @@ def _scan(
         for item in workshop_items(
             workshop_roots,
             content_directories=workshop_content_directories,
+            on_unseen=lambda place, kind, why: _not_looked(skipped, unseen, place, kind, why),
         ):
             if cancelled is not None and cancelled():
                 raise ScanCancelledError

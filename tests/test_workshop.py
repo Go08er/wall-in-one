@@ -173,3 +173,55 @@ def test_nothing_is_written_into_steams_tree(tmp_path: Path) -> None:
     workshop.scan((tmp_path,), include_defaults=False)
 
     assert sorted(path.name for path in (content / "3021911243").iterdir()) == before
+
+
+# -- what the scan could not look into ------------------------------------
+
+
+def test_a_listing_that_fails_is_said_and_an_absent_folder_is_not(tmp_path: Path) -> None:
+    import os
+
+    from wall_in_one.library.model import UnseenKind
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    content = _content(tmp_path)
+    video = _install(content, "1", {"type": "video", "file": "v.mp4"}, file="v.mp4")
+    said: list[tuple[Path, UnseenKind]] = []
+
+    def on_unseen(path: Path, kind: UnseenKind, _why: str) -> None:
+        said.append((path, kind))
+
+    assert workshop.scan((tmp_path / "nowhere",), include_defaults=False, on_unseen=on_unseen) == ()
+    assert said == [], "an absent Steam is quiet"
+
+    video.chmod(0o000)
+    try:
+        workshop.scan((tmp_path,), include_defaults=False, on_unseen=on_unseen)
+    finally:
+        video.chmod(0o700)
+    assert said == [(video, UnseenKind.UNREADABLE)]
+
+    said.clear()
+    content.chmod(0o000)
+    try:
+        workshop.scan((tmp_path,), include_defaults=False, on_unseen=on_unseen)
+    finally:
+        content.chmod(0o700)
+    assert said == [(content, UnseenKind.UNREADABLE)]
+
+
+def test_the_item_cap_is_said(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wall_in_one.library.model import UnseenKind
+
+    content = _content(tmp_path)
+    for name in ("1", "2"):
+        _install(content, name, {"type": "video", "file": "v.mp4"}, file="v.mp4")
+    monkeypatch.setattr(workshop, "MAX_ITEMS", 1)
+    said: list[tuple[Path, UnseenKind]] = []
+
+    found = workshop.scan(
+        (tmp_path,), include_defaults=False, on_unseen=lambda p, k, _w: said.append((p, k))
+    )
+
+    assert len(found) == 1 and said == [(content, UnseenKind.LIMIT)]

@@ -799,6 +799,11 @@ def _migrate_locked(
         _stage_targets(targets, keep_existing=True)
 
     _install_targets(targets)
+    # A resumed import keeps the journal's report, which may predate these
+    # diagnostics. Say what this build sees without promising it is there.
+    nothing_to_play_detail = _nothing_to_play_detail(
+        converted.nothing_to_play, report_pointer=journal is None
+    )
     try:
         journal_path().unlink()
         paths.fsync_directory(journal_path().parent)
@@ -810,18 +815,17 @@ def _migrate_locked(
         return Outcome(
             True,
             f"imported legacy authoring; could not remove completed journal: {error}"
-            + _nothing_to_play_detail(converted.nothing_to_play),
+            + nothing_to_play_detail,
             report_path(),
         )
     return Outcome(
         True,
-        "imported legacy authoring; legacy bytes were left untouched"
-        + _nothing_to_play_detail(converted.nothing_to_play),
+        "imported legacy authoring; legacy bytes were left untouched" + nothing_to_play_detail,
         report_path(),
     )
 
 
-def _nothing_to_play_detail(names: tuple[str, ...]) -> str:
+def _nothing_to_play_detail(names: tuple[str, ...], *, report_pointer: bool = True) -> str:
     """The import's one sentence about playlists with nothing to play, or empty."""
     if not names:
         return ""
@@ -830,7 +834,8 @@ def _nothing_to_play_detail(names: tuple[str, ...]) -> str:
     verb = "has" if len(names) == 1 else "have"
     return (
         f"; {listed} {verb} nothing to play yet, so playback goes on without "
-        f"{'it' if len(names) == 1 else 'them'} until that is fixed (see the report)"
+        f"{'it' if len(names) == 1 else 'them'} until that is fixed"
+        + (" (see the report)" if report_pointer else "")
     )
 
 
@@ -1046,7 +1051,7 @@ def _boolean(value: object, where: str, fallback: bool) -> bool:
     return value
 
 
-def _convert(source: _LegacySource) -> _Converted:
+def _convert(source: _LegacySource, *, as_released: bool = False) -> _Converted:
     notes: list[str] = []
     _report_unmapped_plugin_settings(source.plugin_settings, notes)
     legacy_playlists, legacy_outputs, legacy_pairings = _legacy_authoring(source, notes)
@@ -1076,13 +1081,20 @@ def _convert(source: _LegacySource) -> _Converted:
         legacy_outputs, playlist_map, notes, independent=independent
     )
     converted_displays = _convert_displays(legacy_outputs, playlist_map) if independent else {}
-    nothing_to_play = _nothing_to_play(
-        converted_playlists,
-        converted_settings,
-        converted_pairings,
-        converted_schedules,
-        converted_displays,
-        notes,
+    # Released imports did not include these notes in their report. Their
+    # journal binds that report's bytes too, so resuming one must reproduce
+    # its conversion rather than add today's diagnostics to it.
+    nothing_to_play = (
+        ()
+        if as_released
+        else _nothing_to_play(
+            converted_playlists,
+            converted_settings,
+            converted_pairings,
+            converted_schedules,
+            converted_displays,
+            notes,
+        )
     )
     api_key = _api_key(source.plugin_settings, notes)
 
@@ -2311,7 +2323,8 @@ def _targets_as_staged(
     """
     created_at = str(journal["created_at"])
     for as_released in (False, True):
-        targets = _targets(legacy, converted, created_at, as_released=as_released)
+        rendering = _convert(legacy, as_released=True) if as_released else converted
+        targets = _targets(legacy, rendering, created_at, as_released=as_released)
         if journal["targets"] == {target.key: target.digest for target in targets}:
             return targets
     raise MigrationError(

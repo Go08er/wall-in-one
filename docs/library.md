@@ -428,7 +428,7 @@ before the operation is reported durable.
 Removing a wallpaper also drops it from favourites, every playlist occurrence,
 and its complete Pairing record: palette policy, representative-still choice
 and any recorded playback-failure information. It removes only automatic stills and
-sidecars whose exact generated paths prove they belong to that wallpaper.
+sidecars whose names the app generates for that wallpaper.
 Those records normally outlive a missing file because the file might come
 back; that is not true of one the app just destroyed.
 
@@ -455,20 +455,24 @@ untouched, and is destroyed once the file is gone.
 The wallpaper's own files are handled differently: the still the app captured
 for a video, and the small `<file>.wall-in-one.json` beside the video that
 records which still represents it. They are not set aside. A removal deletes
-them last, once the file is gone. When a removal was left unfinished and is
-finished later, they go with it only if both of these are true:
+them last, once the file is gone. When a removal stopped with the file set
+aside and is finished later, they go with it only if both of these are true:
 
 - nothing is at the wallpaper's path;
 - each file is still exactly what it was when the removal began. The pending
   removal keeps a record of each one for this: which file it was, and a
   checksum of its contents.
 
-Otherwise they are left where they are, and the message names them once. So a
+Otherwise they are left where they are, and the message names them once. That
+is for a removal that stopped with the file set aside. One that stopped after
+the file was already destroyed, or that was already marked finished, leaves the
+wallpaper's own files where they are without naming them; Tidy up lists them. A
 download that finishes at the same path before the old removal is finished
 keeps its download record, its still and its selector, whether it wrote them
 or found them already there. A removal left unfinished by 0.2.x, or by a 0.3.0
 development build from before this record existed, has no such record:
-finishing it never deletes these files, and names the ones it left.
+finishing it never deletes these files. When it stopped with the file set
+aside, the message names the ones it left.
 
 A downloaded file that can't be opened for writing (a read-only one, say) is
 refused first, with nothing changed. In the rare case where the file had
@@ -502,7 +506,8 @@ operation may remove is pinned before the media commit. Cleanup acts only
 through those exact retained generations. A crash replay has no surviving
 artifact pins, so it clears durable favourites, Pairings and playlists but
 never rediscovers a same-name physical companion which could belong to a later
-installation. The wallpaper's own download record is no such rediscovery: the
+installation. Nor does it touch the wallpaper's own files, except those the
+removal's record proves (see above). The wallpaper's own download record is no such rediscovery: the
 removal set it aside in a claim named from its own token, so the replay finds
 exactly that record and puts it back or destroys it, as described above. A
 live cleanup failure is reported with the preserved paths; it is not converted

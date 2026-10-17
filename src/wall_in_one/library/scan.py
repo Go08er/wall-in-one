@@ -549,13 +549,19 @@ def _scan(
 ) -> Library:
     resolved_roots = tuple(roots) if roots is not None else default_roots()
     candidate_internal_captures: tuple[tuple[Path, file_io.FileFingerprint], ...] = ()
+    capture_adoption: adopted.Adoption | None = None
+    adoption_unseen: list[tuple[Path, str]] = []
     if adoption_candidates is None:
-        capture_adoption = adopted.load(strict=False)
+        capture_adoption = adopted.load(
+            strict=False,
+            on_unseen=lambda source, why: adoption_unseen.append((source, why)),
+        )
         if capture_adoption is not None and capture_adoption.root in resolved_roots:
             candidate_authorities = capture_adoption.authorities
             candidate_internal_captures = capture_adoption.internal_captures
         else:
             candidate_authorities = ()
+            adoption_unseen.clear()
     else:
         # The deployed-profile detector uses its still-open generation proof
         # to dry-render schema 4 before publishing the adoption manifest.  An
@@ -706,6 +712,15 @@ def _scan(
     adopted_pairs = tuple(
         (authority.source_path, authority.capture_path) for authority in exact_authorities
     )
+    unusable_roots = {place.path for place in unseen if place.kind is UnseenKind.ROOT_NOT_USABLE}
+    if capture_adoption is not None and capture_adoption.root not in unusable_roots:
+        # A retired root or an unindexed source no longer supplies this scan.
+        # Only an indexed moving item can be missing its adopted still for
+        # want of looking. Missing/unusable roots remain known absences.
+        moving = {item.path for item in items if item.is_moving}
+        for source, why in adoption_unseen:
+            if source in moving:
+                _not_looked(skipped, unseen, source, UnseenKind.UNREADABLE, why)
     if cancelled is not None and cancelled():
         raise ScanCancelledError
     stillless: list[tuple[Path, str]] = []

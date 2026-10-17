@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -594,9 +595,12 @@ def test_scan_rechecks_display_only_capture_generation(
     original_load = adopted.load
 
     def load_then_replace(
-        *, strict: bool = False, path: Path | None = None
+        *,
+        strict: bool = False,
+        path: Path | None = None,
+        on_unseen: Callable[[Path, str], None] | None = None,
     ) -> adopted.Adoption | None:
-        publication = original_load(strict=strict, path=path)
+        publication = original_load(strict=strict, path=path, on_unseen=on_unseen)
         assert publication is not None and publication.internal_captures
         fixture.capture.write_bytes(b"replacement after display validation")
         return publication
@@ -657,9 +661,10 @@ def test_scan_rechecks_a_loaded_adoption_against_the_walked_generations(
         *,
         strict: bool = False,
         path: Path | None = None,
+        on_unseen: Callable[[Path, str], None] | None = None,
     ) -> adopted.Adoption | None:
         nonlocal replaced
-        publication = original_load(strict=strict, path=path)
+        publication = original_load(strict=strict, path=path, on_unseen=on_unseen)
         if publication is not None and not replaced:
             fixture.capture.unlink()
             fixture.capture.write_bytes(b"replacement after adoption validation")

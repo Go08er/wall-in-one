@@ -21,13 +21,14 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import pairing
+from wall_in_one.library.model import is_absent
 
 MANIFEST_FILENAME: Final = "deployed-capture-adoption-v1.json"
 MANIFEST_VERSION: Final = 1
@@ -821,7 +822,35 @@ def recorded() -> Adoption | None:
     return None if raw is None else _parse_manifest(_json_object(raw, target), target)
 
 
-def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
+def _note_unreadable_proof(
+    authorities: Sequence[Authority],
+    error: BaseException,
+    on_unseen: Callable[[Path, str], None] | None,
+) -> None:
+    """Report only an actual failed look, not missing or changed authority.
+
+    `_same_public_file` wraps a failed lstat as a changed-proof error. Keep
+    that native cause too, while invalid metadata and generation mismatches
+    (including a `PathChangedError` without an errno) still simply revoke.
+    """
+    if on_unseen is None:
+        return
+    failure = error.__cause__ if isinstance(error, _ChangedAdoptionError) else error
+    if not isinstance(failure, OSError) or failure.errno is None or is_absent(failure):
+        return
+    for authority in authorities:
+        on_unseen(
+            authority.source_path,
+            f"its adopted still {authority.capture_path}: {file_io.public_text(str(error))}",
+        )
+
+
+def load(
+    *,
+    strict: bool = False,
+    path: Path | None = None,
+    on_unseen: Callable[[Path, str], None] | None = None,
+) -> Adoption | None:
     """Load the completed capture adoption, validating current generations.
 
     An absent manifest means this profile has no adopted basename captures.
@@ -833,6 +862,11 @@ def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
     Normal scans also receive separate, display-only ``internal_captures``
     evidence. An expired authority does not by itself make an unchanged
     generated capture a standalone wallpaper.
+
+    `on_unseen` names sources whose still proof could not be looked at, rather
+    than being known absent or changed. Authority is still revoked; a scan
+    keeps the uncertainty so a used, unresolved playlist cannot be left out
+    on the mistaken proof that its old still is gone.
     """
     target = path if path is not None else state_path()
     raw = _read_manifest(target)
@@ -857,6 +891,7 @@ def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
                             f"adopted capture binding for {authority.source_path} is no longer "
                             f"exact: {error}"
                         ) from error
+                    _note_unreadable_proof((authority,), error, on_unseen)
                     continue
                 exact.append(authority)
             directory.verify_public()
@@ -876,6 +911,7 @@ def load(*, strict: bool = False, path: Path | None = None) -> Adoption | None:
             raise AdoptionError(
                 f"capture adoption filesystem proof is no longer exact: {error}"
             ) from error
+        _note_unreadable_proof(adoption.authorities, error, on_unseen)
         return _with_internal_captures(adoption, ())
 
 

@@ -21,6 +21,7 @@ import json
 import math
 import os
 import re
+import stat
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -944,6 +945,30 @@ def linked_folder(root: Path) -> Path | None:
         return real if real.is_dir() else None
     except OSError:
         return None
+
+
+#: What a row says of a library folder that isn't there (an unmounted drive).
+ROOT_NOT_THERE: Final = "not there right now"
+
+
+def root_trouble(root: Path) -> str:
+    """Why a saved library folder that isn't a symbolic link shows nothing; empty if it's a folder.
+
+    ``ROOT_NOT_THERE`` for one that's absent (an unmounted drive); "not a
+    directory" for something else in its place; and, when the stat itself
+    fails (permissions, a dead mount), that it couldn't be looked at, with the
+    reason: `Path.is_dir` says False to that too, which would read as "not
+    there". A symbolic link is `linked_root_note`'s.
+    """
+    try:
+        mode = root.lstat().st_mode
+    except FileNotFoundError, NotADirectoryError:
+        return ROOT_NOT_THERE
+    except OSError as error:
+        return f"couldn't be looked at ({error.strerror or error})"
+    if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+        return ""
+    return "not a directory"
 
 
 def linked_root_note(root: Path) -> str:

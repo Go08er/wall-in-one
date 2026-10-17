@@ -431,6 +431,44 @@ def test_a_library_root_whose_stat_fails_is_not_nothing_to_play(
     assert code == (1 if verb == "--write-config" else 0)
 
 
+@pytest.mark.parametrize("verb", COMPILES)
+def test_a_video_whose_generated_still_cannot_be_looked_at_is_not_no_still_yet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    """Failed at 44fe644: the video read as having no still, Deep was left out and the good
+    ``runtime.toml`` replaced."""
+    from wall_in_one.library import pairing
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    item = _media(tmp_path)
+    root = item.path.parent
+    video = root / "clip.mp4"
+    video.write_bytes(b"\x00" * 16)
+    folder = pairing.still_directory(root)
+    folder.mkdir(parents=True)
+    (folder / (pairing.automatic_still_stem(video) + ".png")).write_bytes(b"\x89PNG\r\n\x1a\n")
+    store = playlists.Store.open()
+    deep = store.add(store.create("Deep").id, video)
+    schedules.Store.open().add(deep.id, rule_id="deep-rule")
+    config.update({"active_playlist": deep.id})
+    assert cli.main(["--write-config"]) == 0
+    good = paths.runtime_config_path().read_bytes()
+    assert deep.id.encode() in good
+    capsys.readouterr()
+
+    folder.parent.chmod(0o000)
+    try:
+        code = cli.main([verb])
+        said = capsys.readouterr()
+    finally:
+        folder.parent.chmod(0o700)
+
+    assert "error:" in said.err and str(video) in said.err, said.err
+    assert paths.runtime_config_path().read_bytes() == good
+    assert code == (1 if verb == "--write-config" else 0)
+
+
 # -- what the released version left on disk ----------------------------------------------------
 
 _RELEASED_SAVES_WHAT_CANNOT_PLAY = r"""

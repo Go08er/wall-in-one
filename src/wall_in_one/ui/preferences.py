@@ -209,10 +209,10 @@ class PreferencesPage(Adw.PreferencesPage):
                 # row, with the folder to add instead.
                 row.set_subtitle(f"{root} -- {linked}")
                 row.add_css_class("warning")
-            elif not root.is_dir():
+            elif trouble := config.root_trouble(root):
                 # Said plainly rather than dropped: a folder on a drive that is
                 # not mounted should come back when it is, not disappear.
-                row.set_subtitle(f"{root} -- not there right now")
+                row.set_subtitle(f"{root} -- {trouble}")
                 row.add_css_class("warning")
             remove = Gtk.Button(
                 icon_name="list-remove-symbolic", tooltip_text="Remove from Library"

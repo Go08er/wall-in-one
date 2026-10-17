@@ -299,7 +299,7 @@ def scan_content_directories(
     must not reinterpret them as Steam roots or silently add defaults.
     """
     found: dict[str, WorkshopItem] = {}
-    for content in directories:
+    for position, content in enumerate(directories):
         try:
             entries = sorted(content.iterdir())
         except FileNotFoundError, NotADirectoryError:
@@ -311,7 +311,9 @@ def scan_content_directories(
         for directory in entries:
             if len(found) >= MAX_ITEMS:
                 if on_unseen is not None:
-                    on_unseen(content, UnseenKind.LIMIT, f"stopped at {MAX_ITEMS} Workshop items")
+                    # This folder, and every one after it, which is never listed.
+                    for left in directories[position:]:
+                        on_unseen(left, UnseenKind.LIMIT, f"stopped at {MAX_ITEMS} Workshop items")
                 return tuple(found.values())
             if not _is_folder(directory, follow=False, on_unseen=on_unseen):
                 continue

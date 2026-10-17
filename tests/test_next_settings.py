@@ -621,3 +621,35 @@ def test_a_palette_that_couldnt_be_read_ends_the_drafts_wait(
     spin_until(lambda: drafts, what="the draft's answer")
     assert drafts == [None]
     assert backend.reports[-1] == "Mine couldn't be read: injected: the read failed"
+
+
+def test_a_folder_row_tells_not_there_from_could_not_look(tmp_path: Path) -> None:
+    """Failed before: ``Path.is_dir`` False for a stat that fails read as "not there right now"."""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root searches a folder with no permission bits")
+    mnt = tmp_path / "mnt"
+    drive = mnt / "drive"
+    drive.mkdir(parents=True)
+    plain = tmp_path / "file"
+    plain.write_bytes(b"x")
+    absent = tmp_path / "absent"
+    mnt.chmod(0o600)
+    try:
+        troubles = {
+            "absent": config.root_trouble(absent),
+            "file": config.root_trouble(plain),
+            "closed": config.root_trouble(drive),
+            "folder": config.root_trouble(tmp_path),
+        }
+        checked = real_settings._check_folders((absent, plain, drive))
+    finally:
+        mnt.chmod(0o700)
+
+    assert troubles["absent"] == config.ROOT_NOT_THERE
+    assert troubles["file"] == "not a directory"
+    assert troubles["closed"].startswith("couldn't be looked at (")
+    assert troubles["folder"] == ""
+    assert checked.missing == frozenset({absent})
+    assert dict(checked.linked) == {plain: "not a directory", drive: troubles["closed"]}

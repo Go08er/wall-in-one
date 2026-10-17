@@ -689,6 +689,24 @@ def resolve(
     *,
     adopted_still: Path | None = None,
 ) -> Pairing:
+    """`_resolve`, saying (when a scan is collecting, `pairing.recording_unseen`) that
+    ``item`` has no still not for want of one but because a place it looks in
+    could not be looked at: "no still yet" must not read as "nothing there"."""
+    with pairing.collecting_lookup_failures(item.path):
+        bundle = _resolve(item, roots, records, adopted_still=adopted_still)
+        failures = pairing.lookup_failures()
+    if bundle.still is None and failures:
+        pairing.note_unseen_still(item.path, failures[0])
+    return bundle
+
+
+def _resolve(
+    item: MediaItem,
+    roots: Sequence[Path] = (),
+    records: Mapping[str, Pairing] | None = None,
+    *,
+    adopted_still: Path | None = None,
+) -> Pairing:
     """The bundle to actually use for ``item``.
 
     A chosen still that is not on disk right now falls back to the default

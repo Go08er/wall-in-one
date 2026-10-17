@@ -706,12 +706,18 @@ def _scan(
     )
     if cancelled is not None and cancelled():
         raise ScanCancelledError
-    paired = pairings.apply(
-        items,
-        resolved_roots,
-        records,
-        adopted_stills=adopted_mapping,
-    )
+    stillless: list[tuple[Path, str]] = []
+    with pairing.recording_unseen(stillless):
+        paired = pairings.apply(
+            items,
+            resolved_roots,
+            records,
+            adopted_stills=adopted_mapping,
+        )
+    for video, why in stillless:
+        # No still for want of looking: the video's own path, so a playlist
+        # entry for it is "couldn't look", not "no still yet".
+        _not_looked(skipped, unseen, video, UnseenKind.UNREADABLE, f"its still: {why}")
     # Display-only provenance never enters adopted_mapping/adopted_stills:
     # those relationships can be consumed by destructive operations. Recheck
     # against the walked generation so a later user replacement stays visible.

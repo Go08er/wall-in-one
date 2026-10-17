@@ -22,6 +22,7 @@ so it is not a fallback so much as the common case.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -267,13 +268,84 @@ def is_excluded(path: Path, status: os.stat_result) -> bool:
     return exclusion is not None and exclusion.covers(path, status)
 
 
+#: Where an ordinary scan collects the videos it could not find a still for
+#: because a place could not be looked at: ``(video, why)``. None outside a
+#: scan, so nothing is collected and everything is as on disk.
+_UNSEEN_SINK: ContextVar[list[tuple[Path, str]] | None] = ContextVar(
+    "wall_in_one_unseen_stills", default=None
+)
+#: The look-ups of the one item being resolved that failed for a reason other
+#: than "not there"; only set while a sink is.
+_LOOKUP_FAILURES: ContextVar[list[str] | None] = ContextVar(
+    "wall_in_one_still_lookup_failures", default=None
+)
+
+
+@contextmanager
+def recording_unseen(sink: list[tuple[Path, str]]) -> Iterator[None]:
+    """Within this, `resolve_collecting` adds to ``sink`` each video left without a still
+    only because a place could not be looked at (a scan's `Unseen`). Context-local."""
+    token = _UNSEEN_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _UNSEEN_SINK.reset(token)
+
+
+@contextmanager
+def collecting_lookup_failures(video: Path) -> Iterator[None]:
+    """Within this, a still look-up that fails for another reason than "not there"
+    is noted; on leaving, if the caller says the item has no still, `unseen_if_stillless`
+    adds ``video`` to the sink. A no-op outside `recording_unseen`."""
+    if _UNSEEN_SINK.get() is None:
+        yield
+        return
+    token = _LOOKUP_FAILURES.set([])
+    try:
+        yield
+    finally:
+        _LOOKUP_FAILURES.reset(token)
+
+
+def lookup_failures() -> list[str]:
+    """The notes of the look-ups that failed so far in `collecting_lookup_failures`."""
+    failures = _LOOKUP_FAILURES.get()
+    return list(failures) if failures is not None else []
+
+
+def note_unseen_still(video: Path, why: str) -> None:
+    """Add ``video`` to the scan's sink, if one is collecting: it has no still, and not
+    for want of looking."""
+    sink = _UNSEEN_SINK.get()
+    if sink is not None:
+        sink.append((video, why))
+
+
+def _note_failed_lookup(path: Path, error: BaseException) -> None:
+    failures = _LOOKUP_FAILURES.get()
+    if failures is not None and getattr(error, "errno", None) not in (
+        None,
+        errno.ELOOP,
+        errno.ENOENT,
+        errno.ENOTDIR,
+    ):
+        failures.append(f"{path}: {getattr(error, 'strerror', None) or error}")
+
+
 def present(path: Path) -> bool:
-    """`Path.is_file`, as every convention here asks it, honoring a dry run's exclusions."""
-    if _EXCLUDED.get() is None:
-        return path.is_file()
+    """`Path.is_file`, as every convention here asks it, honoring a dry run's exclusions.
+
+    A stat that fails for another reason than "not there" still reads as
+    absent, but is noted when a scan is collecting (`collecting_lookup_failures`).
+    """
     try:
         status = path.stat()
-    except OSError, ValueError:
+    except FileNotFoundError, NotADirectoryError:
+        return False
+    except OSError as error:
+        _note_failed_lookup(path, error)
+        return False
+    except ValueError:
         return False
     return stat.S_ISREG(status.st_mode) and not is_excluded(path, status)
 
@@ -315,9 +387,10 @@ def _selected_still(video: Path, *, strict: bool) -> Path | None:
     sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
         raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
-    except OSError:
+    except OSError as error:
         if strict:
             raise
+        _note_failed_lookup(sidecar, error)
         return None
     if raw is None:
         return None

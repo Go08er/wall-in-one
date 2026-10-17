@@ -297,6 +297,43 @@ def test_a_library_root_whose_stat_fails_is_a_publication_problem_not_something_
     assert application.left_out_notice == ""
 
 
+def test_a_video_whose_generated_still_cannot_be_looked_at_is_a_publication_problem(
+    profiles: Any,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Failed at 44fe644: "no still yet", so the default was left out and the document replaced."""
+    from wall_in_one.library import pairing
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    profile: Profile = profiles()
+    application = profile.application
+    root = tmp_path / "wallpapers"
+    video = root / "clip.mp4"
+    video.write_bytes(b"media")
+    folder = pairing.still_directory(root)
+    folder.mkdir(parents=True)
+    (folder / (pairing.automatic_still_stem(video) + ".png")).write_bytes(b"media")
+    application.session.refresh(mutate_removals=False)
+    deep = _saved(profile, "Deep", [], used=True)
+    application.session.playlists.add(deep.id, video)
+    config.update({"active_playlist": deep.id})
+    document = _published(application)
+    assert document["default_playlist"] == deep.id
+    good = paths.runtime_config_path().read_bytes()
+
+    folder.parent.chmod(0o000)
+    try:
+        application.session.refresh(mutate_removals=False)
+        _published(application)
+    finally:
+        folder.parent.chmod(0o700)
+
+    problem = application.publication_problem
+    assert str(video) in problem and "nothing to play" not in problem, problem
+    assert paths.runtime_config_path().read_bytes() == good
+
+
 def test_a_rule_that_is_turned_off_leaves_no_standing_notice(
     profiles: Any,  # noqa: F811
 ) -> None:

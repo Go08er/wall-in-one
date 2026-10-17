@@ -246,9 +246,17 @@ class _FolderCheck:
 
 
 def _check_folders(roots: tuple[Path, ...]) -> _FolderCheck:
-    missing = frozenset(root for root in roots if not root.is_dir())
+    troubles = {root: config.root_trouble(root) for root in roots}
+    missing = frozenset(root for root, why in troubles.items() if why == config.ROOT_NOT_THERE)
     found = () if roots else scan.default_roots()
-    linked = tuple((root, note) for root in roots if (note := config.linked_root_note(root)))
+    # A link, or a folder that can't be looked at (or isn't one): said on its
+    # row in its own words, never as "not there right now".
+    linked = tuple(
+        (root, note)
+        for root in roots
+        if (note := config.linked_root_note(root))
+        or (note := troubles[root]) not in ("", config.ROOT_NOT_THERE)
+    )
     return _FolderCheck(
         roots, missing, str(found[0]) if found else "", scenes.is_available(), linked=linked
     )

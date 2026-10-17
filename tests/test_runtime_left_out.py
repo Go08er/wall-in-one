@@ -39,7 +39,7 @@ import pytest
 
 from tests.test_runtime_config import _session
 from wall_in_one import config, runtime_config
-from wall_in_one.library import displays, pairings, playlists, schedules
+from wall_in_one.library import displays, pairing, pairings, playlists, schedules
 from wall_in_one.library.model import Unseen, UnseenKind
 from wall_in_one.runtime_config import (
     DEFAULT_OWNER,
@@ -611,6 +611,105 @@ def test_a_root_whose_stat_fails_is_not_left_out_it_refuses(tmp_path: Path, use:
 
 
 # -- the Workshop scan says what it could not look into too -------------------------------------
+
+
+def _video_with_unlooked_still(tmp_path: Path, how: str) -> tuple[Path, Path]:
+    """A video in a scanned folder, and the thing that makes its still unlookable.
+
+    ``(video, closed)``: ``closed`` is what to chmod 0o000 (a generated still's
+    folder, or the sidecar naming one).
+    """
+    root = tmp_path / "vids"
+    root.mkdir()
+    video = root / "clip.mp4"
+    video.write_bytes(b"\x00" * 16)
+    if how == "automatic":
+        folder = pairing.still_directory(root)
+        folder.mkdir(parents=True)
+        (folder / (pairing.automatic_still_stem(video) + ".png")).write_bytes(b"\x89PNG\r\n\x1a\n")
+        return video, folder.parent
+    still = root / "chosen.png"
+    still.write_bytes(b"\x89PNG\r\n\x1a\n")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({pairing.SIDECAR_STILL_KEY: str(still)}), encoding="utf-8")
+    return video, sidecar
+
+
+@pytest.mark.parametrize("how", ("automatic", "sidecar"))
+def test_a_video_whose_still_cannot_be_looked_at_refuses_but_one_with_none_is_left_out(
+    tmp_path: Path, how: str
+) -> None:
+    """Failed at 44fe644: "no still yet", so Deep was left out and the document replaced."""
+    from wall_in_one.library import scan
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a file with no permission bits")
+    settings, session = _session(tmp_path)
+    video, closed = _video_with_unlooked_still(tmp_path, how)
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, video)
+    settings = replace(settings, active_playlist=deep.id)
+    if how == "sidecar":
+        (tmp_path / "vids" / "chosen.png").unlink()  # the sidecar names a still that isn't there
+    closed.chmod(0o000)
+    try:
+        session._library = scan.scan([tmp_path / "vids"])
+        with pytest.raises(runtime_config.RuntimeConfigError, match="could not look") as refused:
+            runtime_config.render(settings, session)
+    finally:
+        closed.chmod(0o700)
+    assert str(video) in str(refused.value)
+
+    # Looked at, and there is no still at all: left out, as before.
+    if how == "automatic":
+        for leftover in pairing.still_directory(tmp_path / "vids").iterdir():
+            leftover.unlink()
+    session._library = scan.scan([tmp_path / "vids"])
+    published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
+    assert any(one.reference == deep.id for one in published.left_out)
+    session.shutdown()
+
+
+def test_the_collector_does_not_outlive_the_scan(tmp_path: Path) -> None:
+    from wall_in_one.library import scan
+
+    _video_with_unlooked_still(tmp_path, "automatic")
+    scan.scan([tmp_path / "vids"])
+    assert pairing._UNSEEN_SINK.get() is None and pairing._LOOKUP_FAILURES.get() is None
+
+
+def test_a_workshop_cap_names_every_content_folder_it_never_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one.library import scan, workshop
+
+    first = tmp_path / "a" / "content"
+    second = tmp_path / "b" / "content"
+    for folder, names in ((first, ("1", "2")), (second, ("3",))):
+        for name in names:
+            (folder / name).mkdir(parents=True)
+            (folder / name / "project.json").write_text(
+                '{"type": "video", "file": "v.mp4"}', encoding="utf-8"
+            )
+            (folder / name / "v.mp4").write_bytes(b"\x00" * 16)
+    monkeypatch.setattr(workshop, "MAX_ITEMS", 1)
+    settings, session = _session(tmp_path)
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, second / "3" / "v.mp4")
+    settings = replace(settings, active_playlist=deep.id)
+    session._library = scan.scan(
+        [tmp_path / "library"],
+        include_workshop=True,
+        workshop_content_directories=(first, second),
+    )
+
+    assert {place.path for place in session.library.unseen if place.kind is UnseenKind.LIMIT} == {
+        first,
+        second,
+    }
+    with pytest.raises(runtime_config.RuntimeConfigError, match="could not look"):
+        runtime_config.render(settings, session)
+    session.shutdown()
 
 
 def _steam(tmp_path: Path) -> tuple[Path, Path, Path]:

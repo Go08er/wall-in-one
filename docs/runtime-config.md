@@ -82,10 +82,16 @@ unseen. A playlists, schedules, displays, pairings, favourites or pending
 removals file that can't be read, is damaged or was saved by a newer version
 still refuses the compile, naming the file, and the last document stays. So
 does a playlist with nothing to play that the default, a rule or a display
-names, when the library scan could not look into a folder its files may be
-in (it is unreadable, or past the scan's limits): "couldn't look" is never
-"nothing there". The refusal names the folder, and the last document stays
-until the folder can be read or the reference is removed. A rule that is
+names, when the library scan **could not look into** a folder its files may
+be in: a listing or stat of the folder (or one above it) failed, or a scan
+limit stopped it (65536 entries examined, 4096 wallpapers, 8 levels deep).
+"Couldn't look" is never "nothing there". The refusal names the folder, and
+the last document stays until the folder can be read (or, past a limit, the
+library made smaller) or the reference is removed. A library folder that is
+absent, not a folder, or a symbolic link (an unmounted drive, or one removed
+for good) was *looked at*: nothing usable is there, so such a playlist is left
+out and said like any other that can't play, and the rest is published until
+the drive comes back. A rule that is
 turned off and names a playlist that can't be used is not written, and is
 neither said nor a reason to refuse. Everything else the
 compiler checks still refuses too: the size and count limits of the wire,

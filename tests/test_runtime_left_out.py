@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tomllib
 from collections.abc import Callable
@@ -561,7 +562,8 @@ def test_a_real_scan_that_hit_a_limit_refuses_and_an_absent_root_does_not(
         runtime_config.render(settings, session)
     assert "make the library smaller" in str(refused.value)
 
-    session._library = scan.scan([tmp_path / "absent"])
+    shutil.rmtree(library)  # the drive is unmounted
+    session._library = scan.scan([library])
     published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
     assert LeftOut(DEFAULT_OWNER, "", deep.id, "Deep", NOTHING_TO_PLAY) in published.left_out
     session.shutdown()

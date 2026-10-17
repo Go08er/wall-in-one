@@ -47,7 +47,15 @@ Three properties of the list are worth knowing:
   every wallpaper in it into the rotation twice.
 - **A root that is not there right now is kept, not removed.** An unmounted
   drive shows in Settings as `<path> · not there right now`, with a warning
-  icon, and comes back when the drive does.
+  icon, and comes back when the drive does. While it is away, a playlist whose
+  only files are in it has nothing to play: where the default, a schedule rule
+  or a display names it, that reference is left out and said (the default
+  plays "All media"), and everything else is still published. The same holds
+  for a library folder that is not a folder or is a symbolic link. It is the
+  scan having *looked* and found nothing usable there; a folder the scan
+  *could not look into* (a listing or stat failed, or a scan limit stopped it)
+  is different, and a playlist that depends on it stops the build instead
+  (see [the runtime document](runtime-config.md)).
 - **A folder that playlists need stays.** Removing a folder, or turning off
   Wallpaper Engine scanning, takes its wallpapers out of the library. It is
   refused when that would leave a playlist something uses with nothing to

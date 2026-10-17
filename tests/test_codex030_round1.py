@@ -17,6 +17,7 @@ import pytest
 
 from tests.test_next_schedule_mapping import Owner
 from tests.test_next_state import FakeApplication, _adapter, _library, _session
+from tests.whole_document import builds_whole
 from wall_in_one import runtime_config
 from wall_in_one.library import favourites, playlists, schedules
 from wall_in_one.library.model import Kind, MediaItem
@@ -105,7 +106,7 @@ def test_p3_an_unresolved_video_does_not_count_as_playable_anywhere(
     session.playlists.add(made.id, still.path, entry_id="e-still")
     session.playlists.add(made.id, video.path, entry_id="e-video")
     session.schedules.add(made.id)
-    runtime_config.render(session.settings, session)  # the still compiles: fine
+    assert builds_whole(session.settings, session)  # the still compiles: fine
     _state, editing, scheduling = _parts(backend)
 
     # Removing the still would leave the rule's playlist with nothing that plays.
@@ -114,7 +115,7 @@ def test_p3_an_unresolved_video_does_not_count_as_playable_anywhere(
     kept = playlists.Store.open().get(made.id)
     assert kept is not None and [entry.id for entry in kept.entries] == ["e-still", "e-video"]
     assert "would have nothing left to play" in backend.reports[-1]
-    runtime_config.render(session.settings, session)  # still buildable
+    assert builds_whole(session.settings, session)  # still buildable
 
     # Every view gives the compiler's answer: the video doesn't play.
     detail = editing.detail(made.id)

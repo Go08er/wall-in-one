@@ -39,7 +39,8 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.test_dry_run import _file  # noqa: E402
 from tests.test_ui_runtime import FakeWindow, _attach, _close  # noqa: E402
-from wall_in_one import config, runtime_config  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
+from wall_in_one import config  # noqa: E402
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import playlists, scan  # noqa: E402
@@ -171,7 +172,7 @@ def current_again(service: Service, mine: playlists.Playlist, *, dusk: bool = Fa
     assert service.holds_dusk() is dusk, "the library the new sources make"
     answer = ctl(application, "playlist-add", f"{mine.id} {service.noon}")
     assert answer.ok, answer
-    runtime_config.render(application.settings, application.session)
+    assert builds_whole(application.settings, application.session)
 
 
 def test_codexs_sequence_a_dropped_folder_whose_rescan_failed_is_not_current(

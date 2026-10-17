@@ -47,7 +47,8 @@ from tests.test_ui_next_window import (  # noqa: E402
     settled,
 )
 from tests.test_ui_runtime import FakeWindow, _application, _attach, _close  # noqa: E402
-from wall_in_one import config, runtime_config  # noqa: E402
+from tests.whole_document import builds_whole  # noqa: E402
+from wall_in_one import config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import playlists, schedules  # noqa: E402
@@ -111,7 +112,7 @@ def test_p1_a_default_queued_behind_the_removal_that_empties_it_is_refused(
         assert config.load_strict().active_playlist == ""
         assert application.settings.active_playlist == ""
         assert any("nothing changed" in text and "nothing to play" in text for text in said)
-        runtime_config.render(application.settings, application.session)  # still buildable
+        assert builds_whole(application.settings, application.session)  # still buildable
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
@@ -156,7 +157,7 @@ def test_p2_a_removal_queued_behind_the_rule_that_uses_its_playlist_is_refused(
         assert kept is not None and [e.id for e in kept.entries] == [entry]
         removed = next(text for text in said if "was not removed" in text)
         assert "“Lone”" in removed and "nothing left to play" in removed
-        runtime_config.render(application.settings, application.session)  # still buildable
+        assert builds_whole(application.settings, application.session)  # still buildable
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
@@ -207,7 +208,7 @@ def test_p1_the_application_refuses_a_default_with_nothing_to_play_from_any_wind
         assert "can\u2019t be used" in errors[0] and "nothing to play" in errors[0]
         assert config.load_strict().active_playlist == ""
         assert application.settings.active_playlist == ""
-        runtime_config.render(application.settings, session)  # still buildable
+        assert builds_whole(application.settings, session)  # still buildable
 
         session.playlists.add(lone.id, dawn.path)
         application.update_settings_async(
@@ -241,6 +242,6 @@ def test_p2_the_application_refuses_a_removal_that_empties_a_used_playlist_from_
         kept = playlists.Store.open().get(lone.id)
         assert kept is not None and [entry.id for entry in kept.entries] == ["dawn-entry"]
         assert not application._removal_active
-        runtime_config.render(application.settings, session)  # still buildable
+        assert builds_whole(application.settings, session)  # still buildable
     finally:
         _close(application)

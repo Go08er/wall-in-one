@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.whole_document import builds_whole
 from wall_in_one import config, dry_run, runtime_config
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
@@ -75,7 +76,7 @@ def test_remove_guard_ignores_representative_dependency(tmp_path: Path, session:
     found = session.library.find(video)
     assert found is not None and found.paired_still == still
     _scheduled(session, "Evening", [video])
-    runtime_config.render(session.settings, session)  # buildable now
+    assert builds_whole(session.settings, session)  # buildable now
 
     assert _removing(session, still) == (
         "\u201cEvening\u201d (used by 1 schedule rule) would have nothing left to play: "

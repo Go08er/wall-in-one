@@ -522,16 +522,33 @@ files and start child processes, and from a developer shell they would find
 your real profile, session bus and desktop. `tools/isolated.sh` gives the
 command a throwaway home and XDG directories, removed afterwards, dead D-Bus
 addresses, no portals and none of your session's display addresses, and runs
-it on a private Xvfb server with the cairo renderer, the way the `gui-tests`
-check does. It also works outside `nix develop`.
+it on a headless Wayland compositor of its own with the cairo renderer, the
+way the `gui-tests` check does. It also works outside `nix develop`.
+
+That compositor comes from `tools/headless-wayland.sh`: Weston's headless
+backend with the pixman renderer (no GPU), one 1600×1200 output, and its
+desktop shell with no panel, lock screen, animations or idle blanking, so a
+window gets the size it asks for. Its socket is in a private directory of its
+own, and it stops, with its directory, when the command ends. Wall-in-One
+supports only Wayland, and nothing in testing uses X11: GTK is told
+`GDK_BACKEND=wayland`, and no test gets a `DISPLAY`.
+
+GUI tests reach that compositor and nothing else. `tests/conftest.py` drops
+your session's `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `NIRI_SOCKET`, and takes
+the socket the script names in `WIO_TEST_WAYLAND_SOCKET` only after checking
+that it is not your desktop's: not in `/run/user/<uid>` or the runtime
+directory the run started with, not one of the sockets there under another
+name, and served by a headless Weston. A GUI test without such a compositor
+fails, naming the reason; it is never skipped.
 
 `tests/conftest.py` sandboxes the test process too, and refuses and reports
 any write to your real Wall-in-One and Noctalia files. That guard is a
 backstop, not a substitute: it cannot see what a child process, native code
 or another program does.
 
-Without `GSK_RENDERER=cairo`, GTK picks Vulkan when it finds a GPU, and under
-Xvfb that renders slowly enough to change the timing the tests see.
+Without `GSK_RENDERER=cairo`, GTK picks Vulkan or GL when it finds a GPU, and
+the tests' timing would then depend on the machine: the gate's sandbox has no
+GPU, and software rendering is slow enough to change what the tests see.
 
 If your login session exports `LD_LIBRARY_PATH`, `nix develop` inherits it. It
 can point the flake's ffmpeg at a library built against a newer glibc. ffmpeg
@@ -539,11 +556,11 @@ then fails with an error such as `GLIBC_2.43 not found`, and about a dozen GUI
 tests fail with it. `tools/isolated.sh` runs the command without it.
 
 `nix flake check` is the complete local gate: it runs the packaged Python and
-Rust tests, all display-backed GTK tests under an isolated Xvfb server, ruff,
-strict mypy, the desktop/unit packaging check, and (on x86_64-linux) the niri +
-Noctalia desktop VM. The `desktop` check validates the installed launcher and
-systemd unit and rasterises the icon, since none can be seen from the Python
-suite.
+Rust tests, all display-backed GTK tests on an isolated headless Wayland
+compositor, ruff, strict mypy, the desktop/unit packaging check, and (on
+x86_64-linux) the niri + Noctalia desktop VM. The `desktop` check validates
+the installed launcher and systemd unit and rasterises the icon, since none
+can be seen from the Python suite.
 
 The [GitHub Actions workflow](.github/workflows/ci.yml) evaluates the complete
 flake and builds the Python, Rust, lint, type and packaging checks on every
@@ -555,9 +572,9 @@ read-only and cancels obsolete runs for the same ref.
 
 Tests that need a display are marked `gui`; tests that need a live Noctalia are
 marked `noctalia`. The packaged build remains display-independent and excludes
-both. The separate `gui-tests` flake check supplies Xvfb, fails if a GUI test is
-skipped, and is part of the fast GitHub Actions job; it does not contact a live
-desktop or Noctalia session.
+both. The separate `gui-tests` flake check supplies the headless compositor,
+fails if a GUI test is skipped, and is part of the fast GitHub Actions job; it
+does not contact a live desktop or Noctalia session.
 
 Anything touching Noctalia's settings file is tested against a sandboxed set of
 XDG directories -- never the real one.

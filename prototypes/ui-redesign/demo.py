@@ -5,10 +5,10 @@ Run from the repository root:
 
     nix develop --command python prototypes/ui-redesign/demo.py
 
-Screenshots (headless; used to review the design):
+Screenshots (headless, on a Wayland compositor of their own; used to review the
+design): ``prototypes/ui-redesign/screenshots.sh``, or
 
-    nix develop --command env GSK_RENDERER=cairo GDK_BACKEND=x11 \\
-        xvfb-run --auto-servernum --server-args='-screen 0 1440x960x24' \\
+    nix develop --command env GSK_RENDERER=cairo tools/headless-wayland.sh \\
         python prototypes/ui-redesign/demo.py --screenshot OUT library schedule ...
 
 A scene is ``[flags@]navkey[+demo]``. Flags (comma separated): light, battery,
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -34,7 +33,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib
+gi.require_version("Graphene", "1.0")
+from gi.repository import Adw, Gio, GLib, Graphene, Gtk
 from wio_demo import noctalia_live, thumbs, ui
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
@@ -143,11 +143,16 @@ def run_screenshots(app: Adw.Application, window: MainWindow, outdir: Path, scen
         width, height = current.get_width(), current.get_height()
         name = "".join(c if c.isalnum() or c in "-_" else "_" for c in scene)
         target = outdir / f"{name}.png"
-        subprocess.run(
-            ["import", "-window", "root", "-crop", f"{width}x{height}+0+0", "+repage", str(target)],
-            check=False,
-        )
-        print(f"saved {target}")
+        # GTK renders the window itself: no display server to grab pixels from.
+        snapshot = Gtk.Snapshot()
+        Gtk.WidgetPaintable.new(current).snapshot(snapshot, width, height)
+        node, renderer = snapshot.to_node(), current.get_renderer()
+        if node is None or renderer is None:
+            print(f"scene {scene!r}: nothing to render", file=sys.stderr)
+        else:
+            area = Graphene.Rect().init(0, 0, width, height)
+            renderer.render_texture(node, area).save_to_png(str(target))
+            print(f"saved {target}")
         GLib.timeout_add(100, next_scene)
         return False
 

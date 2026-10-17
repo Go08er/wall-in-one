@@ -60,12 +60,13 @@ TOUR=(
 if [ "$#" -gt 0 ]; then TOUR=("$@"); fi
 
 cd "$REPO"
-# Icons and fonts for a headless X server; the real desktop already has them.
+# Icons for the headless compositor's run; the real desktop already has them.
 ICONS="$(nix build --inputs-from . nixpkgs#adwaita-icon-theme --no-link --print-out-paths)/share"
-nix develop --command env -u DBUS_SESSION_BUS_ADDRESS -u WAYLAND_DISPLAY \
+nix develop --command env -u DBUS_SESSION_BUS_ADDRESS -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+  -u NIRI_SOCKET -u DISPLAY -u LD_LIBRARY_PATH \
   HOME="$ISO/home" XDG_CONFIG_HOME="$ISO/config" XDG_STATE_HOME="$ISO/state" \
   XDG_CACHE_HOME="$ISO/cache" XDG_DATA_HOME="$ISO/data" XDG_RUNTIME_DIR="$ISO/run" \
   XDG_DATA_DIRS="$ICONS:${XDG_DATA_DIRS:-/run/current-system/sw/share}" \
-  GSK_RENDERER=cairo GDK_BACKEND=x11 GSETTINGS_BACKEND=memory PYTHONDONTWRITEBYTECODE=1 \
-  xvfb-run --auto-servernum --server-args='-screen 0 1440x960x24 -nolisten tcp' \
+  GSK_RENDERER=cairo GDK_BACKEND=wayland GSETTINGS_BACKEND=memory PYTHONDONTWRITEBYTECODE=1 \
+  "$REPO/tools/headless-wayland.sh" \
   python prototypes/ui-redesign/demo.py --screenshot "$OUT" "${TOUR[@]}"

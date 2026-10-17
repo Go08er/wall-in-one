@@ -20,11 +20,10 @@ cd /home/goober/Documents/wall-in-one
 nix develop --command python prototypes/ui-redesign/demo.py
 ```
 
-Headless screenshots (isolated XDG dirs, Xvfb, cairo renderer):
+Headless screenshots (isolated XDG dirs, a headless Wayland compositor of their own, cairo renderer):
 
 ```bash
-SP=/tmp/claude-1000/-home-goober-Documents-goober-noctalia-plugins-v5/2335eb06-27d6-437f-b751-eb02b77501da/scratchpad/proto
-$SP/shoot.sh OUTDIR scene [scene ...]
+prototypes/ui-redesign/screenshots.sh [scene ...]   # into prototypes/ui-redesign/screenshots
 ```
 
 A scene is `[flags@]navkey[+demo]`:

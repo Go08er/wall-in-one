@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Offline production-widget RSS probe for the Browse result surface.
 
-Run under a disposable display; no provider request or thumbnail download is
-made::
+Run it through ``tools/isolated.sh``, which gives it a throwaway profile, no
+session bus and a headless Wayland compositor of its own, never your desktop;
+no provider request or thumbnail download is made::
 
-    nix shell nixpkgs#xvfb-run --command \
-      xvfb-run -a nix develop --command python benchmarks/browse_rss.py
+    tools/isolated.sh python benchmarks/browse_rss.py
 
 The useful contracts are printed alongside RSS: 600 retained candidates,
 never more than ``MAX_MATERIALIZED_RESULTS`` live cards, and result 600 reached.

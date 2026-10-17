@@ -6,10 +6,8 @@ Run from the repository root:
     nix develop --command python prototypes/ui-redesign/demo.py
 
 Screenshots (headless, on a Wayland compositor of their own; used to review the
-design): ``prototypes/ui-redesign/screenshots.sh``, or
-
-    nix develop --command env GSK_RENDERER=cairo tools/headless-wayland.sh \\
-        python prototypes/ui-redesign/demo.py --screenshot OUT library schedule ...
+design): ``prototypes/ui-redesign/screenshots.sh`` (a throwaway profile and a
+headless compositor; do not run ``--screenshot`` any other way).
 
 A scene is ``[flags@]navkey[+demo]``. Flags (comma separated): light, battery,
 service-off, welcome, narrow, mirrored. ``navkey`` is a sidebar key such as

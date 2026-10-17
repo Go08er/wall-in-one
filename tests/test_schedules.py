@@ -845,6 +845,28 @@ def test_a_rule_describes_itself_in_the_words_it_was_written_in(store: Store) ->
     assert store.add("Always").describe() == "always"
 
 
+def test_a_rule_is_called_by_its_name_else_its_playlist() -> None:
+    names = {"x": "Evening"}
+    assert schedules.rule_label(Rule(id="a", playlist="x", name="Frog day"), names) == "Frog day"
+    assert schedules.rule_label(Rule(id="a", playlist="x"), names) == "Evening"
+    assert schedules.rule_label(Rule(id="a", playlist="gone"), names) == "gone"
+
+
+def test_a_listing_shows_each_rules_name_last(store: Store) -> None:
+    named = store.add("Weekdays", name="Work days")
+    plain = store.add("Festive", months=[12])
+    message = schedules.describe(store.rules, "Everyday", CHRISTMAS)
+    assert "# fields: rule, playlist, when, enabled, in-force, name" in message
+    rows = {
+        row[0]: row
+        for row in (line.split("\t") for line in message.splitlines())
+        if not row[0].startswith("#")
+    }
+    assert rows[named.id][5] == "Work days"
+    assert rows[plain.id][5] == "-"
+    assert all(len(row) == 6 for row in rows.values())
+
+
 # -- rule names: format version 3, which every save writes ---------------------------
 
 #: A version-2 file exactly as 0.1.4 and 0.2.x wrote it: read, then rewritten as version 3.

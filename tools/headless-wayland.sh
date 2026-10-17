@@ -117,7 +117,7 @@ socket="$dir/wayland-0"
 # A Unix socket's path holds at most 107 bytes; Weston would fail to bind a
 # longer one and the wait below would only see a socket that never appears.
 if ((${#socket} > 107)); then
-  echo "headless-wayland: $socket is too long for a Unix socket; set WIO_WAYLAND_PARENT (or TMPDIR) to a shorter directory" >&2
+  echo "headless-wayland: $socket is too long for a Unix socket; use a shorter TMPDIR (or WIO_WAYLAND_PARENT, when you run this script yourself; tools/isolated.sh sets it)" >&2
   exit 1
 fi
 

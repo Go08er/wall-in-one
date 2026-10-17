@@ -222,6 +222,7 @@ print(json.dumps({
     "display": display.__gtype__.name if display is not None else None,
     "peers": _peers(),
     "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY"),
+    "WIO_TEST_WAYLAND_SOCKET": os.environ.get("WIO_TEST_WAYLAND_SOCKET"),
     "DISPLAY": os.environ.get("DISPLAY"),
 }))
 """
@@ -283,6 +284,25 @@ def test_an_inherited_live_wayland_display_is_not_what_gtk_uses(
     assert isinstance(peers, list)
     assert conftest.TEST_WAYLAND_SOCKET in peers and str(desktop.path) not in peers, peers
     assert desktop.total == 0, "the desktop's compositor was reached"
+
+
+def test_a_socket_reached_through_a_symbolic_link_is_taken_as_its_resolved_path(
+    stand_in_desktop: tuple[dict[str, str], StandInDesktop], tmp_path: Path
+) -> None:
+    """A TMPDIR that is a link: both names then hold the resolved path, not the spelling given."""
+    environment, desktop = stand_in_desktop
+    assert conftest.TEST_WAYLAND_SOCKET is not None
+    real = Path(conftest.TEST_WAYLAND_SOCKET)
+    link = tmp_path / "link"
+    link.symlink_to(real.parent)
+    environment[conftest.TEST_WAYLAND_ENV] = str(link / real.name)
+
+    report = _child(environment)
+
+    assert report["accepted"] == str(real), report
+    assert report["WAYLAND_DISPLAY"] == str(real)
+    assert report[conftest.TEST_WAYLAND_ENV] == str(real)
+    assert desktop.total == 0
 
 
 @pytest.mark.parametrize("pointed_at", ["the desktop's socket", "unset"])

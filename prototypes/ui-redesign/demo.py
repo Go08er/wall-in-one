@@ -91,6 +91,8 @@ def apply_scene(window: MainWindow, scene: str) -> None:
     navkey, _, demo = rest.partition("+")
     if navkey:
         window.navigate(navkey)
+        # The previous page's open menu stays mapped during the crossfade.
+        ui.finish_page_change(window)
         # Always call demo(): pages reset themselves first, so plain scenes don't
         # inherit state left behind by an earlier "+demo" scene.
         window.pages[navkey.partition(":")[0]].demo(demo)

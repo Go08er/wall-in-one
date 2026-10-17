@@ -344,7 +344,10 @@ def _enter_session_sandbox() -> tuple[Path, str | None, str]:
     if wayland is None:
         os.environ.pop(TEST_WAYLAND_ENV, None)
     else:
+        # Both names hold the resolved path, so a second import judges the same
+        # socket the first one took (and children see one spelling of it).
         os.environ["WAYLAND_DISPLAY"] = wayland
+        os.environ[TEST_WAYLAND_ENV] = wayland
     runtime = root / SESSION_LAYOUT["XDG_RUNTIME_DIR"]
     os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime / DEAD_SESSION_BUS}"
     os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = f"unix:path={runtime / DEAD_SYSTEM_BUS}"

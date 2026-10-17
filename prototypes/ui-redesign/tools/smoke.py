@@ -521,15 +521,12 @@ def window_actions(state, window) -> None:
 def finish_page_change(window) -> None:
     """Let the shell's page crossfade end before the new page's scene runs.
 
-    The old page stays mapped, with any menu it has open, for the 120 ms of the
-    crossfade, and steps are only 60 ms apart. Wayland allows a new menu only
-    on top of the last one, so a scene that opened its menu inside that window
-    made GTK refuse it ("Tried to map a grabbing popup with a non-top most
-    parent"). A person's next click comes after the crossfade; this waits for
-    it, boundedly. A menu left open after the page has gone would still show
-    here: it stays open and the next scene's menu then warns.
+    Steps are only 60 ms apart and the crossfade takes 120 ms (see
+    ``ui.finish_page_change``). A menu left open after the page has gone would
+    still show here: it stays open and the next scene's menu then warns.
+    Still running after the wait is a failure.
     """
-    settle(lambda: not window.stack.get_transition_running(), 5.0)
+    assert ui.finish_page_change(window), "the page crossfade did not end within 5 s"
 
 
 def check_screenshot_draws_popovers(window) -> None:

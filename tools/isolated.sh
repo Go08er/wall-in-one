@@ -10,9 +10,11 @@
 # unset, GLib would look for a bus of its own); no portals; none of your
 # session's Wayland, niri or X11 display addresses; no LD_LIBRARY_PATH (see the
 # README); and a headless Wayland compositor of its own
-# (tools/headless-wayland.sh, whose directory is inside the throwaway root, so
-# that even a KILL leaves nothing behind) with the cairo renderer, as the gui-tests check
-# uses. Nothing here uses X11.
+# (tools/headless-wayland.sh) with the cairo renderer, as the gui-tests check
+# uses. The compositor's directory is inside the throwaway root, so a KILL to
+# that script, or this script's own KILL after the grace period, leaves nothing
+# behind; a KILL to this script itself still leaves the root.
+# Nothing here uses X11.
 #
 # tests/conftest.py sandboxes the test process as well, and refuses and
 # reports writes to your real Wall-in-One and Noctalia files, but that is a

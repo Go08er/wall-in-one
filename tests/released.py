@@ -92,6 +92,15 @@ def released_source(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     yield materialise(tmp_path_factory.mktemp(f"released-{VERSION}"))
 
 
+def _child(
+    source: Path, script: str, arguments: tuple[str, ...]
+) -> tuple[list[str], dict[str, str]]:
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(source)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return [sys.executable, "-c", _PREAMBLE + script, str(source), *arguments], environment
+
+
 def run(
     source: Path, script: str, *arguments: str, timeout: float = 60.0
 ) -> subprocess.CompletedProcess[str]:
@@ -101,15 +110,31 @@ def run(
     directories), with ``PYTHONPATH`` replaced by ``source``. ``arguments``
     arrive as ``sys.argv[1:]``.
     """
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(source)
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    command, environment = _child(source, script, arguments)
     return subprocess.run(
-        [sys.executable, "-c", _PREAMBLE + script, str(source), *arguments],
+        command,
         cwd=source,
         env=environment,
         check=False,
         capture_output=True,
         text=True,
         timeout=timeout,
+    )
+
+
+def start(source: Path, script: str, *arguments: str) -> subprocess.Popen[str]:
+    """Like `run`, but the child keeps running: its stdin and stdout are pipes.
+
+    For a test that needs the released code to be in the middle of something
+    (holding a lease) while this checkout acts. The caller ends it.
+    """
+    command, environment = _child(source, script, arguments)
+    return subprocess.Popen(
+        command,
+        cwd=source,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )

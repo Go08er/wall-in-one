@@ -1,6 +1,7 @@
 # The upgrade scenario, run by the NixOS test driver: the shipped v0.1.4 runs
 # on the golden profile, this build is installed over it, starts, idles and
-# then uses what bumps a store. Updates are one-way: nothing here goes back.
+# then uses a per-playlist interval, a rule name and the display opt-in, and
+# restarts on that profile. Updates are one-way: nothing here goes back.
 #
 # upgrade-vm-test.nix prepends the constants it uses (OLD, NEW, HOME,
 # RUNTIME_DIR, PROFILE, DRIVER_LOG, NOCTALIA_PROBE, SUPPORT, GUEST_PYTHON, PACKAGE_PYTHON,
@@ -16,6 +17,7 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 # The harness and the guest tool live in the support store path, outside the
@@ -587,6 +589,37 @@ with subtest("c: v0.2.0 uses a per-playlist interval, a rule name and the displa
     )
     expect("c: runtime.toml keeps its shape", lambda: unchanged(c_start, c_done, "runtime.toml"))
     assert schema(c_done) <= 5, schema(c_done)
+
+with subtest("c2: this build's service restarts on the profile c left"):
+    # The upgrade direction on a profile with bumped stores and an overrides
+    # file: the packaged service starts again, loads the overrides, applies a
+    # wallpaper and syncs health, and the start writes only the first-start
+    # whitelist. Nothing c wrote is lost, directly: the stores and the
+    # overrides are byte for byte what c left.
+    c2_start = snapshot()
+    since, mark = len(log_lines()), cursor()
+    restart()
+    new_pid = check_running(NEW)
+    restarted = wait_status(
+        NEW,
+        lambda value: (
+            value["runtime_executable"] == f"{NEW}/bin/wall-in-one-service"
+            and value.get("loaded_overrides_sha256") == sidecar_sha
+            and value.get("cycle_interval_seconds") == INTERVAL
+        ),
+    )
+    observe("c2: status after the restart", restarted)
+    observe("c2: applied", wait_applied(new_pid, since))
+    wait_health_sync(NEW)
+    c2_done = snapshot()
+    observe("c2: service journal", journal("wall-in-one.service", mark))
+    c2_writes = writes("c2: restart and idle", c2_start, c2_done)
+    expect(
+        "c2: the start writes only the first-start whitelist",
+        lambda: harness.check_changes(c2_writes, first_start()),
+    )
+    for kept in (*STORES, "runtime-overrides.toml"):
+        expect(f"c2: {kept} is as c left it", partial(unchanged, c_done, c2_done, kept))
 
 with subtest("the session stayed healthy"):
     machine.fail("coredumpctl --json=short | grep -E 'wall-in-one|niri|noctalia'")

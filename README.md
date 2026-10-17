@@ -5,9 +5,12 @@
 > completed a long-running soak or physical multi-monitor validation. Back up
 > your wallpaper library and settings before trying it. Supported upgrade paths
 > are described in the [migration guide](docs/migrating.md); other early formats
-> may not migrate automatically.
+> may not migrate automatically. Updates are one-way: an older version can't be
+> installed over a profile a newer one has used (see the
+> [update guide](docs/updating.md#updates-are-one-way)).
 
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.
+X11 sessions are not supported.
 
 It manages stills and video wallpapers, keeps its own colours in sync with
 [Noctalia](https://github.com/noctalia-dev/noctalia)'s active palette, and

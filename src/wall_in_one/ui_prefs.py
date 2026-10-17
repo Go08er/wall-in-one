@@ -20,9 +20,7 @@ The contract every build keeps:
 * A missing file means defaults. An unreadable or malformed file also means
   defaults, but it is left alone: saving refuses until somebody fixes or
   removes it, so its bytes are never lost.
-* The file is TOML 1.0, written atomically with mode 0644. Later versions must
-  keep writing TOML 1.0 so an older build can still parse the file and see
-  that its version is newer.
+* The file is TOML 1.0, written atomically with mode 0644.
 * Any new field, or new value for an existing field, bumps ``version``.
   ``tidy_offer_dismissed`` joined version 1 before any release shipped
   ui.toml (0.2.0 is the first), so no build knows a version 1 without it.

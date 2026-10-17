@@ -90,11 +90,9 @@ fails where it does not. If the app ever wants to be started by an action
 invocation rather than by its command line, the service file and the key go in
 together.
 
-**`StartupWMClass`.** That key exists to match X11's `WM_CLASS`, which GTK
-derives from the program name rather than from the application id -- so under
-XWayland it would have to read `wall-in-one`, and under Wayland it is not
-consulted at all. The filename already does the job for every case that matters
-here.
+**`StartupWMClass`.** That key exists to match X11's `WM_CLASS`. Wall-in-One
+runs only on Wayland, where it is not consulted: the filename already does the
+job. X11 sessions are not supported.
 
 ## Outside Nix
 

@@ -131,7 +131,8 @@ def _peers() -> list[str]:
 def test_gtk_draws_on_the_runs_own_compositor_and_nothing_else() -> None:
     display = Gdk.Display.get_default()
     assert display is not None
-    assert display.__gtype__.name == "GdkWaylandDisplay"
+    # GdkWayland's class, by its GType's name unless that typelib is loaded.
+    assert type(display).__name__ in {"GdkWaylandDisplay", "WaylandDisplay"}, type(display)
     peers = _peers()
     assert conftest.TEST_WAYLAND_SOCKET in peers, peers
     live = [

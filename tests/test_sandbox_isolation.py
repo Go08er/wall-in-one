@@ -499,22 +499,32 @@ def _hard_link(source: Path, target: Path) -> str:
     return str(target)
 
 
+def _symbolic_link(source: Path, target: Path) -> str:
+    target.symlink_to(source)
+    return str(target)
+
+
+def _regular_file(path: Path) -> str:
+    path.write_text("", encoding="utf-8")
+    return str(path)
+
+
+def _writable(directory: Path) -> Path:
+    directory.chmod(0o777)
+    return directory
+
+
 #: A candidate made in the stand-in desktop, and the reason it is refused.
 REFUSED: Final[dict[str, tuple[Callable[[dict[str, Path]], str | None], str]]] = {
     "unset": (lambda _desktop: None, "is not set"),
     "a bare name": (lambda _desktop: "wayland-0", "is not an absolute path"),
     "missing": (lambda places: str(places["elsewhere"] / "gone"), "is not there"),
     "a regular file": (
-        lambda places: (
-            (places["elsewhere"] / "file").write_text("") or str(places["elsewhere"] / "file")
-        ),
+        lambda places: _regular_file(places["elsewhere"] / "file"),
         "is not a socket",
     ),
     "a symbolic link to the desktop's socket": (
-        lambda places: (
-            (places["elsewhere"] / "link").symlink_to(places["live"])
-            or str(places["elsewhere"] / "link")
-        ),
+        lambda places: _symbolic_link(places["live"], places["elsewhere"] / "link"),
         "is not a socket",
     ),
     "the desktop's socket": (
@@ -523,10 +533,7 @@ REFUSED: Final[dict[str, tuple[Callable[[dict[str, Path]], str | None], str]]] =
     ),
     "niri's socket": (lambda places: str(places["niri"]), "in the desktop's runtime directory"),
     "the desktop's socket through a linked directory": (
-        lambda places: (
-            (places["root"] / "linked").symlink_to(places["run"])
-            or str(places["root"] / "linked" / "wayland-1")
-        ),
+        lambda places: _symbolic_link(places["run"], places["root"] / "linked") + "/wayland-1",
         "in the desktop's runtime directory",
     ),
     "a hard link to the desktop's socket": (
@@ -546,10 +553,7 @@ REFUSED: Final[dict[str, tuple[Callable[[dict[str, Path]], str | None], str]]] =
         "no process of this account's listens on it",
     ),
     "in a directory others can write": (
-        lambda places: (
-            places["elsewhere"].chmod(0o777)
-            or _hard_link(places["ours"], places["elsewhere"] / "wl")
-        ),
+        lambda places: _hard_link(places["ours"], _writable(places["elsewhere"]) / "wl"),
         "in a directory others can write",
     ),
 }

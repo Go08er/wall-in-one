@@ -250,9 +250,13 @@ def wayland_test_socket(
     command = serving(str(path))
     if command is None:
         return None, f"{TEST_WAYLAND_ENV}={candidate!r}: no process of this account's listens on it"
-    if os.path.basename(command[0]) != "weston" or "--backend=headless" not in command:
+    if (
+        not command
+        or os.path.basename(command[0]) != "weston"
+        or "--backend=headless" not in command
+    ):
         return None, (
-            f"{TEST_WAYLAND_ENV}={candidate!r} is served by {' '.join(command[:2])!r}, "
+            f"{TEST_WAYLAND_ENV}={candidate!r} is served by {' '.join(command[:2]) or '?'!r}, "
             "not a headless Weston"
         )
     return str(path), ""

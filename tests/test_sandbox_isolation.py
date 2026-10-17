@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -50,6 +51,8 @@ WATCHED: Final = (
     *conftest.SESSION_LAYOUT,
     *conftest.SESSION_UNSET,
     *conftest.SESSION_SET,
+    "WAYLAND_DISPLAY",
+    conftest.TEST_WAYLAND_ENV,
     "DBUS_SESSION_BUS_ADDRESS",
     "DBUS_SYSTEM_BUS_ADDRESS",
 )
@@ -66,8 +69,14 @@ def session_baseline() -> None:
     _BASELINE["resolved"] = {name: str(resolve()) for name, resolve in RESOLVERS.items()}
 
 
-def _assert_sandboxed(root: Path, seen: dict[str, Any], *, outside: Path | None = None) -> None:
-    """``seen`` (``environ`` and ``resolved``) is the session sandbox below ``root``."""
+def _assert_sandboxed(
+    root: Path, seen: dict[str, Any], *, wayland: str | None, outside: Path | None = None
+) -> None:
+    """``seen`` (``environ`` and ``resolved``) is the session sandbox below ``root``.
+
+    ``wayland`` is the compositor socket that process accepted, if any: the
+    only Wayland display its baseline may name.
+    """
     for name, resolved in seen["resolved"].items():
         assert Path(resolved).is_relative_to(root), (name, resolved)
         # Not the real home itself: in the Nix sandbox the build user's home is
@@ -83,6 +92,8 @@ def _assert_sandboxed(root: Path, seen: dict[str, Any], *, outside: Path | None 
         assert environ[variable] is None, variable
     for variable, value in conftest.SESSION_SET.items():
         assert environ[variable] == value, variable
+    assert environ["WAYLAND_DISPLAY"] == wayland
+    assert environ[conftest.TEST_WAYLAND_ENV] == wayland
     runtime = root / conftest.SESSION_LAYOUT["XDG_RUNTIME_DIR"]
     for variable, dead in (
         ("DBUS_SESSION_BUS_ADDRESS", conftest.DEAD_SESSION_BUS),
@@ -96,7 +107,7 @@ def test_the_session_baseline_is_the_sandbox() -> None:
     """What ``monkeypatch.undo()`` would restore, seen without calling it."""
     root = Path(os.environ[conftest.SESSION_ROOT_ENV])
     assert root == conftest.SESSION_ROOT
-    _assert_sandboxed(root, _BASELINE)
+    _assert_sandboxed(root, _BASELINE, wayland=conftest.TEST_WAYLAND_SOCKET)
 
 
 #: A process started from a developer shell: it imports conftest, as pytest
@@ -143,7 +154,7 @@ def test_from_a_developer_shell_every_restore_lands_in_the_session_sandbox(
 ) -> None:
     """The incident's setting: a bare pytest from a shell pointing at a real profile.
 
-    The stand-in shell's HOME, XDG directories, buses, Wayland and niri
+    The stand-in shell's HOME, XDG directories, buses, Wayland, niri and X11
     addresses are what a desktop session exports. After conftest's import, a
     fresh ``MonkeyPatch().undo()`` and a context exit both land in the
     child's session sandbox, and nothing is written in the stand-in.
@@ -165,7 +176,9 @@ def test_from_a_developer_shell_every_restore_lands_in_the_session_sandbox(
         DBUS_SESSION_BUS_ADDRESS=f"unix:path={shell / 'run' / 'bus'}",
         DBUS_SYSTEM_BUS_ADDRESS=f"unix:path={shell / 'system_bus_socket'}",
         WAYLAND_DISPLAY="wayland-1",
+        WAYLAND_SOCKET="9",
         NIRI_SOCKET=str(shell / "run" / "niri.sock"),
+        DISPLAY=":0",
     )
     for variable in (
         "HOME",
@@ -206,7 +219,7 @@ def test_from_a_developer_shell_every_restore_lands_in_the_session_sandbox(
     ]
     for moment, seen in report.items():
         try:
-            _assert_sandboxed(root, seen, outside=shell)
+            _assert_sandboxed(root, seen, wayland=None, outside=shell)
         except AssertionError as error:
             raise AssertionError(f"{moment}: {error}") from error
     assert [path for path in shell.rglob("*") if not path.is_dir()] == [], "nothing written there"
@@ -386,3 +399,197 @@ def test_the_tripwire_sees_a_child_processs_chmod(tmp_path: Path) -> None:
         str(watched),
         str(settings),
     ]
+
+
+# -- the display rules: which compositor socket a run may draw on ---------------------
+
+
+def test_a_test_not_marked_gui_has_no_display_at_all() -> None:
+    for variable in ("WAYLAND_DISPLAY", conftest.TEST_WAYLAND_ENV, *conftest.SESSION_UNSET):
+        assert variable not in os.environ, variable
+    assert os.environ["GDK_BACKEND"] == "wayland", "and no other backend to fall back to"
+
+
+def test_the_desktops_runtime_directories_are_known(tmp_path: Path) -> None:
+    """``/run/user/<uid>``, the runtime directory the run started with, and
+    those a parent process's conftest recorded (a child starts with that
+    parent's sandbox as its ``XDG_RUNTIME_DIR``)."""
+    recorded = tmp_path / "recorded"
+    environ = {
+        "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        "WIO_TEST_LIVE_RUNTIME_DIRS": os.pathsep.join((str(recorded), "/run/user/4242")),
+    }
+    assert conftest.live_runtime_dirs(environ, 4242) == (
+        Path("/run/user/4242"),
+        recorded,
+        tmp_path / "run",
+    )
+    assert conftest.live_runtime_dirs({"XDG_RUNTIME_DIR": "relative"}, 7) == (Path("/run/user/7"),)
+
+
+def _listening(path: Path) -> socket.socket:
+    """A Unix socket bound and listening at ``path``; nothing connects to it here."""
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    return listener
+
+
+@pytest.fixture
+def desktop(tmp_path: Path) -> Iterator[dict[str, Path]]:
+    """A stand-in desktop: its runtime directory with its compositor's and niri's
+    sockets, and beside it a run's own compositor directory."""
+    run = tmp_path / "run"
+    ours = tmp_path / "wl"
+    elsewhere = tmp_path / "else"
+    for directory in (run, ours, elsewhere):
+        directory.mkdir(mode=0o700)
+    places = {
+        "root": tmp_path,
+        "run": run,
+        "elsewhere": elsewhere,
+        "live": run / "wayland-1",
+        "niri": run / "niri.sock",
+        "ours": ours / "wayland-0",
+    }
+    listeners = [_listening(places[name]) for name in ("live", "niri", "ours")]
+    try:
+        yield places
+    finally:
+        for listener in listeners:
+            listener.close()
+
+
+def _serving(path: str) -> list[str] | None:
+    """Stands in for /proc: who listens where in the stand-in desktop."""
+    name = os.path.basename(os.path.realpath(path))
+    return {
+        "wayland-0": ["/nix/store/weston/bin/weston", "--backend=headless", "--socket=wayland-0"],
+        "wayland-1": ["niri", "--session"],
+        "niri.sock": ["niri", "--session"],
+        "nested": ["weston", "--backend=wayland", "--socket=nested"],
+    }.get(name)
+
+
+def _judge(
+    desktop: dict[str, Path], candidate: str | None, **inherited: str
+) -> tuple[str | None, str]:
+    """The answer for a run started from the stand-in desktop's terminal."""
+    environ = {
+        "XDG_RUNTIME_DIR": str(desktop["run"]),
+        "WAYLAND_DISPLAY": "wayland-1",
+        "NIRI_SOCKET": str(desktop["niri"]),
+        **inherited,
+    }
+    if candidate is not None:
+        environ[conftest.TEST_WAYLAND_ENV] = candidate
+    live = conftest.live_runtime_dirs(environ, os.getuid())
+    return conftest.wayland_test_socket(environ, os.getuid(), live, _serving)
+
+
+def test_the_runs_own_compositor_is_taken(desktop: dict[str, Path]) -> None:
+    ours = str(desktop["ours"])
+    assert _judge(desktop, ours) == (ours, "")
+    # Handed down to a child as both names, as tools/headless-wayland.sh does.
+    assert _judge(desktop, ours, WAYLAND_DISPLAY=ours) == (ours, "")
+
+
+def _hard_link(source: Path, target: Path) -> str:
+    os.link(source, target)
+    return str(target)
+
+
+#: A candidate made in the stand-in desktop, and the reason it is refused.
+REFUSED: Final[dict[str, tuple[Callable[[dict[str, Path]], str | None], str]]] = {
+    "unset": (lambda _desktop: None, "is not set"),
+    "a bare name": (lambda _desktop: "wayland-0", "is not an absolute path"),
+    "missing": (lambda places: str(places["elsewhere"] / "gone"), "is not there"),
+    "a regular file": (
+        lambda places: (
+            (places["elsewhere"] / "file").write_text("") or str(places["elsewhere"] / "file")
+        ),
+        "is not a socket",
+    ),
+    "a symbolic link to the desktop's socket": (
+        lambda places: (
+            (places["elsewhere"] / "link").symlink_to(places["live"])
+            or str(places["elsewhere"] / "link")
+        ),
+        "is not a socket",
+    ),
+    "the desktop's socket": (
+        lambda places: str(places["live"]),
+        "in the desktop's runtime directory",
+    ),
+    "niri's socket": (lambda places: str(places["niri"]), "in the desktop's runtime directory"),
+    "the desktop's socket through a linked directory": (
+        lambda places: (
+            (places["root"] / "linked").symlink_to(places["run"])
+            or str(places["root"] / "linked" / "wayland-1")
+        ),
+        "in the desktop's runtime directory",
+    ),
+    "a hard link to the desktop's socket": (
+        lambda places: _hard_link(places["live"], places["elsewhere"] / "wl"),
+        "one of the desktop's own sockets",
+    ),
+    "a hard link to niri's socket": (
+        lambda places: _hard_link(places["niri"], places["elsewhere"] / "wl"),
+        "one of the desktop's own sockets",
+    ),
+    "a compositor that is not headless": (
+        lambda places: _hard_link(places["ours"], places["elsewhere"] / "nested"),
+        "not a headless Weston",
+    ),
+    "a socket no one listens on": (
+        lambda places: _hard_link(places["ours"], places["elsewhere"] / "stale"),
+        "no process of this account's listens on it",
+    ),
+    "in a directory others can write": (
+        lambda places: (
+            places["elsewhere"].chmod(0o777)
+            or _hard_link(places["ours"], places["elsewhere"] / "wl")
+        ),
+        "in a directory others can write",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(REFUSED))
+def test_anything_else_is_refused(desktop: dict[str, Path], case: str) -> None:
+    make, reason = REFUSED[case]
+    candidate = make(desktop)
+    accepted, refusal = _judge(desktop, candidate)
+    assert accepted is None
+    assert reason in refusal, refusal
+
+
+def test_a_hard_link_to_an_inherited_wayland_display_elsewhere_is_refused(
+    desktop: dict[str, Path],
+) -> None:
+    """A desktop whose socket is not in its runtime directory: named by path."""
+    away = desktop["root"] / "away"
+    away.mkdir(mode=0o700)
+    listener = _listening(away / "wl")
+    try:
+        candidate = _hard_link(away / "wl", desktop["elsewhere"] / "wl")
+        accepted, refusal = _judge(desktop, candidate, WAYLAND_DISPLAY=str(away / "wl"))
+        assert accepted is None and "one of the desktop's own sockets" in refusal
+        # The same socket handed down as the run's own is not the desktop's.
+        handed_down = _judge(desktop, str(away / "wl"), WAYLAND_DISPLAY=str(away / "wl"))
+        assert "not the desktop's" not in handed_down[1]
+        assert "no process of this account's listens on it" in handed_down[1], handed_down
+    finally:
+        listener.close()
+
+
+def test_the_listener_is_found_through_proc_without_connecting(tmp_path: Path) -> None:
+    path = tmp_path / "sock"
+    listener = _listening(path)
+    try:
+        own = Path("/proc/self/cmdline").read_bytes().split(b"\0")
+        assert conftest.listening_command(str(path)) == [os.fsdecode(part) for part in own if part]
+    finally:
+        listener.close()
+    assert conftest.listening_command(str(path)) is None, "a socket file no one listens on"
+    assert conftest.listening_command(str(tmp_path / "never")) is None

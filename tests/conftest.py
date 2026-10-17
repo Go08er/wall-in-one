@@ -25,12 +25,30 @@ and its next compile replaced the real ``runtime.toml``. So the baseline
 itself is a sandbox: before anything else is imported, this module points
 ``HOME`` and every XDG directory at a session-private temporary root, gives
 the session and system buses dead addresses there, tells GTK not to use
-portals, and drops the Wayland and niri addresses -- all before any test
+portals, and drops the desktop's display addresses -- all before any test
 module imports or initializes GTK, whose module-scoped setup runs before the
 per-test guard below. Restoring the environment
 can then only ever land there. Below that, an audit hook refuses any write
 this process attempts under the real profile directories, and a tripwire
 fails the test after which they were written or changed.
+
+The display rules. Wall-in-One supports only Wayland, and so do its tests:
+GTK gets ``GDK_BACKEND=wayland`` and no X11 ``DISPLAY`` at all. The only
+Wayland display a test may reach is the run's own headless compositor, which
+``tools/headless-wayland.sh`` starts and names, by absolute path, in
+``WIO_TEST_WAYLAND_SOCKET``. An inherited ``WAYLAND_DISPLAY`` (``wayland-1``
+from a developer's terminal), ``WAYLAND_SOCKET`` and ``NIRI_SOCKET`` are
+dropped. ``WIO_TEST_WAYLAND_SOCKET`` itself is taken only when it is a socket
+of this account's, not a symbolic link, in a directory no one else can write,
+and outside the desktop's runtime directories (``/run/user/<uid>`` and the
+``XDG_RUNTIME_DIR`` the run started with), when it is not one of the sockets
+found there (or the inherited ``WAYLAND_DISPLAY`` and ``NIRI_SOCKET``) under
+another name, and when the process listening on it, found through /proc
+without connecting, is a headless Weston. Then ``WAYLAND_DISPLAY`` is set to
+it, as an absolute path, so it still resolves after ``XDG_RUNTIME_DIR`` is
+replaced. A test marked ``gui`` that has
+no such compositor fails, naming the reason; it is never skipped. A test not
+marked ``gui`` gets no ``WAYLAND_DISPLAY`` at all.
 
 All of this is a backstop, not the way to run the suite. An audit hook sees
 only this Python process, not a child process or native code, and the
@@ -51,7 +69,7 @@ import stat
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -68,44 +86,232 @@ SESSION_LAYOUT: Final = {
     "XDG_DATA_HOME": "data",
     "XDG_RUNTIME_DIR": "run",
 }
-#: Addresses of the live desktop. DISPLAY stays: GUI tests run under Xvfb.
-SESSION_UNSET: Final = ("WAYLAND_DISPLAY", "NIRI_SOCKET")
+#: Addresses of displays other than the run's own compositor: X11's, a
+#: Wayland connection handed down by file descriptor, and niri's IPC socket.
+#: ``WAYLAND_DISPLAY`` is dropped as well, then set only to the test socket.
+SESSION_UNSET: Final = ("DISPLAY", "WAYLAND_SOCKET", "NIRI_SOCKET")
+#: The run's own headless compositor, by absolute path (tools/headless-wayland.sh).
+TEST_WAYLAND_ENV: Final = "WIO_TEST_WAYLAND_SOCKET"
+#: The desktop's runtime directories as the first conftest import in this
+#: process tree found them, so that a child process (which starts with this
+#: one's sandbox as its ``XDG_RUNTIME_DIR``) still refuses the real ones.
+_LIVE_RUNTIME_ENV: Final = "WIO_TEST_LIVE_RUNTIME_DIRS"
+_WAYLAND_REFUSAL_ENV: Final = "WIO_TEST_WAYLAND_REFUSAL"
 #: The session bus gets a dead address below the session root rather than
-#: none: with DISPLAY set, an unset address makes GTK autolaunch a private
-#: dbus-daemon (and document portals) that outlive the run. The system bus
-#: gets one too: unset, it means the machine's real one.
+#: none: an unset address lets GLib look for a bus of its own (with an X11
+#: display, autolaunch a private dbus-daemon and document portals that outlive
+#: the run). The system bus gets one too: unset, it means the machine's real one.
 DEAD_SESSION_BUS: Final = "no-session-bus"
 DEAD_SYSTEM_BUS: Final = "no-system-bus"
-#: Portals would need that bus anyway; GTK is told not to look for them.
-SESSION_SET: Final = {"GDK_DEBUG": "no-portals", "GTK_USE_PORTAL": "0"}
+#: Portals would need that bus anyway; GTK is told not to look for them. GTK
+#: draws on Wayland or not at all: never a fallback to another backend.
+SESSION_SET: Final = {"GDK_DEBUG": "no-portals", "GTK_USE_PORTAL": "0", "GDK_BACKEND": "wayland"}
 
 
-def _enter_session_sandbox() -> Path:
-    """Make a private temporary root the whole process's baseline environment."""
+def live_runtime_dirs(environ: Mapping[str, str], uid: int) -> tuple[Path, ...]:
+    """The desktop's runtime directories: no test compositor may live below one."""
+    found = [Path(f"/run/user/{uid}")]
+    inherited = environ.get(_LIVE_RUNTIME_ENV, "")
+    found.extend(Path(entry) for entry in inherited.split(os.pathsep) if entry)
+    runtime = environ.get("XDG_RUNTIME_DIR", "")
+    if os.path.isabs(runtime):
+        found.append(Path(runtime))
+    unique: list[Path] = []
+    for directory in found:
+        if directory not in unique:
+            unique.append(directory)
+    return tuple(unique)
+
+
+def _socket_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return None
+    return (status.st_dev, status.st_ino) if stat.S_ISSOCK(status.st_mode) else None
+
+
+def _live_sockets(
+    environ: Mapping[str, str], directories: tuple[Path, ...]
+) -> set[tuple[int, int]]:
+    """(device, inode) of every socket the desktop is known to listen on.
+
+    Every socket directly in its runtime directories, and the inherited
+    ``WAYLAND_DISPLAY`` and ``NIRI_SOCKET``, so that a hard link to one of
+    them is still recognized. Reads metadata only; connects to nothing.
+    """
+    candidates: list[Path] = []
+    for directory in directories:
+        try:
+            with os.scandir(directory) as entries:
+                candidates.extend(Path(entry.path) for entry in entries)
+        except OSError:
+            continue  # not there (the build sandbox has no /run/user)
+    wayland = environ.get("WAYLAND_DISPLAY", "")
+    if wayland and wayland != environ.get(TEST_WAYLAND_ENV):
+        runtime = environ.get("XDG_RUNTIME_DIR", "")
+        candidates.append(Path(wayland) if os.path.isabs(wayland) else Path(runtime, wayland))
+    niri = environ.get("NIRI_SOCKET", "")
+    if niri:
+        candidates.append(Path(niri))
+    return {identity for path in candidates if (identity := _socket_identity(path)) is not None}
+
+
+#: ``__SO_ACCEPTCON`` in /proc/net/unix's flags: a socket that listens.
+_LISTENING: Final = 0x10000
+
+
+def listening_command(path: str) -> list[str] | None:
+    """The command line of the process listening on the Unix socket at ``path``.
+
+    Found through /proc (the kernel's table of Unix sockets, then which of
+    this account's processes holds one of them), so nothing connects to it.
+    None when no process this account can see is listening there.
+    """
+    wanted = os.path.realpath(path)
+    inodes: set[str] = set()
+    try:
+        with open("/proc/net/unix", encoding="utf-8", errors="replace") as table:
+            next(table, None)
+            for line in table:
+                fields = line.rstrip("\n").split(None, 7)
+                if (
+                    len(fields) == 8
+                    and int(fields[3], 16) & _LISTENING
+                    and os.path.realpath(fields[7]) == wanted
+                ):
+                    inodes.add(f"socket:[{fields[6]}]")
+    except OSError, ValueError:
+        return None
+    if not inodes:
+        return None
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            descriptors = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue  # another account's, or gone
+        for descriptor in descriptors:
+            try:
+                held = os.readlink(f"/proc/{pid}/fd/{descriptor}")
+            except OSError:
+                continue
+            if held in inodes:
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as command:
+                        return [os.fsdecode(part) for part in command.read().split(b"\0") if part]
+                except OSError:
+                    return None
+    return None
+
+
+def wayland_test_socket(
+    environ: Mapping[str, str],
+    uid: int,
+    live: tuple[Path, ...],
+    serving: Callable[[str], list[str] | None] = listening_command,
+) -> tuple[str | None, str]:
+    """The run's own compositor socket from ``environ``, or None and why not.
+
+    ``live`` is :func:`live_runtime_dirs`; ``serving`` finds the command
+    listening on a socket (:func:`listening_command`). See the module's
+    display rules.
+    """
+    candidate = environ.get(TEST_WAYLAND_ENV, "")
+    if not candidate:
+        return None, f"{TEST_WAYLAND_ENV} is not set"
+    path = Path(candidate)
+    if not path.is_absolute():
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r} is not an absolute path"
+    try:
+        status = os.lstat(path)
+    except OSError as error:
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r} is not there ({error.strerror})"
+    if not stat.S_ISSOCK(status.st_mode):
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r} is not a socket"
+    if status.st_uid != uid:
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r} belongs to another account"
+    resolved = Path(os.path.realpath(path))
+    try:
+        parent = os.stat(resolved.parent)
+    except OSError as error:
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r}: its directory is unreadable ({error})"
+    if parent.st_uid != uid or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r} is in a directory others can write"
+    for directory in live:
+        if resolved.is_relative_to(Path(os.path.realpath(directory))):
+            return None, (
+                f"{TEST_WAYLAND_ENV}={candidate!r} is in the desktop's runtime directory "
+                f"{directory}, where its own compositor's sockets are"
+            )
+    if (status.st_dev, status.st_ino) in _live_sockets(environ, live):
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r} is one of the desktop's own sockets"
+    command = serving(str(path))
+    if command is None:
+        return None, f"{TEST_WAYLAND_ENV}={candidate!r}: no process of this account's listens on it"
+    if os.path.basename(command[0]) != "weston" or "--backend=headless" not in command:
+        return None, (
+            f"{TEST_WAYLAND_ENV}={candidate!r} is served by {' '.join(command[:2])!r}, "
+            "not a headless Weston"
+        )
+    return str(path), ""
+
+
+def _enter_session_sandbox() -> tuple[Path, str | None, str]:
+    """Make a private temporary root the whole process's baseline environment.
+
+    Returns the root and :func:`wayland_test_socket`'s answer.
+    """
     existing = os.environ.get(SESSION_ROOT_ENV)
     if existing and os.environ.get(_SESSION_OWNER_ENV) == str(os.getpid()):
-        root = Path(existing)  # this module imported twice in one process
+        # This module imported twice in one process: the environment already
+        # is the sandbox, and the runtime directories are the ones recorded.
+        root = Path(existing)
+        live = tuple(
+            Path(entry)
+            for entry in os.environ.get(_LIVE_RUNTIME_ENV, "").split(os.pathsep)
+            if entry
+        )
     else:
         root = Path(tempfile.mkdtemp(prefix="wio-test-session-"))
         atexit.register(shutil.rmtree, root, ignore_errors=True)
+        live = live_runtime_dirs(os.environ, os.getuid())
+        os.environ.pop(_WAYLAND_REFUSAL_ENV, None)
+    wayland, refusal = wayland_test_socket(os.environ, os.getuid(), live)
+    # A refusal is kept for a second import of this module, which no longer
+    # sees the inherited addresses it may have depended on.
+    refusal = os.environ.get(_WAYLAND_REFUSAL_ENV) or refusal
+    if wayland is None:
+        os.environ[_WAYLAND_REFUSAL_ENV] = refusal
+    os.environ[_LIVE_RUNTIME_ENV] = os.pathsep.join(str(directory) for directory in live)
     os.chmod(root, 0o700)
     for variable, name in SESSION_LAYOUT.items():
         directory = root / name
         directory.mkdir(mode=0o700, exist_ok=True)
         os.chmod(directory, 0o700)
         os.environ[variable] = str(directory)
-    for variable in SESSION_UNSET:
+    for variable in (*SESSION_UNSET, "WAYLAND_DISPLAY"):
         os.environ.pop(variable, None)
+    if wayland is None:
+        os.environ.pop(TEST_WAYLAND_ENV, None)
+    else:
+        os.environ["WAYLAND_DISPLAY"] = wayland
     runtime = root / SESSION_LAYOUT["XDG_RUNTIME_DIR"]
     os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime / DEAD_SESSION_BUS}"
     os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = f"unix:path={runtime / DEAD_SYSTEM_BUS}"
     os.environ.update(SESSION_SET)
     os.environ[SESSION_ROOT_ENV] = str(root)
     os.environ[_SESSION_OWNER_ENV] = str(os.getpid())
-    return root
+    return root, wayland, refusal
 
 
-SESSION_ROOT: Final = _enter_session_sandbox()
+_SANDBOX: Final = _enter_session_sandbox()
+SESSION_ROOT: Final = _SANDBOX[0]
+#: The run's own compositor socket GUI tests draw on, or None: then every GUI
+#: test fails with :data:`TEST_WAYLAND_REFUSAL` (see the module's display rules).
+TEST_WAYLAND_SOCKET: Final = _SANDBOX[1]
+TEST_WAYLAND_REFUSAL: Final = _SANDBOX[2]
 
 # Only now import the application: nothing may resolve a path before the
 # sandbox is the baseline.
@@ -341,6 +547,24 @@ def real_profile_tripwire() -> Iterator[None]:
 MARKUP_FAILURE: Final = "from markup due to error parsing markup"
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Fail, never skip, a GUI test that has no compositor of the run's own.
+
+    First, before any fixture: a GUI module's own setup would otherwise find
+    no display and skip, and a skipped GUI test is a gate that passed for
+    nothing.
+    """
+    if item.get_closest_marker("gui") is not None and TEST_WAYLAND_SOCKET is None:
+        pytest.fail(
+            "this GUI test has no headless Wayland compositor of the run's own "
+            f"({TEST_WAYLAND_REFUSAL}). GUI tests draw only there, never on the desktop: "
+            "run them through tools/isolated.sh or the gui-tests check "
+            '(README, "Development").',
+            pytrace=False,
+        )
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
     """Fail a test during which GTK could not show some text as markup.
@@ -412,13 +636,20 @@ def no_live_noctalia(
     fail; outside the sandbox it had been succeeding against real app state.
 
     A test not marked ``gui`` runs as the package's own check does: no
-    display and no session bus at all. Under Xvfb that also keeps GLib from
-    autolaunching a private bus, and code that asks whether a user-service
-    manager exists gets the same answer as in the build sandbox.
+    display and no session bus at all, so code that asks whether a
+    user-service manager exists gets the same answer as in the build sandbox.
+    A ``gui`` test gets the run's own compositor as ``WAYLAND_DISPLAY`` again,
+    whatever an earlier test left there. No test gets an X11 ``DISPLAY``.
     """
     if request.node.get_closest_marker("gui") is None:
-        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.delenv(TEST_WAYLAND_ENV, raising=False)
         monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    elif TEST_WAYLAND_SOCKET is not None:
+        monkeypatch.setenv("WAYLAND_DISPLAY", TEST_WAYLAND_SOCKET)
+        monkeypatch.setenv(TEST_WAYLAND_ENV, TEST_WAYLAND_SOCKET)
+    for variable in SESSION_UNSET:
+        monkeypatch.delenv(variable, raising=False)
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))

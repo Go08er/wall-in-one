@@ -388,7 +388,9 @@ def test_only_the_new_ui_and_the_tidy_card_use_ui_toml() -> None:
     create it (``tests/test_ui_tidy.py`` and the golden idle tests check). The
     command line only reads it, for the interface a start without ``--ui``
     builds (``ui_prefs.launch_interface``), and has the copy an earlier
-    version kept of it removed (``ui_prefs.remove_retired_backup``). The
+    version kept of it removed (``ui_prefs.remove_retired_backup``). Tidy up
+    names that copy when it stays (``ui_prefs.retired_backup_candidate``,
+    read-only). The
     application and the service never read or write it. Both windows change it only through the
     preferences keeper (``ui/next/prefs.py``), the classic one for the
     interface row in Settings.
@@ -407,6 +409,7 @@ def test_only_the_new_ui_and_the_tidy_card_use_ui_toml() -> None:
     assert users == [
         "cli.py",
         "paths.py",
+        "tidy.py",
         "ui/next/prefs.py",
         "ui/next/real_state.py",
         "ui/tidy_section.py",

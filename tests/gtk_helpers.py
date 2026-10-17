@@ -3,9 +3,9 @@
 ``while context.pending(): context.iteration(False)`` reads as "drain what is
 queued", but it is not bounded. ``pending()`` stays true for as long as anything
 animates with frames that take longer than the refresh interval, because GTK
-queues the next frame before the last one is done. Under the Vulkan renderer on
-Xvfb a tile spinner did exactly that and the GUI suite hung at the first test
-that drained while one was turning.
+queues the next frame before the last one is done. Under a software Vulkan
+renderer a tile spinner did exactly that and the GUI suite hung at the first
+test that drained while one was turning.
 
 So every wait here checks its deadline inside the ``pending()`` loop as well as
 around it, and a wait for a condition fails loudly, naming the condition,

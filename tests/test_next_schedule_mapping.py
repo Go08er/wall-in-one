@@ -76,7 +76,7 @@ def no_monitors(monkeypatch: pytest.MonkeyPatch) -> None:
     """No GTK monitors: connected displays come from the runtime alone here.
 
     Without a display there are none anyway; in a process where a GUI test
-    opened one (Xvfb's single "screen"), it must not count.
+    opened one (the headless compositor's single output), it must not count.
     """
     monkeypatch.setattr(real_schedule, "_monitor_displays", list)
 

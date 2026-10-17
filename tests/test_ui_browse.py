@@ -386,7 +386,7 @@ def test_search_and_batch_controls_wrap_without_clipping_at_large_text(
         ),
     )
     settings = Gtk.Settings.get_default()
-    if settings is None:  # pragma: no cover - Gtk is initialised under Xvfb
+    if settings is None:  # pragma: no cover - Gtk is initialised on the run's compositor
         pytest.skip("no GTK settings")
     old_font = settings.get_property("gtk-font-name")
     settings.set_property("gtk-font-name", "Sans 24")

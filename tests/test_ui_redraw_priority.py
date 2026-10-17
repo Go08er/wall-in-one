@@ -2,7 +2,7 @@
 
 A plain ``GLib.idle_add`` runs at priority 200, below GTK's redraw at 120.
 When frames cost more than a refresh interval (a spinner under software
-rendering, a VM, Xvfb), GTK paints back to back and such an idle never runs
+rendering, a VM, a loaded headless compositor), GTK paints back to back and such an idle never runs
 until the animation stops -- and the animation is often the very spinner the
 completion would stop. These tests reproduce that window with a real GTK
 window, an ``Adw.Spinner`` and a tick callback that spends about 25 ms per

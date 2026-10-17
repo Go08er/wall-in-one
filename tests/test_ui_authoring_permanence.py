@@ -594,7 +594,7 @@ def _is_dragging(page: playlists_page.PlaylistsPage) -> bool:
 
 
 def _settle(predicate: Any, seconds: float = 2.0) -> bool:
-    """Let Xvfb allocate an adaptive widget without touching the live display."""
+    """Let GTK allocate an adaptive widget on the run's own compositor, never the desktop."""
     context = GLib.MainContext.default()
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -658,9 +658,9 @@ def test_playlist_editor_is_navigable_and_unclipped_at_800_by_600(
             page._navigation.get_show_content(),
             page._arranger.get_width(),
         )
-        # Xvfb without a window manager may allocate a different outer size;
-        # this pins the requested compact geometry and the page's response to
-        # the real (sub-960 px) content allocation above.
+        # The compositor decides the window's outer size, which may differ
+        # from the request; this pins the requested compact geometry and the
+        # page's response to the real (sub-960 px) content allocation above.
         assert window.get_default_size() == (800, 600)
         assert page.get_width() < playlists_page.COMPACT_WIDTH
         assert page._editor_header.get_show_back_button()
@@ -692,7 +692,7 @@ def test_compact_playlist_actions_wrap_and_both_panes_scroll_with_large_text(
 ) -> None:
     monkeypatch.setattr(playlists_page, "ThumbnailLoader", QuietLoader)
     settings = Gtk.Settings.get_default()
-    if settings is None:  # pragma: no cover - Gtk.init guarantees it under Xvfb
+    if settings is None:  # pragma: no cover - Gtk.init guarantees it on the compositor
         pytest.skip("no GTK settings")
     old_font = settings.get_property("gtk-font-name")
     settings.set_property("gtk-font-name", "Sans 24")

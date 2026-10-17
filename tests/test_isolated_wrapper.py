@@ -276,10 +276,10 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
 ) -> None:
     """Sweep 4 T-3, Codex's case: a real compositor and a sleeping command,
     and the signal sent only to the wrapper's own PID, as a task runner does.
-    Before (then with xvfb-run and Xvfb), the profile was removed and the
-    display server and the command lived on. Every process this test started
-    is in its own session or, for the compositor's shell client, below one of
-    them; cleanup kills only those exact processes."""
+    Before, the profile was removed and the display server and the command
+    lived on. Every process this test started is in its own session or, for
+    the compositor's shell client, below one of them; cleanup kills only those
+    exact processes. No X server is among them, Xwayland included."""
     bash, weston = shutil.which("bash"), shutil.which("weston")
     if bash is None or weston is None:  # pragma: no cover - the gui-tests check has both
         pytest.skip("needs bash and weston")
@@ -320,7 +320,7 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
             time.sleep(0.05)
         assert seen["pid"] in owned, names
         assert "weston" in names and "weston-desktop-" in names, names
-        assert not {"Xvfb", "Xwayland", "xvfb-run"} & set(names), names
+        assert not [name for name in names if name.startswith("X")], names
         assert [path.name[:7] for path in temporary.iterdir()].count("wio-wl.") == 1
 
         os.kill(wrapper.pid, number)

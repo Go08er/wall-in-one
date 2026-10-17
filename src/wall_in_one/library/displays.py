@@ -27,6 +27,7 @@ written as version 2; version 1 is still read.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -149,6 +150,30 @@ def reads_cleanly(path: Path | None = None) -> bool:
     """Whether the file is there and reads without a fault, in a version this build knows."""
     reading = _read(path if path is not None else state_path())
     return reading.fault is None and reading.version is not None
+
+
+def record_ids(contents: bytes) -> frozenset[str] | None:
+    """The identities of the records in a document of this store, or ``None``.
+
+    ``None`` when ``contents`` is not a document this build reads in full
+    (`_parse` finds a fault), so a copy that fails this is never taken away.
+    """
+    try:
+        document = json.loads(contents.decode("utf-8"))
+    except UnicodeDecodeError, ValueError, RecursionError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    found, fault = _parse(Path(STATE_FILENAME), document)
+    return None if fault is not None else frozenset(found.assignments)
+
+
+def held_record_ids(path: Path | None = None) -> frozenset[str] | None:
+    """The identities of the records the file holds, or ``None`` unless it reads in full."""
+    reading = _read(path if path is not None else state_path())
+    if reading.fault is not None or reading.version is None:
+        return None
+    return frozenset(reading.value.assignments)
 
 
 def _parse(path: Path, document: dict[str, Any]) -> tuple[Arrangement, str | None]:

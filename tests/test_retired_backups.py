@@ -575,3 +575,152 @@ def test_a_start_that_opens_a_window_removes_all_five(monkeypatch: pytest.Monkey
     assert cli._run_graphical_startup_upgrade(require_legacy_safe=False) is None
 
     assert [name for name in COPIES if (_folder(name) / name).exists()] == []
+
+
+# -- a copy goes only when nothing in it is missing from the live file -------------------
+
+
+def _document(version: int | None, key: str, records: object) -> bytes:
+    body: dict[str, object] = {key: records}
+    if version is not None:
+        body = {"version": version, **body}
+    return (json.dumps(body, indent=2) + "\n").encode()
+
+
+def _three_playlists() -> bytes:
+    return _document(
+        1,
+        "playlists",
+        [{"id": name, "name": name.title(), "entries": []} for name in ("a", "b", "c")],
+    )
+
+
+def _put_copy(name: str, contents: bytes) -> Path:
+    target = _folder(name) / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(contents)
+    target.chmod(0o644)
+    return target
+
+
+def _only_these_left(*names: str) -> None:
+    assert sorted(path.name for path in _state().glob("*-backup")) == sorted(names)
+
+
+def test_a_recovered_file_that_lost_what_the_copy_holds_keeps_the_copy() -> None:
+    """The reviewer's case: 0.2.x kept the copy of three playlists; later the
+    file is damaged; the person adds one playlist, so the damaged file is set
+    aside as ``.broken`` and only the new playlist is saved. The file reads in
+    full, and is not the copy's translation."""
+    copy = _put_copy("playlists.json.v1-backup", _three_playlists())
+    live = _state() / "playlists.json"
+    live.write_text("{ not json", encoding="utf-8")
+    playlists.Store.open().create("New")
+    assert live.with_name("playlists.json.broken").is_file()
+    assert playlists.reads_cleanly()
+
+    assert retired_backups.remove() == ()
+
+    assert copy.read_bytes() == _three_playlists()
+
+
+def test_a_schedule_copy_stays_beside_a_file_that_lacks_its_rules() -> None:
+    copy = _put_copy(
+        "schedules.json.v1-backup", _document(None, "rules", [{"id": "old", "playlist": "x"}])
+    )
+    (_state() / "schedules.json").write_bytes(
+        _document(2, "rules", [{"id": "other", "playlist": "x"}])
+    )
+
+    assert retired_backups.remove() == ()
+
+    assert copy.is_file()
+
+
+def test_a_copy_whose_file_was_deleted_and_recreated_by_a_save_stays() -> None:
+    copy = _put_copy("playlists.json.v1-backup", _three_playlists())
+    assert not (_state() / "playlists.json").exists()
+    playlists.Store.open().create("Fresh")
+    assert playlists.reads_cleanly()
+
+    assert retired_backups.remove() == ()
+
+    assert copy.read_bytes() == _three_playlists()
+
+
+def test_a_displays_copy_stays_while_one_of_its_connectors_is_gone() -> None:
+    copy = _put_copy(
+        "displays.json.v1-backup", _document(1, "displays", {"DP-1": "a", "DP-2": "b"})
+    )
+    displays.Store.open().assign("DP-1", "a")
+
+    assert retired_backups.remove() == ()
+
+    assert copy.is_file()
+
+
+def test_a_ui_copy_stays_while_ui_toml_holds_no_interface_choice() -> None:
+    copy = _put_copy("ui.toml.v1-backup", V1_UI)
+    ui_prefs.update({"window_style": "frosted"})
+    assert ui_prefs.reads_cleanly() and ui_prefs.load().prefs.interface is None
+
+    assert not ui_prefs.remove_retired_backup()
+    assert copy.is_file()
+
+    ui_prefs.update({"interface": "classic"})
+    assert ui_prefs.remove_retired_backup()
+    assert not copy.exists()
+
+
+def test_every_record_still_there_removes_the_copy_even_after_changes_to_them() -> None:
+    """A playlist renamed, a rule changed, a display retargeted: same identity,
+    so the copy holds only an older state of something the person changed."""
+    _put_copy("playlists.json.v1-backup", _three_playlists())
+    _put_copy(
+        "schedules.json.v2-backup",
+        _document(2, "rules", [{"id": "r", "playlist": "a"}]),
+    )
+    _put_copy("displays.json.v1-backup", _document(1, "displays", {"DP-1": "a"}))
+    (_state() / "playlists.json").write_bytes(
+        _document(
+            2,
+            "playlists",
+            [
+                {"id": "a", "name": "Renamed after the copy", "entries": []},
+                {"id": "b", "name": "B", "entries": []},
+                {"id": "c", "name": "C", "entries": []},
+                {"id": "d", "name": "Added later", "entries": []},
+            ],
+        )
+    )
+    (_state() / "schedules.json").write_bytes(
+        _document(3, "rules", [{"id": "r", "playlist": "d", "start": "07:00", "end": "08:00"}])
+    )
+    (_state() / "displays.json").write_bytes(_document(2, "displays", {"DP-1": "d"}))
+
+    removed = retired_backups.remove()
+
+    assert {path.name for path in removed} == {
+        "playlists.json.v1-backup",
+        "schedules.json.v2-backup",
+        "displays.json.v1-backup",
+    }
+    _only_these_left()
+
+
+@pytest.mark.parametrize(
+    ("name", "contents"),
+    [
+        ("playlists.json.v1-backup", b'{"version": 1, "playlists": [{"id": 7}]}\n'),
+        ("playlists.json.v1-backup", b'{"version": 1, "playlists": "none"}\n'),
+        ("schedules.json.v2-backup", b'{"version": 2, "rules": [{"id": 7, "playlist": null}]}\n'),
+        ("displays.json.v1-backup", b'{"version": 1, "displays": {"DP-1": 3}}\n'),
+    ],
+)
+def test_a_copy_that_does_not_read_in_full_stays(name: str, contents: bytes) -> None:
+    _bumped_profile()
+    copy = _put_copy(name, contents)
+
+    assert retired_backups.remove() == ()
+
+    assert copy.read_bytes() == contents

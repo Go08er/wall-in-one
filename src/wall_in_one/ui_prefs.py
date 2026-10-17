@@ -352,13 +352,31 @@ def _declared_version(contents: bytes) -> int | None:
     return FORMATS.declared(raw)
 
 
+def _chosen_interface(contents: bytes) -> frozenset[str] | None:
+    """The copy's requirement: what a version 1 file holds that ui.toml must still hold.
+
+    A version 1 file has no interface choice, so the live file must hold one
+    (`_held_interface`). ``None`` when ``contents`` is not a ui.toml this
+    build reads.
+    """
+    return frozenset({"interface"}) if _declared_version(contents) is not None else None
+
+
+def _held_interface(path: Path | None = None) -> frozenset[str] | None:
+    """``{"interface"}`` when ui.toml reads in full and holds an interface choice."""
+    document, existing = _read(path if path is not None else paths.ui_prefs_path())
+    if existing is None or not document.writable:
+        return None
+    return frozenset({"interface"}) if document.prefs.interface is not None else frozenset()
+
+
 def remove_retired_backup() -> bool:
     """Remove `RETIRED_BACKUP_NAME`, the copy kept for going back; whether it went.
 
     Only that one name, beside ui.toml in the app's config folder, and only
     under the checks of `wall_in_one.library.retired_backups`: a regular
-    version 1 ui.toml of this user's, while ui.toml itself reads without a
-    problem. Never raises. For a start that opens a window: no other start
+    version 1 ui.toml of this user's, while ui.toml itself reads in full and
+    holds an interface choice. Never raises. For a start that opens a window: no other start
     reads ui.toml.
     """
     from wall_in_one.library import retired_backups
@@ -371,6 +389,8 @@ def remove_retired_backup() -> bool:
         MAX_BYTES,
         _declared_version,
         reads_cleanly,
+        _chosen_interface,
+        _held_interface,
     )
     return bool(retired_backups.remove((candidate,)))
 

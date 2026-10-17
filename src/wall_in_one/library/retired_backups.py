@@ -4,8 +4,9 @@ From 0.2.0 until updates became one-way, the first save of ``playlists.json``,
 ``schedules.json``, ``displays.json`` or ``ui.toml`` in a newer format first
 copied the old bytes beside the file as ``<file>.v<old>-backup``, so that an
 older version could be handed the file back. Going back is no longer
-supported and nothing reads those copies: the file beside each one is its
-translation. `remove` takes them away when the app or its service starts.
+supported and nothing reads those copies. `remove` takes away each one whose
+file beside it still holds everything the copy does, when the app or its
+service starts.
 
 It looks for an exact, enumerated set: each name in the one folder it was
 ever written to, the app's own state or config folder. Never a pattern, and
@@ -22,7 +23,17 @@ and stays, for a later start, when any of it does not or cannot be checked:
   what the copy was when it was made;
 * the file it is a copy of is there and reads without a fault, in a version
   this build knows. A damaged, unreadable or missing file, or one a newer
-  version saved, keeps its copy: it may be the only good one.
+  version saved, keeps its copy: it may be the only good one;
+* the copy itself is read in full by that store's own reader, and nothing in
+  it is missing from the file: every record in it, by its identity (a
+  playlist's id, a schedule rule's id, a display's connector), is in the
+  file. A record under the same identity with other contents counts as
+  there: the copy then holds an older state of something changed since.
+  The file reading cleanly now does not show it is the copy's translation
+  (it may have been recovered from damage with only what was added since).
+  For ``ui.toml`` the file must hold an interface choice.
+
+A copy that stays is listed by Tidy up.
 
 The checks and the removal happen under that file's own mutation lock, on one
 pinned generation of the copy (`file_io.discard_regular_if_same`), so
@@ -83,6 +94,12 @@ class Candidate:
     declared: Callable[[bytes], int | None]
     #: Whether `live` is there and reads without a fault, in a known version.
     reads_cleanly: Callable[[Path], bool]
+    #: The identities of the records in the copy (a playlist's id, a schedule
+    #: rule's id, a display's connector), or None when the copy is not read in
+    #: full by this store's own reader.
+    needed: Callable[[bytes], frozenset[str] | None]
+    #: The identities of the records `live` holds, or None unless it reads in full.
+    held: Callable[[Path], frozenset[str] | None]
 
     def path(self) -> Path:
         return self.live().with_name(self.name)
@@ -100,6 +117,8 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         playlists.MAX_STATE_BYTES,
         _json_version(playlists.FORMATS),
         playlists.reads_cleanly,
+        playlists.record_ids,
+        playlists.held_record_ids,
     ),
     Candidate(
         "displays.json.v1-backup",
@@ -109,6 +128,8 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         displays.MAX_STATE_BYTES,
         _json_version(displays.FORMATS),
         displays.reads_cleanly,
+        displays.record_ids,
+        displays.held_record_ids,
     ),
     Candidate(
         "schedules.json.v1-backup",
@@ -118,6 +139,8 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         schedules.MAX_STATE_BYTES,
         _json_version(schedules.FORMATS),
         schedules.reads_cleanly,
+        schedules.record_ids,
+        schedules.held_record_ids,
     ),
     Candidate(
         "schedules.json.v2-backup",
@@ -127,6 +150,8 @@ STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
         schedules.MAX_STATE_BYTES,
         _json_version(schedules.FORMATS),
         schedules.reads_cleanly,
+        schedules.record_ids,
+        schedules.held_record_ids,
     ),
 )
 
@@ -163,6 +188,14 @@ def _remove(candidate: Candidate, path: Path) -> bool:
                 return _kept(path, f"it is not a version {candidate.version} {live.name}")
             if not candidate.reads_cleanly(live):
                 return _kept(path, f"{live.name} is missing or could not be read in full")
+            needed = candidate.needed(contents)
+            if needed is None:
+                return _kept(path, f"it could not be read in full as a {live.name}")
+            held = candidate.held(live)
+            if held is None:
+                return _kept(path, f"{live.name} is missing or could not be read in full")
+            if not needed <= held:
+                return _kept(path, f"{live.name} lacks {len(needed - held)} the copy holds")
             if not file_io.discard_regular_if_same(
                 path,
                 expected_identity=generation[:2],

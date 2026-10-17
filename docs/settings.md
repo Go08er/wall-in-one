@@ -146,7 +146,7 @@ classic, wrote only `next`). Every save writes version 2, whether or not you
 have chosen an interface or turned GPU acceleration off; a version 1 file is
 read as it is and written as version 2 by the next save. No copy of the
 version 1 file is kept; a `ui.toml.v1-backup` that 0.2.2 left is removed the next time a window
-opens (see [Format versions](library.md#format-versions)).
+opens, if `ui.toml` holds an interface choice (see [Format versions](library.md#format-versions)).
 A row whose change could not be saved goes back to what `ui.toml`
 holds and says why. Keys it doesn't know are
 kept through every save, an invalid value falls back to that preference's

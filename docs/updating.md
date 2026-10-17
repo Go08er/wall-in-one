@@ -98,7 +98,12 @@ mean stays the same. The bytes of a few files can change, and it writes only:
   `playlists.json.v1-backup`, `displays.json.v1-backup`,
   `schedules.json.v1-backup` and `schedules.json.v2-backup` in the state
   folder and `ui.toml.v1-backup` in the config folder are removed, each
-  leaving one empty record in that folder's `.wall-in-one-retained`. See
+  leaving one empty record in that folder's `.wall-in-one-retained`, but
+  only when the file beside it still holds everything the copy does. A copy
+  stays, and Tidy up lists it, when it can't be read in full, when the file
+  beside it is missing, damaged or from a newer version, or when something
+  in the copy is no longer in the file. The app removes the first four at its
+  or its service's start, and `ui.toml.v1-backup` when a window opens. See
   [Format versions](library.md#format-versions).
 - Automatic stills, the one exception that writes into your library (since
   0.1.0). After each scan, including the first one, the app captures a still
@@ -158,7 +163,9 @@ this one keeps nothing so that an older one can run again: a file that moves
 to a newer format is saved over, with no copy of the older one, and the
 copies 0.2.x kept for that (the `.v1-backup` and `.v2-backup` files beside
 `playlists.json`, `schedules.json`, `displays.json` and `ui.toml`) are
-removed the next time the app or its service starts. The upgrade from the
+removed at a later start, once the file beside each still holds everything
+the copy does (see [Format versions](library.md#format-versions)); one that
+doesn't stays, and Tidy up lists it. The upgrade from the
 older empty-root app likewise removes its own pre-upgrade copies of
 `settings.toml` and `runtime.toml` once it has finished, when it can prove
 they are exactly what it translated; copies that an earlier version's

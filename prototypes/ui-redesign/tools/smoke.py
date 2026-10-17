@@ -17,7 +17,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib
+from gi.repository import Adw, GLib, Gtk
 from wio_demo import art, data, store_catalog, thumbs, ui
 from wio_demo.models import Wallpaper
 from wio_demo.shell import MainWindow
@@ -517,6 +517,27 @@ def window_actions(state, window) -> None:
     state.set_scope("all")
 
 
+def close_popovers(window) -> None:
+    """Pop down every open popover in ``window``, as the click on another page does.
+
+    A person reaches another page with a click, and on Wayland the compositor
+    dismisses an open menu at the first click outside it. The demo scenes
+    open menus with no click at all, so a menu from an earlier page stayed
+    open, and Wayland allows a new menu only on top of the last one: GTK
+    refused to map the next page's ("Tried to map a grabbing popup with a
+    non-top most parent").
+    """
+    pending = [window]
+    while pending:
+        widget = pending.pop()
+        if isinstance(widget, Gtk.Popover) and widget.get_mapped():
+            widget.popdown()
+        child = widget.get_first_child()
+        while child is not None:
+            pending.append(child)
+            child = child.get_next_sibling()
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -638,6 +659,8 @@ def build_steps(app, holder):
                 dialog = w().get_visible_dialog()
                 if dialog is not None:
                     dialog.force_close()
+                if w().pages[p.partition(":")[0]] is not w().current_page:
+                    close_popovers(w())
                 w().navigate(p)
                 w().pages[p.partition(":")[0]].demo(sc)
 

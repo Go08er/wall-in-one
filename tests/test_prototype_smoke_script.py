@@ -4,8 +4,9 @@ Its EXIT trap removed the throwaway profile with a bare ``rm -rf``. A
 fontconfig cache written while the last GTK process exited raced it
 ("Directory not empty"), and under ``set -e`` the failed cleanup made a run
 with 0 failures exit 1. Here every tool the script calls is a stand-in (``nix``
-and ``xvfb-run`` on ``PATH``): the stand-in smoke run prints its verdict and
-leaves a writer filling the profile's cache for a while after it returns.
+on ``PATH``, and the checkout's ``tools/headless-wayland.sh``): the stand-in
+smoke run prints its verdict and leaves a writer filling the profile's cache
+for a while after it returns.
 """
 
 from __future__ import annotations
@@ -30,9 +31,11 @@ NIX: Final = """case "$1" in
 esac
 """
 
-#: ``xvfb-run``: the stand-in smoke run. Its verdict comes from the
-#: environment; a detached writer keeps (re)creating cache files for a while.
-XVFB_RUN: Final = """cache="$XDG_CACHE_HOME/fontconfig"
+#: ``tools/headless-wayland.sh``: the stand-in smoke run. Its verdict comes from
+#: the environment; a detached writer keeps (re)creating cache files for a while.
+#: It also records what it was handed: the smoke run must reach no X11 display.
+COMPOSITOR: Final = """env > "$STUB_SEEN"
+cache="$XDG_CACHE_HOME/fontconfig"
 (
   end=$((SECONDS + 2))
   while ((SECONDS < end)); do
@@ -56,11 +59,12 @@ def _run(tmp_path: Path, failures: int, warning: str = "") -> subprocess.Complet
     tools.mkdir(parents=True)
     smoke = tools / "smoke.sh"
     shutil.copy2(SMOKE, smoke)
+    (tmp_path / "repo" / "tools").mkdir()
     stubs = tmp_path / "bin"
     stubs.mkdir()
     for path, text in (
         (stubs / "nix", NIX),
-        (stubs / "xvfb-run", XVFB_RUN),
+        (tmp_path / "repo" / "tools" / "headless-wayland.sh", COMPOSITOR),
         (tools / "typecheck.sh", 'echo "Success: no issues found in 1 source file"\n'),
     ):
         path.write_text(f"#!{bash}\n{text}", encoding="utf-8")
@@ -74,6 +78,12 @@ def _run(tmp_path: Path, failures: int, warning: str = "") -> subprocess.Complet
         "STUB_ICONS": str(tmp_path / "icons"),
         "STUB_FAILURES": str(failures),
         "STUB_WARNING": warning,
+        "STUB_SEEN": str(tmp_path / "seen"),
+        # What a desktop terminal exports.
+        "DISPLAY": ":0",
+        "WAYLAND_DISPLAY": "wayland-1",
+        "WAYLAND_SOCKET": "9",
+        "NIRI_SOCKET": str(tmp_path / "niri.sock"),
     }
     completed = subprocess.run(
         (bash, str(smoke)),
@@ -93,6 +103,21 @@ def test_a_clean_run_passes_even_while_a_late_writer_fills_the_profile(tmp_path:
     assert "SMOKE steps=1 failures=0" in completed.stdout
     assert "Directory not empty" not in completed.stderr
     assert not any((tmp_path / "tmp").iterdir()), "the throwaway profile is removed"
+
+
+def test_the_smoke_run_is_handed_no_display_of_the_desktops(tmp_path: Path) -> None:
+    """Only the compositor script names a display; GTK is told Wayland, nothing else."""
+    completed = _run(tmp_path, failures=0)
+    assert completed.returncode == 0, completed.stderr
+    seen = dict(
+        line.split("=", 1)
+        for line in (tmp_path / "seen").read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    for variable in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "NIRI_SOCKET"):
+        assert variable not in seen, variable
+    assert seen["GDK_BACKEND"] == "wayland"
+    assert seen["GSK_RENDERER"] == "cairo"
 
 
 def test_a_failure_still_fails(tmp_path: Path) -> None:

@@ -935,6 +935,7 @@ def test_a_copy_rewritten_in_place_after_it_was_checked_is_not_removed() -> None
 
 _DELETE: Final = "You can delete it yourself"
 _LEFT_ALONE: Final = "so it isn't one of Wall-in-One's old copies and is left alone."
+_NOT_SHOWN: Final = "so it can't be shown to be one of Wall-in-One's old copies, and is left alone."
 
 
 def _live_for(name: str) -> Path:
@@ -990,10 +991,10 @@ REASONS: Final[dict[str, tuple[Callable[[str], None], str, bool]]] = {
     "a link": (_setup_link, f"is a link, {_LEFT_ALONE}", False),
     "another name": (
         _setup_second_name,
-        f"belongs to another user or has another name, {_LEFT_ALONE}",
+        f"belongs to another user or has another name, {_NOT_SHOWN}",
         False,
     ),
-    "too large": (_setup_too_large, "is larger than a ", False),
+    "too large": (_setup_too_large, f"may be, {_NOT_SHOWN}", False),
     "another version": (_setup_other_version, "is not a readable version", False),
     "newer live file": (_setup_newer_live, "was saved by a newer version.", True),
     "live file missing": (_setup_live_missing, "is missing or could not be read in full.", True),
@@ -1038,7 +1039,7 @@ def test_the_reasons_for_a_file_that_lacks_what_the_copy_holds(name: str) -> Non
                 "schedules.json.v2-backup": _document(2, "rules", [{"id": "o", "playlist": "x"}]),
             }[name]
         )
-        says = " of the records it holds."
+        says = " of the records the copy holds."
 
     reason = retired_backups.why_it_stays(_candidate(name))
 

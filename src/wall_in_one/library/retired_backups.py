@@ -117,7 +117,7 @@ class Candidate:
 #: Every copy of a store any version ever made, by name, in the app's state
 #: folder. ``schedules.json`` has two: a version 1 file that was first saved
 #: with a rule name went straight to 3.
-STORE_LACK: Final = "{live} lacks {n} of the records it holds"
+STORE_LACK: Final = "{live} lacks {n} of the records the copy holds"
 
 
 STORE_CANDIDATES: Final[tuple[Candidate, ...]] = (
@@ -213,7 +213,9 @@ def _reason_to_stay(
     name = candidate.name
     status = pin.status()
     generation = file_io.file_fingerprint(status)
-    not_a_copy = "so it isn't one of Wall-in-One's old copies and is left alone."
+    # These checks show only that the name can't be proven to hold such a copy:
+    # a real one may have been hard-linked, truncated or edited since.
+    not_a_copy = "so it can't be shown to be one of Wall-in-One's old copies, and is left alone."
     if status.st_uid != os.getuid() or status.st_nlink != 1:
         return f"{name} belongs to another user or has another name, {not_a_copy}", generation
     if status.st_size > candidate.maximum_bytes:

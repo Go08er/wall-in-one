@@ -102,7 +102,9 @@ def _stub_weston(stubs: Path) -> None:
     weston.chmod(0o755)
 
 
-def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path, temporary: Path) -> None:
+def test_the_wrapper_runs_the_command_in_a_throwaway_profile(
+    tmp_path: Path, temporary: Path
+) -> None:
     """Started from a stand-in desktop shell, inside a Nix shell, with a stand-in
     Weston: the command sees none of that shell, and draws only on that Weston,
     which saw none of it either."""
@@ -361,13 +363,15 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
 
 
 #: Like SLEEPER, but ignores TERM, so only the wrapper's KILL stops it.
-DEAF: Final = SLEEPER.replace("import json, os, sys, time", "import json, os, signal, sys, time").replace(
-    "report = {", "signal.signal(signal.SIGTERM, signal.SIG_IGN)\nreport = {", 1
-)
+DEAF: Final = SLEEPER.replace(
+    "import json, os, sys, time", "import json, os, signal, sys, time"
+).replace("report = {", "signal.signal(signal.SIGTERM, signal.SIG_IGN)\nreport = {", 1)
 
 
 @pytest.mark.gui
-def test_a_kill_after_the_grace_period_leaves_no_compositor_directory(tmp_path: Path, temporary: Path) -> None:
+def test_a_kill_after_the_grace_period_leaves_no_compositor_directory(
+    tmp_path: Path, temporary: Path
+) -> None:
     """A KILL cannot be caught, so the helper cannot remove its own directory.
 
     The command ignores TERM, so the wrapper's TERM waits out the grace period
@@ -448,7 +452,9 @@ os._exit(3)
 """
 
 
-def _stubbed_wrapper_environment(tmp_path: Path, temporary: Path, grace_tenths: int) -> dict[str, str]:
+def _stubbed_wrapper_environment(
+    tmp_path: Path, temporary: Path, grace_tenths: int
+) -> dict[str, str]:
     """The wrapper inside a Nix shell, with a stand-in Weston."""
     stubs = tmp_path / "bin"
     _stub_weston(stubs)

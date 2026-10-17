@@ -17,7 +17,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk
+gi.require_version("Graphene", "1.0")
+from gi.repository import Adw, GLib, Graphene, Gtk
 from wio_demo import art, data, store_catalog, thumbs, ui
 from wio_demo.models import Wallpaper
 from wio_demo.shell import MainWindow
@@ -531,6 +532,28 @@ def finish_page_change(window) -> None:
     settle(lambda: not window.stack.get_transition_running(), 5.0)
 
 
+def check_screenshot_draws_popovers(window) -> None:
+    """``demo.py --screenshot`` must show a menu that is open: it has a surface of
+    its own, so the window's own image never holds it."""
+    import demo  # the screenshot code itself
+
+    window.navigate("displays")
+    finish_page_change(window)
+    window.pages["displays"].demo("menu:HDMI-A-1")
+    settle(lambda: demo.mapped_popovers(window) and window.get_width() > 0)
+    assert demo.mapped_popovers(window), "the menu never mapped"
+    settle(lambda: False, 0.3)  # a frame to lay out and place it
+
+    def png(snapshot) -> bytes:
+        node, area = snapshot.to_node(), Graphene.Rect().init(0, 0, window.get_width(), window.get_height())
+        assert node is not None
+        return window.get_renderer().render_texture(node, area).save_to_png_bytes().get_data()
+
+    plain = Gtk.Snapshot()
+    Gtk.WidgetPaintable.new(window).snapshot(plain, window.get_width(), window.get_height())
+    assert png(plain) != png(demo.snapshot_window(window)), "the menu is not in the screenshot"
+
+
 def build_steps(app, holder):
     w = lambda: holder["window"]  # noqa: E731
     s = lambda: holder["window"].state  # noqa: E731
@@ -661,6 +684,7 @@ def build_steps(app, holder):
             # The demo's downloads land on timers, as real ones do: let them
             # land here, not in the middle of the next page's scenes.
             steps.append(("store downloads land", lambda: settle(lambda: not s().downloads.busy)))
+    steps.append(("the screenshot draws an open menu", lambda: check_screenshot_draws_popovers(w())))
     steps.append(
         (
             "select pill library",

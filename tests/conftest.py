@@ -44,8 +44,8 @@ and outside the desktop's runtime directories (``/run/user/<uid>`` and the
 ``XDG_RUNTIME_DIR`` the run started with), when it is not one of the sockets
 found there (or the inherited ``WAYLAND_DISPLAY`` and ``NIRI_SOCKET``) under
 another name, and when the process listening on it, found through /proc
-without connecting, is a headless Weston whose own ``XDG_RUNTIME_DIR`` (read from /proc/<pid>/environ)
-is the socket's directory. Then ``WAYLAND_DISPLAY`` is set to
+without connecting, is a headless Weston whose own ``XDG_RUNTIME_DIR`` (read
+from /proc/<pid>/environ) is the socket's directory. Then ``WAYLAND_DISPLAY`` is set to
 its resolved path, absolute, so it still resolves after ``XDG_RUNTIME_DIR`` is
 replaced. A test marked ``gui`` that has
 no such compositor fails, naming the reason; it is never skipped. A test not

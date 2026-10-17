@@ -7,7 +7,9 @@ Run from the repository root:
 
 Screenshots (headless, on a Wayland compositor of their own; used to review the
 design): ``prototypes/ui-redesign/screenshots.sh`` (a throwaway profile and a
-headless compositor; do not run ``--screenshot`` any other way).
+headless compositor; do not run ``--screenshot`` any other way). Each open
+popover or menu is drawn over the window image at its place; one that reaches
+past the window's edge is cut there.
 
 A scene is ``[flags@]navkey[+demo]``. Flags (comma separated): light, battery,
 service-off, welcome, narrow, mirrored. ``navkey`` is a sidebar key such as
@@ -32,7 +34,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Graphene", "1.0")
-from gi.repository import Adw, Gio, GLib, Graphene, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gtk
 from wio_demo import noctalia_live, thumbs, ui
 from wio_demo.shell import MainWindow
 from wio_demo.state import AppState
@@ -94,6 +96,80 @@ def apply_scene(window: MainWindow, scene: str) -> None:
         window.pages[navkey.partition(":")[0]].demo(demo)
 
 
+def mapped_popovers(window: Gtk.Widget) -> list[Gtk.Popover]:
+    """Every mapped popover (menus included) below ``window``, parents before their submenus."""
+    found: list[tuple[int, Gtk.Popover]] = []
+    pending: list[tuple[int, Gtk.Widget]] = [(0, window)]
+    while pending:
+        depth, widget = pending.pop()
+        if isinstance(widget, Gtk.Popover) and widget.get_mapped():
+            found.append((depth, widget))
+            depth += 1
+        child = widget.get_first_child()
+        while child is not None:
+            pending.append((depth, child))
+            child = child.get_next_sibling()
+    return [popover for _depth, popover in sorted(found, key=lambda item: item[0])]
+
+
+def popover_origin(window: Gtk.Window, popover: Gtk.Popover) -> tuple[float, float] | None:
+    """Where the popover's widget sits in the window's own coordinates, or None.
+
+    A popover has a surface of its own, placed relative to its parent surface
+    (``Gdk.Popup``), and both surfaces have a transform for the shadow margin
+    around their widget (``Gtk.Native.get_surface_transform``). The window
+    image starts at the window widget, so both are taken off.
+    """
+    popup = popover.get_surface()
+    if not isinstance(popup, Gdk.Popup):
+        return None
+    parent = popup.get_parent()
+    shadow_x, shadow_y = popover.get_surface_transform()
+    if parent is None:
+        return None
+    # Nested popovers are placed relative to their parent popover's surface.
+    parent_x, parent_y = 0.0, 0.0
+    if parent != window.get_surface():
+        for other in mapped_popovers(window):
+            if other is not popover and other.get_surface() == parent:
+                origin = popover_origin(window, other)
+                if origin is None:
+                    return None
+                parent_x, parent_y = origin
+                parent_shadow = other.get_surface_transform()
+                parent_x, parent_y = parent_x - parent_shadow[0], parent_y - parent_shadow[1]
+                break
+        else:
+            return None
+    else:
+        window_shadow = window.get_surface_transform()
+        parent_x, parent_y = -window_shadow[0], -window_shadow[1]
+    return (
+        parent_x + popup.get_position_x() + shadow_x,
+        parent_y + popup.get_position_y() + shadow_y,
+    )
+
+
+def snapshot_window(window: Gtk.Window) -> Gtk.Snapshot:
+    """The window, and each mapped popover on top of it at its place.
+
+    GTK renders the window widget itself, and a popover has a surface of its
+    own, so it is not part of that image; each is drawn over it separately.
+    """
+    snapshot = Gtk.Snapshot()
+    Gtk.WidgetPaintable.new(window).snapshot(snapshot, window.get_width(), window.get_height())
+    for popover in mapped_popovers(window):
+        origin = popover_origin(window, popover)
+        if origin is None:
+            print(f"popover {type(popover).__name__}: no place in the window; left out", file=sys.stderr)
+            continue
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(*origin))
+        Gtk.WidgetPaintable.new(popover).snapshot(snapshot, popover.get_width(), popover.get_height())
+        snapshot.restore()
+    return snapshot
+
+
 def run_screenshots(app: Adw.Application, window: MainWindow, outdir: Path, scenes: list[str]) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     queue = list(scenes)
@@ -142,8 +218,7 @@ def run_screenshots(app: Adw.Application, window: MainWindow, outdir: Path, scen
         name = "".join(c if c.isalnum() or c in "-_" else "_" for c in scene)
         target = outdir / f"{name}.png"
         # GTK renders the window itself: no display server to grab pixels from.
-        snapshot = Gtk.Snapshot()
-        Gtk.WidgetPaintable.new(current).snapshot(snapshot, width, height)
+        snapshot = snapshot_window(current)
         node, renderer = snapshot.to_node(), current.get_renderer()
         if node is None or renderer is None:
             print(f"scene {scene!r}: nothing to render", file=sys.stderr)

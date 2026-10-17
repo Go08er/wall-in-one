@@ -67,6 +67,7 @@ nix develop --command env -u DBUS_SESSION_BUS_ADDRESS -u WAYLAND_DISPLAY -u WAYL
   HOME="$ISO/home" XDG_CONFIG_HOME="$ISO/config" XDG_STATE_HOME="$ISO/state" \
   XDG_CACHE_HOME="$ISO/cache" XDG_DATA_HOME="$ISO/data" XDG_RUNTIME_DIR="$ISO/run" \
   XDG_DATA_DIRS="$ICONS:${XDG_DATA_DIRS:-/run/current-system/sw/share}" \
+  WIO_WAYLAND_PARENT="$ISO" \
   GSK_RENDERER=cairo GDK_BACKEND=wayland GSETTINGS_BACKEND=memory PYTHONDONTWRITEBYTECODE=1 \
   bash "$REPO/tools/headless-wayland.sh" \
   python prototypes/ui-redesign/demo.py --screenshot "$OUT" "${TOUR[@]}"

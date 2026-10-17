@@ -40,7 +40,9 @@ would never reach playback (`runtime_config.change_problem`), and so is
 making one like that: a new playlist with wallpapers, or a copy, "All
 wallpapers" included (`runtime_config.checked_new_playlist`). These
 refusals are a courtesy at the gesture. Publication does not depend on
-them: whatever another program saved meanwhile, the document is published.
+them: whatever another program saved meanwhile, the document is published,
+except that a playlist whose files are in a folder the library scan could not
+look into refuses the build, naming the folder.
 Making a playlist with nothing to play the default is refused when asked,
 and again by the application at its own settings write
 (`Application._prepare_settings_batch`), whichever page asked.

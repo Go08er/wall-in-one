@@ -77,8 +77,8 @@ display's entry in `runtime-overrides.toml`. So every reference in both files
 names a playlist that is there, which is what the service checks. The app
 says what it left out once and keeps it as a notice; `--write-config`,
 `--service-startup-prepare` and `--sync-runtime-health` print one `warning:`
-line for each and exit as for a clean compile. This holds only where nothing was
-unseen. A playlists, schedules, displays, pairings, favourites or pending
+line for each and exit as for a clean compile. This holds only where nothing
+that matters was unseen. A playlists, schedules, displays, pairings, favourites or pending
 removals file that can't be read, is damaged or was saved by a newer version
 still refuses the compile, naming the file, and the last document stays. So
 does a playlist with nothing to play that the default, a rule or a display

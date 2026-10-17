@@ -1681,6 +1681,13 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     relies on. The service checks that every reference names an emitted
     playlist, so nothing left out is ever named in either document.
 
+    **Except where the scan could not look.** A playlist that plays nothing
+    only because the library scan could not look into a folder its entries
+    may be in (a failed listing or stat, a scan limit; `_unseen_folder`)
+    refuses the build, naming the folder: files may be there now. A library
+    folder that is absent, not a folder or a link was looked at, and is left
+    out as above.
+
     **Only over stores read in full.** A store that couldn't be read, is
     damaged or was saved by a newer build refuses the whole build, naming the
     file (`Session.authoring_faults`): "couldn't look" is never "nothing

@@ -53,7 +53,8 @@ Three properties of the list are worth knowing:
   plays "All media"), and everything else is still published. The same holds
   for a library folder that is not a folder or is a symbolic link. It is the
   scan having *looked* and found nothing usable there; a folder the scan
-  *could not look into* (a listing or stat failed, or a scan limit stopped it)
+  *could not look into* (a listing or stat of the folder, or of a library
+  folder itself, failed, or a scan limit stopped it)
   is different, and a playlist that depends on it stops the build instead
   (see [the runtime document](runtime-config.md)).
 - **A folder that playlists need stays.** Removing a folder, or turning off

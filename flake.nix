@@ -337,9 +337,12 @@
           # delivery regressions need a real display.  Keep those tests out of
           # the package's ordinary checkPhase (which must remain usable in a
           # display-less build sandbox), but do not let that turn `gui` into a
-          # marker CI silently never runs.  Xvfb supplies only an isolated X11
-          # framebuffer; the tests retain their autouse XDG/network/desktop
-          # guards and never see the developer's session.
+          # marker CI silently never runs.  Wall-in-One supports only Wayland,
+          # so the display is a Wayland compositor of the run's own:
+          # tools/headless-wayland.sh starts Weston's headless backend with the
+          # pixman renderer (no GPU, no X11, no Xwayland) and hands its socket
+          # to the tests by absolute path; the tests retain their autouse
+          # XDG/network/desktop guards and never see the developer's session.
           gui-tests =
             pkgs.runCommand "wall-in-one-gui-tests"
               {
@@ -354,8 +357,9 @@
                   pkgs.gtk4
                   pkgs.libadwaita
                   pkgs.ffmpeg
-                  pkgs.xauth
-                  pkgs.xvfb-run
+                  pkgs.weston
+                  # setpriv: the compositor dies with the script that started it.
+                  pkgs.util-linux
                 ];
               }
               ''
@@ -367,10 +371,13 @@
                 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
                   "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
 
-                export GDK_BACKEND=x11
+                # GTK draws on Wayland or not at all: no fallback to another
+                # backend if the compositor is missing.
+                export GDK_BACKEND=wayland
                 # The sandbox has no GPU driver and falls back to cairo. A local
-                # run that finds one picks Vulkan, which under Xvfb is slow
-                # enough to starve plain idles. Name the renderer so both agree.
+                # run that finds one would pick Vulkan or GL, which in software
+                # renders slowly enough to starve plain idles. Name the renderer
+                # so both agree.
                 export GSK_RENDERER=cairo
                 export GSETTINGS_BACKEND=memory
                 export GI_TYPELIB_PATH="${
@@ -395,8 +402,7 @@
 
                 cd ${./.}
                 export PYTHONPATH="$PWD/src"
-                xvfb-run --auto-servernum \
-                  --server-args='-screen 0 1280x1024x24 -nolisten tcp' \
+                bash tools/headless-wayland.sh \
                   pytest tests -q -m gui -ra -p no:cacheprovider \
                     --junitxml="$TMPDIR/gui-results.xml"
 

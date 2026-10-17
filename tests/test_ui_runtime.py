@@ -2103,7 +2103,7 @@ def test_startup_repair_skips_a_newer_playlists_file_instead_of_pausing_authorin
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rollback must open read-only, not wedge with every write paused.
+    """A playlists.json a newer build saved must open read-only, not wedge with every write paused.
 
     What this build parses of a newer playlists.json cannot prove which
     playlists are gone, so nothing that names one is "repaired" away either.

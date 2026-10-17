@@ -1711,10 +1711,12 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     playlists: list[tuple[str, str, tuple[tuple[str, ...], ...]]] = []
 
     fallback_items = session.library.items
+    fallback_narrowed = False
     if settings.cycle_favourites_only:
         starred = tuple(item for item in fallback_items if item.path in session.favourites.paths)
         if starred:
             fallback_items = starred
+            fallback_narrowed = True
 
     fallback_entries: list[tuple[str, ...]] = []
     for item in fallback_items:
@@ -1722,6 +1724,24 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         if compiled_lines is not None:
             fallback_entries.append(compiled_lines)
     playlists.append((FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, tuple(fallback_entries)))
+
+    # All media is a dynamic inventory, not an authored list of paths. If it
+    # resolves nothing, an unseen place may still hold something it would
+    # play. A favourites-only subset needs only its selected items' evidence;
+    # an unrelated folder cannot make those items resolve.
+    fallback_unseen = None
+    if not fallback_entries:
+        fallback_unseen = (
+            _unseen_folder(
+                (Entry(id="", source=str(item.path)) for item in fallback_items),
+                session.library.unseen,
+            )
+            if fallback_narrowed
+            else next(
+                (place for place in session.library.unseen if place.kind.could_not_look),
+                None,
+            )
+        )
 
     existing_ids = {FALLBACK_PLAYLIST_ID}
     # Playlists that play nothing only because the scan could not look under a
@@ -1762,6 +1782,16 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
 
     left_out: list[LeftOut] = []
 
+    def require_known_fallback(owner: str, owner_id: str = "") -> None:
+        if fallback_unseen is not None:
+            raise RuntimeConfigError(
+                f"cannot compile runtime configuration because playlist "
+                f"{FALLBACK_PLAYLIST_NAME!r}, which {_owner_phrase(owner, owner_id)} names, "
+                "plays nothing only as far as the library scan could look; "
+                f"{_could_not_look(fallback_unseen)}. The existing runtime "
+                f"configuration was left untouched; {_unseen_advice(fallback_unseen)}"
+            )
+
     def runtime_playlist(
         reference: str, *, owner: str, owner_id: str = "", quiet: bool = False
     ) -> str | None:
@@ -1772,6 +1802,8 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         is neither said nor a reason to refuse.
         """
         if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
+            if not quiet:
+                require_known_fallback(owner, owner_id)
             return FALLBACK_PLAYLIST_ID
         authored = find_playlist(reference, session)
         if authored is None:
@@ -1799,6 +1831,8 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         if settings.active_playlist
         else None
     ) or FALLBACK_PLAYLIST_ID
+    if default == FALLBACK_PLAYLIST_ID:
+        require_known_fallback(DEFAULT_OWNER)
     schema_version = (
         BATTERY_SCHEMA_VERSION if settings.stop_animations_on_battery else SCHEMA_VERSION
     )

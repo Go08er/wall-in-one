@@ -52,6 +52,30 @@ class _Framed(Protocol):
     def get_frame_clock(self) -> Any: ...
 
 
+class _Window(Protocol):
+    def get_surface(self) -> Any: ...
+    def realize(self) -> None: ...
+    def destroy(self) -> None: ...
+
+
+def destroy_window(window: _Window) -> None:
+    """Destroy a window a test built, whether or not it was ever shown.
+
+    GTK 4.22 on Wayland crashes the process when a window that belongs to an
+    application is destroyed before it was ever realized: removing it from
+    the application's session dereferences the surface it never had
+    (``gtk_application_window_removed``, then
+    ``gdk_wayland_toplevel_remove_from_session``). X11 let that pass, and
+    many tests build a window only to drive its methods. Wall-in-One itself
+    presents every window in the activation that builds it, so it never
+    destroys one unrealized. Realizing first gives the window its surface
+    without showing it; it is cleanup, after everything a test asserts.
+    """
+    if window.get_surface() is None:
+        window.realize()
+    window.destroy()
+
+
 def first_frame(window: _Framed) -> Callable[[], bool]:
     """A check that is true once ``window`` has painted its first frame.
 

@@ -22,6 +22,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from tests.first_run_windows import application_with_window  # noqa: E402
+from tests.gtk_helpers import destroy_window  # noqa: E402
 from tests.started import StartedApplication, started_application  # noqa: E402
 from tests.test_ui_next_settings import _close, _open  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime, toolkit  # noqa: E402,F401
@@ -66,7 +67,7 @@ def test_a_started_application_does_no_process_work() -> None:
         assert application._legacy_migration_future is None
         window = NextWindow(application, application.settings)
         assert window in application.get_windows()
-        window.destroy()
+        destroy_window(window)
     finally:
         application._stills.shutdown()
         application.session.shutdown()

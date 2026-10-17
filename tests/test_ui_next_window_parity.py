@@ -20,7 +20,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.gtk_helpers import destroy_window, spin_until  # noqa: E402
 from tests.started import started_application  # noqa: E402
 from tests.test_next_status_line import two_display_status  # noqa: E402
 from wall_in_one import config  # noqa: E402
@@ -114,7 +114,7 @@ def test_rescan_is_in_the_new_windows_main_menu_as_in_the_classic_header(
         window.activate_action("win.refresh", None)
         assert rescans == [True]
     finally:
-        window.destroy()
+        destroy_window(window)
         application._stills.shutdown()
         application.session.shutdown()
 

@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
-from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.gtk_helpers import destroy_window, spin_until  # noqa: E402
 from tests.shown_text import shown_texts  # noqa: E402
 from tests.started import started_application  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
@@ -301,7 +301,7 @@ def test_application_side_settings_refresh_the_open_preferences_page(
         assert application.settings.opacity == 0.75
     finally:
         application._window = None
-        window.destroy()
+        destroy_window(window)
         application._stills.shutdown()
         application.session.shutdown()
 

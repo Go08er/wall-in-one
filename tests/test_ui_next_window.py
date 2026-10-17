@@ -36,7 +36,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from tests.gtk_helpers import FIRST_FRAME_S, first_frame, spin_until  # noqa: E402
+from tests.gtk_helpers import FIRST_FRAME_S, destroy_window, first_frame, spin_until  # noqa: E402
 from tests.started import started_application  # noqa: E402
 from tests.test_next_status_line import BATTERY, two_display_status  # noqa: E402
 from wall_in_one import config, paths, ui_prefs  # noqa: E402
@@ -730,7 +730,7 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
             assert window.state.library_folders is not None
             assert page.header_start() == [page._add]
         finally:
-            window.destroy()
+            destroy_window(window)
 
         monkeypatch.setattr(RealAppState, "library_folders", property(lambda _self: None))
         window = NextWindow(application, application.settings)
@@ -741,7 +741,7 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
             page.add_folder("/home/someone/Pictures/Walls")
             assert added == [], "without the capability the page adds nothing"
         finally:
-            window.destroy()
+            destroy_window(window)
 
         folders = Folders()
         monkeypatch.setattr(RealAppState, "library_folders", property(lambda _self: folders))
@@ -755,7 +755,7 @@ def test_add_a_folder_is_offered_only_by_an_adapter_with_folder_authoring(
             assert added == ["/home/someone/Pictures/Walls/"]
             assert toasts == ["Added \u201cWalls\u201d · scanning"]
         finally:
-            window.destroy()
+            destroy_window(window)
     finally:
         application._stills.shutdown()
         application.session.shutdown()
@@ -813,7 +813,7 @@ def test_the_new_interface_settings_row_is_off_while_ui_toml_cannot_be_written()
         window.preferences.close(wait=True)
         assert target.read_text() == document
     finally:
-        window.destroy()
+        destroy_window(window)
         application._stills.shutdown()
         application.session.shutdown()
 
@@ -893,7 +893,7 @@ def test_the_new_interface_gpu_row_saves_goes_back_on_failure_and_is_off_when_un
         assert page.interface_row is not None and page.gpu_row is not None
         assert not page.gpu_row.get_sensitive() and not page.interface_row.get_sensitive()
     finally:
-        window.destroy()
+        destroy_window(window)
         application._stills.shutdown()
         application.session.shutdown()
 

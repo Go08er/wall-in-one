@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from tests.gtk_helpers import settle, spin_until  # noqa: E402
+from tests.gtk_helpers import destroy_window, settle, spin_until  # noqa: E402
 from tests.started import started  # noqa: E402
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import favourites, pairings, playlists, removals, scan  # noqa: E402
@@ -730,5 +730,5 @@ def test_scanning_indicator_preserves_the_grid_search_scroll_and_focus(
     assert adjustment.get_value() == 37
     assert window.get_focus() is focused
 
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()

@@ -32,7 +32,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from tests.gtk_helpers import settle  # noqa: E402
+from tests.gtk_helpers import destroy_window, settle  # noqa: E402
 from tests.started import started  # noqa: E402
 from wall_in_one.library.filter import Query, Sort  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem, Ownership  # noqa: E402
@@ -1245,7 +1245,7 @@ def test_failed_context_menu_store_writes_do_not_publish_or_claim_success(
     assert application.pairing_updates == 1
     assert len(reports) == 4
     assert all("nothing changed" in message for message in reports)
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()
 
 
@@ -1296,7 +1296,7 @@ def apply_window(tmp_path: Path) -> Iterator[tuple[MainWindow, list[Path], list[
     try:
         yield window, played, targeted
     finally:
-        window.destroy()
+        destroy_window(window)
         application.session.shutdown()
 
 
@@ -1458,7 +1458,7 @@ def test_quick_choice_menu_action_really_plays_instead_of_opening_the_editor(
 
     assert application.played == [wallpaper]
     assert window._content_stack.get_visible_child_name() == "primary"
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()
 
 
@@ -1530,7 +1530,7 @@ def test_borked_media_has_a_warning_and_no_global_or_targeted_play_action(
 
     assert application.played == []
     assert reports and "Playback unavailable" in reports[-1]
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()
 
 
@@ -1585,7 +1585,7 @@ def test_main_window_keeps_pairings_inside_the_media_workflow(
     window._content_stack.set_visible_child_name("pairing-editor")
     assert window._toast.get_child() is window._content_stack
 
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()
 
 
@@ -1808,7 +1808,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
     window.show_runtime_unavailable()
     assert not window._runtime_controls.get_sensitive()
 
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()
 
 
@@ -1966,7 +1966,7 @@ def test_media_highlights_and_playing_label_follow_atomic_runtime_status(
     assert window._grid._tiles[first_path].has_css_class("wio-tile-current")
     assert not window._grid._tiles[second_path].has_css_class("wio-tile-current")
     assert "playing Day" in window._subtitle.get_subtitle()
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()
 
 
@@ -2028,5 +2028,5 @@ def test_management_pages_render_real_pairing_playlist_and_schedule_data(
     assert all(isinstance(button, Gtk.ToggleButton) for button in schedule_editor._months)
     assert isinstance(schedule_editor._start_hour, Gtk.DropDown)
     assert isinstance(schedule_editor._start_minute, Gtk.DropDown)
-    window.destroy()
+    destroy_window(window)
     application.session.shutdown()

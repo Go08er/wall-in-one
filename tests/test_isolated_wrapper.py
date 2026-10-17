@@ -343,6 +343,10 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
         }
         assert survivors == {}, f"left running: {survivors}"
         assert status == 128 + number
+        assert wrapper.stderr is not None
+        assert "exited during the run" not in wrapper.stderr.read().decode(errors="replace"), (
+            "Weston gets the group's signal too; that is not a crash"
+        )
         assert not root.exists(), "the profile is removed, after the workload"
         assert list(temporary.iterdir()) == [], "and the compositor's directory"
     finally:

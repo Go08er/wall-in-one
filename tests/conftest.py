@@ -44,8 +44,9 @@ and outside the desktop's runtime directories (``/run/user/<uid>`` and the
 ``XDG_RUNTIME_DIR`` the run started with), when it is not one of the sockets
 found there (or the inherited ``WAYLAND_DISPLAY`` and ``NIRI_SOCKET``) under
 another name, and when the process listening on it, found through /proc
-without connecting, is a headless Weston. Then ``WAYLAND_DISPLAY`` is set to
-it, as an absolute path, so it still resolves after ``XDG_RUNTIME_DIR`` is
+without connecting, is a headless Weston whose own ``XDG_RUNTIME_DIR`` (read from /proc/<pid>/environ)
+is the socket's directory. Then ``WAYLAND_DISPLAY`` is set to
+its resolved path, absolute, so it still resolves after ``XDG_RUNTIME_DIR`` is
 replaced. A test marked ``gui`` that has
 no such compositor fails, naming the reason; it is never skipped. A test not
 marked ``gui`` gets no ``WAYLAND_DISPLAY`` at all.
@@ -161,8 +162,8 @@ def _live_sockets(
 _LISTENING: Final = 0x10000
 
 
-def listening_command(path: str) -> list[str] | None:
-    """The command line of the process listening on the Unix socket at ``path``.
+def _listening_pid(path: str) -> int | None:
+    """The process of this account's listening on the Unix socket at ``path``.
 
     Found through /proc (the kernel's table of Unix sockets, then which of
     this account's processes holds one of them), so nothing connects to it.
@@ -198,11 +199,43 @@ def listening_command(path: str) -> list[str] | None:
             except OSError:
                 continue
             if held in inodes:
-                try:
-                    with open(f"/proc/{pid}/cmdline", "rb") as command:
-                        return [os.fsdecode(part) for part in command.read().split(b"\0") if part]
-                except OSError:
-                    return None
+                return int(pid)
+    return None
+
+
+def listening_command(path: str) -> list[str] | None:
+    """The command line of the process listening on the Unix socket at ``path``.
+
+    Read from /proc; nothing connects. None when no process of this account's
+    listens there, or its command line cannot be read.
+    """
+    pid = _listening_pid(path)
+    if pid is None:
+        return None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as command:
+            return [os.fsdecode(part) for part in command.read().split(b"\0") if part]
+    except OSError:
+        return None
+
+
+def listening_runtime_dir(path: str) -> str | None:
+    """The ``XDG_RUNTIME_DIR`` the process listening at ``path`` was started with.
+
+    Read from that process's /proc/<pid>/environ (its environment at exec, which
+    is what tools/headless-wayland.sh sets for Weston); nothing connects.
+    None when nobody listens there, or the environment cannot be read.
+    """
+    pid = _listening_pid(path)
+    if pid is None:
+        return None
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as environment:
+            for entry in environment.read().split(b"\0"):
+                if entry.startswith(b"XDG_RUNTIME_DIR="):
+                    return os.fsdecode(entry.partition(b"=")[2])
+    except OSError:
+        return None
     return None
 
 
@@ -211,11 +244,13 @@ def wayland_test_socket(
     uid: int,
     live: tuple[Path, ...],
     serving: Callable[[str], list[str] | None] = listening_command,
+    runtime_dir: Callable[[str], str | None] = listening_runtime_dir,
 ) -> tuple[str | None, str]:
     """The run's own compositor socket from ``environ``, or None and why not.
 
     ``live`` is :func:`live_runtime_dirs`; ``serving`` finds the command
-    listening on a socket (:func:`listening_command`). See the module's
+    listening on a socket (:func:`listening_command`) and ``runtime_dir`` the
+    ``XDG_RUNTIME_DIR`` it runs with (:func:`listening_runtime_dir`). See the module's
     display rules.
     """
     candidate = environ.get(TEST_WAYLAND_ENV, "")
@@ -259,7 +294,16 @@ def wayland_test_socket(
             f"{TEST_WAYLAND_ENV}={candidate!r} is served by {' '.join(command[:2]) or '?'!r}, "
             "not a headless Weston"
         )
-    return str(path), ""
+    # tools/headless-wayland.sh starts Weston with XDG_RUNTIME_DIR set to the
+    # directory of its socket. Any other headless Weston (another project's, say)
+    # is not this run's compositor, whatever its command line looks like.
+    runtime = runtime_dir(str(path))
+    if runtime is None or os.path.realpath(runtime) != str(resolved.parent):
+        return None, (
+            f"{TEST_WAYLAND_ENV}={candidate!r} is served by a Weston whose own runtime "
+            f"directory ({runtime or 'unreadable'}) is not the socket's directory"
+        )
+    return str(resolved), ""
 
 
 def _enter_session_sandbox() -> tuple[Path, str | None, str]:

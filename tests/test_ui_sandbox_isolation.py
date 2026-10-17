@@ -182,6 +182,28 @@ class StandInCompositor:
         self._listener.close()
 
 
+class StandInDesktop(StandInCompositor):
+    """The desktop's compositor, listening at both default names GTK would try.
+
+    ``wayland-1`` is what its terminal exports; ``wayland-0`` is the name GTK
+    falls back to when ``WAYLAND_DISPLAY`` is unset, resolved against
+    ``XDG_RUNTIME_DIR``. A run that left its runtime directory in place would
+    reach the second without ever naming it; connections to either count.
+    """
+
+    def __init__(self, run: Path) -> None:
+        super().__init__(run / "wayland-1")
+        self._fallback = StandInCompositor(run / "wayland-0")
+
+    @property
+    def total(self) -> int:
+        return self.connections + self._fallback.connections
+
+    def close(self) -> None:
+        self._fallback.close()
+        super().close()
+
+
 #: Imports conftest as pytest does first, then GTK, and reports what GTK connected to.
 CHILD: Final = """
 import json, os, socket, stat, sys
@@ -206,12 +228,12 @@ print(json.dumps({
 
 
 @pytest.fixture
-def stand_in_desktop(tmp_path: Path) -> Iterator[tuple[dict[str, str], StandInCompositor]]:
+def stand_in_desktop(tmp_path: Path) -> Iterator[tuple[dict[str, str], StandInDesktop]]:
     """A child's environment as a desktop terminal exports it, and that desktop's compositor."""
     shell = tmp_path / "desk"
     run = shell / "run"
     run.mkdir(parents=True, mode=0o700)
-    compositor = StandInCompositor(run / "wayland-1")
+    compositor = StandInDesktop(run)
     environment = {
         name: value
         for name, value in os.environ.items()
@@ -245,7 +267,7 @@ def _child(environment: dict[str, str]) -> dict[str, object]:
 
 
 def test_an_inherited_live_wayland_display_is_not_what_gtk_uses(
-    stand_in_desktop: tuple[dict[str, str], StandInCompositor],
+    stand_in_desktop: tuple[dict[str, str], StandInDesktop],
 ) -> None:
     """The terminal's ``WAYLAND_DISPLAY=wayland-1`` is dropped; GTK takes the run's own."""
     environment, desktop = stand_in_desktop
@@ -260,12 +282,12 @@ def test_an_inherited_live_wayland_display_is_not_what_gtk_uses(
     peers = report["peers"]
     assert isinstance(peers, list)
     assert conftest.TEST_WAYLAND_SOCKET in peers and str(desktop.path) not in peers, peers
-    assert desktop.connections == 0, "the desktop's compositor was reached"
+    assert desktop.total == 0, "the desktop's compositor was reached"
 
 
 @pytest.mark.parametrize("pointed_at", ["the desktop's socket", "unset"])
 def test_without_a_compositor_of_its_own_gtk_reaches_no_display(
-    stand_in_desktop: tuple[dict[str, str], StandInCompositor], pointed_at: str
+    stand_in_desktop: tuple[dict[str, str], StandInDesktop], pointed_at: str
 ) -> None:
     """Refused or missing, there is no display at all: no fallback to the desktop's."""
     environment, desktop = stand_in_desktop
@@ -280,7 +302,7 @@ def test_without_a_compositor_of_its_own_gtk_reaches_no_display(
     assert report["display"] is None, report
     assert report["WAYLAND_DISPLAY"] is None
     assert report["DISPLAY"] is None
-    assert desktop.connections == 0, "the desktop's compositor was reached"
+    assert desktop.total == 0, "the desktop's compositor was reached"
 
 
 #: A GUI test, run by a child pytest that has no compositor of its own.
@@ -294,7 +316,7 @@ def test_needs_a_display():
 
 
 def test_a_gui_test_without_a_compositor_fails_and_is_never_skipped(
-    stand_in_desktop: tuple[dict[str, str], StandInCompositor], tmp_path: Path
+    stand_in_desktop: tuple[dict[str, str], StandInDesktop], tmp_path: Path
 ) -> None:
     environment, desktop = stand_in_desktop
     environment.pop(conftest.TEST_WAYLAND_ENV, None)
@@ -325,4 +347,4 @@ def test_a_gui_test_without_a_compositor_fails_and_is_never_skipped(
     assert "1 error" in completed.stdout and "skipped" not in completed.stdout, completed.stdout
     assert "has no headless Wayland compositor of the run's own" in completed.stdout
     assert "WIO_TEST_WAYLAND_SOCKET is not set" in completed.stdout
-    assert desktop.connections == 0
+    assert desktop.total == 0

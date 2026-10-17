@@ -24,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Final
@@ -484,7 +485,14 @@ def _judge(
     if candidate is not None:
         environ[conftest.TEST_WAYLAND_ENV] = candidate
     live = conftest.live_runtime_dirs(environ, os.getuid())
-    return conftest.wayland_test_socket(environ, os.getuid(), live, _serving)
+
+    def runtime_dir(path: str) -> str | None:
+        """What /proc/<pid>/environ would say: Weston runs in its own socket's directory."""
+        if os.path.basename(os.path.realpath(path)) == "wayland-0":
+            return str(desktop["ours"].parent)
+        return None
+
+    return conftest.wayland_test_socket(environ, os.getuid(), live, _serving, runtime_dir)
 
 
 def test_the_runs_own_compositor_is_taken(desktop: dict[str, Path]) -> None:
@@ -548,6 +556,10 @@ REFUSED: Final[dict[str, tuple[Callable[[dict[str, Path]], str | None], str]]] =
         lambda places: _hard_link(places["ours"], places["elsewhere"] / "nested"),
         "not a headless Weston",
     ),
+    "a headless Weston whose runtime directory is another": (
+        lambda places: _hard_link(places["ours"], places["elsewhere"] / "wayland-0"),
+        "whose own runtime directory",
+    ),
     "a socket no one listens on": (
         lambda places: _hard_link(places["ours"], places["elsewhere"] / "stale"),
         "no process of this account's listens on it",
@@ -597,3 +609,33 @@ def test_the_listener_is_found_through_proc_without_connecting(tmp_path: Path) -
         listener.close()
     assert conftest.listening_command(str(path)) is None, "a socket file no one listens on"
     assert conftest.listening_command(str(tmp_path / "never")) is None
+
+
+def test_the_listeners_runtime_directory_is_read_from_proc(tmp_path: Path) -> None:
+    """A child bound to a socket, started with its own XDG_RUNTIME_DIR: read, not asked."""
+    run = tmp_path / "run"
+    run.mkdir(mode=0o700)
+    ready = tmp_path / "ready"
+    code = (
+        "import socket, sys, time\n"
+        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "s.bind(sys.argv[1]); s.listen(1)\n"
+        "open(sys.argv[2], 'w').close()\n"
+        "time.sleep(60)\n"
+    )
+    environment = {**os.environ, "XDG_RUNTIME_DIR": str(run)}
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path / "wl"), str(ready)],
+        env=environment,
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+        assert conftest.listening_runtime_dir(str(tmp_path / "wl")) == str(run)
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+    assert conftest.listening_runtime_dir(str(tmp_path / "wl")) is None

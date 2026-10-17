@@ -77,10 +77,17 @@ display's entry in `runtime-overrides.toml`. So every reference in both files
 names a playlist that is there, which is what the service checks. The app
 says what it left out once and keeps it as a notice; `--write-config`,
 `--service-startup-prepare` and `--sync-runtime-health` print one `warning:`
-line for each and exit as for a clean compile. This holds only for files that
-were read in full: a playlists, schedules, displays or pairings file that
-can't be read, is damaged or was saved by a newer version still refuses the
-compile, naming the file, and the last document stays. Everything else the
+line for each and exit as for a clean compile. This holds only where nothing was
+unseen. A playlists, schedules, displays, pairings, favourites or pending
+removals file that can't be read, is damaged or was saved by a newer version
+still refuses the compile, naming the file, and the last document stays. So
+does a playlist with nothing to play that the default, a rule or a display
+names, when the library scan could not look into a folder its files may be
+in (it is unreadable, or past the scan's limits): "couldn't look" is never
+"nothing there". The refusal names the folder, and the last document stays
+until the folder can be read or the reference is removed. A rule that is
+turned off and names a playlist that can't be used is not written, and is
+neither said nor a reason to refuse. Everything else the
 compiler checks still refuses too: the size and count limits of the wire,
 duplicate ids, text limits and renderer settings.
 

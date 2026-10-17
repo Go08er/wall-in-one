@@ -1622,6 +1622,32 @@ def _overrides_document(
     return document
 
 
+def _unseen_folder(entries: Iterable[Entry], skipped: tuple[str, ...]) -> str | None:
+    """The first skipped scan note that covers a place one of ``entries`` may be in.
+
+    A note reads ``<folder>: <why>``; it covers an entry whose path is that
+    folder or lies under it. None when the scan skipped nothing of theirs.
+    """
+    if not skipped:
+        return None
+    for entry in entries:
+        path = Path(entry.path)
+        for place in (path, *path.parents):
+            prefix = f"{place}: "
+            for note in skipped:
+                if note.startswith(prefix):
+                    return note
+    return None
+
+
+def _owner_phrase(owner: str, owner_id: str) -> str:
+    if owner == SCHEDULE_OWNER:
+        return f"schedule rule {owner_id!r}"
+    if owner == DISPLAY_OWNER:
+        return f"display {owner_id!r}"
+    return "the default"
+
+
 def _compile(settings: config.Settings, session: Session) -> Compiled:
     """Both generated documents, ``runtime.toml`` and its optional overrides, and what
     they were built without.
@@ -1673,6 +1699,9 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     playlists.append((FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, tuple(fallback_entries)))
 
     existing_ids = {FALLBACK_PLAYLIST_ID}
+    # Playlists that play nothing only because the scan could not look under a
+    # folder their entries may be in: "couldn't look" is not "nothing there".
+    unseen: dict[str, str] = {}
     rotations: list[tuple[str, int | None, bool | None]] = []
     for playlist in session.playlists.all():
         resolved: list[tuple[str, ...]] = []
@@ -1686,7 +1715,11 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         if not resolved:
             # Nothing the runtime could play: empty, or every authored entry
             # is missing or unresolved. Not emitted; whatever refers to it is
-            # left out below, and said (`LeftOut`, `NOTHING_TO_PLAY`).
+            # left out below, and said (`LeftOut`, `NOTHING_TO_PLAY`), unless
+            # the scan could not look where its entries may be.
+            hidden = _unseen_folder(playlist.entries, session.library.skipped)
+            if hidden is not None:
+                unseen[playlist.id] = hidden
             continue
         playlists.append((playlist.id, playlist.name, tuple(resolved)))
         existing_ids.add(playlist.id)
@@ -1704,15 +1737,34 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
 
     left_out: list[LeftOut] = []
 
-    def runtime_playlist(reference: str, *, owner: str, owner_id: str = "") -> str | None:
-        """The emitted playlist ``reference`` names; None, and noted, when it can't be used."""
+    def runtime_playlist(
+        reference: str, *, owner: str, owner_id: str = "", quiet: bool = False
+    ) -> str | None:
+        """The emitted playlist ``reference`` names; None, and noted, when it can't be used.
+
+        ``quiet``: for a reference that does nothing while it stays as it is (a
+        rule that is turned off). It is not emitted when it can't be used, and
+        is neither said nor a reason to refuse.
+        """
         if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
             return FALLBACK_PLAYLIST_ID
         authored = find_playlist(reference, session)
         if authored is None:
+            if quiet:
+                return None
             left_out.append(LeftOut(owner, owner_id, reference, "", DOES_NOT_EXIST))
             return None
         if authored.id not in existing_ids:
+            if quiet:
+                return None
+            if authored.id in unseen:
+                raise RuntimeConfigError(
+                    f"cannot compile runtime configuration because playlist "
+                    f"{authored.name!r}, which {_owner_phrase(owner, owner_id)} names, plays "
+                    "nothing only as far as the library scan could look; it could not look "
+                    f"into {unseen[authored.id]}. The existing runtime configuration was "
+                    "left untouched; make the folder readable, or remove the reference."
+                )
             left_out.append(LeftOut(owner, owner_id, reference, authored.name, NOTHING_TO_PLAY))
             return None
         return authored.id
@@ -1779,7 +1831,9 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     for rule in session.schedules.rules:
         if settings.display_mode != config.DISPLAY_MODE_INDEPENDENT and rule.connector:
             continue
-        rule_playlist = runtime_playlist(rule.playlist, owner=SCHEDULE_OWNER, owner_id=rule.id)
+        rule_playlist = runtime_playlist(
+            rule.playlist, owner=SCHEDULE_OWNER, owner_id=rule.id, quiet=not rule.enabled
+        )
         if rule_playlist is not None:
             emitted_schedules.append((rule, rule_playlist))
     if len(emitted_schedules) > MAX_SCHEDULES:

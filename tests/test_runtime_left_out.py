@@ -411,3 +411,119 @@ def test_the_rust_service_loads_a_document_built_without_what_cannot_play(
     assert checked.returncode == 0, checked.stderr
     assert "unknown playlist" not in checked.stderr
     assert "not applied" not in checked.stderr, "no override names what the document lacks"
+
+
+# -- a folder the scan could not look into is "couldn't look", not "nothing to play" -----------
+
+
+def _deep(session: Session, tmp_path: Path) -> tuple[playlists.Playlist, Path]:
+    """A playlist "Deep" whose only file is under ``library/sub``, which the library lacks."""
+    folder = tmp_path / "library" / "sub"
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, folder / "deep.png")
+    return session.playlists.find(deep.id), folder
+
+
+def _scan_skipped(session: Session, *notes: str) -> None:
+    """As a scan that could not look into a folder left it (`Library.skipped`)."""
+    session._library = replace(session.library, skipped=notes)
+
+
+@pytest.mark.parametrize("use", ("default", "rule", "display"))
+def test_a_playlist_under_a_folder_the_scan_could_not_look_into_refuses_the_build(
+    tmp_path: Path, use: str
+) -> None:
+    """Failed on the tolerant build's first commit: Deep was left out as "has nothing to play",
+    and the good document was replaced by one without the default and the rule."""
+    settings, session = _session(tmp_path)
+    settings = _independent(settings)
+    deep, folder = _deep(session, tmp_path)
+    if use == "default":
+        settings = replace(settings, active_playlist=deep.id)
+    elif use == "rule":
+        session.schedules.add(deep.id, rule_id="deep-rule", start="08:00", end="09:00")
+    else:
+        session.displays.assign("HDMI-A-1", deep.id)
+    target = tmp_path / "runtime.toml"
+    target.write_text('schema_version = 4\nlast_known_good = "kept"\n', encoding="utf-8")
+    _scan_skipped(session, f"{folder}: Permission denied")
+
+    with pytest.raises(runtime_config.RuntimeConfigError) as refused:
+        runtime_config.publish_changes(settings, session, target)
+
+    assert f"{folder}: Permission denied" in str(refused.value)
+    assert "left untouched" in str(refused.value)
+    assert target.read_text(encoding="utf-8") == 'schema_version = 4\nlast_known_good = "kept"\n'
+
+    # The same profile with the folder readable (a scan that skipped nothing):
+    _scan_skipped(session)
+    published = runtime_config.publish_changes(settings, session, target)
+    assert published.left_out and all(one.why == NOTHING_TO_PLAY for one in published.left_out)
+    session.shutdown()
+
+
+@pytest.mark.parametrize(
+    "note",
+    (
+        "{root}/other: Permission denied",  # a folder that holds none of its entries
+        "{root}/sub/deeper: Permission denied",  # below the file, not above it
+        "{root}/subtle: Permission denied",  # a name that only starts the same
+    ),
+)
+def test_a_folder_that_holds_none_of_its_entries_does_not_stop_leaving_it_out(
+    tmp_path: Path, note: str
+) -> None:
+    settings, session = _session(tmp_path)
+    deep, _folder = _deep(session, tmp_path)
+    settings = replace(settings, active_playlist=deep.id)
+    _scan_skipped(session, note.format(root=tmp_path / "library"))
+    target = tmp_path / "runtime.toml"
+
+    published = runtime_config.publish_changes(settings, session, target)
+
+    assert published.left_out == (LeftOut(DEFAULT_OWNER, "", deep.id, "Deep", NOTHING_TO_PLAY),)
+    session.shutdown()
+
+
+def test_a_whole_root_that_could_not_be_scanned_covers_what_is_under_it(tmp_path: Path) -> None:
+    settings, session = _session(tmp_path)
+    deep, _folder = _deep(session, tmp_path)
+    settings = replace(settings, active_playlist=deep.id)
+    _scan_skipped(session, f"{tmp_path / 'library'}: stopped after 100000 entries")
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="stopped after"):
+        runtime_config.render(settings, session)
+    session.shutdown()
+
+
+def test_an_unused_or_empty_playlist_is_left_out_whatever_the_scan_skipped(
+    tmp_path: Path,
+) -> None:
+    """Nothing refers to Deep, and an empty playlist has no entry anywhere: no reason to refuse."""
+    settings, session = _session(tmp_path)
+    _deep(session, tmp_path)
+    empty = session.playlists.create("Draft")
+    settings = replace(settings, active_playlist=empty.id)
+    _scan_skipped(session, f"{tmp_path / 'library' / 'sub'}: Permission denied")
+
+    published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
+
+    assert published.left_out == (LeftOut(DEFAULT_OWNER, "", empty.id, "Draft", NOTHING_TO_PLAY),)
+    session.shutdown()
+
+
+def test_a_rule_that_is_turned_off_is_not_left_out_and_never_refuses(tmp_path: Path) -> None:
+    """Off, it does nothing whatever it names: not said, not a reason to refuse."""
+    settings, session = _session(tmp_path)
+    deep, folder = _deep(session, tmp_path)
+    session.schedules.add("ghost", rule_id="off-ghost", start="08:00", end="09:00", enabled=False)
+    session.schedules.add(deep.id, rule_id="off-deep", start="10:00", end="11:00", enabled=False)
+    _scan_skipped(session, f"{folder}: Permission denied")
+    target = tmp_path / "runtime.toml"
+
+    published = runtime_config.publish_changes(settings, session, target)
+
+    assert published.left_out == ()
+    document, _overrides = _documents(target)
+    assert [rule["id"] for rule in document["schedules"]] == ["night"]
+    session.shutdown()

@@ -312,6 +312,50 @@ def test_a_compile_leaves_nothing_out_over_a_store_that_was_not_read(
     assert lone.id in good.decode("utf-8")
 
 
+@pytest.mark.parametrize("verb", COMPILES)
+def test_a_folder_the_scan_could_not_look_into_is_not_nothing_to_play(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    """Deep (the default, and a rule's) holds only a file under ``library/sub``.
+
+    The folder becomes unreadable: the scan cannot say Deep has nothing to
+    play, only that it could not look. The compile refuses, naming the
+    folder, and the last good ``runtime.toml`` stays; with the folder
+    readable again, Deep plays and nothing is left out.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    item = _media(tmp_path)
+    folder = item.path.parent / "sub"
+    folder.mkdir()
+    (folder / "deep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    store = playlists.Store.open()
+    deep = store.add(store.create("Deep").id, folder / "deep.png")
+    schedules.Store.open().add(deep.id, rule_id="deep-rule")
+    config.update({"active_playlist": deep.id})
+    assert cli.main(["--write-config"]) == 0
+    good = paths.runtime_config_path().read_bytes()
+    assert deep.id.encode() in good
+    capsys.readouterr()
+
+    folder.chmod(0o000)
+    try:
+        code = cli.main([verb])
+        said = capsys.readouterr()
+    finally:
+        folder.chmod(0o700)
+
+    assert "error:" in said.err and str(folder) in said.err, said.err
+    assert "nothing to play" not in said.err
+    assert [line for line in _warnings(said.err) if "building" in line] == []
+    assert paths.runtime_config_path().read_bytes() == good
+    assert code == (1 if verb == "--write-config" else 0)
+
+    assert cli.main([verb]) == 0
+    assert _warnings(capsys.readouterr().err) == []
+    assert paths.runtime_config_path().read_bytes() == good
+
+
 # -- what the released version left on disk ----------------------------------------------------
 
 _RELEASED_SAVES_WHAT_CANNOT_PLAY = r"""

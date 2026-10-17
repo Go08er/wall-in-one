@@ -661,8 +661,10 @@
             pkgs.rustc
             pkgs.rustfmt
             pkgs.pkg-config
-            pkgs.xvfb-run
-            pkgs.xauth
+            # The headless Wayland compositor tools/headless-wayland.sh starts
+            # for GUI runs, and setpriv, which ties it to that script's life.
+            pkgs.weston
+            pkgs.util-linux
             pkgs.luau
             pkgs.shellcheck
           ] ++ runtimeTools;

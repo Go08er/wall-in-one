@@ -3374,7 +3374,7 @@ def test_a_rule_can_be_named_and_unnamed_by_its_id(sandbox: Path, applied: list[
     rule = app.session.schedules.rules[0]
     target = paths.app_state_dir() / "schedules.json"
     unnamed = target.read_bytes()
-    assert json.loads(unnamed)["version"] == 2
+    assert json.loads(unnamed)["version"] == 3, "an unnamed rule is saved at the current version"
 
     response = _immediate(commands.name_schedule_rule(f"{rule.id} Frog   weekend"))
 

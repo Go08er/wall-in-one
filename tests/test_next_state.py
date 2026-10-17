@@ -1194,7 +1194,7 @@ def test_an_earlier_failure_never_reverts_a_later_queued_choice(
     assert (keeper.prefs.interface, keeper.prefs.window_style) == (None, "frosted")
     assert shown == [(None, "frosted")], "only the latest save reconciled, once"
     assert len(backend.reports) == 1 and refused == [target]
-    assert tomllib.loads(target.read_text())["version"] == 1
+    assert tomllib.loads(target.read_text())["version"] == ui_prefs.FORMATS.current
 
 
 # -- the new interface's look follows what ui.toml holds ---------------------------------

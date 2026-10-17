@@ -488,19 +488,21 @@ def test_cleanup_of_an_already_unplayable_used_playlist_is_allowed() -> None:
 # -- how it plays -------------------------------------------------------------------------------
 
 
-def test_interval_and_shuffle_are_the_playlists_own_and_bump_the_file_once(
+def test_interval_and_shuffle_are_the_playlists_own_and_saved_at_the_current_version(
     backend: FakeApplication,
 ) -> None:
     pid = _evening(backend)
     editing = _editor(backend)[1]
-    assert json.loads(_file().read_text())["version"] == 1
+    assert json.loads(_file().read_text())["version"] == 2
+    assert "cycle_interval" not in json.loads(_file().read_text())["playlists"][0]
     editing.set_playlist_interval(pid, 900)
     detail = editing.detail(pid)
     assert detail is not None and detail.rotation.interval == 900, "the choice, meanwhile"
     assert backend.session.playlists.find(pid).cycle_interval is None
     backend.run_authoring()
     assert backend.session.playlists.find(pid).cycle_interval == 900
-    assert json.loads(_file().read_text())["version"] == 2, "bumped on first use"
+    assert json.loads(_file().read_text())["version"] == 2
+    assert json.loads(_file().read_text())["playlists"][0]["cycle_interval"] == 900
     assert not _file().with_name("playlists.json.v1-backup").exists(), "and no copy is kept"
     editing.set_playlist_shuffle(pid, True)
     backend.run_authoring()

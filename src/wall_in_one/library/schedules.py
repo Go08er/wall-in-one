@@ -34,23 +34,14 @@ from wall_in_one.library import playlists, state_file
 #: The file, under `paths.app_state_dir()`.
 STATE_FILENAME: Final = "schedules.json"
 
-#: Versions 1 to 3 are read. Version 1 is rewritten as version 2 on the next
-#: edit, as it always was. Version 3 adds an optional ``name`` per rule and is
-#: written only when a rule has one (format-change guard 1, lazy bump on use):
-#: a schedule without names stays version 2, byte for byte what 0.1.4
-#: writes. A file stays at
-#: version 3 once there, even after its last name is cleared. A newer version
-#: is shown but never compiled or rewritten: every mutation is refused (kind
-#: ``newer-version``). Unknown keys in a version this build reads are carried
-#: through every save; see `DOCUMENT_SHAPE`.
+#: Versions 1 to 3 are read; every save is written as version 3, which adds
+#: an optional ``name`` per rule. A newer version is shown but never compiled
+#: or rewritten: every mutation is refused (kind ``newer-version``). Unknown
+#: keys in a version this build reads are carried through every save; see
+#: `DOCUMENT_SHAPE`.
 FORMAT_VERSION: Final = 3
 LEGACY_FORMAT_VERSION: Final = 1
-#: What every supported older build reads and writes; see `FORMATS`.
-UNNAMED_FORMAT_VERSION: Final = 2
-NAMED_FORMAT_VERSION: Final = 3
-FORMATS: Final = state_file.FormatVersions(
-    oldest=LEGACY_FORMAT_VERSION, floor=UNNAMED_FORMAT_VERSION, current=FORMAT_VERSION
-)
+FORMATS: Final = state_file.FormatVersions(oldest=LEGACY_FORMAT_VERSION, current=FORMAT_VERSION)
 
 #: Ceilings, so a file that grew a zero cannot be read forever.
 MAX_RULES: Final = 512
@@ -364,17 +355,6 @@ def _name_is_malformed(raw: dict[str, Any]) -> bool:
     return False
 
 
-def required_version(rules: Sequence[Rule]) -> int:
-    """The oldest format that can hold ``rules``: 3 once any rule is named.
-
-    This is format-change guard 1 for schedules; `FORMATS` turns it into the
-    version a save actually writes.
-    """
-    if any(rule.name is not None for rule in rules):
-        return NAMED_FORMAT_VERSION
-    return UNNAMED_FORMAT_VERSION
-
-
 def rule_label(rule: Rule, playlist_names: Mapping[str, str] | None = None) -> str:
     """What to call a rule for a person: its name, else its playlist's."""
     if rule.name is not None:
@@ -512,14 +492,10 @@ def _render(
     target: Path,
     *,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
-    version: int | None = None,
 ) -> str:
     """The document ``save`` writes; refused if this build could not read it back."""
-    written = version if version is not None else FORMATS.to_write(None, required_version(rules))
-    if required_version(rules) > written or not FORMATS.floor <= written <= FORMATS.current:
-        raise ValueError(f"schedules cannot be saved as version {written}")
     payload = state_file.merge_unknown(
-        {"version": written, "rules": [rule.to_json() for rule in rules]},
+        {"version": FORMATS.current, "rules": [rule.to_json() for rule in rules]},
         unknown,
         DOCUMENT_SHAPE,
     )
@@ -551,21 +527,17 @@ def save(
     *,
     replace_existing: bool = True,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
-    version: int | None = None,
 ) -> Path:
     """Write the rules atomically, carrying ``unknown`` fields back in.
 
-    ``version`` defaults to the oldest format that holds ``rules`` (see
-    `required_version`), so unnamed rules are written as version 2. This
-    writes what it is given and nothing more: keeping a file's newer version
-    belongs to `Store`, which knows what is on
-    disk. A document larger than ``MAX_STATE_BYTES``, which this build's
-    reader would refuse, is refused (``full``) before anything is written.
+    The document is always written at `FORMATS`'s current version. A document
+    larger than ``MAX_STATE_BYTES``, which this build's reader would refuse, is
+    refused (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
     _write(
         target,
-        _render(rules, target, unknown=unknown, version=version),
+        _render(rules, target, unknown=unknown),
         replace_existing=replace_existing,
     )
     return target
@@ -1062,12 +1034,9 @@ class Store:
                         raise _unreadable_error(fault, target) from error
                     raise
                 if changed:
-                    # Keep the file's version unless these rules need a
-                    # newer one.
-                    version = FORMATS.to_write(reading.version, required_version(rules))
                     # Refused if too large to read back, before anything is
                     # moved; `save` then renders and writes it.
-                    _render(rules, target, unknown=reading.unknown, version=version)
+                    _render(rules, target, unknown=reading.unknown)
                     if fault is not None:
                         try:
                             backup = state_file.preserve_faulted(target, observed=observed)
@@ -1084,7 +1053,6 @@ class Store:
                                     target,
                                     replace_existing=False,
                                     unknown=reading.unknown,
-                                    version=version,
                                 )
                         except ScheduleError as error:
                             # The damaged original is safe at ``backup``: say where,
@@ -1094,7 +1062,7 @@ class Store:
                             ) from error
                     else:
                         with state_file.published_counts():
-                            save(rules, target, unknown=reading.unknown, version=version)
+                            save(rules, target, unknown=reading.unknown)
                     fault = None
 
                 # File first, then memory: failed persistence cannot make the

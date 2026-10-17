@@ -44,12 +44,10 @@ STATE_FILENAME: Final = "playlists.json"
 #: no ``.broken`` copy. Unknown keys in a known version are carried through
 #: every save; see `DOCUMENT_SHAPE`.
 #:
-#: Version 2 adds a playlist's own ``cycle_interval`` and ``shuffle``. It is
-#: written only once one of them is used (lazy bump); until then every save
-#: stays version 1.
+#: Version 2 adds a playlist's own ``cycle_interval`` and ``shuffle``. Every
+#: save is written as version 2; version 1 is still read.
 FORMAT_VERSION: Final = 2
-ROTATION_VERSION: Final = 2
-FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=FORMAT_VERSION)
+FORMATS: Final = state_file.FormatVersions(oldest=1, current=FORMAT_VERSION)
 
 #: A playlist's own interval uses the same bounds as the global setting.
 MIN_CYCLE_INTERVAL: Final = 5
@@ -526,15 +524,6 @@ def valid_cycle_interval(value: object) -> bool:
     return type(value) is int and MIN_CYCLE_INTERVAL <= value <= MAX_CYCLE_INTERVAL
 
 
-def required_version(playlists: Iterable[Playlist]) -> int:
-    """The oldest format that can hold ``playlists`` (lazy bump on use)."""
-    return (
-        ROTATION_VERSION
-        if any(playlist.has_rotation_override for playlist in playlists)
-        else FORMATS.floor
-    )
-
-
 def _entry(raw: object) -> Entry | None:
     if not isinstance(raw, dict):
         return None
@@ -704,16 +693,11 @@ def _render(
     target: Path,
     *,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
-    version: int | None = None,
 ) -> str:
     """The document ``save`` writes; refused if this build could not read it back."""
-    wanted = required_version(playlists.values())
-    written = version if version is not None else FORMATS.to_write(None, wanted)
-    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
-        raise ValueError(f"playlists cannot be saved as version {written}; they need {wanted}")
     payload = state_file.merge_unknown(
         {
-            "version": written,
+            "version": FORMATS.current,
             "playlists": [playlists[key].to_json() for key in sorted(playlists)],
         },
         unknown,
@@ -748,23 +732,19 @@ def save(
     *,
     replace_existing: bool = True,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
-    version: int | None = None,
 ) -> Path:
     """Write them atomically, and return where they went.
 
     ``unknown`` is what the previous document carried beyond this build's
     model; it is merged back so a newer field survives an older build's edit.
-    ``version`` defaults to the oldest format that holds ``playlists`` (see
-    `required_version`), so playlists without their own rotation are written
-    as version 1. Keeping a file's newer version belongs to `Store`, which
-    knows what is on disk. A document larger
-    than ``MAX_STATE_BYTES``, which this build's reader would refuse, is
+    The document is always written at `FORMATS`'s current version. A document
+    larger than ``MAX_STATE_BYTES``, which this build's reader would refuse, is
     refused (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
     _write(
         target,
-        _render(playlists, target, unknown=unknown, version=version),
+        _render(playlists, target, unknown=unknown),
         replace_existing=replace_existing,
     )
     return target
@@ -1444,10 +1424,9 @@ class Store:
                         raise _unreadable_error(fault, target) from error
                     raise
                 if changed:
-                    version = FORMATS.to_write(reading.version, required_version(authored.values()))
                     # Refused if too large to read back, before anything is
                     # moved; `save` then renders and writes it.
-                    _render(authored, target, unknown=reading.unknown, version=version)
+                    _render(authored, target, unknown=reading.unknown)
                     if fault is not None:
                         try:
                             backup = state_file.preserve_faulted(target, observed=observed)
@@ -1464,7 +1443,6 @@ class Store:
                                     target,
                                     replace_existing=False,
                                     unknown=reading.unknown,
-                                    version=version,
                                 )
                         except PlaylistError as error:
                             # The damaged original is safe at ``backup``: say where,
@@ -1474,7 +1452,7 @@ class Store:
                             ) from error
                     else:
                         with state_file.published_counts():
-                            save(authored, target, unknown=reading.unknown, version=version)
+                            save(authored, target, unknown=reading.unknown)
                     fault = None
 
                 # Adopt memory only after the durable write, so an exception

@@ -30,11 +30,9 @@ The contract every build keeps:
   without ``--ui``, and ``gpu_acceleration``, whether that window may render
   on the GPU (``false`` makes the next start use GTK's software renderer).
   ``gpu_acceleration`` joined version 2 before any release shipped it, so no
-  released build knows a version 2 without it. The file moves to
-  version 2 only when an ``interface`` or ``gpu_acceleration = false`` is
-  first saved (a lazy bump, see :mod:`wall_in_one.library.state_file`; a
-  profile that makes neither choice stays at version 1), and it never moves
-  back down.
+  released build knows a version 2 without it. Every save writes version 2,
+  chosen or not (see :mod:`wall_in_one.library.state_file`); a version 1
+  file is read as it is and written as version 2 by the next save.
 * ``interface`` is absent until the user chooses one, and absent means the
   default (`DEFAULT_INTERFACE`): the new interface since 0.3.0, classic in
   0.2.2. So 0.3.0 writes either choice, ``"classic"`` included, while 0.2.2
@@ -60,9 +58,9 @@ from typing import Any, Final, Literal
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
 
-#: Version 1 is what 0.2.0 and 0.2.1 read and write; version 2 adds ``interface``
-#: and ``gpu_acceleration`` (0.2.2).
-FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=2)
+#: Version 1 is what 0.2.0 and 0.2.1 wrote and is still read; version 2 adds
+#: ``interface`` and ``gpu_acceleration`` (0.2.2). Every save is version 2.
+FORMATS: Final = state_file.FormatVersions(oldest=1, current=2)
 VERSION: Final = FORMATS.current
 LOGGER: Final = logging.getLogger(__name__)
 MAX_BYTES: Final = 64 * 1024
@@ -251,12 +249,6 @@ class UiPrefs:
         )
 
 
-def required_version(prefs: UiPrefs) -> int:
-    """The oldest version that can hold ``prefs``: 2 once an interface is chosen, or no GPU."""
-    prefs = prefs.validated()
-    return 2 if prefs.interface is not None or not prefs.gpu_acceleration else 1
-
-
 @dataclass(frozen=True, slots=True)
 class UiPrefsDocument:
     """What was read from ui.toml and whether this build may write it."""
@@ -429,21 +421,12 @@ def _value(value: object) -> str:
     raise UiPrefsError(f"ui.toml cannot hold a {type(value).__name__} value")
 
 
-def render(
-    prefs: UiPrefs, raw: Mapping[str, Any] | None = None, *, version: int | None = None
-) -> str:
-    """The document for ``prefs``, carrying every unknown key in ``raw``.
-
-    ``version`` defaults to the oldest that can hold ``prefs``.
-    """
+def render(prefs: UiPrefs, raw: Mapping[str, Any] | None = None) -> str:
+    """The document for ``prefs`` at the current version, carrying every unknown key in ``raw``."""
     prefs = prefs.validated()
-    needed = required_version(prefs)
-    written = needed if version is None else version
-    if not needed <= written <= FORMATS.current:
-        raise UiPrefsError(f"ui.toml version {written} cannot hold these preferences")
     carried = dict(raw or {})
     scalars: dict[str, object] = {
-        "version": written,
+        "version": FORMATS.current,
         "window_style": prefs.window_style,
         "frost": prefs.frost,
         "thumbnail_size": prefs.thumbnail_size,
@@ -455,10 +438,10 @@ def render(
         scalars["tidy_offer_dismissed"] = True
     if prefs.interface is not None:
         # Written once chosen, classic too: absent means the default, which
-        # 0.3.0 made the new interface. Only a choice needs version 2.
+        # 0.3.0 made the new interface.
         scalars["interface"] = prefs.interface
     if not prefs.gpu_acceleration:
-        # Omitted while on (the default), so only turning it off needs version 2.
+        # Omitted while on (the default).
         scalars["gpu_acceleration"] = False
     tables: dict[str, Mapping[str, Any]] = {}
     for name, glass in (
@@ -504,8 +487,7 @@ def mutate(
     field, and the latest unknown keys, instead of a stale snapshot. A file
     that has not changed is not rewritten.
 
-    The file keeps its version unless the change needs a newer one (choosing
-    an interface, or turning GPU acceleration off, needs 2).
+    A save writes the current version, whatever version the file was in.
     """
     target = path if path is not None else paths.ui_prefs_path()
     try:
@@ -514,9 +496,7 @@ def mutate(
             if current.read_only:
                 raise UiPrefsReadOnlyError(current.read_only)
             prefs = change(current.prefs).validated()
-            on_disk = FORMATS.declared(current.raw) if existing is not None else None
-            version = FORMATS.to_write(on_disk, required_version(prefs))
-            text = render(prefs, current.raw, version=version)
+            text = render(prefs, current.raw)
             encoded = text.encode("utf-8")
             if len(encoded) > MAX_BYTES:
                 raise UiPrefsError(

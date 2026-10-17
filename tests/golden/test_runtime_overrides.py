@@ -3,12 +3,13 @@
 The transition rule: nothing changes what plays after an upgrade until the
 person sets something. On the golden profile that means:
 
-* an edit that uses no new field keeps ``playlists.json`` and
-  ``displays.json`` at version 1, byte for byte what 0.1.4 writes, and no
-  ``runtime-overrides.toml`` ever appears;
+* an edit that uses no new field rewrites ``playlists.json`` and
+  ``displays.json`` (version 1, as the fixture has them) as version 2 with
+  the same records and no new field, and no ``runtime-overrides.toml`` ever
+  appears;
 * the first per-playlist interval or shuffle, and the first display opt-in,
-  bump their store once, as one ordinary save: no copy of the old bytes is
-  kept beside it;
+  are one ordinary save of their store: no copy of the old bytes is kept
+  beside it;
 * ``runtime.toml`` never changes because of them. The overrides go to
   ``runtime-overrides.toml``, which exists only while one is in use;
 * a running 0.1.4 service never blocks saving them;
@@ -89,21 +90,24 @@ def test_the_fixture_compiles_with_no_overrides_from_version_one_stores(
     assert sorted(profile.app_state.glob("*-backup")) == []
 
 
-def test_edits_using_no_new_field_keep_both_files_at_version_one(golden: Golden) -> None:
+def test_edits_using_no_new_field_write_both_files_at_the_current_version_without_new_fields(
+    golden: Golden,
+) -> None:
     profile = golden.profile
     ids = playlist_ids(profile)
     before = harness.snapshot(profile.home)
 
     store = playlists.Store.open()
-    store.rename(ids[0], "Renamed, still version 1")
+    store.rename(ids[0], "Renamed, no rotation")
     store.set_rotation(ids[1], cycle_interval=None, shuffle=None)
     display_store = displays.Store.open()
     display_store.assign("DP-9", ids[0])
     display_store.set_beats_global_rules("DP-1", False)
 
-    def stays_version_one(change: Change) -> None:
+    def current_version_no_new_field(change: Change) -> None:
         old, new = _only(change)
-        assert old["version"] == new["version"] == 1
+        assert old["version"] == 1
+        assert new["version"] == playlists.FORMAT_VERSION == displays.FORMAT_VERSION == 2
         assert change.after is not None and change.after.content == _serialized(new)
         for playlist in new.get("playlists", []):
             assert set(playlist) == {"id", "name", "entries"}
@@ -111,13 +115,17 @@ def test_edits_using_no_new_field_keep_both_files_at_version_one(golden: Golden)
     harness.check_changes(
         harness.diff(before, harness.snapshot(profile.home)),
         [
-            Allowance(PLAYLISTS, frozenset({"modified"}), "the rename", stays_version_one),
-            Allowance(DISPLAYS, frozenset({"modified"}), "the assignment", stays_version_one),
+            Allowance(
+                PLAYLISTS, frozenset({"modified"}), "the rename", current_version_no_new_field
+            ),
+            Allowance(
+                DISPLAYS, frozenset({"modified"}), "the assignment", current_version_no_new_field
+            ),
         ],
     )
 
 
-def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
+def test_the_first_playlist_rotation_is_one_save_and_never_touches_runtime_toml(
     golden: Golden, capsys: pytest.CaptureFixture[str]
 ) -> None:
     profile = golden.profile
@@ -148,7 +156,7 @@ def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
             Allowance(
                 PLAYLISTS,
                 frozenset({"modified"}),
-                "the first rotation moves the file to version 2",
+                "the first rotation, saved at version 2",
                 gained_one_rotation,
             ),
         ],
@@ -191,7 +199,7 @@ def test_the_first_playlist_rotation_bumps_once_and_never_touches_runtime_toml(
     assert read_json(target)["version"] == 2
 
 
-def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routing(
+def test_the_first_display_opt_in_is_one_save_and_reaches_only_independent_routing(
     golden: Golden, capsys: pytest.CaptureFixture[str]
 ) -> None:
     profile = golden.profile
@@ -215,7 +223,7 @@ def test_the_first_display_opt_in_bumps_once_and_reaches_only_independent_routin
             Allowance(
                 DISPLAYS,
                 frozenset({"modified"}),
-                "the first opt-in moves the file to version 2",
+                "the first opt-in, saved at version 2",
                 gained_one_opt_in,
             ),
         ],

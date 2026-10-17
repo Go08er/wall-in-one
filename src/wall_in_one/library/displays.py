@@ -21,8 +21,8 @@ the same reason -- a session that ends any way other than the close button
 should not lose the arrangement.
 
 Version 2 adds one opt-in per assigned screen: its own playlist beats the
-*global* schedule rules (rules aimed at that screen still win). The file moves
-to version 2 only when somebody turns that on; until then it stays version 1.
+*global* schedule rules (rules aimed at that screen still win). Every save is
+written as version 2; version 1 is still read.
 """
 
 from __future__ import annotations
@@ -42,8 +42,7 @@ BROKEN_SUFFIX: Final = ".broken"
 #: ``newer-version``). Unknown top-level keys in a known version are carried
 #: through every save.
 FORMAT_VERSION: Final = 2
-PRECEDENCE_VERSION: Final = 2
-FORMATS: Final = state_file.FormatVersions(oldest=1, floor=1, current=FORMAT_VERSION)
+FORMATS: Final = state_file.FormatVersions(oldest=1, current=FORMAT_VERSION)
 
 #: Version 2: the sorted connectors whose own playlist beats global rules.
 BEATS_GLOBAL_RULES_KEY: Final = "beats_global_rules"
@@ -131,11 +130,6 @@ class Arrangement:
     beats_global_rules: frozenset[str] = frozenset()
 
 
-def required_version(beats_global_rules: Iterable[str]) -> int:
-    """The oldest format that can hold the arrangement (lazy bump on use)."""
-    return PRECEDENCE_VERSION if any(True for _ in beats_global_rules) else FORMATS.floor
-
-
 def _read(path: Path) -> state_file.Reading[Arrangement]:
     """Stored assignments, plus why the file was passed over."""
     document, fault = state_file.read_object(
@@ -208,17 +202,12 @@ def _render(
     *,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     beats_global_rules: Iterable[str] = (),
-    version: int | None = None,
 ) -> str:
     """The document ``save`` writes; refused if this build could not read it back."""
     beating = sorted(set(beats_global_rules))
     if any(connector not in assignments for connector in beating):
         raise ValueError("only an assigned display can beat global rules")
-    wanted = required_version(beating)
-    written = version if version is not None else FORMATS.to_write(None, wanted)
-    if wanted > written or not FORMATS.floor <= written <= FORMATS.current:
-        raise ValueError(f"displays cannot be saved as version {written}; they need {wanted}")
-    fields: dict[str, Any] = {"version": written, "displays": dict(assignments)}
+    fields: dict[str, Any] = {"version": FORMATS.current, "displays": dict(assignments)}
     if beating:
         fields[BEATS_GLOBAL_RULES_KEY] = beating
     payload = state_file.merge_unknown(fields, unknown, DOCUMENT_SHAPE)
@@ -251,15 +240,11 @@ def save(
     replace_existing: bool = True,
     unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
     beats_global_rules: Iterable[str] = (),
-    version: int | None = None,
 ) -> Path:
     """Write the assignments, atomically, carrying ``unknown`` fields back in.
 
-    ``version`` defaults to the oldest format that holds the arrangement (see
-    `required_version`), so a file without opt-ins is written as version 1.
-    Keeping a file's newer version belongs to
-    `Store`, which knows what is on disk. A document larger than
-    ``MAX_STATE_BYTES``, which this build's reader would refuse, is refused
+    The document is always written at `FORMATS`'s current version. A document
+    larger than ``MAX_STATE_BYTES``, which this build's reader would refuse, is refused
     (``full``) before anything is written.
     """
     target = path if path is not None else state_path()
@@ -270,7 +255,6 @@ def save(
             target,
             unknown=unknown,
             beats_global_rules=beats_global_rules,
-            version=version,
         ),
         replace_existing=replace_existing,
     )
@@ -672,9 +656,6 @@ class Store:
                     raise _unreadable_error(fault, target)
                 result, changed = change(working)
                 if changed:
-                    version = FORMATS.to_write(
-                        reading.version, required_version(working.beats_global_rules)
-                    )
                     # Refused if too large to read back, before anything is
                     # moved; `save` then renders and writes it.
                     _render(
@@ -682,7 +663,6 @@ class Store:
                         target,
                         unknown=reading.unknown,
                         beats_global_rules=working.beats_global_rules,
-                        version=version,
                     )
                     if fault is not None:
                         try:
@@ -701,7 +681,6 @@ class Store:
                                     replace_existing=False,
                                     unknown=reading.unknown,
                                     beats_global_rules=working.beats_global_rules,
-                                    version=version,
                                 )
                         except DisplayError as error:
                             # The damaged original is safe at ``backup``: say where,
@@ -716,7 +695,6 @@ class Store:
                                 target,
                                 unknown=reading.unknown,
                                 beats_global_rules=working.beats_global_rules,
-                                version=version,
                             )
                     fault = None
 

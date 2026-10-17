@@ -142,11 +142,10 @@ preferences it understands and never writes the file. Version 2 adds
 `interface` and `gpu_acceleration`. `interface` is absent until you choose an
 interface, and absent means the default: the new interface since 0.3.0.
 Choosing either one writes it, Classic included (0.2.2, whose default was
-classic, wrote only `next`). A file moves to version 2 only when you first
-choose an interface or turn GPU acceleration off, and it stays at version 2
-after that, even if you turn GPU acceleration on again. A profile that never
-makes either choice stays at version 1. No copy of the version 1 file is
-kept; a `ui.toml.v1-backup` that 0.2.2 left is removed the next time a window
+classic, wrote only `next`). Every save writes version 2, whether or not you
+have chosen an interface or turned GPU acceleration off; a version 1 file is
+read as it is and written as version 2 by the next save. No copy of the
+version 1 file is kept; a `ui.toml.v1-backup` that 0.2.2 left is removed the next time a window
 opens (see [Format versions](library.md#format-versions)).
 A row whose change could not be saved goes back to what `ui.toml`
 holds and says why. Keys it doesn't know are

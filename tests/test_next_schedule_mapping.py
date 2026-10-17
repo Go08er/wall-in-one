@@ -510,7 +510,7 @@ def test_beating_the_shared_rules_is_written_beside_the_runtime_configuration(
     assert target.read_bytes() == before, "runtime.toml never changes shape"
     document = tomllib.loads(overrides.read_text())
     assert document["displays"] == [{"connector": "DP-1", "beats_global_rules": True}]
-    assert json.loads(displays.state_path().read_text())["version"] == displays.PRECEDENCE_VERSION
+    assert json.loads(displays.state_path().read_text())["version"] == displays.FORMATS.current
 
     adapter.set_beats_global_rules("DP-1", False, results.append)
     backend.run_authoring()

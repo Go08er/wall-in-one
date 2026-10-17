@@ -1,14 +1,14 @@
-"""0.2.0's lazy format bump on a whole profile, starting with rule names.
+"""Every save writes a store's current version, on a whole profile, starting with rule names.
 
-An edit that uses no new field writes the version the file already has, byte
-for byte. The first save that does use one moves the file to the newer
-version, as an ordinary save: no copy of the old bytes is kept (updates are
-one-way), and whatever an earlier version left under a copy's name neither
-stops the save nor is touched by it.
+A save of the released fixture's schedule, named or not, writes version 3: the
+version-2 file is read, and the same rules are written under the new version
+as an ordinary save. No copy of the old bytes is kept (updates are one-way),
+and whatever an earlier version left under a copy's name neither stops the
+save nor is touched by it.
 
 Every check diffs the whole sandbox home, so a stray copy, temporary or
-``.broken`` file fails as an unexpected write. Idle never bumps anything, and
-names never reach ``runtime.toml``.
+``.broken`` file fails as an unexpected write. Idle never rewrites a store,
+and names never reach ``runtime.toml``.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def test_the_fixture_schedule_is_an_unnamed_version_two_file_as_released(golden:
     assert not any("name" in rule for rule in document["rules"])
 
 
-def test_an_unnamed_edit_keeps_version_two_byte_for_byte(golden: Golden) -> None:
+def test_an_unnamed_edit_writes_version_three_and_the_same_rules(golden: Golden) -> None:
     profile = golden.profile
     target = profile.app_state / "schedules.json"
     document = read_json(target)
@@ -68,7 +68,7 @@ def test_an_unnamed_edit_keeps_version_two_byte_for_byte(golden: Golden) -> None
     store.set_name(rest[0]["id"], "  ")
 
     expected = {
-        "version": 2,
+        "version": schedules.FORMAT_VERSION,
         "rules": [
             {key: value for key, value in first.items() if key != "enabled"},
             {**second, "start": "20:30", "end": "04:00"},
@@ -89,7 +89,7 @@ def test_an_unnamed_edit_keeps_version_two_byte_for_byte(golden: Golden) -> None
     )
 
 
-def test_naming_a_rule_bumps_once_and_keeps_no_copy(golden: Golden) -> None:
+def test_naming_a_rule_keeps_no_copy(golden: Golden) -> None:
     profile = golden.profile
     target = profile.app_state / "schedules.json"
     mode = stat.S_IMODE(target.stat().st_mode)
@@ -118,15 +118,14 @@ def test_naming_a_rule_bumps_once_and_keeps_no_copy(golden: Golden) -> None:
             Allowance(
                 SCHEDULES,
                 frozenset({"modified"}),
-                "the first rule name moves the file to version 3",
+                "the save writes the rule name at version 3",
                 named_one_rule,
             ),
         ],
     )
     assert stat.S_IMODE(target.stat().st_mode) == mode
 
-    # More names, and clearing them all: the file stays at version 3 (no
-    # flip-flop back to 2).
+    # More names, and clearing them all: the file is version 3 throughout.
     store = schedules.Store.open()
     for index, rule in enumerate(rules):
         store.set_name(rule["id"], f"Rule {index}")
@@ -142,8 +141,8 @@ def test_naming_a_rule_bumps_once_and_keeps_no_copy(golden: Golden) -> None:
     assert not any("name" in rule for rule in cleared["rules"])
 
 
-def test_something_at_an_old_copys_name_does_not_stop_the_bump(golden: Golden) -> None:
-    """Earlier versions refused the bump when they could not keep their copy
+def test_something_at_an_old_copys_name_does_not_stop_the_save(golden: Golden) -> None:
+    """Earlier versions refused the save when they could not keep their copy
     there. Nothing writes to that name now: the save goes through and whatever
     holds the name is not touched."""
     profile = golden.profile
@@ -178,11 +177,11 @@ def test_names_never_reach_the_runtime(golden: Golden, capsys: pytest.CaptureFix
 
 
 @pytest.mark.parametrize("scenario", ["named-version-three", "hand-named-version-two"])
-def test_idle_never_bumps_a_schedule(golden: Golden, scenario: str) -> None:
+def test_idle_never_rewrites_a_schedule(golden: Golden, scenario: str) -> None:
     """Idle writes only the whitelist whatever the schedule's names and version.
 
     ``hand-named-version-two`` is a ``name`` typed into a version-2 file: this
-    build reads it, and only an edit (never idle) moves the file to version 3.
+    build reads it, and only an edit (never idle) rewrites the file as version 3.
     """
     profile = golden.profile
     target = profile.app_state / "schedules.json"

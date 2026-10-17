@@ -119,16 +119,12 @@ def test_the_names_are_exactly_the_five_any_version_wrote() -> None:
         assert name == f"{live.name}.v{candidate.version}-backup"
         assert candidate.path() == _state() / name
     assert CONFIG_NAMES[0] == ui_prefs.RETIRED_BACKUP_NAME
-    # A bump is a save above both the file's version and the oldest version
-    # written: playlists 1->2, displays 1->2, schedules 1->3 and 2->3, ui.toml 1->2.
-    assert (playlists.FORMATS.floor, playlists.FORMATS.current) == (1, 2)
-    assert (displays.FORMATS.floor, displays.FORMATS.current) == (1, 2)
-    assert (schedules.FORMATS.oldest, schedules.FORMATS.floor, schedules.FORMATS.current) == (
-        1,
-        2,
-        3,
-    )
-    assert (ui_prefs.FORMATS.floor, ui_prefs.FORMATS.current) == (1, 2)
+    # What each store reads and now always writes: playlists 1 to 2, displays
+    # 1 to 2, schedules 1 to 3, ui.toml 1 to 2.
+    assert (playlists.FORMATS.oldest, playlists.FORMATS.current) == (1, 2)
+    assert (displays.FORMATS.oldest, displays.FORMATS.current) == (1, 2)
+    assert (schedules.FORMATS.oldest, schedules.FORMATS.current) == (1, 3)
+    assert (ui_prefs.FORMATS.oldest, ui_prefs.FORMATS.current) == (1, 2)
 
 
 def test_every_copy_goes_and_nothing_else_does(tmp_path: Path) -> None:

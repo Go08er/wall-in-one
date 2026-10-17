@@ -383,7 +383,7 @@ def test_a_connector_target_survives_add_edit_and_reload(tmp_path: Path) -> None
     reopened = Store.open(target)
     assert updated.connector == "DP-9"
     assert reopened.rules[0].connector == "DP-9"
-    assert json.loads(target.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(target.read_text(encoding="utf-8"))["version"] == schedules.FORMAT_VERSION
 
 
 @pytest.mark.parametrize("connector", ["DP-1\x01", "DP 1", " DP-1", "x" * 257])
@@ -522,7 +522,9 @@ def test_a_direct_absent_file_seed_is_retained_on_its_first_mutation(tmp_path: P
     ]
 
 
-def test_version_one_schedule_migrates_on_the_next_authoring_write(tmp_path: Path) -> None:
+def test_version_one_schedule_is_rewritten_as_the_current_version_on_the_next_write(
+    tmp_path: Path,
+) -> None:
     target = tmp_path / "schedules.json"
     target.write_text(
         json.dumps(
@@ -540,7 +542,7 @@ def test_version_one_schedule_migrates_on_the_next_authoring_write(tmp_path: Pat
     store.add("Morning", connector="DP-2", rule_id="new")
 
     payload = json.loads(target.read_text(encoding="utf-8"))
-    assert payload["version"] == 2
+    assert payload["version"] == schedules.FORMAT_VERSION
     assert payload["rules"][0].get("connector") is None
     assert payload["rules"][1]["connector"] == "DP-2"
     assert not target.with_name(target.name + schedules.BROKEN_SUFFIX).exists()
@@ -763,14 +765,11 @@ def test_a_valid_manual_repair_before_recovery_publication_remains_canonical(
         *,
         replace_existing: bool = True,
         unknown: state_file.Unknown = state_file.NOTHING_UNKNOWN,
-        version: int | None = None,
     ) -> Path:
         assert path == target
         assert not replace_existing
         save((manual,), target)
-        return save(
-            updated, target, replace_existing=replace_existing, unknown=unknown, version=version
-        )
+        return save(updated, target, replace_existing=replace_existing, unknown=unknown)
 
     monkeypatch.setattr(schedules, "save", repair_then_save)
 
@@ -846,9 +845,9 @@ def test_a_rule_describes_itself_in_the_words_it_was_written_in(store: Store) ->
     assert store.add("Always").describe() == "always"
 
 
-# -- rule names: format version 3, written only when used ---------------------------
+# -- rule names: format version 3, which every save writes ---------------------------
 
-#: A version-2 file exactly as 0.1.4 writes it.
+#: A version-2 file exactly as 0.1.4 and 0.2.x wrote it: read, then rewritten as version 3.
 V2_RULES: list[dict[str, Any]] = [
     {"id": "quiet", "playlist": "quick-choice", "enabled": False},
     {"id": "night", "playlist": "Night", "start": "21:00", "end": "04:00"},
@@ -909,8 +908,10 @@ def test_a_name_is_bounded_like_a_playlist_name() -> None:
         schedules.tidy_name("\ud800")
 
 
-def test_unnamed_edits_keep_version_two_byte_for_byte(tmp_path: Path) -> None:
-    """Guard 1: without a name the file is exactly what 0.1.4 writes."""
+def test_unnamed_edits_to_a_version_two_file_write_version_three(tmp_path: Path) -> None:
+    """No rule has a name, and the file is still saved at the current version:
+    the version-2 rules are read, and the same rules are written under
+    ``"version": 3``. Nothing is held back for an older reader."""
     target, _original = _v2_file(tmp_path)
     store = Store.open(target)
 
@@ -932,21 +933,23 @@ def test_unnamed_edits_keep_version_two_byte_for_byte(tmp_path: Path) -> None:
             "end": "23:00",
         },
     ]
-    assert target.read_bytes() == _as_written({"version": 2, "rules": expected})
+    assert target.read_bytes() == _as_written(
+        {"version": schedules.FORMAT_VERSION, "rules": expected}
+    )
     assert _backups(target) == []
 
 
-def test_a_new_unnamed_schedule_is_version_two(tmp_path: Path) -> None:
+def test_a_new_unnamed_schedule_is_the_current_version(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     Store.open(target).add("Evening", rule_id="evening")
     assert target.read_bytes() == _as_written(
-        {"version": 2, "rules": [{"id": "evening", "playlist": "Evening"}]}
+        {"version": schedules.FORMAT_VERSION, "rules": [{"id": "evening", "playlist": "Evening"}]}
     )
 
 
-def test_naming_a_rule_bumps_to_version_three_and_keeps_no_copy(tmp_path: Path) -> None:
-    """A bump is an ordinary save: the old format is read, the new one written
-    over it. No copy of the version-2 bytes is kept (updates are one-way)."""
+def test_naming_a_rule_in_a_version_two_file_keeps_no_copy(tmp_path: Path) -> None:
+    """The old format is read, the current one written over it. No copy of the
+    version-2 bytes is kept (updates are one-way)."""
     target, _original = _v2_file(tmp_path)
     store = Store.open(target)
 
@@ -955,7 +958,7 @@ def test_naming_a_rule_bumps_to_version_three_and_keeps_no_copy(tmp_path: Path) 
     assert named.name == "Frog night"
     assert store.rules[1] == named
     document = _document(target)
-    assert document["version"] == 3
+    assert document["version"] == schedules.FORMAT_VERSION
     assert document["rules"] == [
         V2_RULES[0],
         {**V2_RULES[1], "name": "Frog night"},
@@ -972,8 +975,8 @@ def test_naming_a_rule_bumps_to_version_three_and_keeps_no_copy(tmp_path: Path) 
     assert _backups(target) == []
 
 
-def test_clearing_the_last_name_stays_on_version_three(tmp_path: Path) -> None:
-    """Decided: a bumped file never flips back, though the data would fit v2."""
+def test_clearing_the_last_name_leaves_the_file_at_version_three(tmp_path: Path) -> None:
+    """Every save is version 3, with or without names."""
     target, _original = _v2_file(tmp_path)
     store = Store.open(target)
     store.set_name("night", "Frog night")
@@ -983,7 +986,7 @@ def test_clearing_the_last_name_stays_on_version_three(tmp_path: Path) -> None:
     store.set_name("quiet", "")
     store.set_enabled("quiet", True)
 
-    assert _document(target)["version"] == 3
+    assert _document(target)["version"] == schedules.FORMAT_VERSION
     assert all(rule.name is None for rule in Store.open(target).rules)
 
 
@@ -1043,7 +1046,7 @@ def test_a_named_rule_in_a_new_file_is_version_three(tmp_path: Path) -> None:
     assert _backups(target) == []
 
 
-def test_a_version_one_file_named_goes_straight_to_version_three(tmp_path: Path) -> None:
+def test_a_version_one_file_named_is_rewritten_as_version_three(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     original = _as_written({"version": 1, "rules": [{"id": "a", "playlist": "X"}]})
     target.write_bytes(original)
@@ -1058,7 +1061,7 @@ def test_a_version_one_file_named_goes_straight_to_version_three(tmp_path: Path)
 
 
 @pytest.mark.parametrize("occupant", ("directory", "symlink", "file"))
-def test_something_at_an_old_copys_name_neither_stops_a_bump_nor_is_touched(
+def test_something_at_an_old_copys_name_neither_stops_a_save_nor_is_touched(
     tmp_path: Path, occupant: str
 ) -> None:
     """Earlier versions refused the bump when they could not keep their copy
@@ -1089,8 +1092,8 @@ def test_something_at_an_old_copys_name_neither_stops_a_bump_nor_is_touched(
     assert not list(tmp_path.glob("*.broken*"))
 
 
-def test_a_faulted_file_is_moved_aside_whole_before_the_bump(tmp_path: Path) -> None:
-    """The fault's ``.broken`` copy holds the original; the bump keeps none of its own."""
+def test_a_faulted_file_is_moved_aside_whole_before_the_rewrite(tmp_path: Path) -> None:
+    """The fault's ``.broken`` copy holds the original; the rewrite keeps none of its own."""
     target, original = _v2_file(tmp_path, [*V2_RULES, {"id": "bad", "playlist": 7}])
     store = Store.open(target)
     assert store.fault is not None
@@ -1134,37 +1137,15 @@ def test_naming_an_unknown_rule_says_so(store: Store) -> None:
     assert caught.value.kind == "invalid-name"
 
 
-def test_save_writes_the_oldest_version_that_holds_the_rules(tmp_path: Path) -> None:
+def test_save_always_writes_the_current_version(tmp_path: Path) -> None:
     target = tmp_path / "schedules.json"
     schedules.save([Rule(id="a", playlist="X")], target)
-    assert _document(target)["version"] == 2
-    schedules.save([Rule(id="a", playlist="X", name="Frog")], target)
-    assert _document(target)["version"] == 3
-    schedules.save([Rule(id="a", playlist="X")], target, version=3)
-    assert _document(target) == {"version": 3, "rules": [{"id": "a", "playlist": "X"}]}
-    with pytest.raises(ValueError):
-        schedules.save([Rule(id="a", playlist="X", name="Frog")], target, version=2)
-    with pytest.raises(ValueError):
-        schedules.save([Rule(id="a", playlist="X")], target, version=4)
-
-
-def test_a_rule_is_called_by_its_name_else_its_playlist() -> None:
-    names = {"x": "Evening"}
-    assert schedules.rule_label(Rule(id="a", playlist="x", name="Frog day"), names) == "Frog day"
-    assert schedules.rule_label(Rule(id="a", playlist="x"), names) == "Evening"
-    assert schedules.rule_label(Rule(id="a", playlist="gone"), names) == "gone"
-
-
-def test_a_listing_shows_each_rules_name_last(store: Store) -> None:
-    named = store.add("Weekdays", name="Work days")
-    plain = store.add("Festive", months=[12])
-    message = schedules.describe(store.rules, "Everyday", CHRISTMAS)
-    assert "# fields: rule, playlist, when, enabled, in-force, name" in message
-    rows = {
-        row[0]: row
-        for row in (line.split("\t") for line in message.splitlines())
-        if not row[0].startswith("#")
+    assert _document(target) == {
+        "version": schedules.FORMAT_VERSION,
+        "rules": [{"id": "a", "playlist": "X"}],
     }
-    assert rows[named.id][5] == "Work days"
-    assert rows[plain.id][5] == "-"
-    assert all(len(row) == 6 for row in rows.values())
+    schedules.save([Rule(id="a", playlist="X", name="Frog")], target)
+    assert _document(target)["version"] == schedules.FORMAT_VERSION
+    assert schedules.FORMAT_VERSION == schedules.FORMATS.current == 3
+    with pytest.raises(TypeError):
+        schedules.save([Rule(id="a", playlist="X")], target, version=2)  # type: ignore[call-arg]

@@ -477,45 +477,26 @@ class Reading[T]:
 
 # -- format versions -----------------------------------------------------------
 #
-# Lazy bump on use. A file moves to a newer version only when the data being
-# saved needs it; every other edit keeps writing the version the file already
-# has. A bump is an ordinary save: the old format is read, and the new one is
-# written atomically over it. No copy of the old bytes is kept (updates are
-# one-way; see `wall_in_one.library.retired_backups` for the copies earlier
-# versions made).
+# A save writes the store's current version. Updates are one-way (owner,
+# 2026-10-11): nothing keeps an older build able to read what this one saves,
+# so a file is not held at the oldest version that can represent its data.
+# Whatever version a readable file was in, the next save of it is written at
+# ``FormatVersions.current``. Older versions are still *read* (that is the
+# translation); `FormatVersions.declared` says which version a document is in.
+# A save is an ordinary atomic replacement: no copy of the old bytes is kept
+# (see `wall_in_one.library.retired_backups` for the copies earlier versions
+# made).
 #
-# A store adopts it in five steps; schedules.py is the worked example
-# (FORMATS, required_version, _read, save and Store._mutate there).
+# A store adopts it in three steps; schedules.py is the worked example.
 #
-# * Declare its versions once. For schedules: v1 is read, v2 is the oldest
-#   version written, v3 adds rule names::
+# * Declare its versions once::
 #
-#       FORMATS = state_file.FormatVersions(oldest=1, floor=2, current=3)
+#       FORMATS = state_file.FormatVersions(oldest=1, current=3)
 #
-#   A store whose current version is also its floor today (playlists.json
-#   at 1) declares ``FormatVersions(oldest=1, floor=1, current=2)`` when it
-#   adds version 2.
-# * Say which version the data needs -- "the minimum version that can
-#   represent this data" -- as a pure function of the value::
-#
-#       def required_version(rules: Sequence[Rule]) -> int:
-#           if any(rule.name is not None for rule in rules):
-#               return 3
-#           return FORMATS.floor
-#
-#   Add the new field to the store's :class:`Shape` so it is modeled rather
-#   than carried, and serialize it only when it is used.
 # * Record the declared version when reading:
 #   ``Reading(..., version=FORMATS.declared(document))``.
-# * In the locked mutation, after the change and before anything is moved
-#   or written::
-#
-#       version = FORMATS.to_write(reading.version, required_version(value))
-#       ...  # then preserve_faulted() if faulted, then save at ``version``
-#
-# * Write ``version`` into the saved document instead of a constant, and
-#   check every other writer of the file (an importer, a migration) does the
-#   same with ``FORMATS.to_write(None, required_version(value))``.
+# * Write ``FORMATS.current`` as the document's ``version``, and add the new
+#   field to the store's :class:`Shape` so it is modeled rather than carried.
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,23 +504,16 @@ class FormatVersions:
     """The versions of one store's file this build reads and writes.
 
     ``oldest`` is the oldest version this build reads, and the one a file
-    without a ``version`` marker is taken to be. ``floor`` is the oldest it
-    writes: a readable file older than that is brought up to ``floor`` on its
-    next save, as stores always did. ``current`` is the newest version this
-    build understands; a file declaring a newer one is read-only here
-    (:data:`NEWER_VERSION`).
-
-    A file never moves back down. Once at a version it stays there even if
-    its data would fit an older one again, so a file does not flip between
-    formats as it is edited.
+    without a ``version`` marker is taken to be. ``current`` is the newest
+    version this build understands and the only one it writes; a file
+    declaring a newer one is read-only here (:data:`NEWER_VERSION`).
     """
 
     oldest: int
-    floor: int
     current: int
 
     def __post_init__(self) -> None:
-        if not 1 <= self.oldest <= self.floor <= self.current:
+        if not 1 <= self.oldest <= self.current:
             raise ValueError(f"inconsistent format versions {self!r}")
 
     def declared(self, document: Mapping[str, Any]) -> int | None:
@@ -556,20 +530,6 @@ class FormatVersions:
         if type(version) is int and self.oldest <= version <= self.current:
             return version
         return None
-
-    def to_write(self, on_disk: int | None, required: int) -> int:
-        """The version the next save writes.
-
-        ``on_disk`` is :attr:`Reading.version`; ``required`` is the minimum
-        version that can represent the data being saved. The result keeps the
-        file's version unless the data needs more, and is never below
-        :attr:`floor`.
-        """
-        if not self.floor <= required <= self.current:
-            raise ValueError(f"required version {required} is outside {self!r}")
-        if on_disk is not None and not self.oldest <= on_disk <= self.current:
-            raise ValueError(f"on-disk version {on_disk} is outside {self!r}")
-        return max(self.floor, required, on_disk if on_disk is not None else self.floor)
 
 
 def joined_faults(faults: list[str]) -> str | None:

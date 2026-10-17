@@ -834,15 +834,15 @@ def test_a_document_with_nothing_unknown_captures_nothing() -> None:
     assert state_file.merge_unknown({"version": 1}, unknown, _SHAPE) == {"version": 1}
 
 
-# -- format-change guards: lazy bump on use, one backup before the first bump ---------
+# -- format versions: every version in range is read, the current one is written ---------
 
-FORMATS = state_file.FormatVersions(oldest=1, floor=2, current=3)
+FORMATS = state_file.FormatVersions(oldest=1, current=3)
 
 
 def test_format_versions_must_be_ordered() -> None:
-    for oldest, floor, current in ((0, 1, 1), (2, 1, 3), (1, 3, 2)):
+    for oldest, current in ((0, 1), (2, 1), (-1, 3)):
         with pytest.raises(ValueError):
-            state_file.FormatVersions(oldest=oldest, floor=floor, current=current)
+            state_file.FormatVersions(oldest=oldest, current=current)
 
 
 @pytest.mark.parametrize(
@@ -863,37 +863,6 @@ def test_a_declared_version_is_one_this_build_reads_or_none(
     document: dict[str, object], declared: int | None
 ) -> None:
     assert FORMATS.declared(document) == declared
-
-
-@pytest.mark.parametrize(
-    ("on_disk", "required", "written"),
-    (
-        # No file, or one too damaged to say: the oldest format the data fits.
-        (None, 2, 2),
-        (None, 3, 3),
-        # Lazy bump on use: the file keeps its version unless the data needs more.
-        (2, 2, 2),
-        (2, 3, 3),
-        # The old v1 -> v2 upgrade is unchanged; v1 straight to v3 when needed.
-        (1, 2, 2),
-        (1, 3, 3),
-        # Never back down: a bumped file stays bumped.
-        (3, 2, 3),
-        (3, 3, 3),
-    ),
-)
-def test_the_version_written_keeps_the_files_unless_the_data_needs_more(
-    on_disk: int | None, required: int, written: int
-) -> None:
-    assert FORMATS.to_write(on_disk, required) == written
-
-
-@pytest.mark.parametrize(("on_disk", "required"), ((None, 1), (None, 4), (4, 2), (0, 2)))
-def test_versions_outside_the_declared_range_are_a_programming_error(
-    on_disk: int | None, required: int
-) -> None:
-    with pytest.raises(ValueError):
-        FORMATS.to_write(on_disk, required)
 
 
 def test_bytes_and_text_writers_publish_the_same_file(tmp_path: Path) -> None:

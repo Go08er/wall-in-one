@@ -2017,6 +2017,11 @@ def _api_key(plugin: dict[str, Any], notes: list[str]) -> str:
         return ""
 
 
+#: The store versions 0.2.2 and earlier staged for an import (the oldest that
+#: held it): only for finishing an import one of them began.
+_RELEASED_STORE_VERSIONS: Final = {"playlists": 1, "schedules": 2, "displays": 1}
+
+
 def _targets(
     source: _LegacySource, converted: _Converted, created_at: str, *, as_released: bool = False
 ) -> tuple[_Target, ...]:
@@ -2030,25 +2035,20 @@ def _targets(
         "version": pairings.FORMAT_VERSION,
         "pairings": [converted.pairings[key].to_json() for key in sorted(converted.pairings)],
     }
-    # Imports are first writes at the oldest format that holds them (lazy
-    # bump): the retired plugin had no per-playlist rotation or display
-    # opt-ins, so these stay at the versions every older build reads.
+    # A new import writes each store at its current version, as every save
+    # does. One a released version began is finished with the versions that
+    # version staged, because the journal binds each target's digest.
+    released = _RELEASED_STORE_VERSIONS if as_released else None
     playlists_payload = {
-        "version": playlists.FORMATS.to_write(
-            None, playlists.required_version(converted.playlists.values())
-        ),
+        "version": released["playlists"] if released else playlists.FORMATS.current,
         "playlists": [converted.playlists[key].to_json() for key in sorted(converted.playlists)],
     }
     schedules_payload = {
-        # The oldest format that holds the imported rules (they have no names),
-        # so an import never moves a profile past what older builds read.
-        "version": schedules.FORMATS.to_write(
-            None, schedules.required_version(converted.schedules)
-        ),
+        "version": released["schedules"] if released else schedules.FORMATS.current,
         "rules": [rule.to_json() for rule in converted.schedules],
     }
     displays_payload = {
-        "version": displays.FORMATS.to_write(None, displays.required_version(())),
+        "version": released["displays"] if released else displays.FORMATS.current,
         "displays": converted.displays,
     }
     favourites_payload = {"version": favourites.FORMAT_VERSION, "paths": []}

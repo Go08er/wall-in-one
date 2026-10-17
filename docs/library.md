@@ -692,20 +692,18 @@ playlist, playlist entry, schedule rule, pairing and removal intent.
 
 ### Format versions
 
-A file moves to a newer format only when you first use what that format adds;
-every other edit keeps writing the version the file already has. The first
-rule name is the first such change: `schedules.json` stays at version 2 until
-a rule has a name, and is version 3 from then on. Likewise `playlists.json`
-stays at version 1 until a playlist has its own interval or shuffle, and
-`displays.json` until a display's own playlist is set to beat global schedule
-rules; each is version 2 from then on. Those settings reach the service
-through `runtime-overrides.toml`, never `runtime.toml` (see
+Every save writes a file in the newest format this version knows:
+`schedules.json` and the rule names it can hold are version 3, `playlists.json`
+(with a playlist's own interval and shuffle) and `displays.json` (with a
+display's own playlist set to beat global schedule rules) are version 2. This
+holds whether or not you use what the newer format adds. A file an earlier
+version left in an older format is read as it is, and the next save of it
+writes the newest one. Those settings reach the service through
+`runtime-overrides.toml`, never `runtime.toml` (see
 [the runtime contract](runtime-config.md#per-playlist-rotation-and-display-precedence-runtime-overridestoml)).
 
-The move is an ordinary save: the older format is read and the newer one is
-written over it in one step. No copy of the older file is kept, and a file
-stays in its newer format after you stop using the feature, for example after
-clearing the last rule name, so it does not switch formats back and forth.
+A save is an ordinary one: the older format is read and the newer one is
+written over it in one step. No copy of the older file is kept.
 
 0.2.0 to 0.2.2 did keep a copy, beside the file, the first time they saved it
 in a newer format: `playlists.json.v1-backup`, `displays.json.v1-backup`,

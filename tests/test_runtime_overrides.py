@@ -6,8 +6,9 @@ version 2. Both reach the runtime through ``runtime-overrides.toml``, a
 sibling of ``runtime.toml`` that only this release's service reads. The
 transition rule: nothing changes for a profile until somebody uses one.
 
-* Lazy bump: a store moves to version 2 only on the save that first uses a
-  new field, and never moves back. The bump keeps no copy of the old bytes.
+* A save writes the stores' current version (2), used field or not; the
+  version 1 files an earlier build left are read, and rewritten at version 2
+  by the next save. No copy of the old bytes is kept.
 * ``runtime.toml`` never changes because of them: with the fields in use it
   is byte-identical to the same profile with them cleared, so every released
   service still loads it. The overrides file exists only while one is used.
@@ -77,7 +78,7 @@ def _json(path: Path) -> dict[str, Any]:
 
 @pytest.fixture
 def evening(tmp_path: Path) -> tuple[playlists.Store, str, Path]:
-    """A version-1 ``playlists.json`` at the profile's own path, one entry long."""
+    """A ``playlists.json`` at the profile's own path, one entry long."""
     picture = tmp_path / "library" / "evening.png"
     picture.parent.mkdir()
     picture.write_bytes(b"fixture")
@@ -85,14 +86,14 @@ def evening(tmp_path: Path) -> tuple[playlists.Store, str, Path]:
     made = store.create("Evening")
     store.add(made.id, picture)
     target = playlists.state_path()
-    assert _json(target)["version"] == 1
+    assert _json(target)["version"] == playlists.FORMAT_VERSION == 2
     return store, made.id, target
 
 
 # -- playlists.json --------------------------------------------------------------------
 
 
-def test_edits_that_use_no_new_field_keep_version_one_byte_for_byte(
+def test_edits_that_use_no_new_field_write_the_current_version_and_only_the_old_fields(
     evening: tuple[playlists.Store, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, identifier, target = evening
@@ -100,12 +101,12 @@ def test_edits_that_use_no_new_field_keep_version_one_byte_for_byte(
     store.rename(identifier, "Late evening")
     store.create("Morning")
     document = _json(target)
-    assert document["version"] == 1
+    assert document["version"] == playlists.FORMAT_VERSION
     for playlist in document["playlists"]:
         assert set(playlist) == {"id", "name", "entries"}
-    # Exactly what 0.1.4 writes for the same playlists: key order included.
+    # The same playlists, key order included; only the version is the current one.
     expected = {
-        "version": 1,
+        "version": playlists.FORMAT_VERSION,
         "playlists": [
             {
                 "id": playlist.id,
@@ -119,7 +120,7 @@ def test_edits_that_use_no_new_field_keep_version_one_byte_for_byte(
     assert not _backup(target).exists()
 
 
-def test_the_first_rotation_bumps_once_and_keeps_no_copy(
+def test_the_first_rotation_is_an_ordinary_save_and_keeps_no_copy(
     evening: tuple[playlists.Store, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, identifier, target = evening
@@ -131,10 +132,10 @@ def test_the_first_rotation_bumps_once_and_keeps_no_copy(
     assert document["version"] == 2
     (saved,) = document["playlists"]
     assert saved["cycle_interval"] == 60 and "shuffle" not in saved
-    assert not _backup(target).exists(), "the bump is an ordinary save"
+    assert not _backup(target).exists(), "a save keeps no copy"
 
-    # Later saves -- more rotation, clearing it, unrelated edits -- never
-    # move the file back to version 1.
+    # Later saves -- more rotation, clearing it, unrelated edits -- write
+    # the same version.
     store.set_rotation(identifier, shuffle=True)
     assert playlists.Store.open().find(identifier).shuffle is True
     store.set_rotation(identifier, cycle_interval=None, shuffle=None)
@@ -156,10 +157,10 @@ def test_a_copy_an_earlier_version_kept_is_left_alone_by_a_save(
     assert _json(target)["version"] == 2
 
 
-def test_something_at_an_old_copys_name_does_not_stop_a_bump(
+def test_something_at_an_old_copys_name_does_not_stop_a_save(
     evening: tuple[playlists.Store, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Earlier versions refused the bump when they could not keep their copy there."""
+    """Earlier versions refused the save when they could not keep their copy there."""
     store, identifier, target = evening
     _backup(target).mkdir()
     store.set_rotation(identifier, cycle_interval=60)
@@ -207,15 +208,15 @@ def test_setting_what_is_already_there_writes_nothing(
     assert target.stat().st_ino == identity
 
 
-def test_a_file_written_fresh_starts_at_the_version_its_data_needs(tmp_path: Path) -> None:
+def test_a_file_written_fresh_is_the_current_version_whatever_its_data(tmp_path: Path) -> None:
     plain = playlists.Playlist(id="a", name="A")
     spaced = playlists.Playlist(id="b", name="B", cycle_interval=120)
     playlists.save({"a": plain}, tmp_path / "plain.json")
     playlists.save({"a": plain, "b": spaced}, tmp_path / "spaced.json")
-    assert _json(tmp_path / "plain.json")["version"] == 1
-    assert _json(tmp_path / "spaced.json")["version"] == 2
-    with pytest.raises(ValueError, match="need 2"):
-        playlists.save({"b": spaced}, tmp_path / "narrow.json", version=1)
+    assert _json(tmp_path / "plain.json")["version"] == playlists.FORMAT_VERSION
+    assert _json(tmp_path / "spaced.json")["version"] == playlists.FORMAT_VERSION
+    assert "cycle_interval" not in _json(tmp_path / "plain.json")["playlists"][0]
+    assert _json(tmp_path / "spaced.json")["playlists"][1]["cycle_interval"] == 120
     assert list(tmp_path.glob("*backup*")) == []
 
 
@@ -270,13 +271,13 @@ def docked() -> tuple[displays.Store, Path]:
     store.assign("HDMI-A-1", "Morning")
     target = displays.state_path()
     assert _json(target) == {
-        "version": 1,
+        "version": displays.FORMAT_VERSION,
         "displays": {"DP-1": "Evening", "HDMI-A-1": "Morning"},
     }
     return store, target
 
 
-def test_display_edits_that_use_no_new_field_keep_version_one(
+def test_display_edits_that_use_no_new_field_write_no_opt_in_key(
     docked: tuple[displays.Store, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, target = docked
@@ -284,11 +285,14 @@ def test_display_edits_that_use_no_new_field_keep_version_one(
     store.assign("DP-2", "Night")
     store.unassign("DP-2")
     store.set_beats_global_rules("DP-1", False)
-    assert _json(target) == {"version": 1, "displays": {"DP-1": "Evening", "HDMI-A-1": "Morning"}}
+    assert _json(target) == {
+        "version": displays.FORMAT_VERSION,
+        "displays": {"DP-1": "Evening", "HDMI-A-1": "Morning"},
+    }
     assert not _backup(target).exists()
 
 
-def test_the_display_opt_in_bumps_once_and_belongs_to_its_assignment(
+def test_the_display_opt_in_belongs_to_its_assignment(
     docked: tuple[displays.Store, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, target = docked
@@ -301,7 +305,7 @@ def test_the_display_opt_in_bumps_once_and_belongs_to_its_assignment(
         "displays": {"DP-1": "Evening", "HDMI-A-1": "Morning"},
         "beats_global_rules": ["DP-1"],
     }
-    assert not _backup(target).exists(), "the bump is an ordinary save"
+    assert not _backup(target).exists(), "a save keeps no copy"
     reopened = displays.Store.open()
     assert reopened.beats_global_rules("DP-1")
     assert not reopened.beats_global_rules("HDMI-A-1")
@@ -439,7 +443,7 @@ def test_runtime_toml_is_the_same_bytes_with_the_fields_in_use_or_cleared(
         {"connector": "DP-1", "beats_global_rules": True}
     ]
 
-    # Clearing them leaves the stores at version 2 and no overrides at all.
+    # Clearing them leaves the stores at the current version and no overrides at all.
     session.playlists.set_rotation(made.id, cycle_interval=None, shuffle=None)
     session.displays.set_beats_global_rules("DP-1", False)
     assert _json(playlists.state_path())["version"] == 2
@@ -853,7 +857,7 @@ NEWER_OVERRIDES = (
 def test_an_overrides_file_from_a_newer_build_is_never_rewritten_or_removed(
     library: Path,
 ) -> None:
-    """After a rollback, this build's compiler leaves the newer release's file as it was."""
+    """This build's compiler leaves a file a newer build wrote as it was."""
     settings = config.Settings(roots=(library,), scan_workshop=False)
     config.save(settings)
     session = Session(settings)
@@ -882,7 +886,7 @@ def test_an_overrides_file_from_a_newer_build_is_never_rewritten_or_removed(
 def test_the_constants_name_one_contract() -> None:
     assert runtime_config.OVERRIDES_FILENAME == "runtime-overrides.toml"
     assert runtime_config.OVERRIDES_SCHEMA_VERSION == 1
-    assert playlists.ROTATION_VERSION == displays.PRECEDENCE_VERSION == 2
+    assert playlists.FORMATS.current == displays.FORMATS.current == 2
 
 
 def _service_binary() -> Path | None:

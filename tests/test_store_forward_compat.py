@@ -438,6 +438,7 @@ def test_playlists_carry_unknown_keys_at_every_level_through_every_edit(tmp_path
     store.delete("y")
 
     saved = _saved(target)
+    assert saved["version"] == playlists.FORMAT_VERSION, "a save writes the current version"
     assert saved["written_by"] == "0.2.0"
     by_id = {record["id"]: record for record in saved["playlists"]}
     assert set(by_id) == {"x", "z"}
@@ -475,7 +476,7 @@ def test_schedules_carry_unknown_keys_without_resurrecting_cleared_fields(
     store.move("a", 2)
 
     saved = _saved(target)
-    assert saved["version"] == 2
+    assert saved["version"] == schedules.FORMAT_VERSION
     assert saved["note"] == "kept"
     assert saved["rules"] == [
         {"id": "b", "playlist": "Y"},
@@ -484,7 +485,7 @@ def test_schedules_carry_unknown_keys_without_resurrecting_cleared_fields(
     ]
 
 
-def test_the_lazy_schedule_upgrade_carries_unknown_keys_into_version_two(
+def test_a_version_one_schedule_is_saved_as_the_current_version_with_its_unknown_keys(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "schedules.json"
@@ -498,7 +499,7 @@ def test_the_lazy_schedule_upgrade_carries_unknown_keys_into_version_two(
     store.add("Y", rule_id="b")
 
     saved = _saved(target)
-    assert saved["version"] == 2
+    assert saved["version"] == schedules.FORMAT_VERSION
     assert saved["note"] == "kept"
     assert saved["rules"][0] == {"id": "a", "playlist": "X", "colour": "N"}
     assert not list(tmp_path.glob("*-backup")), "no save keeps a copy of the old bytes"
@@ -562,7 +563,11 @@ def test_display_assignments_carry_unknown_top_level_keys(tmp_path: Path) -> Non
     store.assign("DP-2", "Y")
     store.unassign("DP-1")
 
-    assert _saved(target) == {"version": 1, "displays": {"DP-2": "Y"}, "note": "kept"}
+    assert _saved(target) == {
+        "version": displays.FORMAT_VERSION,
+        "displays": {"DP-2": "Y"},
+        "note": "kept",
+    }
 
 
 def test_favourites_carry_unknown_top_level_keys(tmp_path: Path) -> None:

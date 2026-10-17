@@ -12,7 +12,9 @@ poll that meets the same set.
 
 from __future__ import annotations
 
+import os
 import tomllib
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -52,7 +54,7 @@ DEFAULT_HAS_NOTHING = (
     "The default names \u201c{}\u201d, which has nothing to play, so \u201cAll media\u201d "
     "plays instead."
 )
-NOTHING_LEFT_OUT = "Nothing is left out of playback any more: every saved playlist plays."
+NOTHING_LEFT_OUT = "Nothing that playback uses is left out any more."
 
 
 def _published(application: Any) -> dict[str, Any]:
@@ -173,6 +175,100 @@ def test_a_store_that_can_not_be_read_is_a_publication_problem_not_something_lef
     assert paths.runtime_config_path().read_bytes() == good
     assert application.left_out_notice == RULE_NAMES_NOTHING, "still true of what is published"
     assert profile.window.reports == [RULE_NAMES_NOTHING, problem]
+
+
+def test_a_folder_the_scan_could_not_look_into_is_a_publication_problem_not_something_left_out(
+    profiles: Any,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """Deep (the default, and a rule's) is under ``wallpapers/sub``, which stops being readable.
+
+    The window's own scan says it could not look there; the publication
+    refuses, naming the folder, and the document that was published stays.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    profile: Profile = profiles()
+    application = profile.application
+    folder = tmp_path / "wallpapers" / "sub"
+    folder.mkdir()
+    (folder / "deep.png").write_bytes(b"media")
+    application.session.refresh(mutate_removals=False)
+    deep = _saved(profile, "Deep", [], used=True)
+    application.session.playlists.add(deep.id, folder / "deep.png")
+    config.update({"active_playlist": deep.id})
+    document = _published(application)
+    assert document["default_playlist"] == deep.id and application.left_out_notice == ""
+    good = paths.runtime_config_path().read_bytes()
+
+    folder.chmod(0o000)
+    try:
+        application.session.refresh(mutate_removals=False)
+        _published(application)
+    finally:
+        folder.chmod(0o700)
+
+    problem = application.publication_problem
+    assert str(folder) in problem and "nothing to play" not in problem, problem
+    assert paths.runtime_config_path().read_bytes() == good
+    assert application.left_out_notice == "", "nothing was left out: it was not built"
+
+    application.session.refresh(mutate_removals=False)
+    document = _published(application)
+    assert application.publication_problem == "" and application.left_out_notice == ""
+    assert document["default_playlist"] == deep.id
+
+
+def test_a_rule_that_is_turned_off_leaves_no_standing_notice(
+    profiles: Any,  # noqa: F811
+) -> None:
+    """Off, a rule does nothing whatever it names; it is not "left out" and not said."""
+    profile: Profile = profiles()
+    application = profile.application
+    _saved(profile, "Lone", [profile.dawn], used=True)
+    schedules.Store.open().add("ghost", rule_id="off-ghost", enabled=False)
+
+    document = _published(application)
+
+    assert application.left_out_notice == "" and profile.window.reports == []
+    assert all(rule["id"] != "off-ghost" for rule in document["schedules"])
+
+    # A rule that is on and names a playlist that isn't there is said, alone.
+    schedules.Store.open().add("phantom", rule_id="on-phantom")
+    _published(application)
+    assert application.left_out_notice == (
+        "A schedule rule names a playlist that doesn\u2019t exist (phantom), so that rule "
+        "is left out."
+    )
+
+
+def test_the_synchronous_publication_keeps_what_it_left_out_under_the_compiler_lock(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The set kept is stored while the cross-process compiler lock is still held.
+
+    Stored after it was released, a compile that began in between (the
+    health or publication lane) could store its newer set first and have it
+    replaced by this older one.
+    """
+    profile: Profile = profiles(service=True)
+    application = profile.application
+    _saved(profile, "Lone", [profile.dawn])
+    application.session.schedules.add("ghost", rule_id="dangling")
+    held: list[bool] = []
+    real = type(application).__setattr__
+
+    def watching(self: Any, name: str, value: Any) -> None:
+        if name == "_compiled_left_out":
+            held.append(runtime_config._COMPILER_LOCK_STATE.held is not None)
+        real(self, name, value)
+
+    monkeypatch.setattr(type(application), "__setattr__", watching)
+
+    assert application._update_runtime_document() == (True, True)
+
+    assert held == [True]
 
 
 def test_the_headless_service_logs_what_it_left_out_once(

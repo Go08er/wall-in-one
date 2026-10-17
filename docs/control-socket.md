@@ -180,9 +180,11 @@ A playlist with no resolvable entries, like an empty one, is not in the
 runtime configuration. Whatever names it is left out and said, and everything
 else is published: the default plays "All media" instead, and a schedule rule
 or a display's own playlist that names it doesn't apply until the media is
-back or the playlist is repaired. The app says which and why once, and keeps
-it as a notice; `wall-in-one --write-config` prints one `warning:` line for
-each. A playlist whose name has a space in it is referred to by the id
+back or the playlist is repaired. The app says which and why once, in a toast
+and the activity log (a process with no window, such as `--service`, only
+logs it); the new window also keeps it as a notice under its header, and the
+classic window does not. `wall-in-one --write-config` prints one `warning:`
+line for each. A playlist whose name has a space in it is referred to by the id
 `playlists` prints beside it.
 
 Whichever window or verb asks, a change is refused when it would leave a

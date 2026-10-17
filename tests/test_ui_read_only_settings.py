@@ -97,6 +97,21 @@ NAMES_NOTHING = (
 )
 
 
+def _pointed(reference: str) -> str:
+    """The sentence for a default in a ``settings.toml`` that can't be changed.
+
+    It ends with where to fix it: the file and the key (the reason before that
+    depends on how the file is kept, so a test matches the two ends).
+    """
+    return NAMES_NOTHING.format(reference)
+
+
+def _is_said_with_its_pointer(text: str, reference: str) -> bool:
+    return text.startswith(
+        _pointed(reference) + " The settings file can\u2019t be changed: "
+    ) and text.endswith(f"To change the default, edit active_playlist in {paths.settings_path()}.")
+
+
 def _builds(application: Any) -> bool:
     """Whether the runtime document is built whole: nothing left out, no playlist dropped.
 
@@ -336,8 +351,9 @@ def test_a_start_goes_on_past_a_default_it_can_not_save(
     if default == "by name":
         assert about_it == [] and application.left_out_notice == ""
     else:
-        assert about_it == [NAMES_NOTHING.format("ghost")], "said by the publication, once"
-        assert application.left_out_notice == NAMES_NOTHING.format("ghost")
+        assert len(about_it) == 1, "said by the publication, once"
+        assert _is_said_with_its_pointer(about_it[0], "ghost"), about_it
+        assert application.left_out_notice == about_it[0]
         # And once a playlist answers to it, it is the default again.
         made = _saved(profile, "ghost", [profile.dusk])
         _published(application)
@@ -453,7 +469,7 @@ def test_a_left_out_default_is_said_once(
             assert application._finish_playlist_reference_repair(partial).ok
             _published(application)
         # Failed on 7e55112: said twice.
-        assert said() == [NAMES_NOTHING.format("ghost")], said()
+        assert len(said()) == 1 and _is_said_with_its_pointer(said()[0], "ghost"), said()
 
     # Another reference that names nothing is another thing to say.
     paths.settings_path().write_text(
@@ -466,7 +482,11 @@ def test_a_left_out_default_is_said_once(
         partial = application._repair_dangling_playlist_references()
         assert application._finish_playlist_reference_repair(partial).ok
         _published(application)
-    assert said() == [NAMES_NOTHING.format("ghost"), NAMES_NOTHING.format("phantom")], said()
+    assert len(said()) == 2, said()
+    assert all(
+        _is_said_with_its_pointer(text, name)
+        for text, name in zip(said(), ("ghost", "phantom"), strict=True)
+    ), said()
 
 
 # -- which refusals count: only a file that can't be changed for as long as it stays as it is ----
@@ -683,7 +703,8 @@ def test_the_apps_own_lanes_build_without_a_default_that_names_nothing(
         assert paths.settings_path().read_bytes() == saved
 
     told = [text for text in profile.window.reports if "The default names" in text]
-    assert told == [NAMES_NOTHING.format("ghost")], "by the publication; not again by the poll"
+    assert len(told) == 1, "by the publication; not again by the poll"
+    assert _is_said_with_its_pointer(told[0], "ghost"), told
     assert "renderer rejected this wallpaper" in paths.runtime_config_path().read_text("utf-8")
 
 

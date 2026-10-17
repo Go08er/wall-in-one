@@ -214,3 +214,55 @@ def test_ad2_a_choice_made_in_this_window_does_not_send_every_guard_to_a_scan(
     opened.wait("the removal", lambda: len(playlists.Store.open().find(evening.id).entries) == 1)
     assert opened.reports == []
     assert scans == [], "judged by the accepted library: the saved pairings are the ones it has"
+
+
+def test_ad2_choosing_the_still_that_was_already_the_automatic_one_does_not_send_guards_to_a_scan(
+    shown: Shown,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The choice is recorded with the library whether or not the video's still changed.
+
+    The video plays through ``dusk.jpg`` without anybody having chosen it
+    (the library keeps no choice for it). Choosing ``dusk.jpg`` changes no
+    still, so the library item is the same, but the saved pairings now choose
+    something the library wasn't resolved with: every later guarded gesture
+    ran a full scan on the worker until the next one. It does so no longer.
+    """
+    opened = shown.opened
+    application = opened.application
+    session = application.session
+    loop, dusk = _a_video_that_plays_through_a_chosen_still(shown)
+    session.pairings.reset(loop)
+    # The library as a scan hands it over when the still is the automatic one.
+    session.adopt_library(
+        Library(
+            roots=session.library.roots,
+            items=session.library.items,
+            skipped=session.library.skipped,
+            still_inventory=session.library.still_inventory,
+            adopted_stills=session.library.adopted_stills,
+            chosen_stills=(),
+        ),
+        reconcile_workshop=False,
+    )
+    scans: list[bool] = []
+    real = Session.scanned_from_disk
+
+    def scanned(view: Session) -> Library:
+        scans.append(True)
+        return real(view)
+
+    monkeypatch.setattr(Session, "scanned_from_disk", scanned)
+    evening = session.playlists.create("Evening")
+    video = session.playlists.add(evening.id, loop.path).entries[0]
+    session.playlists.add(evening.id, shown.dawn.path)
+
+    session.pairings.choose_still(loop, dusk)
+    again = application.adopt_pairing_still(loop, dusk)
+
+    assert again == loop, "no still changed"
+    assert _chosen(session) == [(pairings.Identity.of(loop).key, dusk)]
+    _editing(shown).remove_entries(evening.id, [video.id])
+    opened.wait("the removal", lambda: len(playlists.Store.open().find(evening.id).entries) == 1)
+    assert opened.reports == []
+    assert scans == [], "judged by the accepted library: it was resolved with this choice"

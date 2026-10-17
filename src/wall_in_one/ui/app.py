@@ -784,8 +784,12 @@ class Application(Adw.Application):
         #: compile. Written by whichever lane compiled, under
         #: `_runtime_config_lock`; said on GTK (`_note_left_out`).
         self._compiled_left_out: tuple[runtime_config.LeftOut, ...] | None = None
+        #: Why ``settings.toml`` can't be changed when the compiled document
+        #: left its default out, or empty; kept with `_compiled_left_out`.
+        self._compiled_default_pointer = ""
         #: The set that was last said, so it is said again only when it changes.
         self._left_out_said: frozenset[runtime_config.LeftOut] = frozenset()
+        self._default_pointer_said = ""
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
         # last normal window cannot cancel a committed Store -> runtime.toml
@@ -3813,18 +3817,19 @@ class Application(Adw.Application):
         if current is None or pairings.Identity.of(current) != pairings.Identity.of(item):
             return item
         adopted = current.with_still(effective_still) if current.is_moving else current
-        if adopted != current:
-            # The still it now holds was resolved with the choice this
-            # process just saved, and the library says so
-            # (`Library.chosen_stills`).
-            key = pairings.Identity.of(current).key
-            record = self._session.pairings.records.get(key)
-            chosen = library.chosen_stills
-            if chosen is not None:
-                kept = [pair for pair in chosen if pair[0] != key]
-                if record is not None and record.still is not None:
-                    kept.append((key, record.still))
-                chosen = tuple(sorted(kept))
+        # The library is resolved with the choice this process just saved
+        # (`Library.chosen_stills`), whether or not the still it plays through
+        # changed: choosing the still that was already the automatic one, or
+        # resetting to it, must not leave every later guard to scan the disk.
+        key = pairings.Identity.of(current).key
+        record = self._session.pairings.records.get(key)
+        chosen = library.chosen_stills
+        if chosen is not None:
+            kept = [pair for pair in chosen if pair[0] != key]
+            if record is not None and record.still is not None:
+                kept.append((key, record.still))
+            chosen = tuple(sorted(kept))
+        if adopted != current or chosen != library.chosen_stills:
             self._session.adopt_library(
                 Library(
                     roots=library.roots,
@@ -4148,10 +4153,35 @@ class Application(Adw.Application):
         path: the set kept is always the newest compile's, which is the
         document on disk, whatever then becomes of its reload.
         """
-        changed, left_out = _runtime_installed(settings, session)
-        with self._runtime_config_lock:
-            self._compiled_left_out = left_out
+        # Held across the store as well as the compile (it is re-entrant), so
+        # that the set kept is the newest document's whichever path got there.
+        with runtime_config.compiler_lock():
+            changed, left_out = _runtime_installed(settings, session)
+            pointer = self._default_pointer(left_out)
+            with self._runtime_config_lock:
+                self._compiled_left_out = left_out
+                self._compiled_default_pointer = pointer
         return changed
+
+    @staticmethod
+    def _default_pointer(left_out: tuple[runtime_config.LeftOut, ...]) -> str:
+        """Where to fix a default that is left out in a ``settings.toml`` that can't be changed.
+
+        Empty otherwise: in a file that can be changed the person can choose
+        another default in the app, and the next start clears a dangling one.
+        """
+        if not any(one.owner == runtime_config.DEFAULT_OWNER for one in left_out):
+            return ""
+        try:
+            why = config.why_settings_cannot_change(config.load_strict_document())
+        except config.ConfigError:
+            return ""
+        if not why:
+            return ""
+        return (
+            f"The settings file can\u2019t be changed: {why}. To change the default, "
+            f"edit active_playlist in {paths.settings_path()}."
+        )
 
     def _compile_runtime_until_current(
         self,
@@ -4515,7 +4545,10 @@ class Application(Adw.Application):
         (`runtime_config.LeftOut`). It stands for as long as that is so: the
         new window keeps it under its header, below a publication problem.
         """
-        return runtime_config.left_out_notice(self._left_out_said)
+        notice = runtime_config.left_out_notice(self._left_out_said)
+        if notice and self._default_pointer_said:
+            return f"{notice} {self._default_pointer_said}"
+        return notice
 
     def _note_left_out(self) -> None:
         """Say what the newest compiled document leaves out, if that has changed.
@@ -4529,18 +4562,18 @@ class Application(Adw.Application):
         """
         with self._runtime_config_lock:
             compiled = self._compiled_left_out
+            pointer = self._compiled_default_pointer
         if compiled is None:
             return
         left_out = frozenset(compiled)
-        if left_out == self._left_out_said:
+        if left_out == self._left_out_said and pointer == self._default_pointer_said:
             return
         self._left_out_said = left_out
+        self._default_pointer_said = pointer
         if left_out:
             self.window_report(self.left_out_notice)
         else:
-            self.activity_log.record(
-                "app", "Nothing is left out of playback any more: every saved playlist plays."
-            )
+            self.activity_log.record("app", "Nothing that playback uses is left out any more.")
         changed = getattr(self._window, "publication_changed", None)
         if callable(changed):
             changed()

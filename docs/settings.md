@@ -94,7 +94,11 @@ read-only mount, or a tool that manages the files in it. Wall-in-One reads
   saved, the app replaces the name with the playlist's id at its next start.
 - A default that names no playlist is left out, whether or not the file can
   be saved, and so is one that names a playlist with nothing to play. "All
-  media" plays, and the app says so once and keeps it as a notice. The
+  media" plays, and the app says so once and keeps it as a notice. When the
+  file can't be changed (kept read-only, or holding keys this version doesn't
+  know), the notice also says why and which file and key to edit
+  (`active_playlist`); where it can be changed, the default can be chosen
+  again in the app and nothing more is said. The
   wallpaper service's startup check, `--write-config` and the health sync
   print a `warning:` line naming the file and the key, build the runtime
   document with "All media" as the default, and exit as usual. Once a

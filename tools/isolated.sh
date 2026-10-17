@@ -7,10 +7,11 @@
 # This, or one of the flake's checks, is how to run the tests. The command
 # gets a new temporary HOME and XDG config, state, cache, data and runtime
 # directories, removed afterwards; dead session and system bus addresses (left
-# unset, GTK under Xvfb would autolaunch a bus and portals that outlive the
-# run); no portals; none of your session's Wayland, niri or X display
-# addresses; no LD_LIBRARY_PATH (see the README); and its own Xvfb server with
-# the cairo renderer, as the gui-tests check uses.
+# unset, GLib would look for a bus of its own); no portals; none of your
+# session's Wayland, niri or X11 display addresses; no LD_LIBRARY_PATH (see the
+# README); and a headless Wayland compositor of its own
+# (tools/headless-wayland.sh) with the cairo renderer, as the gui-tests check
+# uses. Nothing here uses X11.
 #
 # tests/conftest.py sandboxes the test process as well, and refuses and
 # reports writes to your real Wall-in-One and Noctalia files, but that is a
@@ -20,8 +21,8 @@
 # Outside a Nix shell, the command runs in this flake's dev shell.
 #
 # Stopping it with TERM, INT (Ctrl-C) or HUP stops the whole workload first --
-# the command, xvfb-run and Xvfb, with KILL after a grace period -- and only
-# then removes the throwaway profile. The exit status is then 128 + the
+# the command, tools/headless-wayland.sh and its compositor, with KILL after a
+# grace period -- and only then removes the throwaway profile. The exit status is then 128 + the
 # signal's number. When the command ends by itself, anything it left running
 # in its process group gets the same grace period, then TERM and KILL, before
 # the profile goes: nothing is left writing into a removed profile.
@@ -30,8 +31,8 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 
-# The workload (the dev shell, or xvfb-run with its Xvfb and the command)
-# runs in its own process group, led by `supervise`, a copy of this shell. A
+# The workload (the dev shell, or tools/headless-wayland.sh with its
+# compositor and the command) runs in its own process group, led by `supervise`, a copy of this shell. A
 # TERM, INT or HUP sent to this script goes to that whole group, which gets a
 # short grace period before KILL; the throwaway profile is removed only once
 # the group is gone, and the exit status is then 128 + the signal's number.
@@ -183,9 +184,15 @@ fi
 root="$(mktemp -d "${TMPDIR:-/tmp}/wio-isolated.XXXXXX")"
 mkdir -m 700 "$root/home" "$root/config" "$root/state" "$root/cache" "$root/data" "$root/run"
 
+# The runtime directory being replaced is the desktop's: tests/conftest.py
+# refuses a compositor socket below it as well as below /run/user/<uid>.
+live_runtime_dirs="${XDG_RUNTIME_DIR:-}${WIO_TEST_LIVE_RUNTIME_DIRS:+:$WIO_TEST_LIVE_RUNTIME_DIRS}"
+
 status=0
-run_workload env -u WAYLAND_DISPLAY -u NIRI_SOCKET -u DISPLAY -u LD_LIBRARY_PATH \
-  -u WIO_TEST_SESSION_ROOT -u WIO_TEST_SESSION_PID \
+run_workload env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u NIRI_SOCKET -u DISPLAY -u LD_LIBRARY_PATH \
+  -u WIO_TEST_SESSION_ROOT -u WIO_TEST_SESSION_PID -u WIO_TEST_WAYLAND_SOCKET \
+  -u WIO_TEST_WAYLAND_REFUSAL \
+  WIO_TEST_LIVE_RUNTIME_DIRS="$live_runtime_dirs" \
   HOME="$root/home" \
   XDG_CONFIG_HOME="$root/config" \
   XDG_STATE_HOME="$root/state" \
@@ -197,10 +204,10 @@ run_workload env -u WAYLAND_DISPLAY -u NIRI_SOCKET -u DISPLAY -u LD_LIBRARY_PATH
   GDK_DEBUG=no-portals \
   GTK_USE_PORTAL=0 \
   GSETTINGS_BACKEND=memory \
-  GDK_BACKEND=x11 \
+  GDK_BACKEND=wayland \
   GSK_RENDERER=cairo \
   PYTHONDONTWRITEBYTECODE=1 \
-  xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24 -nolisten tcp' "$@" ||
+  "$repo/tools/headless-wayland.sh" "$@" ||
   status=$?
 remove_profile
 exit "$status"

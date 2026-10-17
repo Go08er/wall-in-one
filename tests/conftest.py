@@ -112,7 +112,7 @@ def live_runtime_dirs(environ: Mapping[str, str], uid: int) -> tuple[Path, ...]:
     """The desktop's runtime directories: no test compositor may live below one."""
     found = [Path(f"/run/user/{uid}")]
     inherited = environ.get(_LIVE_RUNTIME_ENV, "")
-    found.extend(Path(entry) for entry in inherited.split(os.pathsep) if entry)
+    found.extend(Path(entry) for entry in inherited.split(os.pathsep) if os.path.isabs(entry))
     runtime = environ.get("XDG_RUNTIME_DIR", "")
     if os.path.isabs(runtime):
         found.append(Path(runtime))

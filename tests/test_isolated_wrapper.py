@@ -55,25 +55,48 @@ def test_the_guard_says_it_is_a_backstop() -> None:
     assert "``tools/isolated.sh``" in doc and "never as a bare ``pytest``" in doc
 
 
+#: A stand-in Weston: listens where it is told, records how it was started
+#: (its arguments, environment and configuration) in $STUB_WESTON_REPORT,
+#: and runs until TERM, as the real one does.
+WESTON: Final = """
+import json, os, signal, socket, sys
+signal.signal(signal.SIGTERM, lambda *_arguments: sys.exit(0))
+options = dict(argument[2:].split("=", 1) for argument in sys.argv[1:] if "=" in argument)
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(os.path.join(os.environ["XDG_RUNTIME_DIR"], options["socket"]))
+listener.listen(1)
+report = os.environ.get("STUB_WESTON_REPORT")
+if report:
+    with open("/proc/self/stat", encoding="utf-8") as stat:
+        started = stat.read().rsplit(")", 1)[1].split()[19]
+    with open(options["config"], encoding="utf-8") as config:
+        seen = {"pid": os.getpid(), "started": started, "argv": sys.argv[1:],
+                "environ": dict(os.environ), "config": config.read()}
+    with open(report + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump(seen, handle)
+    os.replace(report + ".tmp", report)
+while True:
+    signal.pause()
+"""
+
+
+def _stub_weston(stubs: Path) -> None:
+    stubs.mkdir()
+    weston = stubs / "weston"
+    weston.write_text(f"#!{sys.executable}\n{WESTON}", encoding="utf-8")
+    weston.chmod(0o755)
+
+
 def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> None:
     """Started from a stand-in desktop shell, inside a Nix shell, with a stand-in
-    Xvfb that only runs its command: the command sees none of that shell."""
+    Weston: the command sees none of that shell, and draws only on that Weston,
+    which saw none of it either."""
     bash = shutil.which("bash")
     if bash is None:  # pragma: no cover - every supported build has bash
         pytest.skip("no bash")
     stubs = tmp_path / "bin"
-    stubs.mkdir()
-    xvfb_run = stubs / "xvfb-run"
-    xvfb_run.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys\n"
-        "arguments = sys.argv[1:]\n"
-        "while arguments and arguments[0].startswith('-'):\n"
-        "    arguments.pop(0)\n"
-        "os.execvp(arguments[0], arguments)\n",
-        encoding="utf-8",
-    )
-    xvfb_run.chmod(0o755)
+    _stub_weston(stubs)
+    weston_report = tmp_path / "weston.json"
     shell = tmp_path / "desktop"
     temporary = tmp_path / "tmp"
     temporary.mkdir()
@@ -92,13 +115,16 @@ def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> 
         DBUS_SESSION_BUS_ADDRESS=f"unix:path={shell / 'run' / 'bus'}",
         DBUS_SYSTEM_BUS_ADDRESS=f"unix:path={shell / 'system_bus_socket'}",
         WAYLAND_DISPLAY="wayland-1",
+        WAYLAND_SOCKET="9",
         NIRI_SOCKET=str(shell / "run" / "niri.sock"),
         DISPLAY=":0",
         LD_LIBRARY_PATH=str(shell / "lib"),
         IN_NIX_SHELL="impure",
         TMPDIR=str(temporary),
         PATH=f"{stubs}{os.pathsep}{os.environ.get('PATH', '')}",
+        STUB_WESTON_REPORT=str(weston_report),
     )
+    environment.pop("WIO_TEST_LIVE_RUNTIME_DIRS", None)
 
     completed = subprocess.run(
         (
@@ -131,16 +157,43 @@ def test_the_wrapper_runs_the_command_in_a_throwaway_profile(tmp_path: Path) -> 
         assert seen[variable] == str(root / directory), variable
     assert seen["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path={root / 'run' / 'no-session-bus'}"
     assert seen["DBUS_SYSTEM_BUS_ADDRESS"] == f"unix:path={root / 'run' / 'no-system-bus'}"
-    for variable in ("WAYLAND_DISPLAY", "NIRI_SOCKET", "DISPLAY", "LD_LIBRARY_PATH"):
+    for variable in ("WAYLAND_SOCKET", "NIRI_SOCKET", "DISPLAY", "LD_LIBRARY_PATH"):
         assert variable not in seen, variable
     assert conftest.SESSION_ROOT_ENV not in seen
     for variable, value in {
         "GDK_DEBUG": "no-portals",
         "GTK_USE_PORTAL": "0",
         "GSK_RENDERER": "cairo",
-        "GDK_BACKEND": "x11",
+        "GDK_BACKEND": "wayland",
     }.items():
         assert seen[variable] == value, variable
+    # The run's own compositor, by absolute path, in a private directory of its
+    # own: not the shell's wayland-1, and nowhere in either runtime directory.
+    socket_path = Path(seen["WAYLAND_DISPLAY"])
+    assert seen[conftest.TEST_WAYLAND_ENV] == str(socket_path)
+    assert socket_path.is_absolute() and socket_path.name == "wayland-0", socket_path
+    compositor = socket_path.parent
+    assert compositor.parent == temporary and compositor.name.startswith("wio-wl."), compositor
+    assert seen["WIO_TEST_LIVE_RUNTIME_DIRS"].split(os.pathsep)[0] == str(shell / "run")
+    # Weston: headless, in that directory, and handed none of the shell's addresses.
+    weston = json.loads(weston_report.read_text(encoding="utf-8"))
+    assert weston["environ"]["XDG_RUNTIME_DIR"] == str(compositor)
+    for variable in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "NIRI_SOCKET", "DISPLAY"):
+        assert variable not in weston["environ"], variable
+    for argument in (
+        "--backend=headless",
+        "--renderer=pixman",
+        "--width=1600",
+        "--height=1200",
+        "--shell=desktop",
+        "--idle-time=0",
+        "--socket=wayland-0",
+    ):
+        assert argument in weston["argv"], argument
+    for line in ("idle-time=0", "xwayland=false", "locking=false", "panel-position=none"):
+        assert line in weston["config"].splitlines(), line
+    assert not _still_running(weston["pid"], weston["started"]), "the compositor is stopped"
+    assert not compositor.exists(), "and its directory removed"
     assert not root.exists(), "the throwaway profile is removed afterwards"
     assert not shell.exists(), "nothing was written in the stand-in shell's directories"
 
@@ -174,6 +227,38 @@ def _session(session: int) -> dict[int, tuple[str, str]]:
     return found
 
 
+def _descendants(roots: set[int]) -> dict[int, tuple[str, str]]:
+    """Every live process below ``roots`` by parent: pid -> (start time, command name).
+
+    Weston starts its shell's client in a session of its own, which
+    :func:`_session` does not see.
+    """
+    table: dict[int, tuple[int, str, str]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            text = Path(f"/proc/{entry}/stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fields = text[text.rindex(")") + 2 :].split()
+        if fields[0] != "Z":
+            table[int(entry)] = (
+                int(fields[1]),
+                fields[19],
+                text[text.index("(") + 1 : text.rindex(")")],
+            )
+    found: dict[int, tuple[str, str]] = {}
+    frontier = set(roots)
+    while frontier:
+        children = {pid for pid, (parent, _started, _name) in table.items() if parent in frontier}
+        children -= found.keys() | roots
+        for pid in children:
+            found[pid] = table[pid][1:]
+        frontier = children
+    return found
+
+
 def _still_running(pid: int, started: str) -> bool:
     """Whether that exact process (same start time) is alive, not a zombie."""
     try:
@@ -189,14 +274,15 @@ def _still_running(pid: int, started: str) -> bool:
 def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goes(
     tmp_path: Path, number: signal.Signals
 ) -> None:
-    """Sweep 4 T-3, Codex's case: a real xvfb-run and a sleeping command, and
-    the signal sent only to the wrapper's own PID, as a task runner does.
-    Before, the profile was removed and xvfb-run, Xvfb and the command lived
-    on. Every process this test started is in its own session; cleanup kills
-    only those exact processes."""
-    bash, xvfb_run = shutil.which("bash"), shutil.which("xvfb-run")
-    if bash is None or xvfb_run is None:  # pragma: no cover - the gui-tests check has both
-        pytest.skip("needs bash and xvfb-run")
+    """Sweep 4 T-3, Codex's case: a real compositor and a sleeping command,
+    and the signal sent only to the wrapper's own PID, as a task runner does.
+    Before (then with xvfb-run and Xvfb), the profile was removed and the
+    display server and the command lived on. Every process this test started
+    is in its own session or, for the compositor's shell client, below one of
+    them; cleanup kills only those exact processes."""
+    bash, weston = shutil.which("bash"), shutil.which("weston")
+    if bash is None or weston is None:  # pragma: no cover - the gui-tests check has both
+        pytest.skip("needs bash and weston")
     report = tmp_path / "report.json"
     temporary = tmp_path / "tmp"
     temporary.mkdir()
@@ -223,9 +309,19 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
         seen = json.loads(report.read_text(encoding="utf-8"))
         root = Path(seen["home"]).parent
         assert root.parent == temporary and root.is_dir()
-        owned = _session(wrapper.pid)
-        names = sorted(name for _started, name in owned.values())
-        assert seen["pid"] in owned and "Xvfb" in names, names
+        # The compositor's shell client may still be starting: wait for it.
+        names: list[str] = []
+        while time.monotonic() < deadline:
+            owned = _session(wrapper.pid)
+            owned.update(_descendants(set(owned)))
+            names = sorted(name for _started, name in owned.values())
+            if "weston-desktop-" in names:
+                break
+            time.sleep(0.05)
+        assert seen["pid"] in owned, names
+        assert "weston" in names and "weston-desktop-" in names, names
+        assert not {"Xvfb", "Xwayland", "xvfb-run"} & set(names), names
+        assert [path.name[:7] for path in temporary.iterdir()].count("wio-wl.") == 1
 
         os.kill(wrapper.pid, number)
         status = wrapper.wait(timeout=30)
@@ -236,6 +332,7 @@ def test_a_signal_to_the_wrapper_stops_its_whole_workload_before_the_profile_goe
         assert survivors == {}, f"left running: {survivors}"
         assert status == 128 + number
         assert not root.exists(), "the profile is removed, after the workload"
+        assert list(temporary.iterdir()) == [], "and the compositor's directory"
     finally:
         for pid, (started, _name) in owned.items():
             if pid != wrapper.pid and _still_running(pid, started):
@@ -271,20 +368,9 @@ os._exit(3)
 
 
 def _stubbed_wrapper_environment(tmp_path: Path, grace_tenths: int) -> dict[str, str]:
-    """The wrapper inside a Nix shell, with an xvfb-run that only runs its command."""
+    """The wrapper inside a Nix shell, with a stand-in Weston."""
     stubs = tmp_path / "bin"
-    stubs.mkdir()
-    xvfb_run = stubs / "xvfb-run"
-    xvfb_run.write_text(
-        f"#!{sys.executable}\n"
-        "import os, sys\n"
-        "arguments = sys.argv[1:]\n"
-        "while arguments and arguments[0].startswith('-'):\n"
-        "    arguments.pop(0)\n"
-        "os.execvp(arguments[0], arguments)\n",
-        encoding="utf-8",
-    )
-    xvfb_run.chmod(0o755)
+    _stub_weston(stubs)
     temporary = tmp_path / "tmp"
     temporary.mkdir()
     environment = {

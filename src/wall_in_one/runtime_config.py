@@ -28,7 +28,7 @@ from typing import Final
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
 from wall_in_one.library import pairings, schedules, state_file
-from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.library.model import Kind, MediaItem, Unseen, UnseenKind
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.session import SAVED_PLAYLISTS, SAVED_USES, Session
 from wall_in_one.wallpaper import scenes
@@ -1622,22 +1622,39 @@ def _overrides_document(
     return document
 
 
-def _unseen_folder(entries: Iterable[Entry], skipped: tuple[str, ...]) -> str | None:
-    """The first skipped scan note that covers a place one of ``entries`` may be in.
+def _unseen_folder(entries: Iterable[Entry], unseen: tuple[Unseen, ...]) -> Unseen | None:
+    """The first place the scan could not look into that covers one of ``entries``.
 
-    A note reads ``<folder>: <why>``; it covers an entry whose path is that
-    folder or lies under it. None when the scan skipped nothing of theirs.
+    Covers: the place is the entry's path or one of its parent folders (path
+    ancestry, not text). Only the kinds that mean "files may be there now"
+    count (a failed listing or stat, a scan limit); a library folder that is
+    absent, not a folder or a link was looked at and holds nothing usable, so
+    it does not. None when there is no such place.
     """
-    if not skipped:
+    refusing = [place for place in unseen if place.kind.could_not_look]
+    if not refusing:
         return None
     for entry in entries:
         path = Path(entry.path)
-        for place in (path, *path.parents):
-            prefix = f"{place}: "
-            for note in skipped:
-                if note.startswith(prefix):
-                    return note
+        ancestry = {path, *path.parents}
+        for place in refusing:
+            if place.path in ancestry:
+                return place
     return None
+
+
+def _could_not_look(place: Unseen) -> str:
+    """The scan's note for ``place``, said as what it could not do."""
+    return f"it could not look into {place.note}"
+
+
+def _unseen_advice(place: Unseen) -> str:
+    if place.kind is UnseenKind.LIMIT:
+        return (
+            "a folder past a scan limit isn't read; "
+            "make the library smaller, or remove the reference."
+        )
+    return "make the folder readable, or remove the reference."
 
 
 def _owner_phrase(owner: str, owner_id: str) -> str:
@@ -1701,7 +1718,7 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     existing_ids = {FALLBACK_PLAYLIST_ID}
     # Playlists that play nothing only because the scan could not look under a
     # folder their entries may be in: "couldn't look" is not "nothing there".
-    unseen: dict[str, str] = {}
+    unseen: dict[str, Unseen] = {}
     rotations: list[tuple[str, int | None, bool | None]] = []
     for playlist in session.playlists.all():
         resolved: list[tuple[str, ...]] = []
@@ -1717,7 +1734,7 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
             # is missing or unresolved. Not emitted; whatever refers to it is
             # left out below, and said (`LeftOut`, `NOTHING_TO_PLAY`), unless
             # the scan could not look where its entries may be.
-            hidden = _unseen_folder(playlist.entries, session.library.skipped)
+            hidden = _unseen_folder(playlist.entries, session.library.unseen)
             if hidden is not None:
                 unseen[playlist.id] = hidden
             continue
@@ -1761,9 +1778,9 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
                 raise RuntimeConfigError(
                     f"cannot compile runtime configuration because playlist "
                     f"{authored.name!r}, which {_owner_phrase(owner, owner_id)} names, plays "
-                    "nothing only as far as the library scan could look; it could not look "
-                    f"into {unseen[authored.id]}. The existing runtime configuration was "
-                    "left untouched; make the folder readable, or remove the reference."
+                    "nothing only as far as the library scan could look; "
+                    f"{_could_not_look(unseen[authored.id])}. The existing runtime "
+                    f"configuration was left untouched; {_unseen_advice(unseen[authored.id])}"
                 )
             left_out.append(LeftOut(owner, owner_id, reference, authored.name, NOTHING_TO_PLAY))
             return None

@@ -10,7 +10,14 @@ import pytest
 
 from wall_in_one import config
 from wall_in_one.library import pairing, pairings, scan, stills
-from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
+from wall_in_one.library.model import (
+    Kind,
+    Library,
+    MediaItem,
+    Ownership,
+    UnseenKind,
+    classify,
+)
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.wallpaper import renderer, scenes
 
@@ -467,6 +474,56 @@ def test_scan_honours_the_depth_limit(tmp_path: Path, monkeypatch: pytest.Monkey
 
     assert sorted(item.path.name for item in library.items) == ["deep.png", "top.png"]
     assert any("deeper than" in note for note in library.skipped)
+
+
+def test_scan_records_what_it_could_not_look_into_by_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Library.unseen`` carries the path and why, beside the notes in ``skipped``."""
+    monkeypatch.setattr(scan, "MAX_DEPTH", 1)
+    root = tmp_path / "root"
+    _touch(root / "one" / "two" / "deeper.png")
+    absent = tmp_path / "absent"
+    regular = tmp_path / "regular"
+    regular.write_bytes(b"x")
+    link = tmp_path / "link"
+    link.symlink_to(root, target_is_directory=True)
+
+    library = scan.scan([root, absent, regular, link])
+
+    kinds = {place.path: place.kind for place in library.unseen}
+    assert kinds == {
+        root / "one" / "two": UnseenKind.LIMIT,
+        absent: UnseenKind.ROOT_NOT_USABLE,
+        regular: UnseenKind.ROOT_NOT_USABLE,
+        link: UnseenKind.ROOT_NOT_USABLE,
+    }
+    assert sorted(place.note for place in library.unseen) == sorted(library.skipped)
+
+
+def test_scan_records_an_unreadable_folder_and_the_entry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads a folder with no permission bits")
+    closed = tmp_path / "a" / "closed"
+    _touch(closed / "x.png")
+    closed.chmod(0o000)
+    try:
+        library = scan.scan([tmp_path / "a"])
+    finally:
+        closed.chmod(0o700)
+    assert [(place.path, place.kind) for place in library.unseen] == [
+        (closed, UnseenKind.UNREADABLE)
+    ]
+
+    monkeypatch.setattr(scan, "MAX_ENTRIES_EXAMINED", 2)
+    for name in ("1.png", "2.png", "3.png"):
+        _touch(tmp_path / "b" / name)
+    library = scan.scan([tmp_path / "b"])
+    assert [(place.path, place.kind) for place in library.unseen] == [
+        (tmp_path / "b", UnseenKind.LIMIT)
+    ]
 
 
 def test_wallpaper_directory_read_from_noctalia(

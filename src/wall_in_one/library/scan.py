@@ -19,7 +19,15 @@ from typing import Final
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import adopted, pairing, pairings, workshop
-from wall_in_one.library.model import Kind, Library, MediaItem, Ownership, classify
+from wall_in_one.library.model import (
+    Kind,
+    Library,
+    MediaItem,
+    Ownership,
+    Unseen,
+    UnseenKind,
+    classify,
+)
 
 #: What a Wallpaper Engine wallpaper is labelled as in the grid.
 WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
@@ -292,10 +300,20 @@ def default_roots() -> tuple[Path, ...]:
     return ()
 
 
+def _not_looked(
+    skipped: list[str], unseen: list[Unseen], path: Path, kind: UnseenKind, why: object
+) -> None:
+    """Say, as a note and as a structured record, that the scan did not look at ``path``."""
+    note = f"{path}: {why}"
+    skipped.append(note)
+    unseen.append(Unseen(path, kind, note))
+
+
 def _walk(
     root: Path,
     budget: list[int],
     skipped: list[str],
+    unseen: list[Unseen],
     cancelled: Callable[[], bool] | None = None,
     gone: set[Path] | None = None,
 ) -> Iterable[Path]:
@@ -314,7 +332,7 @@ def _walk(
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError as error:
-            skipped.append(f"{directory}: {error.strerror or error}")
+            _not_looked(skipped, unseen, directory, UnseenKind.UNREADABLE, error.strerror or error)
             continue
         for entry in entries:
             if cancelled is not None and cancelled():
@@ -323,20 +341,38 @@ def _walk(
                 continue
             budget[0] -= 1
             if budget[0] <= 0:
-                skipped.append(f"{root}: stopped after {MAX_ENTRIES_EXAMINED} entries")
+                _not_looked(
+                    skipped,
+                    unseen,
+                    root,
+                    UnseenKind.LIMIT,
+                    f"stopped after {MAX_ENTRIES_EXAMINED} entries",
+                )
                 return
             if entry.name.startswith("."):
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
                     if depth + 1 > MAX_DEPTH:
-                        skipped.append(f"{entry.path}: deeper than {MAX_DEPTH} levels")
+                        _not_looked(
+                            skipped,
+                            unseen,
+                            Path(entry.path),
+                            UnseenKind.LIMIT,
+                            f"deeper than {MAX_DEPTH} levels",
+                        )
                         continue
                     stack.append((Path(entry.path), depth + 1))
                 elif entry.is_file(follow_symlinks=False):
                     yield Path(entry.path)
             except OSError as error:
-                skipped.append(f"{entry.path}: {error.strerror or error}")
+                _not_looked(
+                    skipped,
+                    unseen,
+                    Path(entry.path),
+                    UnseenKind.UNREADABLE,
+                    error.strerror or error,
+                )
 
 
 def _deleted(entry: os.DirEntry[str], exclusion: pairing.Exclusion, gone: set[Path] | None) -> bool:
@@ -518,6 +554,7 @@ def _scan(
 
     budget = [MAX_ENTRIES_EXAMINED]
     skipped: list[str] = []
+    unseen: list[Unseen] = []
     items: list[MediaItem] = []
     seen: set[Path] = set()
     observed_generations: dict[
@@ -532,11 +569,13 @@ def _scan(
         if cancelled is not None and cancelled():
             raise ScanCancelledError
         if root.is_symlink() or not root.is_dir():
-            skipped.append(f"{root}: {_unscanned_root(root)}")
+            _not_looked(skipped, unseen, root, UnseenKind.ROOT_NOT_USABLE, _unscanned_root(root))
             continue
-        for path in _walk(root, budget, skipped, cancelled, gone=seen):
+        for path in _walk(root, budget, skipped, unseen, cancelled, gone=seen):
             if len(items) >= MAX_ITEMS:
-                skipped.append(f"{root}: stopped at {MAX_ITEMS} wallpapers")
+                _not_looked(
+                    skipped, unseen, root, UnseenKind.LIMIT, f"stopped at {MAX_ITEMS} wallpapers"
+                )
                 break
             if path in seen or _is_sidecar(path):
                 continue
@@ -555,8 +594,12 @@ def _scan(
                 # one that missed something.
                 if path.parent not in unseen_folders:
                     unseen_folders.add(path.parent)
-                    skipped.append(
-                        f"{path.parent}: files could not be looked at ({error.strerror or error})"
+                    _not_looked(
+                        skipped,
+                        unseen,
+                        path.parent,
+                        UnseenKind.UNREADABLE,
+                        f"files could not be looked at ({error.strerror or error})",
                     )
                 continue
             if pairing.is_excluded(path, info):
@@ -663,6 +706,7 @@ def _scan(
         roots=resolved_roots,
         items=paired,
         skipped=tuple(skipped),
+        unseen=tuple(unseen),
         still_inventory=still_inventory,
         adopted_stills=adopted_pairs,
         chosen_stills=pairings.chosen_stills(records or {}),

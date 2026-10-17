@@ -149,6 +149,33 @@ class MediaItem:
         return replace(self, paired_still=still)
 
 
+class UnseenKind(Enum):
+    """Why the scan has nothing to say about a place."""
+
+    #: A listing or a stat failed there: files may be there now.
+    UNREADABLE = "unreadable"
+    #: A scan limit stopped it (entry budget, wallpaper ceiling, depth).
+    LIMIT = "limit"
+    #: A library root that is absent, not a folder, or a symbolic link:
+    #: the scan looked and there is nothing usable.
+    ROOT_NOT_USABLE = "root not usable"
+
+    @property
+    def could_not_look(self) -> bool:
+        """Whether files may be at the place (so "nothing there" is not known)."""
+        return self is not UnseenKind.ROOT_NOT_USABLE
+
+
+@dataclass(frozen=True, slots=True)
+class Unseen:
+    """A place the scan did not look into, as a path, not note text."""
+
+    path: Path
+    kind: UnseenKind
+    #: The person-readable note, the same text as in `Library.skipped`.
+    note: str
+
+
 @dataclass(frozen=True, slots=True)
 class Library:
     """Everything found under the configured roots."""
@@ -157,6 +184,10 @@ class Library:
     items: tuple[MediaItem, ...]
     #: Directories that were skipped: unreadable, or past the scan ceiling.
     skipped: tuple[str, ...] = ()
+    #: The same places as ``skipped``, structured: where, and why the scan
+    #: did not look (`UnseenKind`). Whoever judges "couldn't look" from
+    #: "nothing there" reads this, never the note text.
+    unseen: tuple[Unseen, ...] = ()
     #: Every still the scanner found before pairing hides app-generated
     #: captures from playback. It retains that internal scan inventory for
     #: diagnostics without turning automatic captures into authoring choices;

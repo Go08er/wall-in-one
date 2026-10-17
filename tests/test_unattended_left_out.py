@@ -356,6 +356,42 @@ def test_a_folder_the_scan_could_not_look_into_is_not_nothing_to_play(
     assert paths.runtime_config_path().read_bytes() == good
 
 
+@pytest.mark.parametrize("how", ("absent", "a file", "a symlink"))
+@pytest.mark.parametrize("verb", COMPILES)
+def test_a_library_folder_that_is_not_there_is_left_out_not_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: str, how: str
+) -> None:
+    """An unmounted drive holds Deep's only file: the scan looked and found no usable folder.
+
+    Deep (the default, and a rule's) is left out and said; the rest is published.
+    Before the ruling the compile refused, naming the folder, and published nothing.
+    """
+    item = _media(tmp_path)
+    drive = tmp_path / "drive"
+    if how == "a file":
+        drive.write_bytes(b"not a folder")
+    elif how == "a symlink":
+        real = tmp_path / "real"
+        real.mkdir()
+        drive.symlink_to(real, target_is_directory=True)
+    config.save(config.Settings(roots=(item.path.parent, drive), scan_workshop=False))
+    store = playlists.Store.open()
+    deep = store.add(store.create("Deep").id, drive / "deep.png")
+    schedules.Store.open().add(deep.id, rule_id="deep-rule")
+    config.update({"active_playlist": deep.id})
+    capsys.readouterr()
+
+    code = cli.main([verb])
+    said = capsys.readouterr()
+
+    assert code == 0, said.err
+    assert "error:" not in said.err and str(drive) not in said.err, said.err
+    assert len(_warnings(said.err)) == 2, said.err
+    document = _document()
+    assert document["default_playlist"] == ALL_MEDIA
+    assert not any(rule["playlist"] == deep.id for rule in document.get("schedules", []))
+
+
 # -- what the released version left on disk ----------------------------------------------------
 
 _RELEASED_SAVES_WHAT_CANNOT_PLAY = r"""

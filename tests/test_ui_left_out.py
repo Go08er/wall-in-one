@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -217,6 +218,44 @@ def test_a_folder_the_scan_could_not_look_into_is_a_publication_problem_not_some
     document = _published(application)
     assert application.publication_problem == "" and application.left_out_notice == ""
     assert document["default_playlist"] == deep.id
+
+
+@pytest.mark.parametrize("how", ("absent", "a file", "a symlink"))
+def test_a_library_folder_that_is_not_there_is_left_out_and_said_not_a_publication_problem(
+    profiles: Any,  # noqa: F811
+    tmp_path: Path,
+    how: str,
+) -> None:
+    """Deep (the default) holds only a file under a library folder that is not there.
+
+    The window's scan looked and found no usable folder: the default plays
+    "All media", the notice says so, and nothing else is stopped.
+    """
+    profile: Profile = profiles()
+    application = profile.application
+    drive = tmp_path / "drive"
+    if how == "a file":
+        drive.write_bytes(b"not a folder")
+    elif how == "a symlink":
+        real = tmp_path / "real"
+        real.mkdir()
+        drive.symlink_to(real, target_is_directory=True)
+    settings = replace(application.settings, roots=(tmp_path / "wallpapers", drive)).validated()
+    config.save(settings)
+    application._settings = settings
+    application._settings_requested = settings
+    application.session.update_settings(settings, rescan_library=False)
+    application.session.refresh(mutate_removals=False)
+    assert any(place.path == drive for place in application.session.library.unseen)
+    deep = _saved(profile, "Deep", [], used=True)
+    application.session.playlists.add(deep.id, drive / "deep.png")
+    config.update({"active_playlist": deep.id})
+
+    document = _published(application)
+
+    assert application.publication_problem == "", application.publication_problem
+    assert document["default_playlist"] == ALL_MEDIA
+    assert DEFAULT_HAS_NOTHING.format("Deep") in application.left_out_notice
 
 
 def test_a_rule_that_is_turned_off_leaves_no_standing_notice(

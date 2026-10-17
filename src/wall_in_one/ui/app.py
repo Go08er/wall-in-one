@@ -3838,6 +3838,7 @@ class Application(Adw.Application):
                         for candidate in library.items
                     ),
                     skipped=library.skipped,
+                    unseen=library.unseen,
                     still_inventory=library.still_inventory,
                     adopted_stills=library.adopted_stills,
                     chosen_stills=chosen,

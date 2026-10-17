@@ -39,6 +39,7 @@ import pytest
 from tests.test_runtime_config import _session
 from wall_in_one import config, runtime_config
 from wall_in_one.library import displays, pairings, playlists, schedules
+from wall_in_one.library.model import Unseen, UnseenKind
 from wall_in_one.runtime_config import (
     DEFAULT_OWNER,
     DISPLAY_OWNER,
@@ -424,9 +425,16 @@ def _deep(session: Session, tmp_path: Path) -> tuple[playlists.Playlist, Path]:
     return session.playlists.find(deep.id), folder
 
 
-def _scan_skipped(session: Session, *notes: str) -> None:
-    """As a scan that could not look into a folder left it (`Library.skipped`)."""
-    session._library = replace(session.library, skipped=notes)
+def _scan_skipped(session: Session, *places: tuple[Path, UnseenKind, str]) -> None:
+    """As a scan that did not look into some places left it (`Library.skipped`, `unseen`)."""
+    session._library = replace(
+        session.library,
+        skipped=tuple(f"{path}: {why}" for path, _kind, why in places),
+        unseen=tuple(Unseen(path, kind, f"{path}: {why}") for path, kind, why in places),
+    )
+
+
+DENIED = "Permission denied"
 
 
 @pytest.mark.parametrize("use", ("default", "rule", "display"))
@@ -446,7 +454,7 @@ def test_a_playlist_under_a_folder_the_scan_could_not_look_into_refuses_the_buil
         session.displays.assign("HDMI-A-1", deep.id)
     target = tmp_path / "runtime.toml"
     target.write_text('schema_version = 4\nlast_known_good = "kept"\n', encoding="utf-8")
-    _scan_skipped(session, f"{folder}: Permission denied")
+    _scan_skipped(session, (folder, UnseenKind.UNREADABLE, DENIED))
 
     with pytest.raises(runtime_config.RuntimeConfigError) as refused:
         runtime_config.publish_changes(settings, session, target)
@@ -463,20 +471,20 @@ def test_a_playlist_under_a_folder_the_scan_could_not_look_into_refuses_the_buil
 
 
 @pytest.mark.parametrize(
-    "note",
+    "name",
     (
-        "{root}/other: Permission denied",  # a folder that holds none of its entries
-        "{root}/sub/deeper: Permission denied",  # below the file, not above it
-        "{root}/subtle: Permission denied",  # a name that only starts the same
+        "other",  # a folder that holds none of its entries
+        "sub/deeper",  # below the file, not above it
+        "subtle",  # a name that only starts the same
     ),
 )
 def test_a_folder_that_holds_none_of_its_entries_does_not_stop_leaving_it_out(
-    tmp_path: Path, note: str
+    tmp_path: Path, name: str
 ) -> None:
     settings, session = _session(tmp_path)
     deep, _folder = _deep(session, tmp_path)
     settings = replace(settings, active_playlist=deep.id)
-    _scan_skipped(session, note.format(root=tmp_path / "library"))
+    _scan_skipped(session, (tmp_path / "library" / name, UnseenKind.UNREADABLE, DENIED))
     target = tmp_path / "runtime.toml"
 
     published = runtime_config.publish_changes(settings, session, target)
@@ -489,11 +497,86 @@ def test_a_whole_root_that_could_not_be_scanned_covers_what_is_under_it(tmp_path
     settings, session = _session(tmp_path)
     deep, _folder = _deep(session, tmp_path)
     settings = replace(settings, active_playlist=deep.id)
-    _scan_skipped(session, f"{tmp_path / 'library'}: stopped after 100000 entries")
+    _scan_skipped(session, (tmp_path / "library", UnseenKind.LIMIT, "stopped after 100000 entries"))
 
-    with pytest.raises(runtime_config.RuntimeConfigError, match="stopped after"):
+    with pytest.raises(runtime_config.RuntimeConfigError, match="stopped after") as refused:
         runtime_config.render(settings, session)
+    assert "make the library smaller" in str(refused.value)
+    assert "make the folder readable" not in str(refused.value)
     session.shutdown()
+
+
+@pytest.mark.parametrize("use", ("default", "rule", "display"))
+@pytest.mark.parametrize("how", ("absent", "a file", "a symlink"))
+def test_a_library_folder_that_is_not_there_is_left_out_not_refused(
+    tmp_path: Path, use: str, how: str
+) -> None:
+    """An unmounted drive (or a folder removed for good) holds the only entry: looked, nothing
+    usable. Failed before the ruling: the build refused, naming the root."""
+    settings, session = _session(tmp_path)
+    settings = _independent(settings)
+    root = tmp_path / "drive"
+    if how == "a file":
+        root.write_bytes(b"not a folder")
+    elif how == "a symlink":
+        real = tmp_path / "real"
+        real.mkdir()
+        root.symlink_to(real, target_is_directory=True)
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, root / "deep.png")
+    if use == "default":
+        settings = replace(settings, active_playlist=deep.id)
+    elif use == "rule":
+        session.schedules.add(deep.id, rule_id="deep-rule", start="08:00", end="09:00")
+    else:
+        session.displays.assign("HDMI-A-1", deep.id)
+    _scan_skipped(session, (root, UnseenKind.ROOT_NOT_USABLE, "not there"))
+    owner = {"default": DEFAULT_OWNER, "rule": SCHEDULE_OWNER, "display": DISPLAY_OWNER}[use]
+    owner_id = {"default": "", "rule": "deep-rule", "display": "HDMI-A-1"}[use]
+
+    published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
+
+    assert LeftOut(owner, owner_id, deep.id, "Deep", NOTHING_TO_PLAY) in published.left_out
+    session.shutdown()
+
+
+def test_a_real_scan_that_hit_a_limit_refuses_and_an_absent_root_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The structured record from a real scan decides, not the note text."""
+    from wall_in_one.library import scan
+
+    settings, session = _session(tmp_path)
+    library = tmp_path / "library"
+    (library / "a" / "b").mkdir(parents=True)
+    (library / "a" / "b" / "deep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    deep = session.playlists.create("Deep")
+    session.playlists.add(deep.id, library / "a" / "b" / "deep.png")
+    settings = replace(settings, active_playlist=deep.id)
+    monkeypatch.setattr(scan, "MAX_DEPTH", 1)
+    session._library = scan.scan([library])
+    assert session.library.find(library / "a" / "b" / "deep.png") is None
+
+    with pytest.raises(runtime_config.RuntimeConfigError, match="deeper than") as refused:
+        runtime_config.render(settings, session)
+    assert "make the library smaller" in str(refused.value)
+
+    session._library = scan.scan([tmp_path / "absent"])
+    published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
+    assert LeftOut(DEFAULT_OWNER, "", deep.id, "Deep", NOTHING_TO_PLAY) in published.left_out
+    session.shutdown()
+
+
+def test_a_sibling_whose_name_starts_the_same_is_not_an_ancestor(tmp_path: Path) -> None:
+    """``/lib/a`` does not cover ``/lib/ab/x.png``; ``/lib/ab`` does."""
+    entries = [playlists.Entry(id="e", source=str(tmp_path / "lib" / "ab" / "x.png"))]
+    sibling = Unseen(tmp_path / "lib" / "a", UnseenKind.UNREADABLE, "a: denied")
+    parent = Unseen(tmp_path / "lib" / "ab", UnseenKind.UNREADABLE, "ab: denied")
+    absent = Unseen(tmp_path / "lib", UnseenKind.ROOT_NOT_USABLE, "lib: not there")
+
+    assert runtime_config._unseen_folder(entries, (sibling,)) is None
+    assert runtime_config._unseen_folder(entries, (absent,)) is None
+    assert runtime_config._unseen_folder(entries, (sibling, parent)) == parent
 
 
 def test_an_unused_or_empty_playlist_is_left_out_whatever_the_scan_skipped(
@@ -504,7 +587,7 @@ def test_an_unused_or_empty_playlist_is_left_out_whatever_the_scan_skipped(
     _deep(session, tmp_path)
     empty = session.playlists.create("Draft")
     settings = replace(settings, active_playlist=empty.id)
-    _scan_skipped(session, f"{tmp_path / 'library' / 'sub'}: Permission denied")
+    _scan_skipped(session, (tmp_path / "library" / "sub", UnseenKind.UNREADABLE, DENIED))
 
     published = runtime_config.publish_changes(settings, session, tmp_path / "runtime.toml")
 
@@ -518,7 +601,7 @@ def test_a_rule_that_is_turned_off_is_not_left_out_and_never_refuses(tmp_path: P
     deep, folder = _deep(session, tmp_path)
     session.schedules.add("ghost", rule_id="off-ghost", start="08:00", end="09:00", enabled=False)
     session.schedules.add(deep.id, rule_id="off-deep", start="10:00", end="11:00", enabled=False)
-    _scan_skipped(session, f"{folder}: Permission denied")
+    _scan_skipped(session, (folder, UnseenKind.UNREADABLE, DENIED))
     target = tmp_path / "runtime.toml"
 
     published = runtime_config.publish_changes(settings, session, target)

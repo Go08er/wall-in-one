@@ -29,6 +29,7 @@ from wall_in_one import (
     file_io,
     legacy_migration,
     paths,
+    runtime_compatibility,
     runtime_config,
     runtime_health,
 )
@@ -3136,11 +3137,21 @@ class Application(Adw.Application):
             self.window_report(f"Runtime reload failed: {error}")
             return False
         if not response.ok:
-            self.window_report(f"Runtime rejected the new configuration: {response.message}")
+            self.window_report(self._rejected_configuration(response.message))
             return False
         with self._runtime_config_lock:
             self._runtime_loaded_generation = self._runtime_document_generation
         return True
+
+    def _rejected_configuration(self, message: str) -> str:
+        """What is said when the running service refused a new runtime.toml.
+
+        With a service older than this app (between an update and its
+        restart), also what ends it.
+        """
+        return f"Runtime rejected the new configuration: {message}" + (
+            runtime_compatibility.restart_hint(self.runtime_status)
+        )
 
     def _publish_runtime_async(self) -> bool:
         """Queue a durable authoring compilation without doing I/O on GTK.
@@ -4526,9 +4537,7 @@ class Application(Adw.Application):
                 elif publication.unavailable:
                     self._status_model.mark_unavailable(forget=False)
                 elif publication.response is not None and not publication.response.ok:
-                    problem = (
-                        f"Runtime rejected the new configuration: {publication.response.message}"
-                    )
+                    problem = self._rejected_configuration(publication.response.message)
                     self.window_report(problem)
                 elif publication.changed and self._window is not None:
                     self.refresh_runtime_status_async()
@@ -4671,9 +4680,7 @@ class Application(Adw.Application):
                 self.window_report(f"Runtime reload failed: {error}")
             else:
                 if not response.ok:
-                    self.window_report(
-                        f"Runtime rejected the new configuration: {response.message}"
-                    )
+                    self.window_report(self._rejected_configuration(response.message))
                 elif self._window is not None:
                     self.refresh_runtime_status_async()
         again = self._runtime_reload_again
@@ -5157,7 +5164,7 @@ class Application(Adw.Application):
         elif publication.unavailable:
             self._status_model.mark_unavailable(forget=False)
         elif publication.response is not None and not publication.response.ok:
-            problem = f"Runtime rejected the new configuration: {publication.response.message}"
+            problem = self._rejected_configuration(publication.response.message)
         # Said when it becomes the problem, not by every poll that meets it
         # again: it stands (`publication_problem`) until a publication gets
         # through, this lane's or the compile lane's, and is new after that.

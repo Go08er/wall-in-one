@@ -673,6 +673,30 @@ def test_one_status_snapshot_causes_one_pairings_store_write(
     assert reopened.health(pairings.Identity.of(second)).is_borked
 
 
+def test_a_reload_refused_by_an_older_service_says_to_restart_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Between an update and the service's restart: the old service refuses."""
+    item = _media(tmp_path)
+    _write_runtime_config()
+    snapshot = json.loads(_snapshot(item).message)
+    snapshot["runtime_version"] = "0.0.1"
+
+    def send(verb: str) -> Response:
+        if verb == "status":
+            return Response.success(json.dumps(snapshot))
+        return Response.failure("config is not valid TOML: missing field `niri_program`")
+
+    monkeypatch.setattr(client, "send_runtime", send)
+
+    assert cli.main(["--sync-runtime-health"]) == 1
+    error = capsys.readouterr().err
+    assert "reload was rejected: config is not valid TOML" in error
+    assert "Restart the wallpaper service to finish updating" in error
+
+
 def test_reload_rejection_reports_that_health_was_already_saved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

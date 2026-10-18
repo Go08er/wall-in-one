@@ -6,6 +6,7 @@ This is what the Noctalia plugin reaches: every plugin control is one
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -545,8 +546,23 @@ def dispatch(verb: str, argument: str | None) -> int:
         # the browse dialog toasts, so printing the message prints the kind
         # with it. `Response.kind` is there for a caller that wants to branch on
         # the reason rather than read it.
-        print(response.message, file=stream)
+        message = response.message
+        if not response.ok and request_verb == "reload":
+            message += _restart_hint()
+        print(message, file=stream)
     return 0 if response.ok else 1
+
+
+def _restart_hint() -> str:
+    """Why a reload was refused, when the running service is older than this app."""
+    from wall_in_one import runtime_compatibility
+
+    try:
+        response = send_runtime("status", timeout=TIMEOUT)
+        status = json.loads(response.message) if response.ok else None
+    except ControlError, ValueError, RecursionError:
+        return ""
+    return runtime_compatibility.restart_hint(status)
 
 
 def dispatch_on(connector: str, verb: str, argument: str | None) -> int:

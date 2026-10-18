@@ -572,12 +572,13 @@ def _prepare_service_start() -> int:
 
 def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
     """Persist one atomic Rust failure snapshot through the sole app writer."""
-    from wall_in_one import config, runtime_config, runtime_health
+    from wall_in_one import config, runtime_compatibility, runtime_config, runtime_health
     from wall_in_one.control import client
     from wall_in_one.library import pairings
     from wall_in_one.session import Session
 
     session: Session | None = None
+    status: dict[str, object] = {}
     omitted = 0
     changed = 0
     document_changed = False
@@ -731,7 +732,7 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
             if not reload_response.ok:
                 print(
                     f"error: {saved_subject} was saved but reload was rejected: "
-                    f"{reload_response.message}",
+                    f"{reload_response.message}{runtime_compatibility.restart_hint(status)}",
                     file=sys.stderr,
                 )
                 return 1

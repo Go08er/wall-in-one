@@ -22,7 +22,9 @@ and means the same. The schema numbers did not change: the version marks what
 a reader must understand, and every reader since 0.4.0 reads both shapes. A
 0.4 document is refused by a 0.3 service that has not been restarted yet (a
 missing field, like any document it cannot load), and that service keeps its
-last good configuration until it restarts; nothing is applied wrongly. A new
+last good configuration until it restarts; nothing is applied wrongly. Until
+then the window, `ctl reload` and the health sync say that the running
+service is older than the app and that restarting it finishes the update. A new
 schema number would instead have sent every save through the live-service
 check below, refusing all of them until the restart. See
 [display discovery](display-discovery.md#runtimetoml).

@@ -6,10 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one import config, paths, predecessor_process, runtime_compatibility, runtime_config
+from wall_in_one import (
+    __version__,
+    config,
+    paths,
+    predecessor_process,
+    runtime_compatibility,
+    runtime_config,
+)
 from wall_in_one.control import client
-from wall_in_one.control.protocol import Response
+from wall_in_one.control.protocol import Request, Response
 from wall_in_one.session import Session
+
+#: What a 0.3 service still running after the update says about a 0.4 document.
+OLD_SERVICE_REFUSAL = "config is not valid TOML: missing field `niri_program`"
 
 
 def _reply(monkeypatch: pytest.MonkeyPatch, status: object) -> None:
@@ -151,3 +161,64 @@ def test_low_level_default_settings_save_is_guarded(monkeypatch: pytest.MonkeyPa
     with pytest.raises(config.ConfigError, match="No changes were saved"):
         config.save(config.Settings(stop_animations_on_battery=True), paths.settings_path())
     assert target.read_bytes() == before
+
+
+# -- a document refused by the service still running from before the update ----
+
+
+@pytest.mark.parametrize(
+    ("running", "said"),
+    [
+        ("0.0.1", True),
+        (__version__, False),
+        ("99.0.0", False),
+        ("0.4.0-rc1", False),
+        (7, False),
+        (None, False),
+    ],
+)
+def test_a_refusal_says_to_restart_only_a_service_older_than_the_app(
+    running: object, said: bool
+) -> None:
+    status: dict[str, object] = {"status_version": 2}
+    if running is not None:
+        status["runtime_version"] = running
+
+    hint = runtime_compatibility.restart_hint(status)
+
+    assert ("Restart the wallpaper service to finish updating" in hint) is said
+    assert runtime_compatibility.restart_hint(None) == ""
+
+
+def test_ctl_reload_refused_by_an_older_service_says_to_restart_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked: list[str] = []
+
+    def send(request: Request, **_keywords: object) -> Response:
+        asked.append(request.verb)
+        if request.verb == "reload":
+            return Response.failure(OLD_SERVICE_REFUSAL)
+        return Response.success(json.dumps({"status_version": 2, "runtime_version": "0.0.1"}))
+
+    monkeypatch.setattr(client, "send", send)
+
+    assert client.dispatch("reload", None) == 1
+    error = capsys.readouterr().err
+    assert OLD_SERVICE_REFUSAL in error
+    assert "Restart the wallpaper service to finish updating" in error
+    assert asked == ["reload", "status"]
+
+
+def test_ctl_reload_refused_by_a_current_service_says_only_why(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def send(request: Request, **_keywords: object) -> Response:
+        if request.verb == "reload":
+            return Response.failure("invalid config: scene_fps must be between 1 and 240")
+        return Response.success(json.dumps({"status_version": 2, "runtime_version": __version__}))
+
+    monkeypatch.setattr(client, "send", send)
+
+    assert client.dispatch("reload", None) == 1
+    assert "Restart" not in capsys.readouterr().err

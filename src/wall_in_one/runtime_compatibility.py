@@ -10,9 +10,39 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 
-from wall_in_one import predecessor_process, update_status
+from wall_in_one import __version__, predecessor_process, update_status
 from wall_in_one.control import client
+
+
+def _release(version: str) -> tuple[int, ...] | None:
+    parts = version.split(".")
+    if not 1 <= len(parts) <= 4 or not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def restart_hint(status: object) -> str:
+    """What to add when the service refused a new document, if it is out of date.
+
+    Between an update and the service's restart, the service still running is
+    the older build, and a document the new app wrote may be one it cannot
+    load (0.4 dropped `niri_program`, which 0.3.x requires). It refuses and
+    keeps its last good configuration; this says why, and what ends it. Empty
+    unless ``status`` (the running service's) names a release older than this
+    app's.
+    """
+    running = status.get("runtime_version") if isinstance(status, Mapping) else None
+    if not isinstance(running, str):
+        return ""
+    old, new = _release(running), _release(__version__)
+    if old is None or new is None or old >= new:
+        return ""
+    return (
+        f" Restart the wallpaper service to finish updating: the one running is {running}, "
+        f"older than this app ({__version__})."
+    )
 
 
 class RuntimeCompatibilityError(Exception):

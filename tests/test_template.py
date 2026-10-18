@@ -1876,7 +1876,12 @@ def test_a_moved_back_locator_is_retired_intact(
 
     said = str(raised.value)
     retained = settings_path.parent / file_io.RETAINED_ENTRY_DIRECTORY
-    holding = [entry for entry in retained.iterdir() if entry.stat().st_size > 0]
+    # Regular files only: a directory reports a nonzero size on ext4 and tmpfs (4096), 0 on btrfs.
+    holding = [
+        entry
+        for entry in retained.iterdir()
+        if stat.S_ISREG(os.lstat(entry).st_mode) and os.lstat(entry).st_size > 0
+    ]
     assert edited and not locator.exists() and not staged[0].exists()
     # Failed on a4fa2f0: discarded by its descriptor's current metadata, edit and all.
     assert [entry.read_text(encoding="utf-8") for entry in holding] == edited

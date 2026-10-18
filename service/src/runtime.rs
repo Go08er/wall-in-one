@@ -102,6 +102,9 @@ pub struct Status<'a> {
     pub overrides_ignored: Option<&'a str>,
     pub runtime_version: &'static str,
     pub runtime_executable: Option<&'a str>,
+    /// What kind of install this service is: `nix`, `system` or `source`
+    /// (`crate::INSTALL_KIND`). Added in 0.4.0; a client must not require it.
+    pub install_kind: &'static str,
     pub power_source: &'static str,
     pub power_available: bool,
     pub stop_animations_on_battery: bool,
@@ -4960,6 +4963,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             overrides_ignored: self.config.overrides_ignored.as_deref(),
             runtime_version: env!("CARGO_PKG_VERSION"),
             runtime_executable: self.runtime_executable.as_deref(),
+            install_kind: crate::INSTALL_KIND,
             power_source: self.power.observation.source.name(),
             power_available: self.power.observation.source != PowerSource::Unknown,
             stop_animations_on_battery: self.battery_policy_enabled(),
@@ -5330,6 +5334,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             overrides_ignored: self.config.overrides_ignored.as_deref(),
             runtime_version: env!("CARGO_PKG_VERSION"),
             runtime_executable: self.runtime_executable.as_deref(),
+            install_kind: crate::INSTALL_KIND,
             power_source: self.power.observation.source.name(),
             power_available: self.power.observation.source != PowerSource::Unknown,
             stop_animations_on_battery: self.battery_policy_enabled(),

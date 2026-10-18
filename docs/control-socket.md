@@ -106,6 +106,17 @@ compositor that does not answer, or none of its outputs enabled). Runtime verbs
 shown above without an operand are strictly zero-argument; ignored trailing
 text is rejected, including for `quit`.
 
+## Install kind
+
+From 0.4.0, `status` also carries a top-level `install_kind`: `nix` for this
+flake's packages, `system` for a distribution package built from source (the
+Arch package), and `source` for anything else. It is fixed when the service is
+compiled, and is the service's own kind, not the app's; `wall-in-one
+--version` and `wall-in-one-service --version` print the same value on their
+second line. A 0.3 service has no `install_kind`, so a client treats its
+absence as "unknown" rather than an error. See
+[packaging](packaging.md#install-kind).
+
 ## Outputs
 
 From 0.4.0, `status` also carries `outputs`: the compositor's last successful

@@ -2207,6 +2207,7 @@ fn independent_apply_stages_stills_theme_palette_then_renderers() {
         serde_json::json!([4, 5])
     );
     assert_eq!(snapshot["runtime_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(snapshot["install_kind"], wall_in_one_service::INSTALL_KIND);
     assert_eq!(
         snapshot["runtime_executable"],
         std::env::current_exe().unwrap().to_str().unwrap()
@@ -8019,6 +8020,11 @@ const ADDED_DISPLAY_KEYS: &[&str] = &[
 /// are still compared byte for byte.
 const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs"];
 
+/// Top-level string keys added after the shape fixture was recorded: the
+/// build's install kind (0.4.0), which also differs between a `cargo test`
+/// (`source`) and the packaged build (`nix`).
+const ADDED_TOP_LEVEL_STRINGS: &[&str] = &["install_kind"];
+
 /// `"key":"value"` with the value replaced, for fields that differ per process
 /// or per build. A missing key is left alone; a `null` value is kept.
 fn mask_string_value(text: &str, key: &str) -> String {
@@ -8031,11 +8037,12 @@ fn mask_string_value(text: &str, key: &str) -> String {
     format!("{}<masked>{}", &text[..value_start], &text[value_end..])
 }
 
-/// Remove `,"key":value` for every key in `ADDED_DISPLAY_KEYS`. The added
-/// values are `null`, integers or strings without commas, quotes or braces.
+/// Remove `,"key":value` for every key in `ADDED_DISPLAY_KEYS` and
+/// `ADDED_TOP_LEVEL_STRINGS`. The added values are `null`, integers or
+/// strings without commas, quotes or braces.
 fn without_added_keys(text: &str) -> String {
     let mut text = text.to_string();
-    for key in ADDED_DISPLAY_KEYS {
+    for key in ADDED_DISPLAY_KEYS.iter().chain(ADDED_TOP_LEVEL_STRINGS) {
         let marker = format!(",\"{key}\":");
         while let Some(start) = text.find(&marker) {
             let value_start = start + marker.len();
@@ -8142,6 +8149,35 @@ fn status_shape_samples() -> Vec<(&'static str, String)> {
         ("independent-paused", independent_paused),
         ("independent-manual", independent_manual),
     ]
+}
+
+#[test]
+fn status_and_version_say_the_install_kind_this_build_was_compiled_as() {
+    let at = noon();
+    let kind = wall_in_one_service::INSTALL_KIND;
+    assert!(wall_in_one_service::is_install_kind(kind), "{kind}");
+    for (label, text) in status_shape_samples() {
+        let snapshot: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(snapshot["install_kind"], kind, "{label}");
+        assert_eq!(
+            text.matches("\"install_kind\":").count(),
+            1,
+            "{label}: top level only"
+        );
+    }
+    let (mut independent, _) = started_runtime(loaded(&independent_with_evening(""), &[]), at);
+    assert_eq!(status(&mut independent, at)["install_kind"], kind);
+
+    let version = service_command().arg("--version").output().unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap(),
+        format!(
+            "wall-in-one-service {}\ninstall kind: {kind}\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "the first line is the one 0.3 printed"
+    );
 }
 
 #[test]

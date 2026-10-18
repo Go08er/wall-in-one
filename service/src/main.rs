@@ -139,6 +139,8 @@ fn parse() -> Result<Options, String> {
             Some("--check-config") => options.check_config = true,
             Some("--version") => {
                 println!("wall-in-one-service {}", env!("CARGO_PKG_VERSION"));
+                // A second line, so the first stays what it always was.
+                println!("install kind: {}", wall_in_one_service::INSTALL_KIND);
                 std::process::exit(0);
             }
             Some("--help") => {

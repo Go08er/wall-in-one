@@ -870,8 +870,12 @@ impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for State {
             }
             zwlr_output_manager_v1::Event::Done { .. } => state.heads_complete = true,
             zwlr_output_manager_v1::Event::Finished => {
+                // The compositor is done with this manager: its heads and
+                // their modes go with it, released rather than abandoned.
+                for head in state.heads.drain(..) {
+                    head.release();
+                }
                 state.wlr_manager = None;
-                state.heads.clear();
                 state.heads_complete = false;
             }
             _ => {}

@@ -377,3 +377,32 @@ fn every_question_to_a_compositor_that_stopped_accepting_ends_at_its_deadline() 
     }
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
+
+#[test]
+fn a_finished_manager_lets_its_heads_go() {
+    let path = socket("finished");
+    let compositor = FakeCompositor::start(
+        &path,
+        Layout {
+            heads: Some(vec![
+                FakeHead::new("eDP-1", true),
+                FakeHead::new("HDMI-A-1", false),
+            ]),
+            ..Layout::of(vec![laptop()])
+        },
+    );
+    let mut source = WaylandOutputs::at(path.clone());
+    assert_eq!(
+        names(&source.outputs().unwrap()),
+        [("HDMI-A-1", false), ("eDP-1", true)]
+    );
+
+    // The compositor withdraws wlr-output-management: the manager finishes,
+    // its heads without events of their own.
+    compositor.set_layout(Layout::of(vec![laptop()]));
+    assert_eq!(names(&source.outputs().unwrap()), [("eDP-1", true)]);
+    // The releases go out with the next question's requests.
+    source.outputs().unwrap();
+    assert_eq!(compositor.released_heads(), 2, "both heads released");
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

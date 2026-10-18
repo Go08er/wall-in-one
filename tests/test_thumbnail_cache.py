@@ -501,7 +501,11 @@ def test_a_cache_directory_that_is_a_link_is_refused_and_nothing_is_deleted(
 def test_eviction_leaves_a_file_rewritten_in_place_after_the_scan(
     cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same inode, new contents: a reused inode number on any filesystem (ext4 does it)."""
+    """The same inode, new contents: a reused inode number on any filesystem (ext4 does it).
+
+    The rewrite is shorter than the scanned 1 KiB entry, so the size alone tells
+    them apart, also where timestamps are coarse.
+    """
     scanned = _entry(cache, 0)
     real_scan = thumbnails._scan
     rewritten = _png(b"\x02\x02\x02")

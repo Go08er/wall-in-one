@@ -656,10 +656,14 @@ def _discard(descriptor: int, entry: _Entry) -> bool:
     """Unlink one entry inside the pinned directory, if it is still the scanned file.
 
     "Still the scanned file" means the whole fingerprint matches (device, inode,
-    size, modification and change time), not the inode alone: a file created
-    afterwards has a new change time even when its inode was reused. A different
-    file now at that name (a fresh thumbnail, or anything else) is left alone.
-    A second instance having removed it already counts as done.
+    size, modification and change time), not the inode alone: a file written
+    there afterwards differs in size or, on a filesystem with sub-second
+    timestamps, in its times, even when its inode was reused. A different file
+    now at that name (a fresh thumbnail, or anything else) is left alone. A
+    second instance having removed it already counts as done.
+
+    The check and the unlink are two calls: a file that lands at the name
+    between them is removed, which costs one regeneration.
     """
     try:
         current = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)

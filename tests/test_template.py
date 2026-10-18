@@ -1876,7 +1876,8 @@ def test_a_moved_back_locator_is_retired_intact(
 
     said = str(raised.value)
     retained = settings_path.parent / file_io.RETAINED_ENTRY_DIRECTORY
-    # Regular files only: a directory reports a nonzero size on ext4 and tmpfs (4096), 0 on btrfs.
+    # Regular files only: a directory reports a nonzero size on ext4 (4096) and tmpfs (40
+    # and up), and 0 on btrfs when empty.
     holding = [
         entry
         for entry in retained.iterdir()

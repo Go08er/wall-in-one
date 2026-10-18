@@ -358,6 +358,14 @@ def store_preview(url: str, data: bytes) -> None:
         if temporary is not None:
             with contextlib.suppress(OSError):
                 temporary.unlink()
+        return
+    # Same reasoning as `generate`: a window that keeps browsing the Store
+    # writes previews with no thumbnail generation to bound them. The fresh
+    # entry is inside the eviction grace, so it is never what this removes.
+    # Maintenance is best effort and must not turn a cached preview into an
+    # error for the caller.
+    with contextlib.suppress(Exception):
+        prune()
 
 
 def _command(item: MediaItem, destination: Path) -> list[str]:

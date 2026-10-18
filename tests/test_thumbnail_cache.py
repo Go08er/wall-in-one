@@ -543,3 +543,62 @@ def test_eviction_leaves_a_file_that_replaced_a_scanned_entry(
 
     assert thumbnails.clear() == 0
     assert scanned.exists()
+
+
+# --- Remote previews and the cache budget ------------------------------------
+
+_PREVIEW_BUDGET = 100
+_OLD_URL = "https://example.invalid/old.jpg"
+_NEW_URL = "https://example.invalid/new.jpg"
+
+
+def _small_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scale the real maintenance down to 100 bytes, keeping its eligibility rules."""
+    real_prune = thumbnails.prune
+    monkeypatch.setattr(thumbnails, "prune", lambda: real_prune(max_bytes=_PREVIEW_BUDGET))
+
+
+def _store_old_preview(age: float) -> Path:
+    thumbnails.store_preview(_OLD_URL, _jpeg(b"x" * 64))
+    old = thumbnails.preview_path(_OLD_URL)
+    moment = time.time() - age
+    os.utime(old, (moment, moment))
+    return old
+
+
+def test_a_preview_write_prunes_an_aged_entry_over_budget(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _small_budget(monkeypatch)
+    old = _store_old_preview(2 * thumbnails.EVICTION_GRACE_SECONDS)
+
+    thumbnails.store_preview(_NEW_URL, _jpeg(b"x" * 64))
+
+    assert not old.exists()
+    assert thumbnails.lookup_preview(_NEW_URL) == _jpeg(b"x" * 64)
+    assert thumbnails.usage().total_bytes <= _PREVIEW_BUDGET
+
+
+def test_a_preview_write_keeps_a_recent_entry_even_over_budget(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _small_budget(monkeypatch)
+    recent = _store_old_preview(0.0)
+
+    thumbnails.store_preview(_NEW_URL, _jpeg(b"x" * 64))
+
+    assert recent.exists()
+    assert thumbnails.lookup_preview(_NEW_URL) != b""
+
+
+def test_a_pruning_failure_does_not_fail_the_preview(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken() -> int:
+        raise OSError("scan failed")
+
+    monkeypatch.setattr(thumbnails, "prune", broken)
+
+    thumbnails.store_preview(_NEW_URL, _jpeg(b"x" * 64))
+
+    assert thumbnails.lookup_preview(_NEW_URL) == _jpeg(b"x" * 64)

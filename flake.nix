@@ -682,6 +682,121 @@
                 touch $out
               '';
 
+          # Both modules, evaluated (no VM): with the renderers left to the
+          # module they install both, from the configuration's own pkgs (an
+          # overlay's renderer is the one installed, not this flake's), and
+          # the app; with manualWallpaperInstalls they install the app only.
+          # The home-manager module is evaluated against a stand-in for the
+          # one home-manager option it sets: home-manager is not an input of
+          # this flake. A mismatch fails at evaluation, so `nix flake check
+          # --no-build` catches it too.
+          modules =
+            let
+              inherit (pkgs) lib;
+              renderers = [
+                "linux-wallpaperengine"
+                "mpvpaper"
+              ];
+              # A pkgs whose renderers are this check's own.
+              overlaid = pkgs.extend (
+                _final: prev:
+                lib.genAttrs renderers (name: prev.writeShellScriptBin name "# the configuration's own")
+              );
+              nixos =
+                modulePkgs: settings:
+                (nixpkgs.lib.nixosSystem {
+                  modules = [
+                    self.nixosModules.default
+                    {
+                      nixpkgs.pkgs = modulePkgs;
+                      system.stateVersion = "26.05";
+                      programs.wall-in-one = { enable = true; } // settings;
+                    }
+                  ];
+                }).config.environment.systemPackages;
+              home =
+                modulePkgs: settings:
+                (lib.evalModules {
+                  modules = [
+                    self.homeManagerModules.default
+                    {
+                      options.home.packages = lib.mkOption {
+                        type = lib.types.listOf lib.types.package;
+                        default = [ ];
+                      };
+                    }
+                    {
+                      _module.args.pkgs = modulePkgs;
+                      programs.wall-in-one = { enable = true; } // settings;
+                    }
+                  ];
+                }).config.home.packages;
+              # What a package list installs: the app (this flake's), and each
+              # renderer, said with where it came from.
+              installed =
+                modulePkgs: packages:
+                let
+                  named = name: lib.filter (package: lib.getName package == name) packages;
+                  origin =
+                    name: package:
+                    if package.outPath == modulePkgs.${name}.outPath then
+                      name
+                    else if package.outPath == pkgs.${name}.outPath then
+                      "${name} from this flake's nixpkgs"
+                    else
+                      "${name} from elsewhere";
+                in
+                {
+                  app = map (package: package.outPath == wall-in-one.outPath) (named "wall-in-one");
+                  renderers = lib.sort lib.lessThan (
+                    lib.concatMap (name: map (origin name) (named name)) renderers
+                  );
+                };
+              withRenderers = {
+                app = [ true ];
+                inherit renderers;
+              };
+              without = {
+                app = [ true ];
+                renderers = [ ];
+              };
+              manual.manualWallpaperInstalls = true;
+              cases = {
+                "NixOS, by default" = [ (installed pkgs (nixos pkgs { })) withRenderers ];
+                "NixOS, with an overlay" = [ (installed overlaid (nixos overlaid { })) withRenderers ];
+                "NixOS, manualWallpaperInstalls" = [ (installed pkgs (nixos pkgs manual)) without ];
+                "home-manager, by default" = [ (installed pkgs (home pkgs { })) withRenderers ];
+                "home-manager, with an overlay" = [ (installed overlaid (home overlaid { })) withRenderers ];
+                "home-manager, manualWallpaperInstalls" = [ (installed pkgs (home pkgs manual)) without ];
+                "home-manager, a renderer of one's own" = [
+                  (installed overlaid (
+                    home pkgs {
+                      mpvpaperPackage = overlaid.mpvpaper;
+                      linuxWallpaperenginePackage = overlaid.linux-wallpaperengine;
+                    }
+                  ))
+                  withRenderers
+                ];
+              };
+              failures = lib.concatLists (
+                lib.mapAttrsToList (
+                  name: case:
+                  lib.optional (lib.head case != lib.last case) (
+                    "${name}: installs ${builtins.toJSON (lib.head case)}, "
+                    + "expected ${builtins.toJSON (lib.last case)}"
+                  )
+                ) cases
+              );
+            in
+            if failures != [ ] then
+              throw ("programs.wall-in-one:\n" + lib.concatStringsSep "\n" failures)
+            else
+              pkgs.runCommand "wall-in-one-modules" {
+                # The cases, for the record.
+                passAsFile = [ "cases" ];
+                cases = builtins.toJSON (lib.mapAttrs (_name: lib.head) cases);
+              } "cp $casesPath $out";
+
           ruff =
             pkgs.runCommand "wall-in-one-ruff" { nativeBuildInputs = [ pkgs.ruff ]; }
               ''
@@ -776,6 +891,27 @@
         };
       }
     ))
+    // (
+      let
+        # programs.wall-in-one (nix/module.nix), with this flake's package as
+        # the default. Its renderers come from the importing configuration's
+        # own pkgs.
+        wallInOneModule =
+          target:
+          { lib, pkgs, ... }:
+          {
+            imports = [ (import ./nix/module.nix { inherit target; }) ];
+            programs.wall-in-one.package =
+              lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.wall-in-one;
+          };
+      in
+      {
+        nixosModules.default = wallInOneModule "nixos";
+        homeManagerModules.default = wallInOneModule "home-manager";
+        # The same module under home-manager's newer name for this output.
+        homeModules.default = self.homeManagerModules.default;
+      }
+    )
     // {
       nixosConfigurations.wall-in-one-vm = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";

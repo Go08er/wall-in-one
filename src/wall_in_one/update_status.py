@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from wall_in_one import __version__, paths
+from wall_in_one import __version__, install_kind, paths
 from wall_in_one.control import client
 
 BUS_NAME = "org.freedesktop.systemd1"
@@ -388,6 +388,7 @@ def report() -> dict[str, object]:
         "report_version": 1,
         "installed": {
             "version": __version__,
+            "install_kind": install_kind.INSTALL_KIND,
             "python_source": str(Path(__file__).resolve().parent),
             "package_root": str(root) if root is not None else None,
         },

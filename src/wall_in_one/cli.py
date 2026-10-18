@@ -30,7 +30,7 @@ from collections.abc import Callable, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from wall_in_one import __version__, paths, ui_prefs
+from wall_in_one import __version__, install_kind, paths, ui_prefs
 from wall_in_one.ui.window_services import UI_KINDS
 
 if TYPE_CHECKING:
@@ -104,12 +104,49 @@ CTL_VERBS: Final[tuple[str, ...]] = (
 )
 
 
+def version_text() -> str:
+    """What ``--version`` prints: the release, then the install kind on a second line.
+
+    The first line is what every earlier release printed, so anything matching
+    it still does; the second says which kind of build this is
+    (docs/packaging.md), as ``wall-in-one-service --version`` does for its half.
+    """
+    return f"{paths.APP_ID} {__version__}\ninstall kind: {install_kind.INSTALL_KIND}"
+
+
+class _VersionAction(argparse.Action):
+    """``--version``, printed as it is.
+
+    argparse's own version action refills the text as a paragraph, which
+    would put the install kind on the first line.
+    """
+
+    def __init__(self, option_strings: Sequence[str], dest: str, **kwargs: object) -> None:
+        super().__init__(
+            option_strings,
+            dest,
+            nargs=0,
+            default=argparse.SUPPRESS,
+            help="show the version and install kind, then exit",
+        )
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[object] | None,
+        option_string: str | None = None,
+    ) -> None:
+        print(version_text())
+        parser.exit()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=paths.APP_ID,
         description="A wallpaper manager for Wayland.",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--version", action=_VersionAction)
     parser.add_argument(
         "--service",
         action="store_true",

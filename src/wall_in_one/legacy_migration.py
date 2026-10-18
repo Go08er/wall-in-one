@@ -63,9 +63,10 @@ MARKER_FILENAME: Final = "legacy-migration-v1.json"
 REPORT_FILENAME: Final = "legacy-migration-v1.md"
 JOURNAL_FILENAME: Final = ".legacy-migration-v1.journal.json"
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
+MAX_REPORT_BYTES: Final = 4 * 1024 * 1024
 #: What a journal may hold: its own fields, and the report's notes twice over
 #: (the record keeps them, as escaped JSON). The marker keeps `MAX_JOURNAL_BYTES`.
-MAX_JOURNAL_FILE_BYTES: Final = MAX_JOURNAL_BYTES + 2 * 4 * 1024 * 1024
+MAX_JOURNAL_FILE_BYTES: Final = MAX_JOURNAL_BYTES + 2 * MAX_REPORT_BYTES
 #: The two journal fields an import begun by 0.3.0 or later adds, always
 #: together: the names of the playlists it found with nothing to play, and the
 #: notes its report holds. Both come from reading the library and the wallpaper
@@ -74,7 +75,6 @@ MAX_JOURNAL_FILE_BYTES: Final = MAX_JOURNAL_BYTES + 2 * 4 * 1024 * 1024
 JOURNAL_NOTHING_TO_PLAY: Final = "nothing_to_play"
 JOURNAL_NOTES: Final = "report_notes"
 _PLAYABILITY_FIELDS: Final = frozenset({JOURNAL_NOTHING_TO_PLAY, JOURNAL_NOTES})
-MAX_REPORT_BYTES: Final = 4 * 1024 * 1024
 MAX_RECORDED_PATH_BYTES: Final = 4096
 MAX_RECORDED_SCHEMA_ABS: Final = 2_147_483_647
 MAX_LEGACY_OUTPUTS: Final = 64

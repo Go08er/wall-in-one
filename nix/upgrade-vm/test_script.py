@@ -343,9 +343,19 @@ def document(nodes: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
+#: Written by 0.3.x and earlier, when the service asked niri for displays. The
+#: service accepts and ignores it, so a document with it means the same as one
+#: without, and the first 0.4 start recompiles it away.
+RETIRED_RENDERER_KEYS = ("niri_program",)
+
+
 def runtime_meaning(data: bytes) -> dict[str, Any]:
     value = tomllib.loads(data.decode())
     value.pop("config_generation", None)
+    renderer = value.get("renderer")
+    if isinstance(renderer, dict):
+        for key in RETIRED_RENDERER_KEYS:
+            renderer.pop(key, None)
     return value
 
 

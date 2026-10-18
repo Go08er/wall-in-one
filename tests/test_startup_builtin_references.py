@@ -18,7 +18,7 @@ import pytest
 
 from wall_in_one import config, runtime_config
 from wall_in_one.library import displays, playlists, schedules
-from wall_in_one.ui.app import Application
+from wall_in_one.ui.app import Application, _playlist_namer
 
 pytestmark = pytest.mark.gui
 
@@ -47,6 +47,11 @@ def test_the_compilers_spellings_are_the_ones_recognised() -> None:
     assert not runtime_config.is_fallback_reference("quick-choice")
 
 
+def _stored(reference: str) -> str:
+    """What the repair leaves: the id, whichever spelling was saved (the window keys by id)."""
+    return runtime_config.FALLBACK_PLAYLIST_ID
+
+
 @pytest.mark.parametrize("reference", BUILT_IN)
 def test_a_schedule_rule_naming_the_built_in_survives(reference: str) -> None:
     playlists.Store.open().create("Evening")
@@ -55,7 +60,7 @@ def test_a_schedule_rule_naming_the_built_in_survives(reference: str) -> None:
     result = Application._repair_dangling_playlist_references()
 
     assert result.failures == ()
-    assert _rules() == [reference]
+    assert _rules() == [_stored(reference)]
 
 
 @pytest.mark.parametrize("reference", BUILT_IN)
@@ -71,7 +76,7 @@ def test_a_display_assignment_naming_the_built_in_survives_with_its_priority(
 
     assert result.failures == ()
     kept = displays.Store.open()
-    assert _assigned() == [reference]
+    assert _assigned() == [_stored(reference)]
     assert kept.beats_global_rules("DP-1")
 
 
@@ -83,7 +88,48 @@ def test_a_saved_default_naming_the_built_in_survives(reference: str) -> None:
     result = Application._repair_dangling_playlist_references()
 
     assert result.failures == ()
-    assert config.load_strict().active_playlist == reference
+    assert config.load_strict().active_playlist == _stored(reference)
+
+
+def test_a_default_set_to_the_built_in_during_the_repair_is_not_a_change_to_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another program saves ``all-media`` just as the repair clears a gone default."""
+    playlists.Store.open().create("Evening")
+    config.save(config.Settings(active_playlist="gone"))
+
+    def raced(*_args: object, **_kwargs: object) -> None:
+        config.save(config.Settings(active_playlist="all-media"))
+
+    monkeypatch.setattr(config, "forget_playlist_default", raced)
+
+    result = Application._repair_dangling_playlist_references()
+
+    assert result.failures == ()
+    assert config.load_strict().active_playlist == "all-media"
+
+
+def test_deleting_or_renaming_a_playlist_never_claims_the_built_in_references() -> None:
+    """A hand-edited authored playlist named "All media" loses to the generated one."""
+    mine = playlists.Store.open().create("Evening")
+    document = json.loads(playlists.state_path().read_text(encoding="utf-8"))
+    (record,) = (
+        item
+        for value in document.values()
+        if isinstance(value, list)
+        for item in value
+        if isinstance(item, dict) and item.get("id") == mine.id
+    )
+    record["name"] = "All media"
+    playlists.state_path().write_text(json.dumps(document), encoding="utf-8")
+    listing = playlists.Store.open()
+    assert listing.get(mine.id) is not None, "the hand-edited file was read"
+
+    names = _playlist_namer(listing, mine.id)
+
+    assert names(mine.id)
+    assert not names("All media")
+    assert not names("all-media")
 
 
 def test_a_reference_to_the_built_in_survives_with_no_authored_playlist() -> None:
@@ -93,7 +139,7 @@ def test_a_reference_to_the_built_in_survives_with_no_authored_playlist() -> Non
     assert Application._repair_dangling_playlist_references().failures == ()
 
     assert _rules() == ["all-media"]
-    assert _assigned() == ["All media"]
+    assert _assigned() == ["all-media"]
 
 
 # -- controls: what the repair still does --------------------------------------------------------

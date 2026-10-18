@@ -1949,10 +1949,7 @@ class Session:
         for rule in self._schedules.rules:
             if at is not None and not rule.matches(at):
                 continue
-            if rule.playlist in (
-                runtime_config.FALLBACK_PLAYLIST_ID,
-                runtime_config.FALLBACK_PLAYLIST_NAME,
-            ):
+            if runtime_config.is_fallback_reference(rule.playlist):
                 kept.append(rule)
                 continue
             authored = runtime_config.find_playlist(rule.playlist, self)

@@ -201,7 +201,9 @@ def _playlist_namer(listing: playlists.Store, playlist_id: str) -> Callable[[str
     """
 
     def names(reference: str) -> bool:
-        if not reference:
+        if not reference or runtime_config.is_fallback_reference(reference):
+            # The compiler resolves the generated playlist first, so a
+            # hand-edited authored playlist of that name never owns the reference.
             return False
         found = listing.get(reference)
         if found is None:
@@ -946,8 +948,8 @@ class Application(Adw.Application):
         A reference is to a playlist's id, but an older profile's default,
         rule or display assignment may name its playlist by name, which the
         compiler resolves too (by id, then by name, ignoring case). The
-        generated All media playlist is never authored but is always valid,
-        by its id or its exact name, so a reference to it is left alone. Such a
+        generated All media playlist is never authored but is always valid; its
+        id is left alone and its exact name is pointed at that id. Such a
         reference is not dangling: it is pointed at the playlist's id, in the
         existing key or record, so it keeps working and a later rename can't
         leave it naming nothing. Only a reference that resolves to no
@@ -976,7 +978,13 @@ class Application(Adw.Application):
         retargeted_displays: list[tuple[str, str]] = []
 
         def named(reference: str) -> str | None:
-            """The id of the playlist ``reference`` names by name, as the compiler finds it."""
+            """The id of the playlist ``reference`` names by name, as the compiler finds it.
+
+            The generated playlist's name is pointed at its id like an authored
+            name, so the window, which keys playlists by id, finds it.
+            """
+            if reference == runtime_config.FALLBACK_PLAYLIST_NAME:
+                return runtime_config.FALLBACK_PLAYLIST_ID
             found = playlist_store.by_name(reference)
             return found.id if found is not None else None
 
@@ -989,7 +997,7 @@ class Application(Adw.Application):
             dangling = sorted(
                 reference
                 for reference in {rule.playlist for rule in schedule_store.rules} - valid
-                if not runtime_config.is_fallback_reference(reference)
+                if reference != runtime_config.FALLBACK_PLAYLIST_ID
             )
             for playlist_id in dangling:
                 target = named(playlist_id)
@@ -1014,7 +1022,7 @@ class Application(Adw.Application):
             dangling = sorted(
                 reference
                 for reference in {playlist for _connector, playlist in display_store.all()} - valid
-                if not runtime_config.is_fallback_reference(reference)
+                if reference != runtime_config.FALLBACK_PLAYLIST_ID
             )
             for playlist_id in dangling:
                 target = named(playlist_id)
@@ -1034,7 +1042,7 @@ class Application(Adw.Application):
         try:
             loaded = config.load_strict_document()
             active = loaded.settings.active_playlist
-            if active and active not in valid and not runtime_config.is_fallback_reference(active):
+            if active and active not in valid and active != runtime_config.FALLBACK_PLAYLIST_ID:
                 target = named(active)
                 try:
                     saved_settings = _settings_published(
@@ -1063,6 +1071,9 @@ class Application(Adw.Application):
                         if (
                             durable_settings.active_playlist
                             and durable_settings.active_playlist not in valid
+                            and not runtime_config.is_fallback_reference(
+                                durable_settings.active_playlist
+                            )
                         ):
                             failures.append(
                                 "saved default changed while dangling playlist repair was running"

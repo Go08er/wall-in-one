@@ -80,7 +80,9 @@ fn names(found: &[Output]) -> Vec<(&str, bool)> {
 
 #[test]
 fn a_flood_of_modes_is_bounded_and_the_outputs_still_come_through() {
-    let _one = ONE_AT_A_TIME.lock().unwrap();
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let with_heads = |extra_modes: usize| Layout {
         heads: Some(vec![
             FakeHead {
@@ -107,7 +109,9 @@ fn a_flood_of_modes_is_bounded_and_the_outputs_still_come_through() {
 
 #[test]
 fn a_flood_of_heads_from_a_manager_without_release_is_bounded() {
-    let _one = ONE_AT_A_TIME.lock().unwrap();
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Version 2 has no `release`: past the ceiling, the heads cannot be let
     // go one by one, only with the connection.
     let with_heads = |count: usize| Layout {

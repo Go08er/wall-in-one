@@ -368,6 +368,11 @@ def runtime_meaning(data: bytes) -> dict[str, Any]:
     return value
 
 
+def programs(data: bytes) -> dict[str, Any]:
+    renderer = tomllib.loads(data.decode())["renderer"]
+    return {key: renderer.get(key) for key in PROGRAM_KEYS}
+
+
 def same_program(change: Any) -> None:
     """A recompile by another release may change the generation, not the meaning.
 
@@ -485,6 +490,21 @@ with subtest("b: v0.3.0 installed; the mixed window, then its first start and id
     expect(
         "b: the first start writes only the whitelist",
         lambda: harness.check_changes(first_writes, first_start()),
+    )
+    # 0.1.4 named store paths (its own bundled renderers, the probe on PATH);
+    # this build names what the module and the probe put in the system
+    # profile, which survives the next switch and collection.
+    expect(
+        "b: runtime.toml names the system profile's programs",
+        lambda: require(
+            programs(content(b_first, "runtime.toml"))
+            == {
+                "noctalia_program": "/run/current-system/sw/bin/noctalia",
+                "mpvpaper_program": "/run/current-system/sw/bin/mpvpaper",
+                "linux_wallpaperengine_program": "/run/current-system/sw/bin/linux-wallpaperengine",
+            },
+            f"runtime.toml names {programs(content(b_first, 'runtime.toml'))}",
+        ),
     )
     # Directly, not only through the allowance's callback, which runs only if
     # runtime.toml happened to be rewritten.

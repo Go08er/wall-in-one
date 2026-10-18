@@ -204,6 +204,17 @@ let
   '';
 in
 {
+  # The app and its wallpaper renderers, installed the way a NixOS user does:
+  # the module puts all three in environment.systemPackages (the renderers
+  # from this machine's own pkgs), so the compiler finds them in
+  # /run/current-system/sw/bin.
+  imports = [ (import ./module.nix { target = "nixos"; }) ];
+
+  programs.wall-in-one = {
+    enable = true;
+    package = wallInOnePackage;
+  };
+
   users.users.${user} = {
     isNormalUser = true;
     uid = 1000;
@@ -242,7 +253,6 @@ in
   fonts.packages = [ pkgs.dejavu_fonts ];
 
   environment.systemPackages = [
-    wallInOnePackage
     # The GTK app and Noctalia both use symbolic Adwaita names. Installing the
     # theme in the guest keeps screenshot failures about our UI rather than
     # about an intentionally sparse test image.
@@ -259,7 +269,7 @@ in
   # shell's own unit still runs the real package (programs.noctalia).
   ++ lib.optional (noctaliaProbe != null) (lib.hiPrio noctaliaProbe);
 
-  # The package is already in environment.systemPackages, whose
+  # The module put the package in environment.systemPackages, whose
   # share/systemd/user directory is on the user manager's unit search path.
   # Only add the activation edge here: defining a NixOS service with the same
   # name would shadow the installed unit and let the VM validate a hand-built

@@ -253,6 +253,31 @@ pkgs.testers.runNixOSTest {
             assert parent == upgrade_pid, (parent, upgrade_pid, command)
             assert command.startswith("msg wallpaper-set "), command
 
+    with subtest("the module's renderers are the ones the document names"):
+        # Installed by programs.wall-in-one, not bundled: the compiler finds
+        # them in the system profile and names the profile's path, which
+        # survives the next switch, rather than the store path behind it.
+        runtime_document = "${home}/.local/state/wall-in-one/runtime.toml"
+        for key, name in (
+            ("noctalia_program", "noctalia"),
+            ("mpvpaper_program", "mpvpaper"),
+            ("linux_wallpaperengine_program", "linux-wallpaperengine"),
+        ):
+            program = f"/run/current-system/sw/bin/{name}"
+            machine.succeed(f"grep -Fx '{key} = \"{program}\"' {runtime_document}")
+            machine.succeed(f"test -x {program}")
+        for name in ("mpvpaper", "linux-wallpaperengine"):
+            resolved = machine.succeed(f"readlink -f /run/current-system/sw/bin/{name}").strip()
+            assert f"-{name}-" in resolved, resolved
+            assert not resolved.startswith("${wallInOnePackage}"), resolved
+        # The instrumented Noctalia is the profile's, so the driver log sees it.
+        assert machine.succeed("readlink -f /run/current-system/sw/bin/noctalia").strip() == (
+            "${noctaliaProbe}/bin/noctalia"
+        )
+        machine.succeed(status_matches('.install_kind == "nix"'))
+        version = machine.succeed(as_user("${app} --version")).splitlines()
+        assert version[1:] == ["install kind: nix"], version
+
     with subtest("headless service owns a responsive socket"):
         machine.succeed(status_matches(".cycle_enabled == true"))
         machine.succeed(as_user("systemctl --user is-active wall-in-one-health-sync.timer"))

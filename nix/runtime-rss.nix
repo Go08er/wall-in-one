@@ -10,29 +10,9 @@ let
   # rather than a tiny fixture which flatters the daemon's heap usage.
   mkOutputs = count: builtins.genList (index: "OUT-${toString index}") count;
 
-  mkOutputReply = count:
-    pkgs.writeText "wall-in-one-rss-${toString count}-outputs.json" (
-      builtins.toJSON (
-        builtins.listToAttrs (
-          map (connector: {
-            name = connector;
-            value = {
-              name = connector;
-              current_mode = 0;
-              modes = [ { refresh_rate = 60000; } ];
-            };
-          }) (mkOutputs count)
-        )
-      )
-    );
-  mkFakeNiri = count:
-    pkgs.writeShellScript "wall-in-one-rss-${toString count}-niri" ''
-      if [ "$*" != "msg --json outputs" ]; then
-        echo "unexpected fake niri arguments: $*" >&2
-        exit 2
-      fi
-      exec ${pkgs.coreutils}/bin/cat ${mkOutputReply count}
-    '';
+  # The compositor the service asks for its displays: OUT-0 ... OUT-<n-1>
+  # over wl_output and xdg-output, on a socket of the check's own.
+  fakeCompositor = ./fake-wayland-outputs.py;
   fakeNoctalia = pkgs.writeShellScript "wall-in-one-rss-noctalia" ''
     exit 0
   '';
@@ -73,7 +53,6 @@ let
 
       [renderer]
       noctalia_program = "${fakeNoctalia}"
-      niri_program = "${mkFakeNiri outputCount}"
       mpvpaper_program = "${pkgs.coreutils}/bin/false"
       linux_wallpaperengine_program = "${pkgs.coreutils}/bin/false"
       own_scene_renderer = false
@@ -147,6 +126,13 @@ let
         return envelope["message"]
 
     outputs = [f"OUT-{index}" for index in range(output_count)]
+
+    def check_outputs(status: dict) -> None:
+        # Discovered over Wayland from the check's own compositor.
+        assert status["output_discovery_error"] == "", status["output_discovery_error"]
+        reported = status["outputs"]
+        assert sorted(output["name"] for output in reported) == sorted(outputs), reported
+        assert all(output["enabled"] for output in reported), reported
     def check_power(status: dict) -> None:
         enabled = os.environ.get("WALL_IN_ONE_RSS_BATTERY") == "1"
         source = os.environ.get("WALL_IN_ONE_RSS_POWER_SOURCE", "unknown")
@@ -160,6 +146,7 @@ let
 
     initial = json.loads(call("status"))
     check_power(initial)
+    check_outputs(initial)
     assert initial["status_version"] == 2, initial
     assert initial["display_mode"] == "independent", initial
     assert len(initial["displays"]) == output_count, len(initial["displays"])
@@ -181,6 +168,7 @@ let
 
     status = json.loads(call("status"))
     check_power(status)
+    check_outputs(status)
     assert status["status_version"] == 2, status
     assert status["display_mode"] == "independent", status
     assert len(status["displays"]) == output_count, len(status["displays"])
@@ -240,7 +228,33 @@ pkgs.runCommand "wall-in-one-service-rss"
       export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$TMPDIR/no-power-bus"
       unset WALL_IN_ONE_RSS_POWER_SOURCE
     }
-    trap 'cleanup; cleanup_power_fixture' EXIT
+    compositor_pids=""
+    cleanup_compositors() {
+      for compositor_pid in $compositor_pids; do
+        kill -TERM "$compositor_pid" 2>/dev/null || true
+        wait "$compositor_pid" 2>/dev/null || true
+      done
+      compositor_pids=""
+    }
+    trap 'cleanup; cleanup_power_fixture; cleanup_compositors' EXIT
+
+    # One compositor per display count, each serving every run of that count.
+    mkdir -p "$TMPDIR/wayland"
+    for count in 1 3 64; do
+      ${pkgs.python314}/bin/python ${fakeCompositor} \
+        "$TMPDIR/wayland/outputs-$count" "$count" "$TMPDIR/wayland/ready-$count" \
+        2> "$artifacts/compositor-$count.stderr" &
+      compositor_pids="$compositor_pids $!"
+      for attempt in $(${pkgs.coreutils}/bin/seq 1 200); do
+        [ -s "$TMPDIR/wayland/ready-$count" ] && break
+        ${pkgs.coreutils}/bin/sleep 0.05
+      done
+      if [ ! -S "$TMPDIR/wayland/outputs-$count" ]; then
+        cat "$artifacts/compositor-$count.stderr" >&2
+        echo "the fake compositor for $count outputs did not start" >&2
+        exit 1
+      fi
+    done
 
     start_power_fixture() {
       power_source="$1"
@@ -340,7 +354,8 @@ pkgs.runCommand "wall-in-one-service-rss"
         stderr="$TMPDIR/service-$label-$run.stderr"
         run_peak=0
 
-        ${wallInOneService}/bin/wall-in-one-service \
+        WAYLAND_DISPLAY="$TMPDIR/wayland/outputs-$output_count" \
+          ${wallInOneService}/bin/wall-in-one-service \
           --config "$config" --socket "$socket" \
           >"$stdout" 2>"$stderr" &
         service_pid=$!
@@ -442,7 +457,8 @@ pkgs.runCommand "wall-in-one-service-rss"
           echo "$label run $run retained $threads threads; expected $expected_threads" >&2
           failed=1
         fi
-        # stdio, listener and singleton lock; connected power adds one socket.
+        # stdio, listener, singleton lock and the compositor connection;
+        # connected power adds one socket.
         # Leave room for one short-lived helper's captured output descriptors,
         # while refusing an accumulating connection/pipe leak.
         if [ "$descriptors" -lt 5 ] || [ "$descriptors" -gt 9 ]; then
@@ -576,7 +592,8 @@ pkgs.runCommand "wall-in-one-service-rss"
       status="$artifacts/status-$label.json"
       cp "$config_source" "$config"
 
-      ${wallInOneService}/bin/wall-in-one-service \
+      WAYLAND_DISPLAY="$TMPDIR/wayland/outputs-1" \
+        ${wallInOneService}/bin/wall-in-one-service \
         --config "$config" --socket "$socket" \
         >"$stdout" 2>"$stderr" &
       service_pid=$!
@@ -651,6 +668,7 @@ pkgs.runCommand "wall-in-one-service-rss"
     stress_config="$TMPDIR/state/runtime-stress.toml"
     stress_socket="$TMPDIR/runtime/wall-in-one-runtime-stress.sock"
     cp ${mkRuntimeConfig 64 600 100} "$stress_config"
+    WAYLAND_DISPLAY="$TMPDIR/wayland/outputs-64" \
     ${wallInOneService}/bin/wall-in-one-service \
       --config "$stress_config" --socket "$stress_socket" \
       >"$TMPDIR/service-stress.stdout" 2>"$TMPDIR/service-stress.stderr" &
@@ -697,6 +715,7 @@ pkgs.runCommand "wall-in-one-service-rss"
       cat "$artifacts/$report"
     done
 
+    cleanup_compositors
     [ "$failed" -eq 0 ] || exit 1
 
     mkdir -p "$out"

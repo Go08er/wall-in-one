@@ -499,10 +499,14 @@ pkgs.testers.runNixOSTest {
                 # Mirrored mode deliberately retains one efficient mpvpaper ALL
                 # route. The niri and Noctalia assertions above prove that this
                 # VM's physical connector is winit; the empty discovery error
-                # proves the runtime saw that live snapshot too.
+                # and the published snapshot prove the runtime found it too,
+                # over the compositor's Wayland output protocols, with no niri
+                # tool of its own.
                 "and .displays[0].connector == \"ALL\" "
                 "and .displays[0].connected == true "
                 "and .output_discovery_error == \"\" "
+                "and ([.outputs[] | select(.enabled)] | map(.name)) == [\"winit\"] "
+                "and ([.outputs[] | select(.enabled) | .mode_width > 0] | all) "
                 'and .theme_source.configured == "" '
                 "and .theme_source.effective == null"
             ),

@@ -1156,7 +1156,17 @@ struct RuntimeDriverState {
 #[derive(Clone)]
 struct RuntimeDriver(Arc<Mutex<RuntimeDriverState>>);
 
+thread_local! {
+    /// What a `RuntimeDriver` on this test's thread publishes as `outputs`.
+    static RUNTIME_DRIVER_PUBLISHED: std::cell::Cell<&'static [Output]> =
+        const { std::cell::Cell::new(&[]) };
+}
+
 impl WallpaperDriver for RuntimeDriver {
+    fn published_outputs(&self) -> &[Output] {
+        RUNTIME_DRIVER_PUBLISHED.with(std::cell::Cell::get)
+    }
+
     fn connected_outputs(&mut self) -> Result<Vec<String>, String> {
         let mut state = self.0.lock().unwrap();
         state.output_probes += 1;
@@ -8420,4 +8430,77 @@ fn failing_to_pause_a_scheduled_apply_keeps_paused_and_play_retries() {
         assert_eq!(after["renderer_failed"], false, "{after}");
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// Taboo records kept and omitted, and output rows, in the status of a
+/// document at the status ceiling whose driver publishes `published`.
+fn ceiling_status_with_outputs(published: Vec<Output>) -> (usize, usize, usize) {
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(Box::leak(published.into_boxed_slice())));
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let parsed = Config::from_bytes(status_ceiling_document().into_bytes()).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(
+            (0..64)
+                .map(|index| format!("{}L{index:02}", "\"".repeat(253)))
+                .collect(),
+        ),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.tick(at, Instant::now());
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(&[]));
+    assert!(response.ok, "{}", response.message);
+    let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    (
+        snapshot["taboo_entries"].as_array().unwrap().len(),
+        snapshot["taboo_entries_omitted"].as_u64().unwrap() as usize,
+        snapshot["outputs"].as_array().unwrap().len(),
+    )
+}
+
+#[test]
+fn the_display_snapshot_never_displaces_taboo_records() {
+    let (kept_without, omitted_without, _) = ceiling_status_with_outputs(Vec::new());
+    // 64 ordinary monitors, as a compositor would describe them.
+    let monitors = (0..64)
+        .map(|index| Output {
+            name: format!("DP-{index}"),
+            enabled: true,
+            make: "Dell Inc.".into(),
+            model: "DELL U2720Q".into(),
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+            mode_width: 3840,
+            mode_height: 2160,
+            refresh_millihz: Some(59_997),
+            physical_width_mm: 597,
+            physical_height_mm: 336,
+            ..Output::default()
+        })
+        .collect();
+    let (kept_with, omitted_with, rows) = ceiling_status_with_outputs(monitors);
+    assert_eq!(
+        (kept_with, omitted_with),
+        (kept_without, omitted_without),
+        "the compositor's snapshot pushed taboo records out of status"
+    );
+    assert_eq!(rows, 0, "at the ceiling, the snapshot is what is left out");
 }

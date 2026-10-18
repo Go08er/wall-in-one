@@ -125,9 +125,9 @@ array, sorted by connector, of at most 64 rows:
 | `physical_width_mm`, `physical_height_mm` | The physical size the compositor reports. |
 
 The array is empty before the first successful discovery and stays at the last
-one while `output_discovery_error` says discovery is failing. It is left empty,
-rather than failing the reply, in the rare case that it would push `status`
-over the reply limit. Nothing else in `status` changed: `displays`,
+one while `output_discovery_error` says discovery is failing. In the rare case
+that it would push `status` over the reply limit, it is left empty, before
+any taboo record is left out and rather than failing the reply. Nothing else in `status` changed: `displays`,
 `connected` and `output_discovery_error` mean what they meant, so a client that
 does not know `outputs` is unaffected. The app's window and `ctl displays` use
 this snapshot, and GTK's own monitors when no service answers.

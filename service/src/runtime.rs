@@ -152,8 +152,8 @@ pub struct Status<'a> {
     pub displays: Vec<DisplayStatus<'a>>,
     /// The compositor's last successful display snapshot, switched-off heads
     /// included (`enabled: false`). Empty before the first one, and left
-    /// empty when it would not fit the reply; `output_discovery_error` says
-    /// when it is stale. Not part of the configuration's status budget: the
+    /// empty, before any taboo record is left out, when the whole reply
+    /// would not fit with it; `output_discovery_error` says when it is stale. Not part of the configuration's status budget: the
     /// compositor, not the document, decides its size.
     pub outputs: &'a [Output],
 }
@@ -4668,22 +4668,20 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// left out -- as many as needed, and counted in `taboo_entries_omitted`,
     /// as the 64-record cap already does -- instead of the reply failing. The
     /// shape of the status never changes, and `entry_taboo` stays exact.
+    ///
+    /// The compositor's display snapshot (`outputs`) is outside the
+    /// document's budget and goes first: it is left out before any taboo
+    /// record is, never at a record's expense.
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
-        let with_outputs = self.status_reply_with(at, true)?;
-        if success_fits(&with_outputs) {
-            return Ok(with_outputs);
+        let everything = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, true)?;
+        if success_fits(&everything) {
+            return Ok(everything);
         }
-        // The display snapshot is the compositor's, outside the document's
-        // budget. Leave it out before failing the reply.
-        self.status_reply_with(at, false)
-    }
-
-    fn status_reply_with(&self, at: NaiveDateTime, outputs: bool) -> Result<String, String> {
-        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, outputs)?;
+        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, false)?;
         if success_fits(&full) {
             return Ok(full);
         }
-        let mut best = self.status_json(at, 0, outputs)?;
+        let mut best = self.status_json(at, 0, false)?;
         if !success_fits(&best) {
             // Not reachable from a validated document; the writer refuses it.
             return Ok(best);
@@ -4692,7 +4690,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let (mut fits, mut over) = (0, MAX_TABOO_STATUS_ENTRIES);
         while over - fits > 1 {
             let middle = fits + (over - fits) / 2;
-            let candidate = self.status_json(at, middle, outputs)?;
+            let candidate = self.status_json(at, middle, false)?;
             if success_fits(&candidate) {
                 fits = middle;
                 best = candidate;

@@ -1,0 +1,93 @@
+# Maintainer: goober <149829787+Go08er@users.noreply.github.com>
+
+pkgname=wall-in-one
+pkgver=0.4.0
+pkgrel=1
+pkgdesc='Wallpaper manager for Wayland with Noctalia palette sync'
+arch=(x86_64 aarch64)
+url='https://github.com/Go08er/wall-in-one'
+license=(MIT)
+# Noctalia 5 is in [extra]. The app is useless without it (it applies the
+# wallpaper and the palette through Noctalia), so it is a hard dependency.
+depends=(
+  'ffmpeg'
+  'glib2'
+  'graphene'
+  'gtk4'
+  'libadwaita'
+  'noctalia>=5'
+  'pango'
+  'python>=3.14'
+  'python-cairo'
+  'python-gobject'
+)
+makedepends=(
+  'cargo'
+  'python-build'
+  'python-installer'
+  'python-setuptools'
+)
+checkdepends=(
+  'dbus'
+  'python-pytest'
+)
+# Both renderers are external and managed by the user; the app finds them on
+# PATH (/usr/bin included) and controls them. Neither is in the official repos.
+optdepends=(
+  'mpvpaper: video wallpapers (AUR)'
+  'linux-wallpaperengine: Wallpaper Engine scenes (AUR: linux-wallpaperengine-git)'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# Replace with the real sum once v0.4.0 is tagged: updpkgsums
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --manifest-path service/Cargo.toml \
+    --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --manifest-path service/Cargo.toml
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The service's integration tests exec scripts they have just written; run
+  # in parallel that races ("Text file busy"), so keep them serial.
+  RUST_TEST_THREADS=1 cargo test --frozen --release --manifest-path service/Cargo.toml
+  # The non-GUI suite only: no compositor in a build chroot, and no Noctalia
+  # binary is driven. tests/conftest.py sandboxes HOME, XDG_* and the buses
+  # itself; ffmpeg (a runtime dependency) is what the thumbnail tests use.
+  PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider \
+    -m 'not gui and not noctalia'
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm755 target/release/wall-in-one-service \
+    "$pkgdir/usr/bin/wall-in-one-service"
+
+  # Exec, TryExec and the units' ExecStart are bare command names, which
+  # resolve to /usr/bin here, so the files go in as they are.
+  local data=src/wall_in_one/data id=dev.goober.WallInOne
+  install -Dm644 "$data/$id.desktop" \
+    "$pkgdir/usr/share/applications/$id.desktop"
+  install -Dm644 "$data/$id.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$id.svg"
+  install -Dm644 -t "$pkgdir/usr/lib/systemd/user" \
+    "$data/systemd/wall-in-one.service" \
+    "$data/systemd/wall-in-one-health-sync.service" \
+    "$data/systemd/wall-in-one-health-sync.timer"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

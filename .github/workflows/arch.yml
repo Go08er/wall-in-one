@@ -1,0 +1,108 @@
+name: Arch package
+
+# Builds packaging/arch/PKGBUILD from this checkout in a clean Arch container,
+# runs its check(), installs the result and smoke-tests it. Like the desktop VM
+# job in ci.yml, it runs on release branches and on demand, not on every push.
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arch-package:
+    name: makepkg in archlinux:latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: archlinux:latest
+    steps:
+      - name: Install git (needed to check out)
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Every dependency of the package is in the official repositories:
+      # noctalia 5 is in [extra], and only the optdepends (mpvpaper,
+      # linux-wallpaperengine) are AUR, which the build and the tests do not
+      # need. So there is no AUR helper and no --nodeps: the dependency names
+      # and versions in the PKGBUILD are checked by pacman itself. The lists
+      # come from the PKGBUILD, so the job cannot drift from it.
+      # weston, ttf-dejavu: the GUI suite below. namcap: lint.
+      - name: Install the package's dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel namcap weston ttf-dejavu
+          bash -c 'source packaging/arch/PKGBUILD &&
+            pacman -S --noconfirm --needed \
+              "${depends[@]}" "${makedepends[@]}" "${checkdepends[@]}"'
+
+      # makepkg refuses to run as root.
+      - name: Create an unprivileged build user
+        run: |
+          useradd --create-home builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          su builder -c "git config --global --add safe.directory '$GITHUB_WORKSPACE'"
+
+      - name: makepkg (build, check, package)
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' &&
+            WIO_ARCH_OUT=/home/builder/out packaging/arch/local-build.sh --noconfirm"
+
+      - name: Lint
+        run: |
+          cd /home/builder/out
+          namcap PKGBUILD
+          namcap -- wall-in-one-*.pkg.tar.zst
+
+      - name: .SRCINFO is current
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' &&
+            makepkg --printsrcinfo > /tmp/srcinfo"
+          diff -u "$GITHUB_WORKSPACE/packaging/arch/.SRCINFO" /tmp/srcinfo
+
+      - name: Install the built package
+        run: pacman -U --noconfirm /home/builder/out/wall-in-one-*.pkg.tar.zst
+
+      - name: Smoke tests
+        run: |
+          su builder -c '
+            set -eux
+            HOME=$(mktemp -d)
+            export HOME XDG_CONFIG_HOME=$HOME/c XDG_STATE_HOME=$HOME/s \
+              XDG_CACHE_HOME=$HOME/k XDG_RUNTIME_DIR=$HOME/r
+            mkdir -m 700 "$XDG_RUNTIME_DIR"
+            wall-in-one --version
+            wall-in-one-service --version
+            wall-in-one ctl --help
+            sed "s,/run/current-system/sw/bin/true,/usr/bin/true,g" \
+              "$0/service/tests/fixtures/minimal-runtime.toml" > "$HOME/runtime.toml"
+            wall-in-one-service --check-config \
+              --config "$HOME/runtime.toml" --socket "$XDG_RUNTIME_DIR/runtime.sock"
+            test ! -e "$XDG_RUNTIME_DIR/runtime.sock"
+          ' "$GITHUB_WORKSPACE"
+          # Files the package must carry, at the paths the Nix package uses.
+          for f in /usr/bin/wall-in-one /usr/bin/wall-in-one-service \
+            /usr/share/applications/dev.goober.WallInOne.desktop \
+            /usr/share/icons/hicolor/scalable/apps/dev.goober.WallInOne.svg \
+            /usr/lib/systemd/user/wall-in-one.service \
+            /usr/lib/systemd/user/wall-in-one-health-sync.service \
+            /usr/lib/systemd/user/wall-in-one-health-sync.timer \
+            /usr/share/licenses/wall-in-one/LICENSE; do
+            test -f "$f"
+          done
+
+      # check() runs the non-GUI suite. The GUI suite needs a compositor, so
+      # it runs here, on the repository's own headless Weston, against the
+      # installed Arch libraries.
+      - name: GUI tests on a headless Weston
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' &&
+            export HOME=\$(mktemp -d) XDG_RUNTIME_DIR=\$(mktemp -d) &&
+            export GSK_RENDERER=cairo GSETTINGS_BACKEND=memory GDK_DEBUG=no-portals GTK_USE_PORTAL=0 &&
+            PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
+              tools/headless-wayland.sh python -m pytest tests -q -p no:cacheprovider -m gui"

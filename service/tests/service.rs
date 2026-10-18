@@ -8078,8 +8078,12 @@ fn renderer_exit_while_stopped_stays_stopped() {
         queue_renderer_exit(&state, independent);
         let base = Instant::now();
         runtime.tick(at, base);
-        runtime.tick(at, base + Duration::from_secs(6));
         assert_failed_and_held(&mut runtime, at, independent, "stopped");
+        // A later cycle may move the still, but never restarts motion.
+        runtime.tick(at, base + Duration::from_secs(6));
+        let after = status(&mut runtime, at);
+        assert_eq!(after["playback_state"], "stopped", "{after}");
+        assert!(!state.lock().unwrap().motion_active);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -879,10 +879,16 @@ def default_playlist_id(reference: str, session: Session) -> str:
     playlist the default?" asks this, never ``reference == playlist.id``, so
     such a default is shown as the default it is and not as "All media".
 
+    The generated All media playlist is the default by its id or exact name,
+    as the compiler matches it (`is_fallback_reference`), even where the
+    settings can't be saved and the name stays.
+
     Empty for nothing saved, and for a reference no playlist answers to (the
     compiler leaves it out, `LeftOut`, until the start clears it or a
     playlist answers to it): no playlist is the default then.
     """
+    if is_fallback_reference(reference):
+        return FALLBACK_PLAYLIST_ID
     found = find_playlist(reference, session) if reference else None
     return found.id if found is not None else ""
 

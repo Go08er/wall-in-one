@@ -746,3 +746,39 @@ def test_the_apps_own_lanes_leave_a_default_out_where_the_settings_can_be_change
     _published(application)
     assert application.left_out_notice == ""
     assert profile.window.reports == [NAMES_NOTHING.format("ghost")], "and nothing new is said"
+
+
+@pytest.mark.parametrize("reference", ["All media", "all-media"])
+def test_a_built_in_default_in_unsavable_settings_is_shown_as_all_wallpapers(
+    shown: Shown,  # noqa: F811
+    reference: str,
+) -> None:
+    """A managed ``settings.toml`` keeps the name "All media"; it is not a missing playlist.
+
+    Failed on e0c011b: the new window's default lookup answered "" for it and
+    showed "Missing playlist".
+    """
+    opened = shown.opened
+    application = opened.application
+    session = application.session
+    _playlist(shown, "Evening", [shown.dawn])
+    config.update({"active_playlist": reference})
+    application._settings = config.load_strict()
+    session.update_settings(application._settings, rescan_library=False)
+    saved = paths.settings_path().read_bytes()
+    with _settings_can_not_be_saved():
+        partial = application._repair_dangling_playlist_references()
+        assert application._finish_playlist_reference_repair(partial).ok
+    assert application.settings.active_playlist == reference, "nothing could be saved"
+    assert paths.settings_path().read_bytes() == saved
+
+    scheduling = opened.window.state.scheduling
+    assert isinstance(scheduling, RealScheduling)
+    classic = schedules_page.SchedulesPage(application)
+    chosen = _combo(classic._build_defaults(session)).get_selected_item().get_string()
+
+    assert runtime_config.default_playlist_id(reference, session) == "all-media"
+    assert scheduling.default_playlist == runtime_config.FALLBACK_PLAYLIST_ID
+    named = schedule_editor.playlist_name(opened.window.state, scheduling.default_playlist)
+    assert named != schedule_editor.MISSING
+    assert chosen == "All media (built-in playlist)"

@@ -8,8 +8,10 @@ answer different questions:
   page without opening anything in the host session.
 
 Both use the flake's locked niri and Noctalia packages, the Wall-in-One package
-built from the checkout, and the companion plugin fetched by the locked
-`noctalia-plugins` input. Neither mounts the host home directory.
+built from the checkout, installed through the flake's NixOS module together
+with mpvpaper and linux-wallpaperengine (the module's default), and the
+companion plugin fetched by the locked `noctalia-plugins` input. Neither mounts
+the host home directory.
 
 ## Launch the desktop
 

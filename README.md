@@ -84,14 +84,17 @@ $ nix profile install github:Go08er/wall-in-one    # keep it
 $ nix profile install .                            # from a checkout
 ```
 
-Or as a NixOS / home-manager input:
+Or as a NixOS / home-manager input, through its module, which also installs
+the wallpaper renderers:
 
 ```nix
 {
   inputs.wall-in-one.url = "github:Go08er/wall-in-one";
 
-  # then, in your packages list:
-  #   inputs.wall-in-one.packages.${pkgs.system}.default
+  # then, in a NixOS configuration:
+  #   imports = [ inputs.wall-in-one.nixosModules.default ];
+  #   programs.wall-in-one.enable = true;
+  # or in a home-manager one, with inputs.wall-in-one.homeManagerModules.default.
 }
 ```
 
@@ -108,13 +111,16 @@ app-id, which is what lets the compositor pair the window with the entry.
 menu entry, why the packaged `Exec` is a store path, and why the entry claims
 neither D-Bus activation nor a `StartupWMClass`.
 
-`mpvpaper`, `ffmpeg`, and `linux-wallpaperengine` come with the package:
-mpvpaper plays video wallpapers, ffmpeg makes thumbnails and video stills, and
-linux-wallpaperengine renders true Workshop scenes and captures their stills.
-The engine is deliberately a runtime dependency rather than an ambient-PATH
-option because a packaged application must not make scene support depend on
-how the desktop happened to launch it. A checkout/non-Nix launch reports the
-renderer status under **Settings → Advanced → Scenes**.
+`ffmpeg` comes with the package; it makes thumbnails and video stills. The
+wallpaper renderers do not: `mpvpaper` plays video wallpapers and
+`linux-wallpaperengine` renders true Workshop scenes and captures their
+stills, and Wall-in-One finds and controls the ones installed on the system.
+The NixOS and home-manager modules install both unless you set
+`programs.wall-in-one.manualWallpaperInstalls = true`; with a plain
+`nix profile install`, or outside Nix, install them yourself.
+[`docs/installing.md`](docs/installing.md#the-wallpaper-renderers) says where
+the app looks, and [`docs/packaging.md`](docs/packaging.md) why. The scene
+renderer's status is under **Settings → Advanced → Scenes**.
 
 Noctalia is the wallpaper-and-colour application endpoint. The library and
 authoring screens still open without it, but applying a resolved entry requires

@@ -32,13 +32,105 @@ $ nix profile install .                           # from a checkout
 
 A profile install is what puts the launcher entry somewhere a desktop shell
 looks: `~/.local/state/nix/profile/share` is on `XDG_DATA_DIRS` in a normal Nix
-session, and `share/applications` beneath it is scanned. On NixOS, listing the
-package in `environment.systemPackages` or a Home Manager `home.packages` does
-the same thing through the system or user profile.
+session, and `share/applications` beneath it is scanned. On NixOS, the
+[module](#on-nixos-the-module) (or listing the package in
+`environment.systemPackages` or a Home Manager `home.packages`) does the same
+thing through the system or user profile.
 
 `nix run` deliberately does not. It builds the package and executes
 `bin/wall-in-one` without adding anything to a profile, so nothing is installed
 and no menu entry appears -- which is the right behaviour for trying it out.
+
+### The wallpaper renderers
+
+The package brings FFmpeg (thumbnails and stills) and no wallpaper renderer.
+Video wallpapers need [mpvpaper](https://github.com/GhostNaN/mpvpaper), and
+Wallpaper Engine scenes need
+[linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine);
+Wall-in-One finds what is installed and controls it. Stills play without
+either. The NixOS and home-manager modules below install both by default; a
+plain `nix profile install` does not, so install them beside it:
+
+```console
+$ nix profile install nixpkgs#mpvpaper nixpkgs#linux-wallpaperengine
+```
+
+The app looks in the Nix profiles (`~/.nix-profile/bin`,
+`~/.local/state/nix/profile/bin`, `/etc/profiles/per-user/$USER/bin`,
+`/nix/var/nix/profiles/default/bin`, `/run/current-system/sw/bin`), then in
+`~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, then on `PATH`
+([why this order](packaging.md#finding-a-renderer)). It names a renderer by the
+path it found it at, so a profile update needs nothing from you. After
+installing a renderer that was missing, run `wall-in-one --write-config` and
+`wall-in-one ctl reload` (or restart `wall-in-one.service`), so the service
+learns where it is.
+
+### On NixOS: the module
+
+```nix
+{
+  inputs.wall-in-one.url = "github:Go08er/wall-in-one";
+
+  outputs = { nixpkgs, wall-in-one, ... }: {
+    nixosConfigurations.my-machine = nixpkgs.lib.nixosSystem {
+      modules = [
+        wall-in-one.nixosModules.default
+        { programs.wall-in-one.enable = true; }
+        # ... the rest of your configuration
+      ];
+    };
+  };
+}
+```
+
+`programs.wall-in-one.enable` installs the app and both renderers into
+`environment.systemPackages`: the launcher entry, the icon and the user units
+come with the app, as with any profile install. It enables no unit; start the
+service with `systemctl --user enable --now wall-in-one.service` (see the
+README). The renderers come from your configuration's own nixpkgs, so your
+overlays apply; `programs.wall-in-one.mpvpaperPackage` and
+`programs.wall-in-one.linuxWallpaperenginePackage` choose others, and
+`programs.wall-in-one.package` another build of the app.
+
+linux-wallpaperengine is free software (GPL-3.0-or-later), so no `allowUnfree`
+is needed, but it is built against a prebuilt Chromium Embedded Framework; a
+configuration that refuses packages not built from source refuses it. On
+aarch64-linux it is not in the binary cache and builds locally.
+
+### With home-manager
+
+```nix
+{
+  imports = [ inputs.wall-in-one.homeManagerModules.default ];
+  programs.wall-in-one.enable = true;
+}
+```
+
+The same options, installing into `home.packages`. On NixOS (home-manager as a
+NixOS module or standalone) the user manager finds the units in the user
+profile by itself. A standalone home-manager on another distribution needs the
+profile's `share` on the user manager's `XDG_DATA_DIRS`: set
+`targets.genericLinux.enable = true`, or link the three units from
+`share/systemd/user` into `~/.config/systemd/user`. If
+`systemctl --user cat wall-in-one.service` finds the unit, it is there.
+
+### Managing the renderers yourself
+
+```nix
+programs.wall-in-one = {
+  enable = true;
+  manualWallpaperInstalls = true;
+};
+```
+
+installs the app only. Install mpvpaper and linux-wallpaperengine however you
+like, in any of the places above; a renderer that is not there just can't play
+its kind of wallpaper, and the service says so when one is needed.
+
+Outside Nix, install them from your distribution: on Arch, `mpvpaper` and
+`linux-wallpaperengine-git` from the AUR (the Wall-in-One package lists both
+as optional dependencies). Anything that puts the program in `/usr/bin`,
+`/usr/local/bin` or `~/.local/bin` works.
 
 ### Updating an existing app installation
 
@@ -79,10 +171,11 @@ That rewrite is the difference between a menu entry that works and one that
 reports "command not found" in a session whose `PATH` never picked up the
 profile -- a common enough state when the display manager starts before the
 profile is on `PATH`. It also guarantees the *wrapped* binary runs, the one
-carrying `GI_TYPELIB_PATH`, the GSettings schemas, mpvpaper and ffmpeg on
-`PATH`, together with linux-wallpaperengine for scene playback. Finding the
-displays needs no program on `PATH`: the service asks the compositor over
-Wayland. `TryExec` holds the same string and is rewritten with it.
+carrying `GI_TYPELIB_PATH`, the GSettings schemas and ffmpeg on `PATH`. The
+renderers are not on the wrapper's `PATH`; the app looks for them in the
+places [above](#the-wallpaper-renderers). Finding the displays needs no
+program on `PATH`: the service asks the compositor over Wayland. `TryExec`
+holds the same string and is rewritten with it.
 
 ## What the entry deliberately does not say
 
@@ -117,14 +210,24 @@ $ install -Dm644 src/wall_in_one/data/dev.goober.WallInOne.svg \
 ```
 
 `Exec=wall-in-one` is left alone there, which is correct: a pip install puts
-that command on the same `PATH` the session already has.
+that command on the same `PATH` the session already has. The renderers come
+from the distribution, as [above](#managing-the-renderers-yourself).
+
+A distribution package also sets the install kind, so the companion can tell
+it from a Nix install: `tools/set-install-kind.sh system` before building the
+app, and `WALL_IN_ONE_INSTALL_KIND=system` while cargo builds the service.
+`tools/check-install-kind.sh system <wall-in-one> <wall-in-one-service>`
+checks the installed pair (see [packaging](packaging.md#install-kind)).
 
 ## Checking it
 
 `nix flake check` builds a `desktop` check that runs `desktop-file-validate`
 over the installed entry and rasterises the icon at 16px and 128px. It works
 from the package's output paths, so a `postInstall` that put either file
-somewhere else fails there rather than on someone's menu. `tests/test_packaging.py`
-covers the half that is about agreement rather than validity: that the entry's
-filename and `Icon` key are the application id, and that its `Exec` names a
-console script `pyproject.toml` actually installs.
+somewhere else fails there rather than on someone's menu; it also checks that
+the installed app and service report the same install kind. `package-closure`
+fails if either renderer is in the package's closure, and `modules` evaluates
+both modules with and without `manualWallpaperInstalls`.
+`tests/test_packaging.py` covers the half that is about agreement rather than
+validity: that the entry's filename and `Icon` key are the application id, and
+that its `Exec` names a console script `pyproject.toml` actually installs.

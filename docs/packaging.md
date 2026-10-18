@@ -25,11 +25,13 @@ check makes sure they agree.
 
 - **Python.** `src/wall_in_one/install_kind.py` holds the line
   `INSTALL_KIND: Final[InstallKind] = "source"`. A package rewrites that one
-  line before it builds: the flake's package with
-  `substituteInPlace --replace-fail` in `postPatch`, a PKGBUILD with `sed` in
-  `prepare()`. The value is then part of the installed module, which is the
-  same file whatever imports it: the console script, the package's own test
-  run, the `golden-profile` check's interpreter, a subinterpreter worker.
+  line before it builds, with `tools/set-install-kind.sh <kind>`: the flake's
+  package in `postPatch`, a PKGBUILD in `prepare()`. The script refuses a kind
+  it does not know and a module without exactly that line, so a package
+  cannot quietly ship `source`. The value is then part of the installed
+  module, which is the same file whatever imports it: the console script,
+  the package's own test run, the `golden-profile` check's interpreter, a
+  subinterpreter worker.
   An environment variable that the wrapper exports at run time would not
   be the same thing: only the Nix package has a wrapper, and a module
   imported any other way (a test, `python -m`, a subinterpreter that starts

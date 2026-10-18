@@ -657,7 +657,7 @@ def test_control_display_discovery_is_deferred_and_keeps_glib_responsive(
     started = threading.Event()
     release = threading.Event()
 
-    def delayed_discovery() -> tuple[()]:
+    def delayed_discovery(*_arguments: object) -> tuple[()]:
         started.set()
         assert release.wait(2)
         return ()
@@ -2463,7 +2463,7 @@ def test_shutdown_suppresses_a_late_deferred_display_reply(
     started = threading.Event()
     release = threading.Event()
 
-    def delayed_discovery() -> tuple[()]:
+    def delayed_discovery(*_arguments: object) -> tuple[()]:
         started.set()
         assert release.wait(2)
         return ()

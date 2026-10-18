@@ -1196,7 +1196,7 @@ def test_the_automatic_pass_recaptures_only_a_still_smaller_both_ways(root: Path
 def test_an_existing_scene_still_is_never_judged_against_a_guess(
     monkeypatch: pytest.MonkeyPatch, root: Path
 ) -> None:
-    """niri unreachable: the 2560x1440 capture fallback is not a display."""
+    """No display measured: the 2560x1440 capture fallback is not a display."""
     monkeypatch.setattr(scenes, "measured_capture_size", lambda: None)
     target = pairing.still_directory(root) / "1647046763.png"
     scene = _scene("1647046763", target)

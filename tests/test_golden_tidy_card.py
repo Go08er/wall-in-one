@@ -39,6 +39,7 @@ from tests.test_ui_next_window import (  # noqa: E402
 from wall_in_one import paths, tidy, ui_prefs  # noqa: E402
 from wall_in_one import thumbnails as thumbnail_cache  # noqa: E402
 from wall_in_one.library.model import MediaItem  # noqa: E402
+from wall_in_one.ui import monitors  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.settings import SettingsPage  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
@@ -67,14 +68,15 @@ def golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[sandbox.
 
 
 def _quiet_machine(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The nix check's machine: no ffmpeg, engine or niri, so idle writes no stills."""
+    """The nix check's machine: no ffmpeg, engine or measured display, so idle writes no stills."""
 
     def no_ffmpeg(item: MediaItem, **_keywords: object) -> Path:
         raise thumbnail_cache.ThumbnailError(f"no processes in the golden sandbox: {item.path}")
 
     monkeypatch.setattr(thumbnail_cache, "generate", no_ffmpeg)
     monkeypatch.setattr(scenes, "is_available", lambda: False)
-    monkeypatch.setattr(outputs, "is_available", lambda: False)
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
+    monkeypatch.setattr(monitors, "snapshot", lambda: ())
 
 
 def _whitelist(golden: sandbox.Golden) -> list[Allowance]:

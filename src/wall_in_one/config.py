@@ -283,9 +283,10 @@ def _tidy_connector(value: str) -> str:
 @dataclass(frozen=True, slots=True)
 class Settings:
     #: Window background opacity. 1.0 is fully opaque. Values below 1.0 let the
-    #: compositor show through; on niri >= 26.04 a `background-effect` window
-    #: rule can then blur what shows through. The app never requests blur
-    #: itself -- see docs/niri.md.
+    #: compositor show through; a compositor that blurs behind windows (niri
+    #: 26.04's `background-effect` rule, for one) can then blur what shows
+    #: through. The app never requests blur itself -- see
+    #: docs/compositor-window-rules.md.
     opacity: float = 1.0
 
     #: Scheme used when previewing or generating a palette from a wallpaper.

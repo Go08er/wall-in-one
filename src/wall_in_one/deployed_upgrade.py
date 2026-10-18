@@ -121,6 +121,8 @@ _TOP_LEVEL_REQUIRED: Final = frozenset(
 _RUNTIME_SETTINGS_KEYS: Final = frozenset(
     {"cycle_interval_seconds", "cycle_enabled", "shuffle", "dynamics_enabled"}
 )
+# The schema-2 renderer section exactly as 0.1.4 deployed it. It named niri,
+# which that release asked for displays; it is validated here, never used.
 _RENDERER_KEYS: Final = frozenset(
     {
         "noctalia_program",

@@ -33,7 +33,7 @@ from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 from wall_in_one.wallpaper import outputs, scenes
 
-#: The owner's panel, as niri reports it.
+#: The owner's panel, as the compositor reports it.
 DISPLAY = (2560, 1600)
 
 
@@ -71,9 +71,9 @@ def _scene(items: tuple[MediaItem, ...]) -> MediaItem:
 
 @pytest.fixture
 def no_renderer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The nix check's PATH: no linux-wallpaperengine, no niri to measure a display."""
+    """The nix check's machine: no linux-wallpaperengine, no service to measure a display."""
     monkeypatch.setattr(scenes, "is_available", lambda: False)
-    monkeypatch.setattr(outputs, "is_available", lambda: False)
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
 
 
 def test_the_golden_scene_still_is_never_judged_against_a_guess(

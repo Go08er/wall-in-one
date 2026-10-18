@@ -712,18 +712,22 @@ def check_changes(changes: Sequence[Change], allowances: Sequence[Allowance]) ->
 
 PROGRAM_KEYS: Final = (
     "noctalia_program",
-    "niri_program",
     "mpvpaper_program",
     "linux_wallpaperengine_program",
 )
+#: Written by 0.3.x and earlier, when the service asked niri for displays. The
+#: service accepts and ignores it, so a document with it means the same as one
+#: without.
+RETIRED_RENDERER_KEYS: Final = ("niri_program",)
 
 
 def runtime_document_semantics(text: str, profile: Profile) -> dict[str, Any]:
     """``runtime.toml`` minus what only says *which machine* compiled it.
 
-    Dropped: ``config_generation`` (a hash of the rest), and the directories
-    of the four renderer programs (``shutil.which`` on the compiling machine;
-    the basename stays).  Sandbox paths are spelled in the profile's original
+    Dropped: ``config_generation`` (a hash of the rest), the directories of
+    the three renderer programs (``shutil.which`` on the compiling machine;
+    the basename stays), and the retired ``niri_program``, which the service
+    ignores.  Sandbox paths are spelled in the profile's original
     home, so a document compiled here compares equal to the stored one.
     Everything else -- every playlist, entry id, still, motion, palette,
     taboo, schedule and setting -- must be identical.
@@ -731,6 +735,8 @@ def runtime_document_semantics(text: str, profile: Profile) -> dict[str, Any]:
     document = tomllib.loads(profile.to_original(text))
     document.pop("config_generation", None)
     renderer = document.get("renderer", {})
+    for key in RETIRED_RENDERER_KEYS:
+        renderer.pop(key, None)
     for key in PROGRAM_KEYS:
         if isinstance(renderer.get(key), str):
             renderer[key] = renderer[key].rsplit("/", 1)[-1]

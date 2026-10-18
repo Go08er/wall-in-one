@@ -53,6 +53,7 @@ from wall_in_one.library import favourites, playlists  # noqa: E402
 from wall_in_one.library.model import MediaItem  # noqa: E402
 from wall_in_one.session import QUICK_CHOICE_ID  # noqa: E402
 from wall_in_one.theme import css  # noqa: E402
+from wall_in_one.ui import monitors  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE  # noqa: E402
 from wall_in_one.ui.next.library import LibraryPage  # noqa: E402
@@ -891,13 +892,14 @@ def test_opening_idling_and_closing_the_golden_profile_writes_only_the_whitelist
     # made for the refused ffmpeg behind (a sandbox artefact, not a write).
     monkeypatch.setattr(thumbnail_cache, "generate", no_ffmpeg)
     # The application's automatic-still maker runs for real (it runs for every
-    # interface after a scan). The PATH is pinned to the nix check's -- no
-    # linux-wallpaperengine, no niri -- so a developer's machine with niri on
-    # PATH idles the same way rather than tripping the sandbox's process
-    # refusal on the still worker. Other machine shapes are in
-    # test_golden_still_maker.
+    # interface after a scan). The machine is pinned to the nix check's -- no
+    # linux-wallpaperengine, no display measured -- so a developer's machine
+    # with an engine and a service idles the same way rather than tripping the
+    # sandbox's process refusal on the still worker. Other machine shapes are
+    # in test_golden_still_maker.
     monkeypatch.setattr(scenes, "is_available", lambda: False)
-    monkeypatch.setattr(outputs, "is_available", lambda: False)
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
+    monkeypatch.setattr(monitors, "snapshot", lambda: ())
     stills_asked: list[Path] = []
     request = StillMaker.request
 

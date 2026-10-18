@@ -108,13 +108,13 @@ def test_a_terminal_and_the_service_compile_the_same_renderer_programs(
     monkeypatch.setattr(runtime_config, "NIX_STORE", store, raising=False)
     # The package wrapper's bundled renderers, at the front of every caller's PATH.
     bundled = store / "abc-renderers" / "bin"
-    for name in ("niri", "mpvpaper", "linux-wallpaperengine"):
+    for name in ("mpvpaper", "linux-wallpaperengine"):
         _executable(bundled, name)
     # Noctalia is the person's, in their Nix profile.
     profile = _executable(Path.home() / ".nix-profile" / "bin", "noctalia")
     # A terminal's own extras: a checkout's build, a project's bin.
     terminal = tmp_path / "terminal-bin"
-    for name in ("noctalia", "niri", "mpvpaper"):
+    for name in ("noctalia", "mpvpaper"):
         _executable(terminal, name)
 
     config.save(config.Settings(roots=(library,), scan_workshop=False))
@@ -131,12 +131,12 @@ def test_a_terminal_and_the_service_compile_the_same_renderer_programs(
     renderer = service.decode()
     assert f'noctalia_program = "{profile.resolve()}"' in renderer
     for name, key in (
-        ("niri", "niri_program"),
         ("mpvpaper", "mpvpaper_program"),
         ("linux-wallpaperengine", "linux_wallpaperengine_program"),
     ):
         assert f'{key} = "{(bundled / name).resolve()}"' in renderer
     assert str(terminal) not in renderer
+    assert "niri_program" not in renderer
 
 
 def test_the_search_order_is_store_profiles_system_then_the_rest_of_path(
@@ -192,7 +192,6 @@ def test_a_renderer_only_in_an_unusual_place_on_path_is_still_found(
     # already have in a standard place (in a build sandbox: all four).
     keys = {
         "noctalia": "noctalia_program",
-        "niri": "niri_program",
         "mpvpaper": "mpvpaper_program",
         "linux-wallpaperengine": "linux_wallpaperengine_program",
     }

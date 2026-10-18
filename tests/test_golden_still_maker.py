@@ -6,7 +6,8 @@ the application's automatic-still maker writes while the app sits idle. Both
 interfaces run it after every scan (`Application._make_missing_stills`).
 
 The golden run is the nix check's machine: no linux-wallpaperengine and no
-niri on PATH. No still can be captured, so the whitelist must hold as it is.
+display measured (no service snapshot, no monitor). No still can be captured,
+so the whitelist must hold as it is.
 A second machine has the engine and a measured display but refuses the
 engine's process: there the only extra write allowed is the one empty
 tombstone a withdrawn named temporary leaves (the engine needs a ``.png`` name).
@@ -22,9 +23,10 @@ with no engine, and two ``.wall-in-one-retained`` entries were left behind.
 
 The last tests are the owner's machine, where the engine is installed and a
 capture really replaces the still. An existing scene still is recaptured at
-idle only when it is smaller than a display niri measured in both
-directions: not for its shape (a 16:9 monitor listed first), and not
-against a guess (niri unreachable).
+idle only when it is smaller than a measured display in both directions: not
+for its shape (a 16:9 monitor listed first), and not against a guess (no
+display measured). The display is the wallpaper service's when it answers,
+else the window's own monitors.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ from tests.test_ui_next_window import (  # noqa: E402
 from wall_in_one import thumbnails as thumbnail_cache  # noqa: E402
 from wall_in_one.library import pairing, stills  # noqa: E402
 from wall_in_one.library.model import Kind, MediaItem  # noqa: E402
+from wall_in_one.ui import monitors  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.next.window import NextWindow  # noqa: E402
 from wall_in_one.ui.stills import Callback, StillMaker  # noqa: E402
@@ -92,7 +95,7 @@ def golden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[sandbox.
 
 #: The automatic stills folder of the golden profile's first library root.
 STILLS = RETAINED.removesuffix(".wall-in-one-retained/")
-#: The display niri measured on the capturing machine: larger than the golden
+#: The display measured on the capturing machine: larger than the golden
 #: scene's 2x2 still in both directions, and small enough for a tiny PNG.
 CAPTURED_SIZE = (64, 40)
 CAPTURED_FRAME = _real_png(*CAPTURED_SIZE)
@@ -116,12 +119,14 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
     monkeypatch.setattr(thumbnail_cache, "generate", no_ffmpeg)
     engine_started: list[object] = []
     if machine == "nix-check":
-        # No engine, no niri: nothing at all may be written.
+        # No engine and no display: no service snapshot and no monitor of the
+        # window's own. Nothing at all may be written.
         monkeypatch.setattr(scenes, "is_available", lambda: False)
-        monkeypatch.setattr(outputs, "is_available", lambda: False)
+        monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
+        monkeypatch.setattr(monitors, "snapshot", lambda: ())
     elif machine == "engine-captures":
         # The documented exception to the idle rule: the engine is installed,
-        # niri measured a display larger than the 2x2 golden scene still in
+        # a display was measured larger than the 2x2 golden scene still in
         # both directions, and the capture succeeds. The still is replaced.
         monkeypatch.setattr(scenes, "is_available", lambda: True)
         monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: CAPTURED_SIZE)
@@ -137,7 +142,7 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
 
         monkeypatch.setattr(subprocess, "Popen", capturing_engine)
     else:
-        # The engine is installed and niri measured the panel, so the 2x2
+        # The engine is installed and the panel was measured, so the 2x2
         # golden still is due; but the engine's process is refused. Its named
         # temporary then leaves one empty tombstone, and nothing else may change.
         monkeypatch.setattr(scenes, "is_available", lambda: True)
@@ -253,7 +258,7 @@ def _private_still(change: Change) -> None:
 
 # -- the same selection on a real machine -----------------------------------------------
 
-#: The owner's laptop panel (niri: eDP-1, 2560x1600 at scale 1.5) and the size
+#: The owner's laptop panel (eDP-1, 2560x1600 at scale 1.5) and the size
 #: of its four existing scene stills.
 LAPTOP = outputs.Output("eDP-1", physical_width=2560, physical_height=1600)
 STILL_SIZE = (3840, 2400)
@@ -283,7 +288,8 @@ def _asked_to_capture(
     item = MediaItem(
         path=scene_dir, kind=Kind.SCENE, size=0, mtime=0, scene="2149140853", paired_still=still
     )
-    monkeypatch.setattr(outputs, "discover", lambda: screens)
+    # The service's snapshot; the window has no view of its own here.
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: screens or None)
     monkeypatch.setattr(scenes, "is_available", lambda: True)
     ensured: list[MediaItem] = []
 
@@ -291,7 +297,7 @@ def _asked_to_capture(
         ensured.append(item)
 
     monkeypatch.setattr(stills, "ensure", ensure)
-    maker = StillMaker()
+    maker = StillMaker(displays=lambda: ())
     try:
         maker.request([item], root, lambda _made: None)
         deadline = time.monotonic() + 10
@@ -324,7 +330,7 @@ def test_an_old_portrait_scene_still_is_still_recaptured_at_idle(
 @pytest.mark.parametrize(
     "screens",
     [
-        pytest.param((), id="niri-not-reachable"),
+        pytest.param((), id="no-display-measured"),
         pytest.param(
             (outputs.Output("DP-1", physical_width=1920, physical_height=1080), LAPTOP),
             id="a-16:9-monitor-listed-first",

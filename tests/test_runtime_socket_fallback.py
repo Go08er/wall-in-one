@@ -33,6 +33,7 @@ display_mode = "mirrored"
 theme_source_connector = ""
 [renderer]
 noctalia_program = "/bin/true"
+# As 0.3.x wrote it: the service accepts this retired key and ignores it.
 niri_program = "/bin/false"
 mpvpaper_program = "/bin/true"
 linux_wallpaperengine_program = "/bin/true"

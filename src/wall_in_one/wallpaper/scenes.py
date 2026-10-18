@@ -42,9 +42,13 @@ from typing import Final
 from wall_in_one import worker_processes
 from wall_in_one.wallpaper import outputs
 
-#: What `--layer` should be on niri. Its own help says so: pairing with the
-#: `place-within-backdrop` rule, without which the wallpaper is cloned into
-#: every workspace in the overview.
+#: The wlr-layer-shell layer the engine draws on, as mpvpaper does. The
+#: protocol sets `background` aside for wallpapers, below the `bottom` layer
+#: panels and desktop widgets use, and every compositor Noctalia supports
+#: offers layer-shell, because Noctalia's own surfaces are layer-shell
+#: surfaces. Compositors may treat the layer further with rules of their own;
+#: docs/compositor-window-rules.md has niri's `place-within-backdrop` as an
+#: example.
 DEFAULT_LAYER: Final = "background"
 
 #: Frames to render before the screenshot is taken. Scenes animate in, and the
@@ -242,7 +246,7 @@ class SceneRenderer:
         )
         if not targets:
             raise SceneError(
-                "niri reported no usable outputs; refusing to open a scene preview window"
+                "no display could be discovered; refusing to open a scene preview window"
             )
         for target in targets:
             arguments += ["--screen-root", target]
@@ -387,17 +391,18 @@ def screenshot(
 def measured_capture_size(
     output: str = "", found: tuple[outputs.Output, ...] | None = None
 ) -> tuple[int, int] | None:
-    """Physical geometry of ``output`` as niri reports it, or ``None`` if unknown.
+    """Physical geometry of ``output`` as the compositor reports it, or ``None``.
 
-    ``None`` when niri cannot be asked, the output is not connected, or it
-    reports no size. That is not the same answer as a 2560x1440 screen, and
-    `library.stills` must be able to tell the two apart: a still judged
-    against a guess would be recaptured for a display nobody has.
+    ``None`` when no display can be asked about (see `outputs.discover`), the
+    output is not connected, or it reports no size. That is not the same
+    answer as a 2560x1440 screen, and `library.stills` must be able to tell
+    the two apart: a still judged against a guess would be recaptured for a
+    display nobody has. Without an ``output``, the first screen that is on.
     """
     screens = outputs.discover() if found is None else found
     selected = next((screen for screen in screens if screen.name == output), None)
-    if selected is None and not output and screens:
-        selected = screens[0]
+    if selected is None and not output:
+        selected = next((screen for screen in screens if screen.enabled), None)
     if selected is None:
         return None
     if selected.physical_width > 0 and selected.physical_height > 0:

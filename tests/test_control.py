@@ -3236,7 +3236,7 @@ def test_display_listing_leads_with_the_reusable_connector(
     commands, _app = _commands(sandbox, [_wallpaper("aurora")])
     monkeypatch.setattr(
         "wall_in_one.ui.app.outputs.discover",
-        lambda: (Output("DP-2", make="Acme", model="Wide", width=2560, height=1440),),
+        lambda *_arguments: (Output("DP-2", make="Acme", model="Wide", width=2560, height=1440),),
     )
 
     outcome = commands.list_displays()

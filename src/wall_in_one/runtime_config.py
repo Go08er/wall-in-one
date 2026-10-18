@@ -659,7 +659,7 @@ def program_directories() -> tuple[Path, ...]:
     first:
 
     1. The Nix store directories on ``PATH``, in ``PATH`` order. The package's
-       wrapper puts its bundled renderers (niri, mpvpaper,
+       wrapper puts its bundled renderers (mpvpaper,
        linux-wallpaperengine) there, at the front, for every caller, and a
        store directory names one immutable build wherever it is seen.
     2. The per-user and system Nix profiles, in NixOS's own login order:
@@ -1920,7 +1920,6 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         "",
         "[renderer]",
         f"noctalia_program = {_quote(_program('noctalia'))}",
-        f"niri_program = {_quote(_program('niri'))}",
         f"mpvpaper_program = {_quote(_program('mpvpaper'))}",
         f"linux_wallpaperengine_program = {_quote(_program('linux-wallpaperengine'))}",
         f"own_scene_renderer = {str(settings.own_scene_renderer).lower()}",

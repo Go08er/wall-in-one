@@ -41,12 +41,20 @@ def test_a_repeated_poll_adds_nothing_and_each_change_is_said_once() -> None:
     crashed = two_display_status(extra={"last_error": "linux-wallpaperengine exited (1)"})
     model.adopt(crashed)
     model.adopt(crashed)
-    model.adopt(two_display_status(extra={"output_discovery_error": "niri msg outputs failed"}))
+    model.adopt(
+        two_display_status(
+            extra={"output_discovery_error": "the Wayland compositor did not answer within 3000 ms"}
+        )
+    )
     model.adopt(two_display_status(extra=BATTERY))
     model.adopt(two_display_status())
     assert _said(log)[2:] == [
         ("renderer", "error", "linux-wallpaperengine exited (1)"),
-        ("displays", "warning", "Display discovery is degraded: niri msg outputs failed"),
+        (
+            "displays",
+            "warning",
+            "Display discovery is degraded: the Wayland compositor did not answer within 3000 ms",
+        ),
         ("power", "info", "Animations stopped on battery"),
         ("power", "info", "Animations are no longer stopped for power"),
     ]

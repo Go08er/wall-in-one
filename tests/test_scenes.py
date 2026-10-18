@@ -138,9 +138,17 @@ def test_a_measured_capture_size_is_never_a_guess() -> None:
     assert scenes.measured_capture_size("DP-1", (scaled,)) == (2560, 1440)
     assert scenes.measured_capture_size("", (scaled,)) == (2560, 1440), "the first screen"
     assert scenes.measured_capture_size("missing", (scaled,)) is None
-    assert scenes.measured_capture_size("", ()) is None, "niri could not be asked"
+    assert scenes.measured_capture_size("", ()) is None, "no display could be asked about"
     assert scenes.measured_capture_size("DP-1", (outputs.Output("DP-1"),)) is None
     assert scenes.capture_size("", ()) == scenes.DEFAULT_CAPTURE_SIZE
+
+
+def test_without_an_output_the_first_screen_that_is_on_is_measured() -> None:
+    """A switched-off head is listed by the compositor but shows nothing."""
+    off = outputs.Output("DP-1", physical_width=3840, physical_height=2160, enabled=False)
+    laptop = outputs.Output("eDP-1", physical_width=2560, physical_height=1600)
+    assert scenes.measured_capture_size("", (off, laptop)) == (2560, 1600)
+    assert scenes.measured_capture_size("", (off,)) is None
 
 
 def test_a_prepared_screenshot_output_is_kept_and_written_in_place(
@@ -206,10 +214,10 @@ def test_a_prepared_screenshot_refuses_nonempty_or_nonregular_output(
     assert nonempty.read_bytes() == b"do not truncate"
 
 
-def test_the_layer_is_the_one_niri_wants() -> None:
-    """Its own help names `background` for niri, to pair with the
-    `place-within-backdrop` rule; `bottom` clones the wallpaper into every
-    workspace in the overview."""
+def test_the_layer_is_layer_shells_wallpaper_layer() -> None:
+    """`background` is the layer wlr-layer-shell sets aside for wallpapers, on
+    every compositor; `bottom` belongs to panels and desktop widgets. (On niri
+    it also pairs with the optional `place-within-backdrop` rule.)"""
     assert scenes.DEFAULT_LAYER == "background"
     assert command()[command().index("--layer") + 1] == "background"
 

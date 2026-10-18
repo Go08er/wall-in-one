@@ -63,6 +63,7 @@ from wall_in_one.session import (
     removal_lock_refusal,
 )
 from wall_in_one.theme import css, noctalia, source
+from wall_in_one.ui import monitors
 from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.real_schedule import ColorsForgotten
@@ -7711,7 +7712,11 @@ class _Commands:
         )
 
     def list_displays(self) -> server.Outcome:
-        """`displays` -- discover screens away from GTK and answer later."""
+        """`displays` -- ask the service for the screens away from GTK, answer later.
+
+        GTK's own monitors are read here, on the main thread, for when no
+        service answers (see `wallpaper.outputs.discover`).
+        """
         session = self._app.session
         # Assignments store the playlist *id*, so a rename does not break them.
         # Nobody reads ids, so they are resolved back to names here rather than
@@ -7719,9 +7724,10 @@ class _Commands:
         # never receive the live Session.
         names = tuple((playlist.id, playlist.name) for playlist in session.playlists.all())
         assignments = session.displays.all()
+        fallback = monitors.snapshot()
 
         def work() -> Response:
-            attached = outputs.discover()
+            attached = outputs.discover(fallback)
             resolved_names = dict(names)
 
             def shown(identifier: str) -> str:
@@ -8429,7 +8435,8 @@ def run(
     """
     # GtkApplication overwrites prgname with the application id on Wayland, so
     # setting it here would be cosmetic at best and misleading at worst. The
-    # Wayland app-id comes from paths.APPLICATION_ID; see docs/niri.md.
+    # Wayland app-id comes from paths.APPLICATION_ID; see
+    # docs/compositor-window-rules.md.
     GLib.set_application_name("Wall-in-One")
     application = Application(
         service=service,

@@ -17,8 +17,9 @@ APPLICATION_ID: Final = "dev.goober.WallInOne"
 """GApplication id, and therefore the Wayland app-id.
 
 GtkApplication sets the Wayland app-id from the GApplication id at startup, so
-this string is what a niri `window-rule { match app-id=... }` has to match.
-Verified by reading `niri msg -j windows` against a live instance.
+this string is what a compositor's window rule matches the app by (niri's
+`window-rule { match app-id=... }`, for one). Verified on niri by reading
+`niri msg -j windows` against a live instance.
 
 Must stay stable: changing it silently breaks every user's blur and opacity
 window rules.

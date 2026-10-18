@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,18 +26,20 @@ from wall_in_one.library import pairing
 from wall_in_one.library import stills as still_backend
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.ui.stills import StillMaker
-from wall_in_one.wallpaper import scenes
+from wall_in_one.wallpaper import outputs, scenes
 
-#: What niri reports for the display in these tests, unless a test says otherwise.
+#: The display measured in these tests, unless a test says otherwise.
 DISPLAY = (2560, 1600)
+#: The real measurement, for the tests that pin which source it is given.
+REAL_MEASURE = scenes.measured_capture_size
 
 
 @pytest.fixture(autouse=True)
 def measured_display(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """No real `niri msg`: a measured display, and the threads that asked for it."""
+    """No real display: a measured one, and the threads that asked for it."""
     asked: list[str] = []
 
-    def measure() -> tuple[int, int]:
+    def measure(*_arguments: object) -> tuple[int, int]:
         asked.append(threading.current_thread().name)
         return DISPLAY
 
@@ -57,8 +60,14 @@ def item(name: str, kind: Kind, still: Path | None = None) -> MediaItem:
 class Recording(StillMaker):
     """A maker whose generator is a list rather than ffmpeg."""
 
-    def __init__(self, *, succeeds: bool = True) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        succeeds: bool = True,
+        displays: Callable[[], tuple[outputs.Output, ...]] = lambda: (),
+    ) -> None:
+        # No GTK unless a test gives the maker a view of its own.
+        super().__init__(displays=displays)
         self.asked: list[Path] = []
         self.batches: list[int] = []
         self._succeeds = succeeds
@@ -285,7 +294,7 @@ def test_an_undersized_managed_scene_still_is_recaptured(maker: Recording, tmp_p
 def test_no_scene_is_touched_without_a_measured_display(
     maker: Recording, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(scenes, "measured_capture_size", lambda: None)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: None)
     scene = _managed_scene(tmp_path)
     assert scene.paired_still is not None
     _png_header(scene.paired_still, 2, 2)
@@ -300,7 +309,7 @@ def test_no_scene_is_touched_without_a_measured_display(
 def test_the_display_is_measured_on_the_worker_once_per_batch(
     maker: Recording, measured_display: list[str], tmp_path: Path
 ) -> None:
-    """`niri msg` is a child process; the end of a scan must not wait for one."""
+    """Asking the service is a socket round trip; the end of a scan must not wait for one."""
     items = (
         _managed_scene(tmp_path, "1"),
         _managed_scene(tmp_path, "2"),
@@ -316,13 +325,118 @@ def test_the_display_is_measured_on_the_worker_once_per_batch(
     assert set(maker.asked) == {Path("/w/1"), Path("/w/2"), Path("/w/3"), Path("/w/clip.mp4")}
 
 
-def test_a_video_only_batch_asks_niri_nothing(
+def test_a_video_only_batch_asks_for_no_display(
     maker: Recording, measured_display: list[str]
 ) -> None:
     maker.request((item("clip.mp4", Kind.VIDEO),), Path("/w"), maker.batches.append)
     maker.drain()
 
     assert measured_display == []
+
+
+# -- which display a scene still is sized for ------------------------------------
+
+LAPTOP = outputs.Output("eDP-1", physical_width=2560, physical_height=1600)
+MONITOR = outputs.Output("DP-1", physical_width=3840, physical_height=2160)
+
+
+def _sizes_asked(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """The real measurement, and the sizes `stills.ensure` was handed."""
+    monkeypatch.setattr(scenes, "measured_capture_size", REAL_MEASURE)
+    sizes: list[object] = []
+
+    def ensure(
+        target: MediaItem,
+        _root: Path,
+        *,
+        processes: object | None = None,
+        size: object | None = None,
+        refused: object | None = None,
+    ) -> Path | None:
+        del target, processes, refused
+        sizes.append(size)
+        return None
+
+    monkeypatch.setattr("wall_in_one.ui.stills.stills.ensure", ensure)
+    return sizes
+
+
+def _window_view(
+    taken: list[str], screens: tuple[outputs.Output, ...]
+) -> Callable[[], tuple[outputs.Output, ...]]:
+    def view() -> tuple[outputs.Output, ...]:
+        taken.append(threading.current_thread().name)
+        return screens
+
+    return view
+
+
+def test_without_a_service_a_scene_is_sized_for_the_window_view(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """GTK may only be read on the main thread: the view is taken there, used on the worker."""
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
+    sizes = _sizes_asked(monkeypatch)
+    taken: list[str] = []
+    made = Recording(displays=_window_view(taken, (LAPTOP,)))
+
+    made.request((item("3", Kind.SCENE),), tmp_path, made.batches.append)
+    made.drain()
+
+    assert sizes == [(2560, 1600)]
+    assert taken == [threading.current_thread().name], "read on the calling thread only"
+
+
+def test_the_service_snapshot_wins_over_the_window_view(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: (MONITOR,))
+    sizes = _sizes_asked(monkeypatch)
+    made = Recording(displays=_window_view([], (LAPTOP,)))
+
+    made.request((item("3", Kind.SCENE),), tmp_path, made.batches.append)
+    made.drain()
+
+    assert sizes == [(3840, 2160)]
+
+
+def test_with_neither_a_service_nor_a_window_no_scene_is_touched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
+    sizes = _sizes_asked(monkeypatch)
+    made = Recording()
+
+    made.request((item("3", Kind.SCENE),), tmp_path, made.batches.append)
+    made.drain()
+
+    assert sizes == [], "never judged against a guess"
+
+
+def test_regenerating_a_scene_still_sizes_it_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: None)
+    monkeypatch.setattr(scenes, "measured_capture_size", REAL_MEASURE)
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments, **_keywords: callback(*arguments),
+    )
+    captured: list[object] = []
+
+    def capture(_item: MediaItem, _root: Path, **keywords: object) -> Path:
+        captured.append(keywords.get("size"))
+        return Path("/w/still.png")
+
+    monkeypatch.setattr("wall_in_one.ui.stills.stills.capture_scene", capture)
+    taken: list[str] = []
+    made = StillMaker(displays=_window_view(taken, (LAPTOP,)))
+
+    made.regenerate_scene(item("3", Kind.SCENE), Path("/w"), lambda _made: None)
+    made._pool.shutdown(wait=True)
+
+    assert captured == [(2560, 1600)]
+    assert taken == [threading.current_thread().name]
 
 
 def test_stills_are_left_out_of_the_batch(maker: Recording) -> None:

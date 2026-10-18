@@ -291,7 +291,7 @@ def scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MediaItem:
     folder = tmp_path / "workshop" / SCENE
     folder.mkdir(parents=True)
     monkeypatch.setattr(scenes, "is_available", lambda: True)
-    monkeypatch.setattr(scenes, "measured_capture_size", lambda: DISPLAY)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: DISPLAY)
 
     def engine(*_arguments: object, **_keywords: object) -> None:
         raise AssertionError("the engine was run for a still its folder can't take")

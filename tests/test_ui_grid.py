@@ -1672,7 +1672,7 @@ def test_runtime_popover_drives_live_state_instead_of_editing_defaults(
             "cycle_enabled": True,
             "shuffle": False,
             "last_error": "",
-            "output_discovery_error": "niri IPC is not ready",
+            "output_discovery_error": "the Wayland compositor did not answer within 3000 ms",
         }
     )
     assert "display discovery degraded" in window._subtitle.get_subtitle()

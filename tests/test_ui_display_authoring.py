@@ -629,13 +629,13 @@ def test_schedule_targets_include_live_runtime_connector_when_gdk_is_unnamed(
     assert isinstance(raw_displays, list)
     display = raw_displays[0]
     assert isinstance(display, dict)
-    display["connector"] = "niri-DP-7"
+    display["connector"] = "service-DP-7"
     application.runtime_status = status
     page = schedules_page.SchedulesPage(application)  # type: ignore[arg-type]
 
     page.refresh(application.session)
 
-    assert "niri-DP-7" in page._rule_connectors
+    assert "service-DP-7" in page._rule_connectors
 
 
 @pytest.mark.parametrize(("name", "shown"), [("Dock & desk", "Dock & desk"), (None, "dock")])

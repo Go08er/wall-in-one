@@ -72,10 +72,14 @@ def test_each_runtime_error_is_said_once_in_either_window(
     model.adopt(crashed)  # the next poll: the same error, not said again
     assert said == ["linux-wallpaperengine exited (1)"]
 
-    degraded = two_display_status(extra={"output_discovery_error": "niri msg outputs failed"})
+    degraded = two_display_status(
+        extra={"output_discovery_error": "the Wayland compositor did not answer within 3000 ms"}
+    )
     model.adopt(degraded)
     model.adopt(degraded)
-    assert said[1:] == ["Display discovery is degraded: niri msg outputs failed"]
+    assert said[1:] == [
+        "Display discovery is degraded: the Wayland compositor did not answer within 3000 ms"
+    ]
 
     model.mark_invalid("status reply is not JSON")
     model.mark_invalid("status reply is not JSON")

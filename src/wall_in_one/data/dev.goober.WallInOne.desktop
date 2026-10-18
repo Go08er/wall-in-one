@@ -1,7 +1,7 @@
 # The filename has to be exactly the Wayland app-id (wall_in_one.paths.
 # APPLICATION_ID) or the compositor cannot tell that this entry and the window
 # on screen are the same program: that association is made by name, not by
-# anything inside the file. See docs/niri.md.
+# anything inside the file. See docs/compositor-window-rules.md.
 #
 # Exec stays a bare command here so the file is the same in a checkout, a wheel
 # and the Nix store; the Nix package rewrites it to the wrapped binary's

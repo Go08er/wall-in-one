@@ -1034,7 +1034,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         return tuple(sorted(connected | saved | targeted))
 
     def _live_connectors(self) -> tuple[str, ...]:
-        """Merge GTK monitor names with Rust's authoritative niri snapshot."""
+        """Merge GTK monitor names with the service's authoritative display snapshot."""
         found = list(_connected_outputs())
         truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         if truth is not None and truth.status_version == 2:

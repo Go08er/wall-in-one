@@ -821,7 +821,8 @@ def test_compiler_resolves_authoring_identity_away(tmp_path: Path) -> None:
     assert len(document["config_generation"]) == 64
     assert document["settings"]["display_mode"] == "mirrored"
     assert document["settings"]["theme_source_connector"] == ""
-    assert Path(document["renderer"]["niri_program"]).is_absolute()
+    assert "niri_program" not in document["renderer"], "display discovery needs no program"
+    assert Path(document["renderer"]["noctalia_program"]).is_absolute()
     assert document["renderer"]["scene_fps"] == 75
     assert document["renderer"]["scene_scaling"] == "fit"
     assert document["renderer"]["scene_clamp"] == "repeat"

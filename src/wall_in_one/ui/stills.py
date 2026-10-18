@@ -37,7 +37,8 @@ from gi.repository import GLib
 from wall_in_one import worker_processes
 from wall_in_one.library import stills
 from wall_in_one.library.model import Kind, MediaItem
-from wall_in_one.wallpaper import scenes
+from wall_in_one.ui import monitors
+from wall_in_one.wallpaper import outputs, scenes
 
 #: Deliberately one. See the module docstring.
 MAX_WORKERS: Final = 1
@@ -68,8 +69,16 @@ class StillMaker:
         *,
         report: FailureCallback | None = None,
         note: FailureCallback | None = None,
+        displays: Callable[[], tuple[outputs.Output, ...]] | None = None,
     ) -> None:
-        """``report`` tells a person now (the window); ``note`` only keeps a record (the log)."""
+        """``report`` tells a person now (the window); ``note`` only keeps a record (the log).
+
+        ``displays`` is the window's own view of the screens, GTK's monitors
+        (`ui.monitors.snapshot`) unless given: taken on the main thread when a
+        job is handed off, it is what a scene still is sized for when the
+        wallpaper service has no snapshot to give.
+        """
+        self._displays = displays
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="still")
         self._closed = False
         self._report = report
@@ -108,8 +117,9 @@ class StillMaker:
             #
             # A scene whose still is the managed one is handed over too, so
             # the worker can see whether it is an old undersized capture. That
-            # needs the still's header and niri's answer, and this runs on the
-            # main thread at the end of every scan: only path arithmetic here.
+            # needs the still's header and the service's answer, and this runs
+            # on the main thread at the end of every scan: only path
+            # arithmetic here.
             if item.kind.moves
             and (
                 item.paired_still is None
@@ -129,13 +139,20 @@ class StillMaker:
         # wide, so leaving the two interleaved would let a handful of scenes
         # hold up every video behind them.
         wanted.sort(key=lambda item: item.kind is Kind.SCENE)
+        # GTK's monitors can only be read here, on the main thread.
+        fallback = self._local_displays() if any(item.kind is Kind.SCENE for item in wanted) else ()
         self._submit(
             self._run,
             tuple(wanted),
             root,
             callback,
+            fallback,
             context="Automatic still generation stopped unexpectedly",
         )
+
+    def _local_displays(self) -> tuple[outputs.Output, ...]:
+        """GTK's view of the screens. Main thread only."""
+        return self._displays() if self._displays is not None else monitors.snapshot()
 
     def _submit(
         self,
@@ -183,7 +200,13 @@ class StillMaker:
             # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
             GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
-    def _run(self, items: tuple[MediaItem, ...], root: Path, callback: Callback) -> None:
+    def _run(
+        self,
+        items: tuple[MediaItem, ...],
+        root: Path,
+        callback: Callback,
+        fallback: tuple[outputs.Output, ...] = (),
+    ) -> None:
         made = 0
         # The folders that would not be written in, with how many stills each
         # refused and the first reason given (`stills.StillFolderError`).
@@ -193,12 +216,15 @@ class StillMaker:
             count, reason = refused.get(error.folder, (0, error.reason))
             refused[error.folder] = (count + 1, reason)
 
-        # Asked once per batch, here on the worker: `niri msg` is a child
-        # process, and neither the main thread nor every scene should wait on
-        # one. With no display measured no scene still can be taken, and an
-        # existing one is never judged against a guess.
+        # Asked once per batch, here on the worker: the service's answer is a
+        # socket round trip, and neither the main thread nor every scene
+        # should wait on one. `fallback` is GTK's view, for when no service
+        # answers. With no display measured no scene still can be taken, and
+        # an existing one is never judged against a guess.
         display = (
-            scenes.measured_capture_size() if any(i.kind is Kind.SCENE for i in items) else None
+            scenes.measured_capture_size("", outputs.discover(fallback))
+            if any(i.kind is Kind.SCENE for i in items)
+            else None
         )
         for item in items:
             if self._processes.cancelled():
@@ -263,9 +289,12 @@ class StillMaker:
         if self._closed or item.kind is not Kind.SCENE:
             return
         self._attempted.add(item.path)
+        # GTK's monitors can only be read here, on the main thread.
+        fallback = self._local_displays()
 
         def run() -> None:
-            stills.capture_scene(item, root, force=True, processes=self._processes)
+            size = scenes.measured_capture_size("", outputs.discover(fallback))
+            stills.capture_scene(item, root, force=True, processes=self._processes, size=size)
             if not self._processes.cancelled():
 
                 def deliver() -> bool:

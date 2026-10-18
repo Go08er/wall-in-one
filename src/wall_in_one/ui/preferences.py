@@ -512,7 +512,7 @@ class PreferencesPage(Adw.PreferencesPage):
         return tuple(ordered)
 
     def _live_theme_connectors(self) -> tuple[str, ...]:
-        """Merge GTK monitor names with Rust's authoritative niri snapshot."""
+        """Merge GTK monitor names with the service's authoritative display snapshot."""
         found = list(_connected_outputs())
         truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
         if truth is not None and truth.status_version == 2:
@@ -606,7 +606,7 @@ class PreferencesPage(Adw.PreferencesPage):
         self._power_status.set_subtitle(detail)
 
     def runtime_status_changed(self, settings: config.Settings) -> None:
-        """Adopt niri connector/palette truth without rebuilding other settings."""
+        """Adopt the service's connector/palette truth without rebuilding other settings."""
         self._refresh_power_status(settings)
         connectors = self._known_theme_connectors(settings)
         attached = frozenset(self._live_theme_connectors())
@@ -746,7 +746,7 @@ class PreferencesPage(Adw.PreferencesPage):
             title="Appearance",
             description=(
                 "Translucency is applied by this app. Blur behind it is the "
-                "compositor's job -- see docs/niri.md for the window rule."
+                "compositor's job -- see docs/compositor-window-rules.md."
             ),
         )
         self._opacity = plain(

@@ -790,7 +790,7 @@ def scene_capture_required(
     from the library may intentionally have another shape and must never be
     overwritten by this maintenance path.
 
-    An existing still is only ever judged against a display niri actually
+    An existing still is only ever judged against a display that was actually
     measured (``size``, or `scenes.measured_capture_size`); with nothing
     measured it is kept. ``automatic`` is the unattended pass that runs after
     every scan: there a still is recaptured only when it is smaller than the
@@ -1838,9 +1838,9 @@ def capture_scene(
     reinstall that moves the directory still finds it.
 
     Without ``force`` this is the automatic pass (see `scene_capture_required`).
-    ``size`` is a display size the caller already measured; otherwise niri is
-    asked. Nothing is written -- no directory, no temporary -- unless a display
-    was measured and the engine is installed.
+    ``size`` is a display size the caller already measured; otherwise the
+    wallpaper service is asked. Nothing is written -- no directory, no
+    temporary -- unless a display was measured and the engine is installed.
     """
     if item.kind is not Kind.SCENE or not item.scene:
         raise StillError(f"{item.name} is not a Wallpaper Engine scene")
@@ -1848,7 +1848,7 @@ def capture_scene(
     measured = size or scenes.measured_capture_size()
     if measured is None:
         # The 2560x1440 fallback is a guess, and a still captured at a guessed
-        # shape would only be judged wrong again once niri answers.
+        # shape would only be judged wrong again once a display is measured.
         raise StillError(
             f"no display size could be measured, so no still was taken for {item.name}"
         )

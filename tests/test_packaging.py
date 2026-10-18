@@ -311,3 +311,25 @@ def test_the_distribution_carries_all_desktop_assets() -> None:
         if path.parent.name == "systemd":
             relative = f"data/systemd/{path.name}"
         assert any(fnmatch(relative, pattern) for pattern in patterns), relative
+
+
+@pytest.mark.skipif(not FLAKE_PATH.is_file(), reason="not running from a source tree")
+def test_the_package_bundles_ffmpeg_and_no_wallpaper_renderer() -> None:
+    """mpvpaper and linux-wallpaperengine are external (docs/packaging.md).
+
+    The wrapper's PATH carries the bundled tools only; the renderers are a
+    separate list that the test run, the dev shell and the checks use. The
+    `package-closure` check proves the built package agrees.
+    """
+    flake = FLAKE_PATH.read_text(encoding="utf-8")
+    bundled = re.findall(r"^\s*bundledTools = \[([^\]]*)\];", flake, re.MULTILINE)
+    assert [entry.split() for entry in bundled] == [["pkgs.ffmpeg"]]
+    renderers = re.findall(r"^\s*wallpaperRenderers = \[([^\]]*)\];", flake, re.MULTILINE)
+    assert [entry.split() for entry in renderers] == [
+        ["pkgs.mpvpaper", "pkgs.linux-wallpaperengine"]
+    ]
+    assert re.findall(r"--prefix PATH : \$\{pkgs\.lib\.makeBinPath (\w+)\}", flake) == [
+        "bundledTools"
+    ]
+    assert re.search(r"^\s*package-closure =$", flake, re.MULTILINE)
+

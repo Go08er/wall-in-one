@@ -63,19 +63,23 @@
         # tools/check-install-kind.sh to prove the installed pair agrees.
         installKind = "nix";
 
-        # Runtime tools bundled with the app. Noctalia remains the selected
+        # Tools bundled with the app: on its wrapper's PATH and in its closure.
+        # Thumbnails, for stills as well as videos: this closure's GdkPixbuf
+        # has no webp or avif loader, and ffmpeg covers every format the
+        # library accepts with one code path. Noctalia remains the selected
         # shell endpoint rather than another copy in this closure: authoring
         # works without it, while runtime status reports application failures.
-        runtimeTools = [
+        bundledTools = [ pkgs.ffmpeg ];
+
+        # The wallpaper renderers: mpvpaper for video, linux-wallpaperengine
+        # for true Wallpaper Engine scenes and their stills. Never bundled
+        # (docs/packaging.md): the app finds and controls what the system has
+        # installed, and the NixOS and home-manager modules install these by
+        # default. Only the package's test run, the dev shell and the checks
+        # see this list; the VMs get the renderers through the module.
+        wallpaperRenderers = [
           pkgs.mpvpaper
-          # True Wallpaper Engine scenes and their full-resolution stills.
-          # Keeping this in the wrapper PATH makes scene support deterministic
-          # instead of depending on whichever ambient PATH launched the app.
           pkgs.linux-wallpaperengine
-          # Thumbnails, for stills as well as videos: this closure's GdkPixbuf
-          # has no webp or avif loader, and ffmpeg covers every format the
-          # library accepts with one code path.
-          pkgs.ffmpeg
         ];
 
         wall-in-one-service = pkgs.rustPlatform.buildRustPackage {
@@ -155,13 +159,15 @@
 
           # The GUI needs a display; the offline suite is what CI can run.
           #
-          # ffmpeg is here as well as in `runtimeTools` because the runtime
+          # ffmpeg is here as well as in the wrapper because the runtime
           # wrapper does not exist yet during the check phase: without it the
           # thumbnail and still-generation tests either skip or, worse, pass
           # for the wrong reason -- `test_a_missing_file_is_reported` was
           # getting "ffmpeg is not installed" and matching nothing it meant to.
           # Twenty-nine tests were silently sitting out the packaged build.
-          nativeCheckInputs = [ python.pkgs.pytest ] ++ runtimeTools;
+          # The renderers are here for the test run only, as on a machine
+          # that has them installed; they are not in the package.
+          nativeCheckInputs = [ python.pkgs.pytest ] ++ bundledTools ++ wallpaperRenderers;
           checkPhase = ''
             runHook preCheck
             PYTHONPATH=$PWD/src:$PYTHONPATH pytest tests -q -m "not gui"
@@ -214,7 +220,7 @@
           dontWrapGApps = true;
           preFixup = ''
             makeWrapperArgs+=("''${gappsWrapperArgs[@]}")
-            makeWrapperArgs+=(--prefix PATH : ${pkgs.lib.makeBinPath runtimeTools})
+            makeWrapperArgs+=(--prefix PATH : ${pkgs.lib.makeBinPath bundledTools})
           '';
 
           meta = with pkgs.lib; {
@@ -647,6 +653,35 @@
                 touch $out
               '';
 
+          # The wallpaper renderers are external (docs/packaging.md): neither
+          # may be in what installing the package installs, by whatever
+          # reference (the wrapper's PATH, a script, a library). FFmpeg is
+          # bundled and must be. The renderers' paths are compared as text, so
+          # this check does not itself pull them in.
+          package-closure =
+            pkgs.runCommand "wall-in-one-package-closure"
+              { closure = pkgs.closureInfo { rootPaths = [ wall-in-one ]; }; }
+              ''
+                paths=$closure/store-paths
+                grep -Fxq ${wall-in-one} "$paths"
+                for renderer in ${
+                  pkgs.lib.concatMapStringsSep " " (
+                    renderer: builtins.unsafeDiscardStringContext renderer.outPath
+                  ) wallpaperRenderers
+                }; do
+                  if grep -Fxq "$renderer" "$paths"; then
+                    echo "the package's closure contains $renderer" >&2
+                    exit 1
+                  fi
+                done
+                if grep -E -- '^/nix/store/[0-9a-z]{32}-(mpvpaper|linux-wallpaperengine)-' "$paths"; then
+                  echo "the package's closure contains a wallpaper renderer" >&2
+                  exit 1
+                fi
+                grep -Fxq ${pkgs.lib.getBin pkgs.ffmpeg} "$paths"
+                touch $out
+              '';
+
           ruff =
             pkgs.runCommand "wall-in-one-ruff" { nativeBuildInputs = [ pkgs.ruff ]; }
               ''
@@ -709,7 +744,9 @@
             pkgs.util-linux
             pkgs.luau
             pkgs.shellcheck
-          ] ++ runtimeTools;
+          ]
+          ++ bundledTools
+          ++ wallpaperRenderers;
 
           shellHook = ''
             export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"

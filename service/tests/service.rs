@@ -830,6 +830,120 @@ fn a_compositor_with_only_switched_off_heads_is_a_readiness_error() {
     );
 }
 
+/// One independent runtime over `source`, its noctalia recording to `log`.
+fn switchable_runtime(
+    root: &Path,
+    label: &str,
+    source: &SwitchableOutputs,
+) -> (Runtime<SystemDriver>, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let log = root.join(format!("{label}.log"));
+    let noctalia = root.join(format!("{label}-noctalia"));
+    fs::write(
+        &noctalia,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log:?}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let document = independent_config()
+        .replace(
+            "noctalia_program = \"/bin/true\"",
+            &format!("noctalia_program = {noctalia:?}"),
+        )
+        .replace("dynamics_enabled = true", "dynamics_enabled = false");
+    let config_path = root.join(format!("{label}.toml"));
+    fs::write(&config_path, &document).unwrap();
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let driver = SystemDriver::with_output_source(
+        parsed.renderer.clone(),
+        Path::new("/wall-in-one-runtime.sock"),
+        Box::new(source.clone()),
+    );
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    (Runtime::new(config_path, parsed, driver, at).unwrap(), log)
+}
+
+/// What a display row says about where the display stands.
+fn route_summary(row: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "connected": row["connected"],
+        "playlist_id": row["playlist_id"],
+        "entry_id": row["entry_id"],
+        "route_source": row["route_source"],
+        "manual_override": row["manual_override"],
+        "renderer_failed": row["renderer_failed"],
+        "last_error": row["last_error"],
+    })
+}
+
+fn applied_on(log: &Path, connector: &str) -> usize {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with(&format!("msg wallpaper-set {connector} ")))
+        .count()
+}
+
+#[test]
+fn a_display_switched_off_is_treated_exactly_like_one_unplugged() {
+    let root = directory("switched-off-like-unplugged");
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let both = vec![live("DP-1", None), live("HDMI-A-1", None)];
+    let switched = SwitchableOutputs::default();
+    let unplugged = SwitchableOutputs::default();
+    switched.set(both.clone());
+    unplugged.set(both.clone());
+    let (mut off, off_log) = switchable_runtime(&root, "off", &switched);
+    let (mut gone, gone_log) = switchable_runtime(&root, "gone", &unplugged);
+    for runtime in [&mut off, &mut gone] {
+        runtime.apply_current().unwrap();
+        // Off the first entry, so a cursor reset would show.
+        assert!(runtime_command(runtime, at, "on", Some("HDMI-A-1 next")).ok);
+    }
+    let base = Instant::now();
+    let before = display_status(&mut off, at, "HDMI-A-1");
+    let applied = applied_on(&off_log, "HDMI-A-1");
+    assert_eq!(applied, applied_on(&gone_log, "HDMI-A-1"));
+
+    // One monitor switched off, the other unplugged.
+    switched.set(vec![live("DP-1", None), switched_off("HDMI-A-1")]);
+    unplugged.set(vec![live("DP-1", None)]);
+    off.tick(at, base + Duration::from_secs(6));
+    gone.tick(at, base + Duration::from_secs(6));
+    let off_row = display_status(&mut off, at, "HDMI-A-1");
+    assert_eq!(off_row["connected"], false, "{off_row}");
+    assert_eq!(
+        route_summary(&off_row),
+        route_summary(&display_status(&mut gone, at, "HDMI-A-1"))
+    );
+
+    // Both back.
+    switched.set(both.clone());
+    unplugged.set(both);
+    off.tick(at, base + Duration::from_secs(12));
+    gone.tick(at, base + Duration::from_secs(12));
+    let back = display_status(&mut off, at, "HDMI-A-1");
+    assert_eq!(back["connected"], true, "{back}");
+    assert_eq!(
+        route_summary(&back),
+        route_summary(&display_status(&mut gone, at, "HDMI-A-1"))
+    );
+    // Its assignment is applied again, the same way in both.
+    assert_eq!(applied_on(&off_log, "HDMI-A-1"), applied + 1);
+    assert_eq!(applied_on(&gone_log, "HDMI-A-1"), applied + 1);
+    // A retained route keeps its cursor across both, as it always did.
+    assert_eq!(back["entry_id"], before["entry_id"]);
+    off.shutdown();
+    gone.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn a_failed_question_keeps_the_last_published_snapshot() {
     let parsed: Config = toml::from_str(&config(

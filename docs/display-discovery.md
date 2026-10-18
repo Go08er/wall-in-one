@@ -44,8 +44,11 @@ startup window, and connects on a later probe.
 It publishes the last successful snapshot in `status` as a new top-level
 `outputs` array (see [control-socket.md](control-socket.md#outputs)). The
 fields the companion reads (`displays`, `displays[].connected`,
-`output_discovery_error`) keep their meaning; only the wording of a discovery
-error changes.
+`output_discovery_error`) keep their shape, and the wording of a discovery
+error changes. One meaning changes: a display switched off in the compositor
+is `connected: false` and is treated exactly like an unplugged one (its
+renderer stops; switched back on, its assignment is applied again), where
+niri's answer, and so 0.3.x, counted it as connected.
 
 ## The window (GTK)
 

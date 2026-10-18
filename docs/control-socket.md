@@ -127,10 +127,15 @@ array, sorted by connector, of at most 64 rows:
 The array is empty before the first successful discovery and stays at the last
 one while `output_discovery_error` says discovery is failing. In the rare case
 that it would push `status` over the reply limit, it is left empty, before
-any taboo record is left out and rather than failing the reply. Nothing else in `status` changed: `displays`,
-`connected` and `output_discovery_error` mean what they meant, so a client that
-does not know `outputs` is unaffected. The app's window and `ctl displays` use
-this snapshot, and GTK's own monitors when no service answers.
+any taboo record is left out and rather than failing the reply.
+
+Apart from `outputs`, `status` keeps its shape, so a client that does not know
+`outputs` is unaffected. One meaning changed in 0.4.0: a display switched off
+in the compositor is `connected: false` in `displays` and is treated exactly
+like an unplugged one (its renderer stops; switched back on, its assignment is
+applied again). With niri, 0.3.x reported it as connected. The app's window
+and `ctl displays` use this snapshot, and GTK's own monitors when no service
+answers.
 
 `on <connector> ...` is the connector-scoped runtime envelope. The connector
 is one whitespace-free token; `playlist-use` takes the remaining text as one

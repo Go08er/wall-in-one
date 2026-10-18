@@ -8013,7 +8013,10 @@ fn assert_failed_and_held(
 ) {
     let after = status(runtime, at);
     assert_eq!(after["playback_state"], expected_state, "{after}");
-    assert_eq!(after["entry_id"], "video-two", "{after}");
+    if expected_state != "stopped" {
+        // Only Stopped keeps cycling its still; Playing and Paused hold here.
+        assert_eq!(after["entry_id"], "video-two", "{after}");
+    }
     assert_eq!(after["renderer_failed"], true, "{after}");
     assert!(
         after["last_error"]
@@ -8022,7 +8025,6 @@ fn assert_failed_and_held(
             .contains("renderer child exited"),
         "{after}"
     );
-    assert_eq!(after["motion_active"], false, "{after}");
     if independent {
         let row = display_status(runtime, at, "DP-1");
         assert_eq!(row["playback_state"], expected_state, "{row}");

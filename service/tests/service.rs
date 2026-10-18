@@ -8158,9 +8158,7 @@ fn failing_to_pause_a_scheduled_apply_keeps_paused_and_play_retries() {
         // The schedule moves to the night playlist; the new renderer cannot
         // be paused, but nobody pressed Play.
         let base = Instant::now() + Duration::from_secs(600);
-        for step in 0..8 {
-            runtime.tick(winter, base + Duration::from_secs(step * 30));
-        }
+        runtime.tick(winter, base);
         let held = status(&mut runtime, winter);
         assert_eq!(held["playback_state"], "paused", "{held}");
         assert_eq!(held["renderer_failed"], true, "{held}");

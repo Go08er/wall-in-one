@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 import re
 import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -41,6 +43,8 @@ from typing import Final
 
 from wall_in_one import file_io, paths, worker_processes
 from wall_in_one.library.model import Kind, MediaItem
+
+LOGGER = logging.getLogger(__name__)
 
 #: Tile geometry. 16:9 because that is what most wallpapers are, and a grid of
 #: mismatched aspect ratios reads as noise.
@@ -359,13 +363,46 @@ def store_preview(url: str, data: bytes) -> None:
             with contextlib.suppress(OSError):
                 temporary.unlink()
         return
-    # Same reasoning as `generate`: a window that keeps browsing the Store
-    # writes previews with no thumbnail generation to bound them. The fresh
-    # entry is inside the eviction grace, so it is never what this removes.
-    # Maintenance is best effort and must not turn a cached preview into an
-    # error for the caller.
-    with contextlib.suppress(Exception):
-        prune()
+    _prune_if_due()
+
+
+#: At most one preview-triggered prune per this many seconds in a process. A
+#: prune scans the whole directory (about 13 ms at 3000 entries, 57 ms at
+#: 10000), and a Store page writes dozens of previews at once.
+PREVIEW_PRUNE_INTERVAL_SECONDS: Final = 30.0
+
+_prune_lock = threading.Lock()
+#: `time.monotonic()` of the last prune this process started, or None.
+_last_prune: float | None = None
+
+
+def _note_pruned() -> None:
+    global _last_prune
+    _last_prune = time.monotonic()
+
+
+def _prune_if_due() -> None:
+    """Bound the cache after a preview write, at most once per interval.
+
+    A window that keeps browsing the Store writes previews with no thumbnail
+    generation to bound them. The fresh entry is inside the eviction grace, so
+    it is never what this removes. The first write in a process prunes; when
+    several workers arrive together one prunes and the rest skip. Best effort:
+    a failure is logged and never reaches the caller.
+    """
+    if not _prune_lock.acquire(blocking=False):
+        return
+    try:
+        last = _last_prune
+        if last is not None and time.monotonic() - last < PREVIEW_PRUNE_INTERVAL_SECONDS:
+            return
+        _note_pruned()
+        try:
+            prune()
+        except Exception as error:
+            LOGGER.warning("thumbnail cache pruning failed: %s", error)
+    finally:
+        _prune_lock.release()
 
 
 def _command(item: MediaItem, destination: Path) -> list[str]:
@@ -473,6 +510,7 @@ def generate(
     # that grows the cache runs through this line, and a scan costs a couple of
     # milliseconds against the 0.3s decode that just happened.
     prune()
+    _note_pruned()  # a preview write right after need not scan again
     return destination
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import struct
 import time
+import types
 import zlib
 from pathlib import Path
 
@@ -552,25 +553,32 @@ _OLD_URL = "https://example.invalid/old.jpg"
 _NEW_URL = "https://example.invalid/new.jpg"
 
 
+@pytest.fixture(autouse=False)
+def due(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forget the last prune, so the next preview write is the process's first."""
+    monkeypatch.setattr(thumbnails, "_last_prune", None)
+
+
 def _small_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Scale the real maintenance down to 100 bytes, keeping its eligibility rules."""
     real_prune = thumbnails.prune
     monkeypatch.setattr(thumbnails, "prune", lambda: real_prune(max_bytes=_PREVIEW_BUDGET))
 
 
-def _store_old_preview(age: float) -> Path:
+def _store_old_preview(age: float, monkeypatch: pytest.MonkeyPatch) -> Path:
     thumbnails.store_preview(_OLD_URL, _jpeg(b"x" * 64))
     old = thumbnails.preview_path(_OLD_URL)
     moment = time.time() - age
     os.utime(old, (moment, moment))
+    monkeypatch.setattr(thumbnails, "_last_prune", None)  # the next write is due
     return old
 
 
 def test_a_preview_write_prunes_an_aged_entry_over_budget(
-    cache: Path, monkeypatch: pytest.MonkeyPatch
+    cache: Path, due: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _small_budget(monkeypatch)
-    old = _store_old_preview(2 * thumbnails.EVICTION_GRACE_SECONDS)
+    old = _store_old_preview(2 * thumbnails.EVICTION_GRACE_SECONDS, monkeypatch)
 
     thumbnails.store_preview(_NEW_URL, _jpeg(b"x" * 64))
 
@@ -580,10 +588,10 @@ def test_a_preview_write_prunes_an_aged_entry_over_budget(
 
 
 def test_a_preview_write_keeps_a_recent_entry_even_over_budget(
-    cache: Path, monkeypatch: pytest.MonkeyPatch
+    cache: Path, due: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _small_budget(monkeypatch)
-    recent = _store_old_preview(0.0)
+    recent = _store_old_preview(0.0, monkeypatch)
 
     thumbnails.store_preview(_NEW_URL, _jpeg(b"x" * 64))
 
@@ -592,7 +600,7 @@ def test_a_preview_write_keeps_a_recent_entry_even_over_budget(
 
 
 def test_a_pruning_failure_does_not_fail_the_preview(
-    cache: Path, monkeypatch: pytest.MonkeyPatch
+    cache: Path, due: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def broken() -> int:
         raise OSError("scan failed")
@@ -602,3 +610,48 @@ def test_a_pruning_failure_does_not_fail_the_preview(
     thumbnails.store_preview(_NEW_URL, _jpeg(b"x" * 64))
 
     assert thumbnails.lookup_preview(_NEW_URL) == _jpeg(b"x" * 64)
+
+
+def _count_prunes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    calls: list[int] = []
+
+    def counting() -> int:
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr(thumbnails, "prune", counting)
+    return calls
+
+
+def test_preview_writes_prune_at_most_once_per_interval(
+    cache: Path, due: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _count_prunes(monkeypatch)
+    now = [1000.0]
+    clock = types.SimpleNamespace(monotonic=lambda: now[0], time=time.time)
+    monkeypatch.setattr(thumbnails, "time", clock)
+
+    thumbnails.store_preview(_OLD_URL, _jpeg(b"a" * 8))
+    assert len(calls) == 1  # the first write in a process prunes
+
+    now[0] += thumbnails.PREVIEW_PRUNE_INTERVAL_SECONDS - 1
+    thumbnails.store_preview(_NEW_URL, _jpeg(b"b" * 8))
+    assert len(calls) == 1
+
+    now[0] += 2
+    thumbnails.store_preview("https://example.invalid/third.jpg", _jpeg(b"c" * 8))
+    assert len(calls) == 2
+
+
+def test_a_preview_write_skips_pruning_while_another_worker_prunes(
+    cache: Path, due: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _count_prunes(monkeypatch)
+    assert thumbnails._prune_lock.acquire(blocking=False)
+    try:
+        thumbnails.store_preview(_NEW_URL, _jpeg(b"b" * 8))
+    finally:
+        thumbnails._prune_lock.release()
+
+    assert calls == []
+    assert thumbnails.lookup_preview(_NEW_URL) != b""

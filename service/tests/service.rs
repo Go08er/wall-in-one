@@ -733,7 +733,9 @@ fn a_switched_off_head_is_published_but_never_a_scene_target() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("scene-switched-off");
     let events = root.join("events");
+    let noctalia = root.join("noctalia");
     let engine = root.join("linux-wallpaperengine");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
     fs::write(
         &engine,
         format!(
@@ -742,8 +744,10 @@ fn a_switched_off_head_is_published_but_never_a_scene_target() {
         ),
     )
     .unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), true).replace(
+    for executable in [&noctalia, &engine] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, Path::new("/bin/true"), true).replace(
         "linux_wallpaperengine_program = \"/bin/true\"",
         &format!("linux_wallpaperengine_program = {engine:?}"),
     );
@@ -800,8 +804,12 @@ fn a_compositor_with_only_switched_off_heads_is_a_readiness_error() {
 
 #[test]
 fn status_publishes_the_compositor_snapshot_with_switched_off_heads() {
+    use std::os::unix::fs::PermissionsExt;
     let root = directory("status-outputs");
-    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let document = config(&noctalia, Path::new("/bin/true"), false);
     let config_path = root.join("runtime.toml");
     fs::write(&config_path, &document).unwrap();
     let parsed: Config = toml::from_str(&document).unwrap();
@@ -7562,6 +7570,11 @@ const ADDED_DISPLAY_KEYS: &[&str] = &[
     "next_change_in_s",
 ];
 
+/// Top-level keys added after the shape fixture was recorded: the compositor's
+/// display snapshot (0.4.0). Removed the same way, so that the released ones
+/// are still compared byte for byte.
+const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs"];
+
 /// `"key":"value"` with the value replaced, for fields that differ per process
 /// or per build. A missing key is left alone; a `null` value is kept.
 fn mask_string_value(text: &str, key: &str) -> String {
@@ -7590,6 +7603,29 @@ fn without_added_keys(text: &str) -> String {
             };
             text.replace_range(start..value_end, "");
         }
+    }
+    for key in ADDED_TOP_LEVEL_KEYS {
+        let marker = format!(",\"{key}\":[");
+        let Some(start) = text.find(&marker) else {
+            continue;
+        };
+        let mut depth = 0_usize;
+        let mut close = None;
+        for (offset, byte) in text.bytes().enumerate().skip(start + marker.len() - 1) {
+            match byte {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.expect("the added array is closed");
+        text.replace_range(start..=close, "");
     }
     text
 }

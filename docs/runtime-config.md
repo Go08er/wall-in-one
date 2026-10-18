@@ -95,8 +95,8 @@ Automatic Stills marker, or the folder holding them failed): a video with no
 still at all is "no still yet" and is left out.
 "Couldn't look" is never "nothing there". The refusal names the folder (or the video), and
 the last document stays until the folder can be read (or, past a limit, the
-library made smaller), anything in the library plays again, or the reference
-is removed. For an implicit All media
+library made smaller), an entry in the affected playlist can be compiled
+again, or the reference is removed. For an implicit All media
 there is no reference to remove: choose a default playlist, or remove the
 folder from the library. A library folder that is
 absent, not a folder, or a symbolic link (an unmounted drive, or one removed

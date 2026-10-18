@@ -5,13 +5,18 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use wall_in_one_service::config::{Config, Overrides};
+use support::compositor::{FakeCompositor, FakeOutput, Layout};
+use wall_in_one_service::config::{Config, Overrides, RendererSettings};
+use wall_in_one_service::outputs::{Output, OutputSource};
 use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
 use wall_in_one_service::renderer::{RendererFailure, SystemDriver, WallpaperDriver};
 use wall_in_one_service::runtime::{Runtime, wall_clock_after};
+
+mod support;
 
 /// Run `attempt` until the kernel stops calling the freshly written program busy.
 ///
@@ -53,6 +58,68 @@ fn directory(label: &str) -> PathBuf {
     path
 }
 
+/// The service binary, unable to reach a desktop's compositor: a test that
+/// wants one gives it `WAYLAND_DISPLAY` itself.
+fn service_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"));
+    command
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET");
+    command
+}
+
+/// A display source that answers from a list, counting the questions.
+struct FixedOutputs {
+    outputs: Result<Vec<Output>, String>,
+    asked: Arc<AtomicUsize>,
+}
+
+impl OutputSource for FixedOutputs {
+    fn outputs(&mut self) -> Result<Vec<Output>, String> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.outputs.clone()
+    }
+}
+
+fn live(name: &str, refresh_millihz: Option<u64>) -> Output {
+    Output {
+        name: name.into(),
+        enabled: true,
+        refresh_millihz,
+        ..Output::default()
+    }
+}
+
+/// A driver whose compositor reports `outputs`, and how often it was asked.
+fn driver_with(
+    settings: RendererSettings,
+    outputs: Vec<Output>,
+) -> (SystemDriver, Arc<AtomicUsize>) {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let source = FixedOutputs {
+        outputs: Ok(outputs),
+        asked: Arc::clone(&asked),
+    };
+    let driver = SystemDriver::with_output_source(
+        settings,
+        Path::new("/wall-in-one-runtime.sock"),
+        Box::new(source),
+    );
+    (driver, asked)
+}
+
+/// A driver with no compositor to ask, never the desktop's.
+fn offline_driver(settings: RendererSettings) -> SystemDriver {
+    SystemDriver::with_output_source(
+        settings,
+        Path::new("/wall-in-one-runtime.sock"),
+        Box::new(FixedOutputs {
+            outputs: Err("cannot connect to the Wayland compositor: this test has none".into()),
+            asked: Arc::new(AtomicUsize::new(0)),
+        }),
+    )
+}
+
 fn config(noctalia: &Path, mpvpaper: &Path, own_scene: bool) -> String {
     format!(
         r#"schema_version = 4
@@ -67,7 +134,6 @@ display_mode = "mirrored"
 theme_source_connector = ""
 [renderer]
 noctalia_program = {noctalia:?}
-niri_program = "/bin/true"
 mpvpaper_program = {mpvpaper:?}
 linux_wallpaperengine_program = "/bin/true"
 own_scene_renderer = {own_scene}
@@ -177,7 +243,7 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
     fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -241,7 +307,7 @@ fn systemd_mode_waits_quietly_for_the_first_config() {
     fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     let stderr = fs::File::create(&stderr_path).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -275,7 +341,7 @@ fn startup_config_load_failures_use_ex_config_without_claiming_the_socket() {
         1,
     );
 
-    let missing = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let missing = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -306,7 +372,7 @@ fn startup_config_load_failures_use_ex_config_without_claiming_the_socket() {
         ),
     ] {
         fs::write(&config_path, document).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        let output = service_command()
             .arg("--config")
             .arg(&config_path)
             .arg("--socket")
@@ -335,7 +401,7 @@ fn config_check_uses_the_production_loader_without_claiming_runtime() {
     )
     .unwrap();
 
-    let valid = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let valid = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -356,7 +422,7 @@ fn config_check_uses_the_production_loader_without_claiming_runtime() {
         1,
     );
     fs::write(&config_path, old_schema).unwrap();
-    let invalid = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let invalid = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -390,7 +456,7 @@ fn explicit_reload_is_not_repeated_by_the_file_watcher() {
     fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
     let original = config(&recorder, &recorder, false);
     fs::write(&config_path, &original).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -436,7 +502,7 @@ fn renderer_applies_still_then_mode_then_palette_then_motion() {
     parsed.validate().unwrap();
     let video = parsed.playlists[0].entries[1].clone();
     let scene = parsed.playlists[1].entries[0].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let mut driver = offline_driver(parsed.renderer.clone());
     without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
     thread::sleep(Duration::from_millis(100));
     let error =
@@ -458,19 +524,9 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-interpolation");
     let launches = root.join("launches");
-    let queries = root.join("queries");
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     let mpvpaper = root.join("mpvpaper");
     fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(
-        &niri,
-        format!(
-            "#!/bin/sh\nprintf x >> {:?}\nprintf '%s\\n' '{{\"eDP-1\":{{\"current_mode\":0,\"modes\":[{{\"refresh_rate\":165004}}]}},\"DP-1\":{{\"current_mode\":0,\"modes\":[{{\"refresh_rate\":165004}}]}}}}'\n",
-            queries
-        ),
-    )
-    .unwrap();
     fs::write(
         &mpvpaper,
         format!(
@@ -479,14 +535,10 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
         ),
     )
     .unwrap();
-    for executable in [&noctalia, &niri, &mpvpaper] {
+    for executable in [&noctalia, &mpvpaper] {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let document = config(&noctalia, &mpvpaper, false)
-        .replace(
-            "niri_program = \"/bin/true\"",
-            &format!("niri_program = {niri:?}"),
-        )
         .replace(
             "video_interpolation = \"off\"",
             "video_interpolation = \"oversample\"",
@@ -497,7 +549,10 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
         );
     let parsed: Config = toml::from_str(&document).unwrap();
     let video = parsed.playlists[0].entries[1].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let (mut driver, asked) = driver_with(
+        parsed.renderer.clone(),
+        vec![live("DP-1", Some(165_004)), live("eDP-1", Some(165_004))],
+    );
 
     driver.begin_apply();
     assert_eq!(
@@ -509,7 +564,11 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     driver.end_apply();
     thread::sleep(Duration::from_millis(100));
 
-    assert_eq!(fs::read_to_string(&queries).unwrap(), "x");
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "one question to the compositor for the whole hand-over"
+    );
     let arguments = fs::read_to_string(&launches).unwrap();
     assert_eq!(arguments.lines().count(), 2);
     for expected in [
@@ -524,18 +583,14 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     driver.stop();
     fs::remove_dir_all(root).unwrap();
 }
-
 #[test]
-fn interpolation_off_never_queries_niri() {
+fn interpolation_off_never_asks_the_compositor() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-interpolation-off");
-    let queried = root.join("queried");
     let launches = root.join("launches");
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     let mpvpaper = root.join("mpvpaper");
     fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(&niri, format!("#!/bin/sh\ntouch {:?}\nexit 1\n", queried)).unwrap();
     fs::write(
         &mpvpaper,
         format!(
@@ -544,20 +599,18 @@ fn interpolation_off_never_queries_niri() {
         ),
     )
     .unwrap();
-    for executable in [&noctalia, &niri, &mpvpaper] {
+    for executable in [&noctalia, &mpvpaper] {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let document = config(&noctalia, &mpvpaper, false).replace(
-        "niri_program = \"/bin/true\"",
-        &format!("niri_program = {niri:?}"),
-    );
+    let document = config(&noctalia, &mpvpaper, false);
     let parsed: Config = toml::from_str(&document).unwrap();
     let video = parsed.playlists[0].entries[1].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let (mut driver, asked) =
+        driver_with(parsed.renderer.clone(), vec![live("eDP-1", Some(60_000))]);
 
     without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
     thread::sleep(Duration::from_millis(100));
-    assert!(!queried.exists());
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
     let arguments = fs::read_to_string(&launches).unwrap();
     for absent in [
         "video-sync=",
@@ -570,53 +623,14 @@ fn interpolation_off_never_queries_niri() {
     driver.stop();
     fs::remove_dir_all(root).unwrap();
 }
-
-#[test]
-fn compositor_output_inventory_over_the_route_ceiling_is_rejected_not_truncated() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = directory("too-many-outputs");
-    let niri = root.join("niri");
-    let outputs = serde_json::Value::Object(
-        (0..65)
-            .map(|index| {
-                (
-                    format!("DP-{index}"),
-                    serde_json::json!({"name": format!("DP-{index}")}),
-                )
-            })
-            .collect(),
-    );
-    fs::write(&niri, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", outputs)).unwrap();
-    fs::set_permissions(&niri, fs::Permissions::from_mode(0o755)).unwrap();
-    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false).replace(
-        "niri_program = \"/bin/true\"",
-        &format!("niri_program = {niri:?}"),
-    );
-    let parsed: Config = toml::from_str(&document).unwrap();
-    let mut driver = SystemDriver::new(parsed.renderer);
-    let error = driver.connected_outputs().unwrap_err();
-    assert!(
-        error.contains("more than the supported 64 outputs"),
-        "{error}"
-    );
-    fs::remove_dir_all(root).unwrap();
-}
-
 #[test]
 fn mixed_all_output_refresh_launches_unsmoothed() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-interpolation-mixed");
     let launches = root.join("launches");
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     let mpvpaper = root.join("mpvpaper");
     fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(
-        &niri,
-        "#!/bin/sh\nprintf '%s\\n' '{\"eDP-1\":{\"current_mode\":0,\"modes\":[{\"refresh_rate\":165004}]},\"DP-1\":{\"current_mode\":0,\"modes\":[{\"refresh_rate\":60000}]}}'\n",
-    )
-    .unwrap();
     fs::write(
         &mpvpaper,
         format!(
@@ -625,21 +639,19 @@ fn mixed_all_output_refresh_launches_unsmoothed() {
         ),
     )
     .unwrap();
-    for executable in [&noctalia, &niri, &mpvpaper] {
+    for executable in [&noctalia, &mpvpaper] {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let document = config(&noctalia, &mpvpaper, false)
-        .replace(
-            "niri_program = \"/bin/true\"",
-            &format!("niri_program = {niri:?}"),
-        )
-        .replace(
-            "video_interpolation = \"off\"",
-            "video_interpolation = \"linear\"",
-        );
+    let document = config(&noctalia, &mpvpaper, false).replace(
+        "video_interpolation = \"off\"",
+        "video_interpolation = \"linear\"",
+    );
     let parsed: Config = toml::from_str(&document).unwrap();
     let video = parsed.playlists[0].entries[1].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let (mut driver, _) = driver_with(
+        parsed.renderer.clone(),
+        vec![live("DP-1", Some(60_000)), live("eDP-1", Some(165_004))],
+    );
 
     without_text_file_busy(|| driver.apply(&video, "", &parsed.settings)).unwrap();
     thread::sleep(Duration::from_millis(100));
@@ -656,21 +668,14 @@ fn mixed_all_output_refresh_launches_unsmoothed() {
     driver.stop();
     fs::remove_dir_all(root).unwrap();
 }
-
 #[test]
 fn all_output_scene_uses_background_targets_for_every_live_connector() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("scene-all-outputs");
     let events = root.join("events");
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     let engine = root.join("linux-wallpaperengine");
     fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(
-        &niri,
-        "#!/bin/sh\nprintf '%s\\n' '{\"eDP-1\":{\"name\":\"eDP-1\"},\"DP-1\":{\"name\":\"DP-1\"}}'\n",
-    )
-    .unwrap();
     fs::write(
         &engine,
         format!(
@@ -679,7 +684,7 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
         ),
     )
     .unwrap();
-    for executable in [&noctalia, &niri, &engine] {
+    for executable in [&noctalia, &engine] {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let document = config(&noctalia, Path::new("/bin/true"), true)
@@ -687,16 +692,15 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
         .replace("scene_scaling = \"\"", "scene_scaling = \"fit\"")
         .replace("scene_clamp = \"\"", "scene_clamp = \"repeat\"")
         .replace(
-            "niri_program = \"/bin/true\"",
-            &format!("niri_program = {niri:?}"),
-        )
-        .replace(
             "linux_wallpaperengine_program = \"/bin/true\"",
             &format!("linux_wallpaperengine_program = {engine:?}"),
         );
     let parsed: Config = toml::from_str(&document).unwrap();
     let scene = parsed.playlists[1].entries[0].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let (mut driver, _) = driver_with(
+        parsed.renderer.clone(),
+        vec![live("DP-1", None), live("eDP-1", None)],
+    );
 
     without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
     thread::sleep(Duration::from_millis(100));
@@ -704,6 +708,7 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
     let launched = fs::read_to_string(&events).unwrap();
     assert!(launched.contains("--screen-root DP-1 --scaling fit --clamp repeat --bg 12345"));
     assert!(launched.contains("--screen-root eDP-1 --scaling fit --clamp repeat --bg 12345"));
+    assert!(launched.contains("--layer background"));
     assert!(launched.contains("--fps 75"));
     assert!(launched.contains("--scaling fit"));
     assert!(launched.contains("--clamp repeat"));
@@ -724,6 +729,124 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
 }
 
 #[test]
+fn a_switched_off_head_is_published_but_never_a_scene_target() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("scene-switched-off");
+    let events = root.join("events");
+    let engine = root.join("linux-wallpaperengine");
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nsleep 30\n",
+            events
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), true).replace(
+        "linux_wallpaperengine_program = \"/bin/true\"",
+        &format!("linux_wallpaperengine_program = {engine:?}"),
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let scene = parsed.playlists[1].entries[0].clone();
+    let off = Output {
+        name: "HDMI-A-1".into(),
+        enabled: false,
+        ..Output::default()
+    };
+    let (mut driver, _) = driver_with(
+        parsed.renderer.clone(),
+        vec![live("DP-1", None), off.clone(), live("eDP-1", None)],
+    );
+
+    assert_eq!(
+        driver.connected_outputs().unwrap(),
+        vec!["DP-1".to_string(), "eDP-1".to_string()]
+    );
+    assert!(driver.published_outputs().contains(&off));
+    without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let launched = fs::read_to_string(&events).unwrap();
+    assert_eq!(launched.matches("--screen-root").count(), 2);
+    assert!(!launched.contains("HDMI-A-1"), "{launched}");
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_compositor_with_only_switched_off_heads_is_a_readiness_error() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        true,
+    ))
+    .unwrap();
+    let off = Output {
+        name: "eDP-1".into(),
+        enabled: false,
+        ..Output::default()
+    };
+    let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![off]);
+
+    let error = driver.connected_outputs().unwrap_err();
+
+    assert!(
+        error.contains("the compositor reported no enabled outputs"),
+        "{error}"
+    );
+    assert_eq!(driver.published_outputs().len(), 1);
+}
+
+#[test]
+fn status_publishes_the_compositor_snapshot_with_switched_off_heads() {
+    let root = directory("status-outputs");
+    let document = config(Path::new("/bin/true"), Path::new("/bin/true"), false);
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, &document).unwrap();
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let off = Output {
+        name: "HDMI-A-1".into(),
+        enabled: false,
+        physical_width_mm: 700,
+        ..Output::default()
+    };
+    let (driver, _) = driver_with(
+        parsed.renderer.clone(),
+        vec![live("eDP-1", Some(60_000)), off],
+    );
+    let mut runtime = Runtime::new(config_path, parsed, driver, at).unwrap();
+    runtime.apply_current().unwrap();
+
+    let response = runtime.handle(
+        wall_in_one_service::protocol::Request {
+            verb: "status".into(),
+            argument: None,
+        },
+        at,
+    );
+    let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+
+    let outputs = status["outputs"].as_array().unwrap();
+    assert_eq!(outputs.len(), 2, "{status}");
+    assert_eq!(outputs[0]["name"], "eDP-1");
+    assert_eq!(outputs[0]["enabled"], true);
+    assert_eq!(outputs[0]["refresh_millihz"], 60_000);
+    assert_eq!(outputs[1]["name"], "HDMI-A-1");
+    assert_eq!(outputs[1]["enabled"], false);
+    assert_eq!(outputs[1]["physical_width_mm"], 700);
+    assert_eq!(outputs[1]["refresh_millihz"], serde_json::Value::Null);
+    // What the companion reads is unchanged: the mirrored route, live.
+    assert_eq!(status["output_discovery_error"], "");
+    assert_eq!(status["displays"][0]["connector"], "ALL");
+    assert_eq!(status["displays"][0]["connected"], true);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("palette-failure");
@@ -739,7 +862,7 @@ fn palette_failure_is_reported_instead_of_claiming_the_entry_applied() {
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let parsed: Config = toml::from_str(&config(&script, Path::new("/bin/true"), false)).unwrap();
     let entry = parsed.playlists[0].entries[0].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let mut driver = offline_driver(parsed.renderer.clone());
 
     let error = without_text_file_busy(|| driver.apply(&entry, "", &parsed.settings)).unwrap_err();
 
@@ -761,7 +884,6 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
     let events = root.join("events");
     let launches = root.join("scene-launches");
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     let engine = root.join("linux-wallpaperengine");
     fs::write(
         &noctalia,
@@ -776,23 +898,13 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         ),
     )
     .unwrap();
-    fs::write(
-        &niri,
-        "#!/bin/sh\nprintf '%s\\n' '{\"eDP-1\":{\"name\":\"eDP-1\"}}'\n",
-    )
-    .unwrap();
-    for executable in [&noctalia, &niri, &engine] {
+    for executable in [&noctalia, &engine] {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let document = config(&noctalia, Path::new("/bin/true"), true)
-        .replace(
-            "niri_program = \"/bin/true\"",
-            &format!("niri_program = {niri:?}"),
-        )
-        .replace(
-            "linux_wallpaperengine_program = \"/bin/true\"",
-            &format!("linux_wallpaperengine_program = {engine:?}"),
-        );
+    let document = config(&noctalia, Path::new("/bin/true"), true).replace(
+        "linux_wallpaperengine_program = \"/bin/true\"",
+        &format!("linux_wallpaperengine_program = {engine:?}"),
+    );
     let parsed: Config = toml::from_str(&document).unwrap();
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)
         .unwrap()
@@ -803,7 +915,11 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
     let mut runtime = Runtime::new(
         config_path.clone(),
         parsed,
-        SystemDriver::new(toml::from_str::<Config>(&document).unwrap().renderer),
+        driver_with(
+            toml::from_str::<Config>(&document).unwrap().renderer,
+            vec![live("eDP-1", None)],
+        )
+        .0,
         at,
     )
     .unwrap();
@@ -939,7 +1055,7 @@ fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
     fs::set_permissions(&mpvpaper, fs::Permissions::from_mode(0o755)).unwrap();
     let parsed: Config = toml::from_str(&config(&noctalia, &mpvpaper, false)).unwrap();
     let video = parsed.playlists[0].entries[1].clone();
-    let mut driver = SystemDriver::new(parsed.renderer.clone());
+    let mut driver = offline_driver(parsed.renderer.clone());
 
     for _visit in 0..2 {
         without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
@@ -2963,7 +3079,6 @@ display_mode = "independent"
 theme_source_connector = "THEME"
 [renderer]
 noctalia_program = "/bin/true"
-niri_program = "/bin/true"
 mpvpaper_program = "/bin/true"
 linux_wallpaperengine_program = "/bin/true"
 own_scene_renderer = false
@@ -6214,7 +6329,7 @@ fn losing_singleton_has_no_wallpaper_side_effects() {
     fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&recorder, &recorder, false)).unwrap();
 
-    let mut owner = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut owner = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6225,7 +6340,7 @@ fn losing_singleton_has_no_wallpaper_side_effects() {
     assert_eq!(request(&socket, "status", None)["ok"], true);
     let before = fs::read_to_string(&events).unwrap();
 
-    let contender = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let contender = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6268,7 +6383,7 @@ fn initial_desktop_readiness_failure_is_visible_and_recovers_within_the_window()
         config(&noctalia, Path::new("/bin/true"), false),
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6344,7 +6459,7 @@ fn pause_during_startup_readiness_applies_once_then_pauses_motion() {
         "id = \"still-one\"\nkind = \"video\"\nstill = \"/tmp/one.png\"\nmotion = \"/tmp/one.mp4\"",
     );
     fs::write(&config_path, document).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6437,7 +6552,7 @@ fn stop_during_startup_readiness_applies_the_still_without_starting_motion() {
         "id = \"still-one\"\nkind = \"video\"\nstill = \"/tmp/one.png\"\nmotion = \"/tmp/one.mp4\"",
     );
     fs::write(&config_path, document).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6485,26 +6600,18 @@ fn stop_during_startup_readiness_applies_the_still_without_starting_motion() {
 }
 
 #[test]
-fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer() {
+fn initial_all_output_scene_waits_for_the_compositor_without_retrying_a_crashed_renderer() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = directory("initial-niri-readiness");
+    let root = directory("initial-compositor-readiness");
     let config_path = root.join("runtime.toml");
     let socket = root.join("runtime.sock");
-    let ready = root.join("ready");
+    // Where the compositor will listen once it has started: not yet.
+    let wayland = root.join("wayland-0");
     let launches = root.join("launches");
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     let engine = root.join("linux-wallpaperengine");
     fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(
-        &niri,
-        format!(
-            "#!/bin/sh\nif [ ! -f {:?} ]; then printf '%s\\n' 'niri IPC is not ready yet' >&2; exit 75; fi\nprintf '%s\\n' '{{\"eDP-1\":{{\"name\":\"eDP-1\"}}}}'\n",
-            ready
-        ),
-    )
-    .unwrap();
     fs::write(
         &engine,
         format!(
@@ -6513,21 +6620,18 @@ fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer()
         ),
     )
     .unwrap();
-    for executable in [&noctalia, &niri, &engine] {
+    for executable in [&noctalia, &engine] {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let document = config(&noctalia, &noctalia, true)
         .replace("default_playlist = \"day\"", "default_playlist = \"night\"")
         .replace(
-            "niri_program = \"/bin/true\"",
-            &format!("niri_program = {niri:?}"),
-        )
-        .replace(
             "linux_wallpaperengine_program = \"/bin/true\"",
             &format!("linux_wallpaperengine_program = {engine:?}"),
         );
     fs::write(&config_path, document).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
+        .env("WAYLAND_DISPLAY", &wayland)
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6542,10 +6646,18 @@ fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer()
         failed["last_error"]
             .as_str()
             .unwrap()
-            .contains("niri IPC is not ready yet")
+            .contains("cannot connect to the Wayland compositor"),
+        "{failed}"
     );
 
-    fs::write(&ready, "ready\n").unwrap();
+    let compositor = FakeCompositor::start(
+        &wayland,
+        Layout::of(vec![FakeOutput::new(
+            "eDP-1",
+            (1920, 1080, 60_000),
+            (0, 0, 1920, 1080),
+        )]),
+    );
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if launches.exists() {
@@ -6553,10 +6665,15 @@ fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer()
         }
         assert!(
             Instant::now() < deadline,
-            "scene was not launched after niri recovered"
+            "scene was not launched once the compositor was there"
         );
         thread::sleep(Duration::from_millis(50));
     }
+    assert!(
+        fs::read_to_string(&launches)
+            .unwrap()
+            .contains("--screen-root eDP-1")
+    );
     let failure_deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let status = request(&socket, "status", None);
@@ -6567,6 +6684,7 @@ fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer()
             .unwrap()
             .contains("scene renderer crashed once")
         {
+            assert_eq!(status["outputs"][0]["name"], "eDP-1", "{status}");
             break;
         }
         assert!(
@@ -6583,9 +6701,9 @@ fn initial_all_output_scene_waits_for_niri_without_retrying_a_crashed_renderer()
     );
 
     stop(&mut child, &socket);
+    drop(compositor);
     fs::remove_dir_all(root).unwrap();
 }
-
 #[test]
 fn successful_reload_apply_supersedes_the_pending_startup_retry() {
     use std::os::unix::fs::PermissionsExt;
@@ -6610,7 +6728,7 @@ fn successful_reload_apply_supersedes_the_pending_startup_retry() {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     fs::write(&config_path, config(&failed, &failed, false)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6654,7 +6772,7 @@ fn reload_without_an_apply_keeps_the_startup_readiness_retry() {
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
     let original = config(&helper, &helper, false);
     fs::write(&config_path, &original).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6705,7 +6823,7 @@ fn quit_during_a_pending_readiness_attempt_never_applies_again() {
     .unwrap();
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&helper, &helper, false)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -6764,7 +6882,7 @@ fn exhausted_startup_readiness_is_fatal_for_systemd_recovery() {
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&helper, &helper, false)).unwrap();
     let stderr = fs::File::create(&stderr_path).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")
@@ -7382,7 +7500,7 @@ fn the_file_watcher_reloads_when_only_the_overrides_file_changes() {
     fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+    let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
         .arg("--socket")

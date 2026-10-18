@@ -437,11 +437,13 @@ fn startup_readiness_error(error: &str) -> bool {
         "cannot run noctalia",
         "noctalia exited",
         "noctalia timed out",
-        "cannot run niri outputs",
-        "niri outputs exited",
-        "niri outputs timed out",
-        "niri outputs returned invalid JSON",
-        "niri reported no usable outputs",
+        // The compositor's socket is not there yet, or it is not answering
+        // yet: see `outputs`.
+        "cannot connect to the Wayland compositor",
+        "cannot use the Wayland connection",
+        "the Wayland connection failed",
+        "the Wayland compositor did not answer",
+        "the compositor reported no enabled outputs",
     ]
     .iter()
     .any(|marker| error.contains(marker))
@@ -741,7 +743,6 @@ display_mode = "mirrored"
 theme_source_connector = ""
 [renderer]
 noctalia_program = "/bin/true"
-niri_program = "/bin/true"
 mpvpaper_program = "/bin/true"
 linux_wallpaperengine_program = "/bin/true"
 own_scene_renderer = false

@@ -258,7 +258,6 @@ display_mode = "mirrored"
 theme_source_connector = ""
 [renderer]
 noctalia_program = "/bin/true"
-niri_program = "/bin/true"
 mpvpaper_program = "/bin/true"
 linux_wallpaperengine_program = "/bin/true"
 own_scene_renderer = false
@@ -310,6 +309,50 @@ fn playlist(template: &Playlist, index: usize) -> Playlist {
     playlist.id = format!("p{index}");
     playlist.name = format!("Playlist {index}");
     playlist
+}
+
+/// A document as 0.3.x wrote it: `[renderer]` still names niri, which the
+/// service once asked for displays.
+fn released_document(schema: u32) -> String {
+    let current = document(schema);
+    assert!(!current.contains("niri_program"));
+    current.replace(
+        "[renderer]\n",
+        "[renderer]\nniri_program = \"/run/current-system/sw/bin/niri\"\n",
+    )
+}
+
+#[test]
+fn a_document_written_by_0_3_with_niri_program_loads_and_means_the_same() {
+    for schema in [4, 5] {
+        let current = temp_file("current");
+        let released = temp_file("released");
+        fs::write(&current, document(schema)).unwrap();
+        fs::write(&released, released_document(schema)).unwrap();
+
+        let current_config = Config::load(&current).unwrap();
+        let released_config = Config::load(&released).unwrap();
+
+        fs::remove_file(current).unwrap();
+        fs::remove_file(released).unwrap();
+        assert_eq!(
+            current_config.renderer, released_config.renderer,
+            "niri_program is accepted and ignored"
+        );
+        assert_eq!(current_config.playlists, released_config.playlists);
+    }
+}
+
+#[test]
+fn niri_program_is_ignored_whatever_it_holds() {
+    for value in ["\"relative/niri\"", "\"\"", "42", "false"] {
+        let text = document(4).replace(
+            "[renderer]\n",
+            &format!("[renderer]\nniri_program = {value}\n"),
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        config.validate().unwrap();
+    }
 }
 
 #[test]

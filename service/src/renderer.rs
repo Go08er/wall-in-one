@@ -2,6 +2,7 @@ use crate::config::{
     Entry, EntryKind, Palette, PaletteSource, RendererSettings, ThemeMode, VideoInterpolation,
     VideoWhenHidden,
 };
+use crate::outputs::{Output, OutputSource, WaylandOutputs};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,10 +18,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MAX_OUTPUTS: usize = 64;
 pub const MAX_OUTPUT_NAME_BYTES: usize = 256;
-const MAX_OUTPUT_REPLY_BYTES: usize = 1024 * 1024;
-const MAX_REFRESH_MILLIHZ: u64 = 1_000_000;
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(3);
 const HELPER_STOP_GRACE: Duration = Duration::from_millis(250);
@@ -104,7 +102,6 @@ impl BoundedCapture {
 
 struct BoundedOutput {
     status: ExitStatus,
-    stdout: Captured,
     stderr: Captured,
 }
 
@@ -144,11 +141,13 @@ fn with_diagnostic(message: String, captured: &Captured) -> String {
     }
 }
 
+/// Run a helper to completion within `timeout`. Its standard output is
+/// drained and discarded; its standard error is kept, bounded, for the
+/// diagnostic.
 fn run_bounded(
     command: &mut Command,
     label: &str,
     timeout: Duration,
-    stdout_limit: usize,
 ) -> Result<BoundedOutput, String> {
     command
         .stdin(Stdio::null())
@@ -163,7 +162,7 @@ fn run_bounded(
             .stdout
             .take()
             .ok_or_else(|| format!("cannot capture {label} stdout"))?,
-        stdout_limit,
+        0,
     );
     let stderr = BoundedCapture::start(
         child
@@ -181,9 +180,9 @@ fn run_bounded(
                 unsafe {
                     libc::kill(-(child.id() as i32), libc::SIGKILL);
                 }
+                stdout.finish();
                 return Ok(BoundedOutput {
                     status,
-                    stdout: stdout.finish(),
                     stderr: stderr.finish(),
                 });
             }
@@ -230,6 +229,11 @@ pub trait WallpaperDriver: Send {
     /// at most one compositor query.
     fn connected_outputs(&mut self) -> Result<Vec<String>, String> {
         Err("live output discovery is unavailable".into())
+    }
+    /// The compositor's last successful display snapshot, switched-off heads
+    /// included, for `status`. Empty for drivers that do not ask one.
+    fn published_outputs(&self) -> &[Output] {
+        &[]
     }
     fn apply(
         &mut self,
@@ -739,7 +743,11 @@ pub struct SystemDriver {
     videos: HashMap<String, ActiveVideo>,
     scenes: HashMap<String, ActiveScene>,
     applying_batch: bool,
-    output_snapshot: Option<Result<Vec<LiveOutput>, String>>,
+    /// One hand-over's answer, reused for every renderer decision in it.
+    output_snapshot: Option<Result<Vec<Output>, String>>,
+    outputs: Box<dyn OutputSource>,
+    /// The last successful answer, switched-off heads included.
+    published: Vec<Output>,
     socket_namespace: u64,
     animations_inhibited: bool,
 }
@@ -748,12 +756,6 @@ struct ActiveVideo {
     renderer: Mpvpaper,
     entry: Entry,
     output: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LiveOutput {
-    name: String,
-    refresh_millihz: Option<u64>,
 }
 
 fn interpolation_options(mode: VideoInterpolation, refresh_millihz: Option<u64>) -> Vec<String> {
@@ -768,82 +770,7 @@ fn interpolation_options(mode: VideoInterpolation, refresh_millihz: Option<u64>)
     ]
 }
 
-fn query_outputs(settings: &RendererSettings) -> Result<Vec<LiveOutput>, String> {
-    let mut command = Command::new(&settings.niri_program);
-    command.args(["msg", "--json", "outputs"]);
-    let reply = run_bounded(
-        &mut command,
-        "niri outputs",
-        HELPER_TIMEOUT,
-        MAX_OUTPUT_REPLY_BYTES,
-    )?;
-    if !reply.status.success() {
-        return Err(with_diagnostic(
-            format!("niri outputs exited with {}", reply.status),
-            &reply.stderr,
-        ));
-    }
-    if reply.stdout.truncated {
-        return Err("niri outputs reply exceeded 1 MiB".into());
-    }
-    let document: serde_json::Value =
-        serde_json::from_slice(&reply.stdout.bytes).map_err(|error| {
-            with_diagnostic(
-                format!("niri outputs returned invalid JSON: {error}"),
-                &reply.stderr,
-            )
-        })?;
-    let object = document
-        .as_object()
-        .ok_or("niri outputs did not return an object")?;
-    if object.len() > MAX_OUTPUTS {
-        return Err(format!(
-            "niri reported more than the supported {MAX_OUTPUTS} outputs"
-        ));
-    }
-    let mut outputs = Vec::new();
-    for (key, value) in object {
-        let entry = value.as_object();
-        let candidate = entry
-            .and_then(|entry| entry.get("name"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(key)
-            .trim();
-        if !usable_output_name(candidate)
-            || outputs
-                .iter()
-                .any(|known: &LiveOutput| known.name == candidate)
-        {
-            continue;
-        }
-        let refresh_millihz = entry
-            .and_then(|entry| {
-                let current = entry.get("current_mode")?.as_u64()? as usize;
-                entry
-                    .get("modes")?
-                    .as_array()?
-                    .get(current)?
-                    .get("refresh_rate")?
-                    .as_u64()
-            })
-            .filter(|refresh| *refresh > 0 && *refresh <= MAX_REFRESH_MILLIHZ);
-        outputs.push(LiveOutput {
-            name: candidate.to_string(),
-            refresh_millihz,
-        });
-    }
-    outputs.sort_by(|left, right| left.name.cmp(&right.name));
-    if outputs.is_empty() {
-        Err(with_diagnostic(
-            "niri reported no usable outputs; paired still remains applied".into(),
-            &reply.stderr,
-        ))
-    } else {
-        Ok(outputs)
-    }
-}
-
-fn usable_output_name(candidate: &str) -> bool {
+pub(crate) fn usable_output_name(candidate: &str) -> bool {
     !candidate.is_empty()
         && candidate.len() <= MAX_OUTPUT_NAME_BYTES
         && !candidate.chars().any(char::is_whitespace)
@@ -922,8 +849,8 @@ fn mpv_socket_name(namespace: u64, output: &str) -> String {
     )
 }
 
-fn unambiguous_refresh_millihz(outputs: &[LiveOutput], output: &str) -> Option<u64> {
-    let candidates: Vec<&LiveOutput> = outputs
+fn unambiguous_refresh_millihz(outputs: &[Output], output: &str) -> Option<u64> {
+    let candidates: Vec<&Output> = outputs
         .iter()
         .filter(|candidate| output.is_empty() || candidate.name == output)
         .collect();
@@ -953,12 +880,28 @@ impl SystemDriver {
     }
 
     pub fn new_for_service_socket(settings: RendererSettings, socket: &Path) -> Self {
+        Self::with_output_source(
+            settings,
+            socket,
+            Box::new(WaylandOutputs::from_environment()),
+        )
+    }
+
+    /// A driver that learns its displays from `outputs` rather than from the
+    /// compositor `WAYLAND_DISPLAY` names.
+    pub fn with_output_source(
+        settings: RendererSettings,
+        socket: &Path,
+        outputs: Box<dyn OutputSource>,
+    ) -> Self {
         Self {
             settings,
             videos: HashMap::new(),
             scenes: HashMap::new(),
             applying_batch: false,
             output_snapshot: None,
+            outputs,
+            published: Vec::new(),
             socket_namespace: renderer_socket_namespace(socket),
             animations_inhibited: false,
         }
@@ -985,7 +928,7 @@ impl SystemDriver {
     fn noctalia(&self, arguments: &[&str]) -> Result<(), String> {
         let mut command = Command::new(&self.settings.noctalia_program);
         command.args(arguments);
-        let result = run_bounded(&mut command, "noctalia", HELPER_TIMEOUT, 0)?;
+        let result = run_bounded(&mut command, "noctalia", HELPER_TIMEOUT)?;
         if result.status.success() {
             Ok(())
         } else {
@@ -1031,12 +974,29 @@ impl SystemDriver {
         }
     }
 
-    fn live_outputs(&mut self) -> Result<Vec<LiveOutput>, String> {
+    /// The enabled outputs, asked of the compositor. A switched-off head is
+    /// published but never a target.
+    fn query_outputs(&mut self) -> Result<Vec<Output>, String> {
+        let reported = self.outputs.outputs()?;
+        let enabled: Vec<Output> = reported
+            .iter()
+            .filter(|output| output.enabled)
+            .cloned()
+            .collect();
+        self.published = reported;
+        if enabled.is_empty() {
+            Err("the compositor reported no enabled outputs; paired still remains applied".into())
+        } else {
+            Ok(enabled)
+        }
+    }
+
+    fn live_outputs(&mut self) -> Result<Vec<Output>, String> {
         if !self.applying_batch {
-            return query_outputs(&self.settings);
+            return self.query_outputs();
         }
         if self.output_snapshot.is_none() {
-            self.output_snapshot = Some(query_outputs(&self.settings));
+            self.output_snapshot = Some(self.query_outputs());
         }
         self.output_snapshot
             .as_ref()
@@ -1209,6 +1169,10 @@ impl WallpaperDriver for SystemDriver {
 
     fn connected_outputs(&mut self) -> Result<Vec<String>, String> {
         self.current_outputs()
+    }
+
+    fn published_outputs(&self) -> &[Output] {
+        &self.published
     }
 
     fn apply(
@@ -1576,13 +1540,15 @@ mod tests {
     #[test]
     fn refresh_must_be_known_and_uniform_across_the_target() {
         let uniform = vec![
-            LiveOutput {
+            Output {
                 name: "DP-1".into(),
                 refresh_millihz: Some(60_000),
+                ..Output::default()
             },
-            LiveOutput {
+            Output {
                 name: "DP-2".into(),
                 refresh_millihz: Some(60_000),
+                ..Output::default()
             },
         ];
         assert_eq!(unambiguous_refresh_millihz(&uniform, ""), Some(60_000));
@@ -1590,16 +1556,18 @@ mod tests {
 
         let mixed = vec![
             uniform[0].clone(),
-            LiveOutput {
+            Output {
                 name: "DP-2".into(),
                 refresh_millihz: Some(165_004),
+                ..Output::default()
             },
         ];
         let partial = vec![
             uniform[0].clone(),
-            LiveOutput {
+            Output {
                 name: "DP-2".into(),
                 refresh_millihz: None,
+                ..Output::default()
             },
         ];
         assert_eq!(unambiguous_refresh_millihz(&mixed, ""), None);
@@ -1681,7 +1649,7 @@ mod tests {
             marker.display()
         ));
         let started = Instant::now();
-        let error = match run_bounded(&mut command, "test helper", Duration::from_millis(100), 0) {
+        let error = match run_bounded(&mut command, "test helper", Duration::from_millis(100)) {
             Ok(_) => panic!("hanging helper unexpectedly succeeded"),
             Err(error) => error,
         };
@@ -1699,7 +1667,7 @@ mod tests {
     fn helper_diagnostics_are_bounded_and_marked_when_truncated() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "head -c 20000 /dev/zero | tr '\\0' x >&2; exit 9"]);
-        let output = run_bounded(&mut command, "test helper", Duration::from_secs(1), 0).unwrap();
+        let output = run_bounded(&mut command, "test helper", Duration::from_secs(1)).unwrap();
         assert!(!output.status.success());
         let rendered = diagnostic(&output.stderr);
         assert!(rendered.len() <= MAX_DIAGNOSTIC_BYTES + 32);

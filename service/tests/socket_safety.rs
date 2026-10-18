@@ -27,12 +27,7 @@ fn executable(path: &Path, body: &str) {
 
 fn fixture(root: &Path) -> PathBuf {
     let noctalia = root.join("noctalia");
-    let niri = root.join("niri");
     executable(&noctalia, "exit 0");
-    executable(
-        &niri,
-        "printf '%s\\n' '{\"eDP-1\":{\"current_mode\":0,\"modes\":[{\"refresh_rate\":60000}]}}'",
-    );
     let config = root.join("runtime.toml");
     fs::write(
         &config,
@@ -49,7 +44,6 @@ display_mode = "mirrored"
 theme_source_connector = ""
 [renderer]
 noctalia_program = {noctalia:?}
-niri_program = {niri:?}
 mpvpaper_program = "/bin/true"
 linux_wallpaperengine_program = "/bin/true"
 own_scene_renderer = false
@@ -75,7 +69,6 @@ still = "/tmp/still.png"
 palette = {{ kind = "keep", mode = "keep" }}
 "#,
             noctalia = noctalia.display(),
-            niri = niri.display(),
         ),
     )
     .unwrap();
@@ -84,6 +77,9 @@ palette = {{ kind = "keep", mode = "keep" }}
 
 fn spawn(config: &Path, socket: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        // Never a desktop's compositor.
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
         .arg("--config")
         .arg(config)
         .arg("--socket")
@@ -132,6 +128,8 @@ fn a_regular_file_at_the_socket_path_is_never_replaced() {
     let socket = root.join("runtime.sock");
     fs::write(&socket, b"sentinel").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
         .arg("--config")
         .arg(&config)
         .arg("--socket")

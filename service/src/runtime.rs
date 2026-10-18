@@ -2,6 +2,7 @@ use crate::config::{
     Config, DisplayAssignment, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES, Playlist,
     SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
 };
+use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response, success_fits};
 use crate::renderer::{MAX_OUTPUT_NAME_BYTES, RendererFailure, WallpaperDriver};
@@ -149,6 +150,12 @@ pub struct Status<'a> {
     pub schedule: ScheduleStatus<'a>,
     pub schedules: Vec<ScheduleRuleStatus<'a>>,
     pub displays: Vec<DisplayStatus<'a>>,
+    /// The compositor's last successful display snapshot, switched-off heads
+    /// included (`enabled: false`). Empty before the first one, and left
+    /// empty when it would not fit the reply; `output_discovery_error` says
+    /// when it is stale. Not part of the configuration's status budget: the
+    /// compositor, not the document, decides its size.
+    pub outputs: &'a [Output],
 }
 
 #[derive(Debug, Serialize)]
@@ -566,7 +573,7 @@ pub struct Runtime<D: WallpaperDriver> {
     /// assignments.
     target_outputs: Vec<String>,
     /// Last successful live compositor snapshot. This remains available as a
-    /// bounded fallback across a transient niri failure.
+    /// bounded fallback across a transient discovery failure.
     live_outputs: Option<Vec<String>>,
     output_discovery_error: String,
     last_output_probe: Instant,
@@ -1198,7 +1205,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             match self.probe_outputs() {
                 Ok(outputs) if self.live_outputs.as_ref() != Some(&outputs) => {
                     // The discovery call populated the driver's batch snapshot;
-                    // reuse it for this hand-over instead of asking niri twice.
+                    // reuse it for this hand-over instead of asking the
+                    // compositor twice.
                     let _ = self.apply_current_in_batch(Ok(outputs));
                 }
                 Ok(outputs) => {
@@ -2484,7 +2492,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 } else if let Some(outputs) = &self.live_outputs {
                     outputs.clone()
                 } else {
-                    // niri may not be ready during login. Preserve the former
+                    // The compositor may not be ready during login. Preserve the former
                     // explicit-assignment behaviour until a live snapshot is
                     // available; unassigned outputs join on the first probe.
                     self.config
@@ -4661,11 +4669,21 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// as the 64-record cap already does -- instead of the reply failing. The
     /// shape of the status never changes, and `entry_taboo` stays exact.
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
-        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES)?;
+        let with_outputs = self.status_reply_with(at, true)?;
+        if success_fits(&with_outputs) {
+            return Ok(with_outputs);
+        }
+        // The display snapshot is the compositor's, outside the document's
+        // budget. Leave it out before failing the reply.
+        self.status_reply_with(at, false)
+    }
+
+    fn status_reply_with(&self, at: NaiveDateTime, outputs: bool) -> Result<String, String> {
+        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, outputs)?;
         if success_fits(&full) {
             return Ok(full);
         }
-        let mut best = self.status_json(at, 0)?;
+        let mut best = self.status_json(at, 0, outputs)?;
         if !success_fits(&best) {
             // Not reachable from a validated document; the writer refuses it.
             return Ok(best);
@@ -4674,7 +4692,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let (mut fits, mut over) = (0, MAX_TABOO_STATUS_ENTRIES);
         while over - fits > 1 {
             let middle = fits + (over - fits) / 2;
-            let candidate = self.status_json(at, middle)?;
+            let candidate = self.status_json(at, middle, outputs)?;
             if success_fits(&candidate) {
                 fits = middle;
                 best = candidate;
@@ -4685,9 +4703,14 @@ impl<D: WallpaperDriver> Runtime<D> {
         Ok(best)
     }
 
-    fn status_json(&self, at: NaiveDateTime, taboo_limit: usize) -> Result<String, String> {
+    fn status_json(
+        &self,
+        at: NaiveDateTime,
+        taboo_limit: usize,
+        outputs: bool,
+    ) -> Result<String, String> {
         if self.is_independent() {
-            return self.status_json_independent(at, taboo_limit);
+            return self.status_json_independent(at, taboo_limit, outputs);
         }
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -5018,6 +5041,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             schedules,
             displays,
+            outputs: if outputs {
+                self.driver.published_outputs()
+            } else {
+                &[]
+            },
         })
         .map_err(|error| error.to_string())
     }
@@ -5026,6 +5054,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         &self,
         at: NaiveDateTime,
         taboo_limit: usize,
+        outputs: bool,
     ) -> Result<String, String> {
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -5396,6 +5425,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             schedules,
             displays,
+            outputs: if outputs {
+                self.driver.published_outputs()
+            } else {
+                &[]
+            },
         })
         .map_err(|error| error.to_string())
     }

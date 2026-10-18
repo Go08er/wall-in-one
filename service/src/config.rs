@@ -126,7 +126,12 @@ pub enum DisplayMode {
 #[serde(deny_unknown_fields)]
 pub struct RendererSettings {
     pub noctalia_program: PathBuf,
-    pub niri_program: PathBuf,
+    /// Written by 0.3.x and earlier, when display discovery asked niri. It
+    /// is accepted so that their documents still load, and ignored: displays
+    /// now come from the compositor's Wayland protocols (`outputs`). The
+    /// compiler no longer writes it.
+    #[serde(default, rename = "niri_program")]
+    pub retired_niri_program: serde::de::IgnoredAny,
     pub mpvpaper_program: PathBuf,
     pub linux_wallpaperengine_program: PathBuf,
     pub own_scene_renderer: bool,
@@ -661,7 +666,6 @@ impl Config {
         bounded_nonempty("renderer layer", &self.renderer.layer, MAX_OPTION_BYTES)?;
         for (label, path) in [
             ("noctalia_program", &self.renderer.noctalia_program),
-            ("niri_program", &self.renderer.niri_program),
             ("mpvpaper_program", &self.renderer.mpvpaper_program),
             (
                 "linux_wallpaperengine_program",
@@ -866,7 +870,7 @@ impl Config {
                 .saturating_add(rule.end.as_ref().map_or(0, String::len));
         }
 
-        // niri discovery is independently capped at 64 live outputs and the
+        // Output discovery is independently capped at 64 live outputs and the
         // atomic inventory also retains up to 64 configured-but-detached
         // assignments. A manual override may put the largest playlist and
         // entry on every row, so count the full 128-row union.

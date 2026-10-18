@@ -391,7 +391,12 @@ The importer preserves, subject to current typed limits:
   folders (each missing, or a video with no still) is kept as it was, and the
   import's message and report name it: until one can, playback goes on
   without that playlist and without whatever uses it ("All media" plays in
-  place of a default that names it), and the app says so;
+  place of a default that names it), and the app says so. The import records
+  what it found in its journal, so an interrupted import that you finish
+  later reports what it found when it began, even if a still or a video has
+  appeared or gone meanwhile. One that 0.2.2 began and this version finishes
+  keeps the report 0.2.2 staged, which has no such note: only the message
+  names the playlist;
 - shared still and palette pairing metadata, including manually selected
   stills as associations rather than owned files;
 - automatic still associations only when an exact adjacent predecessor

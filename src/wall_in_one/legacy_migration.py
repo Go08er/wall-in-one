@@ -63,6 +63,14 @@ MARKER_FILENAME: Final = "legacy-migration-v1.json"
 REPORT_FILENAME: Final = "legacy-migration-v1.md"
 JOURNAL_FILENAME: Final = ".legacy-migration-v1.journal.json"
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
+#: The two journal fields an import begun by 0.3.0 or later adds, always
+#: together: the names of the playlists it found with nothing to play, and the
+#: notes its report holds. Both come from reading the library and the wallpaper
+#: files, which the legacy digest does not cover, so a retry cannot ask again.
+#: Journals 0.2.2 and earlier wrote neither, which is how they are told apart.
+JOURNAL_NOTHING_TO_PLAY: Final = "nothing_to_play"
+JOURNAL_NOTES: Final = "report_notes"
+_PLAYABILITY_FIELDS: Final = frozenset({JOURNAL_NOTHING_TO_PLAY, JOURNAL_NOTES})
 MAX_REPORT_BYTES: Final = 4 * 1024 * 1024
 MAX_RECORDED_PATH_BYTES: Final = 4096
 MAX_RECORDED_SCHEMA_ABS: Final = 2_147_483_647
@@ -469,7 +477,7 @@ def probe(*, source_dir: Path | None = None, noctalia_settings: Path | None = No
         return Probe("conflict", str(error), source, conflicts=(journal_path(),))
     if journal is not None:
         try:
-            legacy, _targets_as_staged = _validate_resumable_journal(
+            legacy, _staged, _converted = _validate_resumable_journal(
                 journal,
                 source=source,
                 noctalia_settings=noctalia_settings,
@@ -780,6 +788,10 @@ def _migrate_locked(
             "legacy_digest": source.digest,
             "created_at": created_at,
             "targets": {target.key: target.digest for target in targets},
+            # What reading the library and the files found, so a retry renders
+            # this report again even if they changed meanwhile.
+            JOURNAL_NOTHING_TO_PLAY: list(converted.nothing_to_play),
+            JOURNAL_NOTES: list(converted.notes),
         }
         try:
             state_file.write_atomic_text(journal_path(), _json_text(journal_document))
@@ -789,20 +801,22 @@ def _migrate_locked(
             ) from error
     else:
         # Finished with the bytes it staged, whichever version began it.
-        source, targets = _validate_resumable_journal(
+        source, targets, converted = _validate_resumable_journal(
             journal,
             source=source_directory,
             noctalia_settings=noctalia_settings,
         )
-        converted = _convert(source)
         _prepare_directories(bool(converted.api_key))
         _stage_targets(targets, keep_existing=True)
 
     _install_targets(targets)
-    # A resumed import keeps the journal's report, which may predate these
-    # diagnostics. Say what this build sees without promising it is there.
+    # The report holds these notes for an import this build began (a resumed
+    # one included: the journal recorded them). One a released version began
+    # keeps the report it staged, which lacks them: say what this build sees
+    # without promising the report does.
     nothing_to_play_detail = _nothing_to_play_detail(
-        converted.nothing_to_play, report_pointer=journal is None
+        converted.nothing_to_play,
+        report_pointer=journal is None or JOURNAL_NOTES in journal,
     )
     try:
         journal_path().unlink()
@@ -1051,7 +1065,19 @@ def _boolean(value: object, where: str, fallback: bool) -> bool:
     return value
 
 
-def _convert(source: _LegacySource, *, as_released: bool = False) -> _Converted:
+def _convert(
+    source: _LegacySource,
+    *,
+    as_released: bool = False,
+    recorded: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
+) -> _Converted:
+    """The retired profile as this build imports it.
+
+    ``as_released`` leaves out the playability notes, as 0.2.2 did.
+    ``recorded`` is a journal's record of an import this build began, the
+    playlists with nothing to play and the report's notes: the report says what
+    that import found, not what the library and the files hold now.
+    """
     notes: list[str] = []
     _report_unmapped_plugin_settings(source.plugin_settings, notes)
     legacy_playlists, legacy_outputs, legacy_pairings = _legacy_authoring(source, notes)
@@ -1084,18 +1110,17 @@ def _convert(source: _LegacySource, *, as_released: bool = False) -> _Converted:
     # Released imports did not include these notes in their report. Their
     # journal binds that report's bytes too, so resuming one must reproduce
     # its conversion rather than add today's diagnostics to it.
-    nothing_to_play = (
-        ()
-        if as_released
-        else _nothing_to_play(
-            converted_playlists,
-            converted_settings,
-            converted_pairings,
-            converted_schedules,
-            converted_displays,
-            notes,
+    nothing_to_play: tuple[str, ...] = ()
+    if not as_released:
+        found = (
+            recorded[0]
+            if recorded is not None
+            else _find_nothing_to_play(converted_playlists, converted_settings, converted_pairings)
         )
-    )
+        about = (converted_playlists, converted_settings, converted_schedules, converted_displays)
+        nothing_to_play = _note_nothing_to_play(*about, found, notes)
+        if recorded is not None:
+            _check_recorded_notes(*about, nothing_to_play, recorded[1])
     api_key = _api_key(source.plugin_settings, notes)
 
     if source.schema < 5:
@@ -1120,7 +1145,7 @@ def _convert(source: _LegacySource, *, as_released: bool = False) -> _Converted:
         schedules=converted_schedules,
         displays=converted_displays,
         api_key=api_key,
-        notes=tuple(dict.fromkeys(notes)),
+        notes=recorded[1] if recorded is not None else tuple(dict.fromkeys(notes)),
         designated_output=designated,
         legacy_schema=source.schema,
         legacy_playlist_count=len(legacy_playlists),
@@ -1129,13 +1154,10 @@ def _convert(source: _LegacySource, *, as_released: bool = False) -> _Converted:
     )
 
 
-def _nothing_to_play(
+def _find_nothing_to_play(
     converted: dict[str, playlists.Playlist],
     settings: config.Settings,
     pairing_records: dict[str, pairings.Pairing],
-    rules: tuple[schedules.Rule, ...],
-    assignments: dict[str, str],
-    notes: list[str],
 ) -> tuple[str, ...]:
     """Each imported playlist holding entries but nothing the compiler can use, by name.
 
@@ -1143,11 +1165,12 @@ def _nothing_to_play(
     but the compiler builds the runtime document without such a playlist,
     and without the default, the rule or the display's own playlist that
     names it (`runtime_config.LeftOut`), until one of its wallpapers is back.
-    Said here, naming it, so the import report is honest; the app says what
-    it left out too once it publishes. Found as the app will find it:
-    the real scan of the imported library folders (and Steam, while Workshop
-    scanning is on) with the imported pairings, judged by the compiler's own
-    rule (`runtime_config.entry_playability`). The scan only reads.
+    Found as the app will find it: the real scan of the imported library
+    folders (and Steam, while Workshop scanning is on) with the imported
+    pairings, judged by the compiler's own rule
+    (`runtime_config.entry_playability`). The scan only reads. It is the
+    answer at the moment of a new import; the journal records it
+    (`JOURNAL_NOTHING_TO_PLAY`) so that a retry does not ask again.
     """
     # Imported here: the module stays importable where the app's isn't.
     from wall_in_one import runtime_config
@@ -1178,32 +1201,91 @@ def _nothing_to_play(
         def found(source: Path) -> bool:
             return runtime_config.entry_playability(known.get(source), view).compiles
 
-        names: list[str] = []
-        for playlist in converted.values():
-            if not playlist.entries or any(found(entry.path) for entry in playlist.entries):
-                continue
-            uses = []
-            if settings.active_playlist == playlist.id:
-                uses.append("the default uses it")
-            if any(rule.playlist == playlist.id for rule in rules):
-                uses.append("a schedule rule uses it")
-            if any(assigned == playlist.id for assigned in assignments.values()):
-                uses.append("a display uses it")
-            used = f" ({', '.join(uses)})" if uses else ""
-            count = len(playlist.entries)
-            notes.append(
-                f"\u201c{playlist.name}\u201d has nothing to play yet{used}: none of its {count} "
-                f"wallpaper{'' if count == 1 else 's'} can play from the imported library "
-                "folders now. "
-                "Its entries were kept. Until one of them is back, playback goes on without "
-                "this playlist: where it is the default, \u201cAll media\u201d plays instead, "
-                "and a schedule rule or a display that uses it is left out. The app says so "
-                "until then."
-            )
-            names.append(playlist.name)
-        return tuple(names)
+        return tuple(
+            playlist.name
+            for playlist in converted.values()
+            if playlist.entries and not any(found(entry.path) for entry in playlist.entries)
+        )
     finally:
         view.shutdown()
+
+
+def _note_nothing_to_play(
+    converted: dict[str, playlists.Playlist],
+    settings: config.Settings,
+    rules: tuple[schedules.Rule, ...],
+    assignments: dict[str, str],
+    names: tuple[str, ...],
+    notes: list[str],
+) -> tuple[str, ...]:
+    """The report's note for each named playlist; the names, once they are checked.
+
+    The names must be exactly what `_find_nothing_to_play` could have
+    returned for these playlists: unique, each one holding entries, in the
+    playlists' order. A journal's record that is not is refused, not trusted.
+    """
+    wanted = set(names)
+    found = tuple(
+        playlist for playlist in converted.values() if playlist.name in wanted and playlist.entries
+    )
+    if tuple(playlist.name for playlist in found) != names:
+        raise MigrationError(
+            f"migration journal {journal_path()} names playlists the import cannot have found"
+        )
+    for playlist in found:
+        notes.append(_nothing_to_play_note(playlist, settings, rules, assignments))
+    return names
+
+
+def _nothing_to_play_note(
+    playlist: playlists.Playlist,
+    settings: config.Settings,
+    rules: tuple[schedules.Rule, ...],
+    assignments: dict[str, str],
+) -> str:
+    uses = []
+    if settings.active_playlist == playlist.id:
+        uses.append("the default uses it")
+    if any(rule.playlist == playlist.id for rule in rules):
+        uses.append("a schedule rule uses it")
+    if any(assigned == playlist.id for assigned in assignments.values()):
+        uses.append("a display uses it")
+    used = f" ({', '.join(uses)})" if uses else ""
+    count = len(playlist.entries)
+    return (
+        f"\u201c{playlist.name}\u201d has nothing to play yet{used}: none of its {count} "
+        f"wallpaper{'' if count == 1 else 's'} can play from the imported library "
+        "folders now. "
+        "Its entries were kept. Until one of them is back, playback goes on without "
+        "this playlist: where it is the default, \u201cAll media\u201d plays instead, "
+        "and a schedule rule or a display that uses it is left out. The app says so "
+        "until then."
+    )
+
+
+def _check_recorded_notes(
+    converted: dict[str, playlists.Playlist],
+    settings: config.Settings,
+    rules: tuple[schedules.Rule, ...],
+    assignments: dict[str, str],
+    names: tuple[str, ...],
+    recorded: tuple[str, ...],
+) -> None:
+    """Refuse a journal whose recorded names and notes do not belong together.
+
+    The notes are authenticated by the report's digest. The names are not
+    rendered, so they must be exactly the playlists whose note the recorded
+    notes hold, in the order they hold them.
+    """
+    every_note = {
+        _nothing_to_play_note(playlist, settings, rules, assignments): playlist.name
+        for playlist in converted.values()
+        if playlist.entries
+    }
+    if tuple(every_note[note] for note in recorded if note in every_note) != names:
+        raise MigrationError(
+            f"migration journal {journal_path()} names playlists its recorded notes do not"
+        )
 
 
 def _report_unmapped_plugin_settings(plugin: dict[str, Any], notes: list[str]) -> None:
@@ -2041,9 +2123,11 @@ def _targets(
 ) -> tuple[_Target, ...]:
     """Every file an import installs, the marker last.
 
-    ``as_released`` renders them byte for byte as 0.2.2 and earlier did, for
-    finishing an import one of those versions began (`_targets_as_staged`).
-    A new import never uses it.
+    ``as_released`` renders the stores and the report's ending as 0.2.2 and
+    earlier did. It gives their bytes only together with ``_convert(...,
+    as_released=True)``, which leaves out the playability notes they never
+    had; only `_targets_as_staged` pairs the two, for finishing an import one
+    of those versions began. A new import never uses it.
     """
     pairings_payload = {
         "version": pairings.FORMAT_VERSION,
@@ -2290,11 +2374,17 @@ def _read_journal() -> dict[str, Any] | None:
     if type(document.get("version")) is not int or document["version"] != MIGRATION_VERSION:
         raise MigrationError(f"migration journal {target} has an unsupported version")
     required_fields = {"version", "legacy_source", "legacy_digest", "created_at", "targets"}
-    if set(document) != required_fields:
+    # The record of playlists with nothing to play is the one optional field:
+    # journals 0.2.2 and earlier wrote have none.
+    if set(document) not in (required_fields, required_fields | _PLAYABILITY_FIELDS):
         raise MigrationError(f"migration journal {target} is incomplete or ambiguous")
     _recorded_path(document["legacy_source"], "migration journal legacy source")
     _sha256(document["legacy_digest"], "migration journal legacy digest")
     _timestamp(document["created_at"], "migration journal timestamp")
+    for field in _PLAYABILITY_FIELDS & set(document):
+        recorded = document[field]
+        if not isinstance(recorded, list) or not all(type(item) is str for item in recorded):
+            raise MigrationError(f"migration journal {target} has a malformed {field} record")
     raw_targets = document["targets"]
     if not isinstance(raw_targets, dict):
         raise MigrationError(f"migration journal {target} has no target digest map")
@@ -2310,23 +2400,45 @@ def _read_journal() -> dict[str, Any] | None:
 
 
 def _targets_as_staged(
-    journal: dict[str, Any], legacy: _LegacySource, converted: _Converted
-) -> tuple[_Target, ...]:
-    """The targets exactly as the journaled import staged them.
+    journal: dict[str, Any], legacy: _LegacySource
+) -> tuple[tuple[_Target, ...], _Converted]:
+    """The targets exactly as the journaled import staged them, and their conversion.
 
     A journal binds the digest of every target, so an interrupted import is
-    finished with those bytes and no others. One this build began describes
-    this build's output. One that 0.2.2 or earlier began describes theirs,
+    finished with those bytes and no others.
+
+    One this build began describes this build's output, whatever has changed
+    in the library since: it recorded the playlists the scan found with
+    nothing to play (`JOURNAL_NOTHING_TO_PLAY`), and the report is rendered
+    from that record, not from a new scan, which only a change outside the
+    import (a still appearing, a video deleted) could make disagree. The
+    record is authenticated by the report's digest in the journal, and by the
+    marker's after it: a record that renders other bytes is refused, as is one
+    that is not what the scan could have returned (`_note_nothing_to_play`).
+
+    One that 0.2.2 or earlier began has no such field and describes theirs,
     which this build can still render (`_targets`, ``as_released``): it is
     completed as it was staged, never restarted in another rendering, which
-    would leave its staged and already installed files unaccounted for.
+    would leave its staged and already installed files unaccounted for. Its
+    report predates the notes, so the current conversion is tried first, as
+    for any journal of unknown rendering, then the released one.
     """
     created_at = str(journal["created_at"])
-    for as_released in (False, True):
-        rendering = _convert(legacy, as_released=True) if as_released else converted
-        targets = _targets(legacy, rendering, created_at, as_released=as_released)
+    if JOURNAL_NOTES in journal:
+        converted = _convert(
+            legacy,
+            recorded=(tuple(journal[JOURNAL_NOTHING_TO_PLAY]), tuple(journal[JOURNAL_NOTES])),
+        )
+        targets = _targets(legacy, converted, created_at)
         if journal["targets"] == {target.key: target.digest for target in targets}:
-            return targets
+            return targets, converted
+    else:
+        converted = _convert(legacy)
+        for as_released in (False, True):
+            rendering = _convert(legacy, as_released=True) if as_released else converted
+            targets = _targets(legacy, rendering, created_at, as_released=as_released)
+            if journal["targets"] == {target.key: target.digest for target in targets}:
+                return targets, converted
     raise MigrationError(
         f"migration journal {journal_path()} does not describe this build's output"
     )
@@ -2334,7 +2446,7 @@ def _targets_as_staged(
 
 def _validate_resumable_journal(
     journal: dict[str, Any], *, source: Path, noctalia_settings: Path | None
-) -> tuple[_LegacySource, tuple[_Target, ...]]:
+) -> tuple[_LegacySource, tuple[_Target, ...], _Converted]:
     recorded_source = _recorded_path(journal["legacy_source"], "migration journal legacy source")
     if recorded_source != source:
         raise MigrationError(
@@ -2347,7 +2459,7 @@ def _validate_resumable_journal(
             "legacy source changed after migration staging began; no current file was "
             f"overwritten. Restore the source matching {journal_path()} before retrying"
         )
-    targets = _targets_as_staged(journal, legacy, _convert(legacy))
+    targets, converted = _targets_as_staged(journal, legacy)
     for target in targets:
         if _path_exists(target.path) and not _exact_regular(
             target.path, target.contents, target.maximum
@@ -2356,7 +2468,7 @@ def _validate_resumable_journal(
                 f"interrupted migration target {target.path} exists with different or unsafe "
                 "bytes; it was not overwritten"
             )
-    return legacy, targets
+    return legacy, targets, converted
 
 
 def _validate_completed_journal(marker: dict[str, Any] | None, journal: dict[str, Any]) -> None:

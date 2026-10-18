@@ -491,9 +491,9 @@ def _warn_left_out(left_out: Sequence[runtime_config.LeftOut]) -> None:
     (`runtime_config.LeftOut`), so the command exits as for a clean compile:
     refusing would stop every publication and, on a profile that has never
     published, the service with it. The exception is where the scan could not
-    look (`runtime_config._compile`): there it refuses, All media included. Each line says which reference, whose it
-    is and why. A store that could not be read is a different thing: the
-    compiler refuses that file by name.
+    look (`runtime_config._compile`): there it refuses, All media included.
+    Each line says which reference, whose it is and why. A store that could
+    not be read is a different thing: the compiler refuses that file by name.
     """
     for one in left_out:
         print(f"warning: {one.warning()}", file=sys.stderr)

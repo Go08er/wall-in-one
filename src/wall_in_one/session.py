@@ -38,6 +38,7 @@ from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.library.pairings import Store as PairingStore
 from wall_in_one.library.playlist import Playlist
 from wall_in_one.library.playlists import Playlist as NamedPlaylist
+from wall_in_one.library.schedules import Rule as ScheduleRule
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.applier import Applied, Applier, ApplyError
@@ -1927,7 +1928,7 @@ class Session:
         kept = self.compiling_schedule_rules(at)
         return schedules.effective(kept, default, at)
 
-    def compiling_schedule_rules(self, at: datetime | None = None) -> tuple[schedules.Rule, ...]:
+    def compiling_schedule_rules(self, at: datetime | None = None) -> tuple[ScheduleRule, ...]:
         """The saved rules the runtime compiler keeps, in order.
 
         One answer for everything that asks which rules apply: compatibility
@@ -1944,7 +1945,7 @@ class Session:
 
         known: dict[Path, MediaItem] | None = None
         compiles: dict[str, bool] = {}
-        kept: list[schedules.Rule] = []
+        kept: list[ScheduleRule] = []
         for rule in self._schedules.rules:
             if at is not None and not rule.matches(at):
                 continue

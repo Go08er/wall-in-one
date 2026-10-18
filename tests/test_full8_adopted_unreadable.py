@@ -84,7 +84,7 @@ def test_unreadable_adopted_proof_refuses_instead_of_leaving_out_its_playlist(
     try:
         session.adopt_library(scan.scan(settings.roots))
         with pytest.raises(
-            runtime_config.RuntimeConfigError, match="could not look|can.t be looked into"
+            runtime_config.RuntimeConfigError, match=r"could not look|can.t be looked into"
         ):
             runtime_config.publish_changes(settings, session, target)
         assert target.read_bytes() == before

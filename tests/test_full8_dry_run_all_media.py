@@ -52,7 +52,7 @@ def test_deleting_the_last_wallpaper_beside_an_unreadable_folder_is_worded_as_a_
         assert len(verdict.refusals) == 1
         text = verdict.refusals[0]
         assert text.startswith(f"All media would have nothing to play while {locked} ")
-        assert "can’t be looked into" in text
+        assert "can\u2019t be looked into" in text
         assert "cannot compile" not in text
         # The compiler's own sentence is still what `compile_error` holds.
         assert "cannot compile" in verdict.compile_error

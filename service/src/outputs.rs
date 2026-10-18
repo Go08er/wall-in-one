@@ -880,10 +880,8 @@ impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, Mutex<ModeState>> for State
                     mode.refresh = refresh;
                 }
             }
-            zwlr_output_mode_v1::Event::Finished => {
-                if proxy.version() >= RELEASE_VERSION {
-                    proxy.release();
-                }
+            zwlr_output_mode_v1::Event::Finished if proxy.version() >= RELEASE_VERSION => {
+                proxy.release();
             }
             _ => {}
         }

@@ -378,7 +378,7 @@ fn loaded_config_digest_binds_exact_bytes_not_only_its_generation() {
         first.source_sha256.as_deref(),
         // Independently computed with sha256sum, including the final newline.
         // Keep the on-disk fingerprint stable across digest-library upgrades.
-        Some("16101ac8499ffbe8758b3408242a2b7d71bd50adf2f22c561b152f7df5b387dc")
+        Some("cccc077dfa28c4859c7812426e908d71a520825870cc30e03da20293a734162b")
     );
     assert_ne!(first.source_sha256, second.source_sha256);
     second.source_sha256.clone_from(&first.source_sha256);

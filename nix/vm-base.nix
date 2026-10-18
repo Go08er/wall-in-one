@@ -252,7 +252,12 @@ in
     pkgs.jq
     pkgs.niri
     pkgs.noctalia
-  ];
+  ]
+  # The compiler looks for its programs in the profiles before any store
+  # directory on PATH, so the instrumented Noctalia has to be the system
+  # profile's `noctalia`, not only first on the user manager's PATH. The
+  # shell's own unit still runs the real package (programs.noctalia).
+  ++ lib.optional (noctaliaProbe != null) (lib.hiPrio noctaliaProbe);
 
   # The package is already in environment.systemPackages, whose
   # share/systemd/user directory is on the user manager's unit search path.

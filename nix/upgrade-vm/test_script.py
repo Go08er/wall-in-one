@@ -348,6 +348,12 @@ def document(nodes: dict[str, Any], name: str) -> dict[str, Any]:
 #: without, and the first 0.4 start recompiles it away.
 RETIRED_RENDERER_KEYS = ("niri_program",)
 
+#: The programs runtime.toml names. Where each is depends on the release that
+#: compiled it: 0.1.4 resolved them into the store (its own wrapper's bundled
+#: renderers, the probe first on PATH), 0.4 names the profile path it finds
+#: them in (docs/packaging.md). The program, its basename, must not change.
+PROGRAM_KEYS = ("noctalia_program", "mpvpaper_program", "linux_wallpaperengine_program")
+
 
 def runtime_meaning(data: bytes) -> dict[str, Any]:
     value = tomllib.loads(data.decode())
@@ -356,14 +362,17 @@ def runtime_meaning(data: bytes) -> dict[str, Any]:
     if isinstance(renderer, dict):
         for key in RETIRED_RENDERER_KEYS:
             renderer.pop(key, None)
+        for key in PROGRAM_KEYS:
+            if isinstance(renderer.get(key), str):
+                renderer[key] = renderer[key].rsplit("/", 1)[-1]
     return value
 
 
 def same_program(change: Any) -> None:
     """A recompile by another release may change the generation, not the meaning.
 
-    Both releases resolve their renderers from the same nixpkgs through the
-    same wrapper PATH, so the program paths must match too.
+    Nor the programs: only the directory each is named in, as the golden
+    profile's own comparison allows (tests/golden/harness.py).
     """
     before = runtime_meaning(change.before.content)
     after = runtime_meaning(change.after.content)

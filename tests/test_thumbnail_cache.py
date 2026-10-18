@@ -556,7 +556,7 @@ _NEW_URL = "https://example.invalid/new.jpg"
 @pytest.fixture(autouse=False)
 def due(monkeypatch: pytest.MonkeyPatch) -> None:
     """Forget the last prune, so the next preview write is the process's first."""
-    monkeypatch.setattr(thumbnails, "_last_prune", None)
+    monkeypatch.setattr(thumbnails, "_last_prune", None, raising=False)
 
 
 def _small_budget(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,7 +570,7 @@ def _store_old_preview(age: float, monkeypatch: pytest.MonkeyPatch) -> Path:
     old = thumbnails.preview_path(_OLD_URL)
     moment = time.time() - age
     os.utime(old, (moment, moment))
-    monkeypatch.setattr(thumbnails, "_last_prune", None)  # the next write is due
+    monkeypatch.setattr(thumbnails, "_last_prune", None, raising=False)  # the next write is due
     return old
 
 

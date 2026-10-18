@@ -14,7 +14,12 @@ sha2 = "0.11"
 toml = "1"
 # Display discovery over the compositor's own Wayland protocols (wl_output,
 # xdg-output, wlr-output-management). The pure-Rust backend: no libwayland.
-wayland-client = "0.31"
+# `log`: the Wayland crates' own error messages go through the `log` crate,
+# for which this service installs no logger, instead of straight to stderr
+# unprefixed. Discovery failures are reported by the service itself
+# (`output_discovery_error`, and its own prefixed lines).
+wayland-backend = { version = "0.3", features = ["log"] }
+wayland-client = { version = "0.31", features = ["log"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 

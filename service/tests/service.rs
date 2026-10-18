@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -6982,6 +6982,75 @@ fn a_compositor_that_stopped_accepting_never_stalls_the_service_or_its_shutdown(
             || reported.contains("did not answer within"),
         "{reported}"
     );
+}
+
+#[test]
+fn a_compositor_going_away_writes_nothing_unprefixed_to_stderr() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("compositor-goes-away");
+    let wayland = root.join("wayland-0");
+    let compositor = FakeCompositor::start(
+        &wayland,
+        Layout::of(vec![FakeOutput::new(
+            "eDP-1",
+            (1920, 1080, 60_000),
+            (0, 0, 1920, 1080),
+        )]),
+    );
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, config(&noctalia, &noctalia, false)).unwrap();
+    let socket = root.join("runtime.sock");
+    let mut child = service_command()
+        .env("WAYLAND_DISPLAY", &wayland)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status_now = || -> serde_json::Value {
+        let reply = request(&socket, "status", None);
+        serde_json::from_str(reply["message"].as_str().unwrap()).unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while status_now()["outputs"][0]["name"] != "eDP-1" {
+        assert!(
+            Instant::now() < deadline,
+            "the compositor's output was never published"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // The compositor exits under the connection; the next probe finds it gone.
+    drop(compositor);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while status_now()["output_discovery_error"] == "" {
+        assert!(
+            Instant::now() < deadline,
+            "the lost compositor was never noticed"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    stop(&mut child, &socket);
+    let mut written = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut written)
+        .unwrap();
+    fs::remove_dir_all(root).unwrap();
+    let unprefixed: Vec<&str> = written
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("wall-in-one-service: "))
+        .collect();
+    assert!(unprefixed.is_empty(), "{unprefixed:?}");
 }
 
 #[test]

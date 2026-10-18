@@ -1,18 +1,20 @@
-# Translucency and blur under niri
+# Compositor window rules (optional)
+
+Wall-in-One runs on any compositor Noctalia 5 or later supports, and needs no
+window rule on any of them. This page is for the one look that is the
+compositor's to give: blur behind a translucent window.
 
 Wall-in-One draws its own translucency. It never asks the compositor for blur.
-
-That split is deliberate. niri exposes blur through
-[`ext-background-effect-v1`](https://wayland.app/protocols/ext-background-effect-v1),
-but it also lets you turn blur on from the config for any window, with no
-protocol code in the application at all. Since the config route needs nothing
-from us and survives the app not being able to reach the Wayland socket, the app
+Many compositors can blur behind a window from their own configuration, with no
+protocol code in the application at all; since that route needs nothing from
+the app and survives it not being able to reach the Wayland socket, the app
 ships its own window styles and this page instead of a protocol binding.
 
-Everything below is verified against **niri 26.04** and its bundled wiki
-(`share/doc/niri/wiki/Window-Effects.md`,
-`Configuration:-Window-Rules.md`, `Configuration:-Miscellaneous.md`). Every
-snippet passes `niri validate`.
+What is the same everywhere comes first: the app-id a rule matches and the
+window styles. Then, as one worked example, niri's rules. Other compositors'
+rules are not listed because they have not been verified here; look up "window
+rules" and "blur" in your compositor's documentation and match on the app-id
+below.
 
 ## The app-id to match on
 
@@ -22,10 +24,10 @@ dev.goober.WallInOne
 
 This is `wall_in_one.paths.APPLICATION_ID`. GtkApplication sets the Wayland
 app-id from the GApplication id, so that string -- not the `wall-in-one` command
-name -- is what a window rule has to match. Confirmed by reading
+name -- is what a window rule has to match. Confirmed on niri by reading
 `niri msg -j windows` against a live instance.
 
-## Minimum config
+## Window styles
 
 Choose the **Translucent** window style first, in the main menu's **Window
 style** or Settings → Appearance: the default, **Solid**, covers the blur
@@ -45,6 +47,18 @@ against a busy wallpaper and no amount of blur rescues it. In the new
 interface's Settings that row is under **Classic interface**, and it changes
 only the classic window.
 
+## Example: niri
+
+niri exposes blur through
+[`ext-background-effect-v1`](https://wayland.app/protocols/ext-background-effect-v1),
+and also lets you turn it on from its config for any window. Everything in this
+section is verified against **niri 26.04** and its bundled wiki
+(`share/doc/niri/wiki/Window-Effects.md`, `Configuration:-Window-Rules.md`,
+`Configuration:-Layer-Rules.md`, `Configuration:-Miscellaneous.md`). Every
+snippet passes `niri validate`.
+
+### Minimum config
+
 ```kdl
 window-rule {
     match app-id=r#"^dev\.goober\.WallInOne$"#
@@ -58,7 +72,7 @@ window-rule {
 Note the `r#"..."#` raw string. KDL rejects `\.` inside a plain quoted string
 (`invalid escape char`), so a regex with escaped dots must be a raw string.
 
-## Tuning
+### Tuning
 
 Blur parameters are global, not per-window, and live at the top level:
 
@@ -85,7 +99,7 @@ blur {
 Adding `blur { off }` disables blur everywhere, including blur that
 applications requested over the protocol.
 
-## Rounded corners
+### Rounded corners
 
 Blur enabled by a window rule follows the window's `geometry-corner-radius`, so
 give it one or the blurred region will be a hard rectangle behind libadwaita's
@@ -104,7 +118,7 @@ window-rule {
 }
 ```
 
-## The xray caveat -- read this if you use a video wallpaper
+### The xray caveat -- read this if you use a video wallpaper
 
 When any background effect is active, niri turns **xray on by default**. Xray
 sees through to the wallpaper only, ignoring windows underneath, and it is much
@@ -137,7 +151,7 @@ niri documents non-xray effects as **experimental**. The known limitation is
 that they disappear during window open/close animations and while dragging a
 tiled window. Enable it knowing that.
 
-## If the window looks tinted
+### If the window looks tinted
 
 niri draws the focus ring and border as a solid rectangle *behind* the window by
 default, so they show through anything semitransparent. Either set
@@ -150,14 +164,14 @@ window-rule {
 }
 ```
 
-## Older niri
+### Older niri
 
 `background-effect` is `Since: 26.04`. On anything older the window rule is a
 config error, so leave it out -- the Translucent style still works, you just
 get plain translucency with no blur behind it, and Frosted blurs on its own.
 Nothing in the app depends on blur being available.
 
-## In-app opacity vs the niri `opacity` rule
+### In-app opacity vs the niri `opacity` rule
 
 They are not the same thing, and the app's own setting is usually what you want.
 
@@ -168,3 +182,23 @@ They are not the same thing, and the app's own setting is usually what you want.
 
 Use the app's setting. Reach for niri's `opacity` only if you want the whole
 window ghosted on purpose.
+
+### The wallpaper in the overview
+
+mpvpaper and linux-wallpaperengine draw on the layer-shell `background` layer.
+niri 26.04 can also show a background-layer wallpaper in the overview's
+backdrop and between workspaces, with a layer rule (`place-within-backdrop`,
+since 25.05). This is optional. Find your wallpaper tool's namespace with
+`niri msg layers`, then:
+
+```kdl
+layer-rule {
+    // The namespace `niri msg layers` shows for the wallpaper surface.
+    match namespace="^wallpaper$"
+
+    place-within-backdrop true
+}
+```
+
+niri documents that this only works for background-layer surfaces that ignore
+exclusive zones, which is what wallpaper tools are.

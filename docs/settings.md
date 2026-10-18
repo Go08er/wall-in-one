@@ -221,7 +221,7 @@ don't exist yet). Settings → Tidy up is always there.
 | key | meaning | default |
 |---|---|---|
 | `roots` | Folders scanned for wallpapers. Empty is unconfigured and triggers the graphical first-run choice; the first chosen root receives downloads and generated stills. | `[]` |
-| `opacity` | The classic window's background opacity, 0.30-1.0; `1.0` is fully opaque. Settings → Classic interface → **Window opacity**; the new window's translucency is its window style instead (see [`niri.md`](niri.md)). | `1.0` |
+| `opacity` | The classic window's background opacity, 0.30-1.0; `1.0` is fully opaque. Settings → Classic interface → **Window opacity**; the new window's translucency is its window style instead (see [`compositor-window-rules.md`](compositor-window-rules.md)). | `1.0` |
 | `preview_scheme` | Default adaptive colour scheme for previews and pairings that inherit it. Explicit pairing schemes take precedence; the app's Noctalia-following UI colours are separate. | `"m3-tonal-spot"` |
 | `follow_noctalia_palette` | Apply Noctalia's palette to the app's own chrome. | `true` |
 | `cycle_enabled` | Change wallpaper on a timer. | `false` |

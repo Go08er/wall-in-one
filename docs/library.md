@@ -158,7 +158,8 @@ Videos from another configured root still use the deterministic managed still;
 the app does not write a pairing file beside a source outside that target root.
 
 A Wallpaper Engine scene gets its still from `linux-wallpaperengine`, rendered
-in a window at the size of a display niri measured, as `<scene id>.png` in the
+in a window at the size of a measured display (the wallpaper service's
+snapshot, or GTK's monitors when no service answers), as `<scene id>.png` in the
 first library folder's `Wall-in-One/Automatic Stills/`. A scene whose managed still is smaller than that display in both
 directions is captured again, so an old low-resolution still is replaced. A
 still is never judged against a guessed size or by its shape, and nothing is

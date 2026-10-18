@@ -10,7 +10,10 @@
 > [update guide](docs/updating.md#updates-are-one-way)).
 
 A wallpaper manager for Wayland, written in Python with GTK4 and libadwaita.
-X11 sessions are not supported.
+It runs on any compositor Noctalia 5 or later supports: displays come from the
+standard Wayland output protocols, and nothing asks one compositor's own tools
+(see [display discovery](docs/display-discovery.md)). X11 sessions are not
+supported.
 
 It manages stills and video wallpapers, keeps its own colours in sync with
 [Noctalia](https://github.com/noctalia-dev/noctalia)'s active palette, and
@@ -165,7 +168,8 @@ remain fatal until the reported problem is resolved.
 ### Test it away from your desktop
 
 The flake includes a bootable niri + Noctalia development desktop and an
-automated NixOS test that saves screenshots of five workflow pages:
+automated NixOS test that saves screenshots of five workflow pages. niri is
+only the desktop these VMs boot; the app does not need it:
 
 ```console
 $ nix run .#vm
@@ -277,7 +281,8 @@ dies.
 **Animate wallpapers** (Settings → Playback, or `wall-in-one ctl dynamics off`)
 controls both videos and Wallpaper Engine scenes. Turning it off releases their
 renderers and shows paired still images. This also avoids repeatedly blurring
-moving wallpaper behind translucent windows; see [`docs/niri.md`](docs/niri.md).
+moving wallpaper behind translucent windows; see
+[`docs/compositor-window-rules.md`](docs/compositor-window-rules.md).
 
 **Stop animations on battery** is a separate, optional switch, off by default.
 It shows paired stills while UPower reports battery power, even with the app
@@ -302,8 +307,9 @@ performance control without an end-to-end measurement showing a real benefit.
 
 **Smooth low-frame-rate videos** can use mpv's display-resample interpolation.
 Oversample is the sharper, cheaper default experiment; Linear blends more
-strongly and may ghost. Wall-in-One reads the active refresh from niri at each
-video hand-over and supplies the complete mpv option set together. A named
+strongly and may ghost. Wall-in-One reads the active refresh from the
+compositor's Wayland output protocols at each video hand-over and supplies the
+complete mpv option set together. A named
 output uses its rate; All outputs is smoothed only when every attached display
 reports the same rate. Unknown or mixed rates keep ordinary source cadence
 rather than using a hard-coded number or a partly effective setup. This does
@@ -322,8 +328,8 @@ reachable.
 **Displays** defaults to one mirrored wallpaper, cursor and schedule everywhere.
 Independent mode gives every live connector its own assignment, schedule
 winner, cursor, renderer and temporary playlist/Cycle/Shuffle overrides. GTK
-monitor names are merged with the Rust service's niri snapshot, so a connector
-the compositor knows remains targetable even when GTK cannot name it; detached
+monitor names are merged with the wallpaper service's display snapshot, so a
+connector the compositor knows remains targetable even when GTK cannot name it; detached
 saved assignments and rules remain visible rather than being reset. Noctalia
 still has one shell-wide palette, so **Colours follow** is an explicit display
 choice. When that display is detached the saved choice stays intact and status
@@ -437,10 +443,12 @@ comes back.
 
 The app draws its own translucency: choose the Translucent or Frosted window
 style in the main menu or Settings → Appearance. Frosted blurs the wallpaper
-itself; behind Translucent, blur is the compositor's job. On niri 26.04 that is
-a four-line window rule. See [`docs/niri.md`](docs/niri.md)
--- it covers the app-id to match, the xray caveat that matters when a video
-wallpaper is running, and what to do on older niri.
+itself; behind Translucent, blur is the compositor's job, usually a window rule
+that matches the app-id. See
+[`docs/compositor-window-rules.md`](docs/compositor-window-rules.md): the app-id
+to match and, as a worked example, niri 26.04's four-line rule with the xray
+caveat that matters when a video wallpaper is running. Nothing needs a rule;
+without one, Translucent is plain translucency.
 
 ## Control sockets
 

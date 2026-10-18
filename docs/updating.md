@@ -108,7 +108,7 @@ mean stays the same. The bytes of a few files can change, and it writes only:
 - Automatic stills, the one exception that writes into your library (since
   0.1.0). After each scan, including the first one, the app captures a still
   for a moving wallpaper that has none, and captures a scene's managed still
-  again when it is smaller, in both directions, than a display niri measured.
+  again when it is smaller, in both directions, than a measured display.
   Only files in `<library>/Wall-in-One/Automatic Stills/` change, plus the
   pairing sidecar beside a video in that library. Without the capture tool, or
   without a measured display for a scene, nothing is written. See

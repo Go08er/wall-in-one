@@ -1,5 +1,10 @@
 # Installing, and getting a launcher entry
 
+Wall-in-One runs on any Wayland compositor that Noctalia 5 or later supports.
+It needs no compositor-specific tool: the wallpaper service learns the displays
+from the compositor's standard Wayland output protocols
+([display discovery](display-discovery.md)).
+
 Wall-in-One is a GUI, so it needs to be startable from a menu and not only from
 a terminal. Two files do that, and the Nix package installs both:
 
@@ -15,7 +20,8 @@ file can make that association. Since GtkApplication takes the app-id from the
 GApplication id, `dev.goober.WallInOne` is the app-id, the desktop file's name
 and the icon's name, all three at once. Rename any one of them and the window
 becomes an anonymous square in the taskbar with no icon and no menu entry
-behind it. See [`docs/niri.md`](niri.md) for the other half of that story.
+behind it. See [`docs/compositor-window-rules.md`](compositor-window-rules.md)
+for the other half of that story.
 
 ## Installing it
 
@@ -74,8 +80,9 @@ reports "command not found" in a session whose `PATH` never picked up the
 profile -- a common enough state when the display manager starts before the
 profile is on `PATH`. It also guarantees the *wrapped* binary runs, the one
 carrying `GI_TYPELIB_PATH`, the GSettings schemas, mpvpaper and ffmpeg on
-`PATH`, together with niri for output discovery and linux-wallpaperengine for
-scene playback. `TryExec` holds the same string and is rewritten with it.
+`PATH`, together with linux-wallpaperengine for scene playback. Finding the
+displays needs no program on `PATH`: the service asks the compositor over
+Wayland. `TryExec` holds the same string and is rewritten with it.
 
 ## What the entry deliberately does not say
 

@@ -59,13 +59,17 @@ with the service's `displays[].connected`; they are unchanged.
 ## Headless Python paths
 
 `--service` (the legacy Python service), `--write-config`,
-`--sync-runtime-health` and `ctl` have no GTK display. Of these only the
-legacy service's own renderer needs displays: the refresh rate for video
-interpolation, and the connectors for a scene on all outputs. It asks the
-service like everything else. In legacy mode no service is running, so it gets
-nothing, which is what happened before when niri could not be asked:
-interpolation stays off, and an all-output scene is refused rather than opened
-as a preview window. The other paths never needed display information.
+`--sync-runtime-health` and `ctl` have no window. Of these only the legacy
+service needs displays: its renderer for the refresh rate of video
+interpolation and the connectors of a scene on all outputs, and its still
+maker for a scene still's size. They ask the service like everything else. In
+legacy mode no service is running, so the renderer gets nothing, which is what
+happened before when niri could not be asked: interpolation stays off, and an
+all-output scene is refused rather than opened as a preview window. (The still
+maker uses GTK's monitors when the process happens to have a display, as the
+window does, and otherwise takes no scene still.) The other paths never needed
+display information; `ctl displays` is answered by the window or the legacy
+service, not by `ctl` itself.
 
 ## `runtime.toml`
 
@@ -92,3 +96,20 @@ desktop widgets use, and every compositor Noctalia supports implements
 layer-shell, because Noctalia's own surfaces are layer-shell surfaces. niri's
 `place-within-backdrop` rule is an optional niri example in
 [compositor-window-rules.md](compositor-window-rules.md).
+
+## How it is tested
+
+- The service's discovery, over the wire, against a fake compositor in its own
+  tests (`service/tests/support/compositor.rs`): with and without
+  wlr-output-management and xdg-output, `wl_output` before version 4, hot-plug
+  in and out, switched-off heads, a compositor that starts late, restarts or
+  never answers, and the 64-output ceiling.
+- `service-rss` runs the service against a fake compositor with 1, 3 and 64
+  outputs (`nix/fake-wayland-outputs.py`), so its memory and idle CPU include
+  the Wayland connection.
+- The window's fallback against the test run's own headless Weston
+  (`tests/test_ui_monitors.py`), and the Python side's choice of source with
+  fakes (`tests/test_outputs.py`, `tests/test_ui_stills.py`).
+- The niri VM test checks that the service published the VM's real output.
+  Nothing here depends on niri, so a second compositor in the VM tests needs
+  no change to the code, only a VM.

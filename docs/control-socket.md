@@ -100,10 +100,37 @@ with `connected = false`; each schedule row carries its optional connector, so
 a runtime-only bar can distinguish global and targeted rules without querying
 the authoring socket.
 `output_discovery_error` is empty during normal operation and explains when
-the service is temporarily using its last known connectors because niri could
-not provide a fresh snapshot. Runtime verbs shown above without an operand are
-strictly zero-argument; ignored trailing text is rejected, including for
-`quit`.
+the service is temporarily using its last known connectors because the
+compositor could not provide a fresh snapshot (no Wayland socket yet, a
+compositor that does not answer, or none of its outputs enabled). Runtime verbs
+shown above without an operand are strictly zero-argument; ignored trailing
+text is rejected, including for `quit`.
+
+## Outputs
+
+From 0.4.0, `status` also carries `outputs`: the compositor's last successful
+display snapshot, which the service reads from the standard Wayland protocols
+(`wl_output`, xdg-output, and wlr-output-management where the compositor
+offers it; see [display discovery](display-discovery.md)). It is a top-level
+array, sorted by connector, of at most 64 rows:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | The connector (`eDP-1`), as every renderer is given it. |
+| `enabled` | `false` for a head wlr-output-management reports switched off. It is listed, never rendered on, and has no row in `displays`. |
+| `make`, `model` | The compositor's description; may be empty. |
+| `x`, `y`, `width`, `height` | Logical position and size; the size is `0` when the compositor has no xdg-output. |
+| `scale` | The compositor's scale, fractional where it says so. |
+| `mode_width`, `mode_height`, `refresh_millihz` | The current mode in pixels, and its refresh (`null` when unknown). |
+| `physical_width_mm`, `physical_height_mm` | The physical size the compositor reports. |
+
+The array is empty before the first successful discovery and stays at the last
+one while `output_discovery_error` says discovery is failing. It is left empty,
+rather than failing the reply, in the rare case that it would push `status`
+over the reply limit. Nothing else in `status` changed: `displays`,
+`connected` and `output_discovery_error` mean what they meant, so a client that
+does not know `outputs` is unaffected. The app's window and `ctl displays` use
+this snapshot, and GTK's own monitors when no service answers.
 
 `on <connector> ...` is the connector-scoped runtime envelope. The connector
 is one whitespace-free token; `playlist-use` takes the remaining text as one
@@ -276,9 +303,10 @@ choice.
 to be plain videos, which play through mpvpaper like any other; only true
 `scene` wallpapers need `linux-wallpaperengine`, and their stills are captured
 through it in a window without anything appearing on screen. The capture window
-uses the display's physical mode as niri reports it, because the engine's
-default window produces a small portrait screenshot; when niri cannot be asked,
-no scene still is taken. A managed scene still smaller than the display in both
+uses the display's physical mode as the compositor reports it (the service's
+snapshot, or GTK's monitors when no service answers), because the engine's
+default window produces a small portrait screenshot; when no display can be
+measured, no scene still is taken. A managed scene still smaller than the display in both
 directions (the old portrait captures) is regenerated automatically and
 atomically; one that is merely another shape, say after plugging in a 16:9
 monitor, is kept. Custom still choices are never overwritten. A scene's

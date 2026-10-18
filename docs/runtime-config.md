@@ -15,6 +15,18 @@ versions; a schema-4 document cannot enable the new policy. This preserves
 older upgrade journals and prevents an older service from silently ignoring
 an enabled battery preference.
 
+From 0.4.0 the compiler no longer writes `[renderer] niri_program`, which
+0.3.x and earlier wrote when the service asked niri for displays. The service
+accepts the key and ignores it, so a document an older build wrote still loads
+and means the same. The schema numbers did not change: the version marks what
+a reader must understand, and every reader since 0.4.0 reads both shapes. A
+0.4 document is refused by a 0.3 service that has not been restarted yet (a
+missing field, like any document it cannot load), and that service keeps its
+last good configuration until it restarts; nothing is applied wrongly. A new
+schema number would instead have sent every save through the live-service
+check below, refusing all of them until the restart. See
+[display discovery](display-discovery.md#runtimetoml).
+
 The service advertises `supported_config_schemas = [4, 5]` in status version 2.
 It also reports `runtime_version` and `runtime_executable` so update inspection
 can distinguish the responding executable from the package selected on disk.
@@ -47,7 +59,7 @@ supported document reaches the service main process. A valid supported
 last-known-good document may therefore continue, while a missing, malformed,
 or schema-2 candidate stops the unit once instead of entering a restart loop.
 
-Every compiler resolves the four `[renderer]` programs (`noctalia`, `niri`,
+Every compiler resolves the three `[renderer]` programs (`noctalia`,
 `mpvpaper`, `linux-wallpaperengine`) the same way, so the GUI, a
 `wall-in-one --write-config` from a terminal and the service's preflight
 compile the same bytes from the same authoring state. First come the Nix
@@ -140,8 +152,8 @@ cannot truthfully promise that an external renderer or desktop helper recovered.
 
 Both schemas contain `schema_version`, `config_generation`, `default_playlist`, `[settings]`,
 `[renderer]`, `[[playlists]]`, `[[schedules]]`, and `[[displays]]`. Executable
-paths—including niri for live connector discovery—and media paths are
-absolute. Every playlist entry has a stable `id`, `kind`,
+and media paths are absolute. Live connector discovery needs no program: the
+service asks the compositor over Wayland ([display discovery](display-discovery.md)). Every playlist entry has a stable `id`, `kind`,
 absolute `still`, and inline `palette`. A video additionally has an absolute
 `motion`; a scene has a numeric `scene_id`. An entry may also carry app-owned
 `taboo = { reason, source }` metadata. That is a durable compatibility decision,
@@ -181,8 +193,9 @@ global launch defaults; changing one performs a deliberate scene hand-over.
 `video_hardware_decode` selects mpv's
 `hwdec=auto` or `hwdec=no`. `video_interpolation` is `off`, `oversample`, or
 `linear`. A non-off mode is applied only as the complete display-synchronised
-set (`video-sync=display-resample`, `interpolation=yes`, a live niri-derived
-`display-fps-override`, and the selected `tscale`). If the selected outputs do
+set (`video-sync=display-resample`, `interpolation=yes`, a
+`display-fps-override` from the compositor's live output snapshot, and the
+selected `tscale`). If the selected outputs do
 not all report one unambiguous refresh, playback stays unsmoothed rather than
 using a guessed or partial configuration.
 
@@ -258,13 +271,15 @@ fallback reasserts the palette only when the failed renderer was the effective
 colour source.
 
 Assignments need not enumerate every monitor. At apply time the service takes
-one live niri output snapshot; a connected connector with no explicit
+one live output snapshot from the compositor; a connected connector with no explicit
 assignment follows `default_playlist`. That same snapshot feeds renderer
 refresh and scene-target decisions, avoiding duplicate compositor queries.
 The service checks for connector changes every five seconds and reapplies only
 after a real hot-plug change. A transient discovery failure retains the last
 successful snapshot, falling back to the explicit assignment list before the
 first success. `status.output_discovery_error` reports that degraded state.
+Only enabled outputs are connectors here; a head the compositor reports switched
+off is listed in `status.outputs` and is never a target.
 
 `status_version = 2` retains top-level compatibility fields for compact bar
 clients and also returns a `displays` array with the effective playlist and

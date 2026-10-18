@@ -241,7 +241,8 @@ class SceneRenderer:
             else (
                 available_outputs
                 if available_outputs is not None
-                else outputs.names(outputs.discover())
+                # A head the compositor reports switched off shows nothing.
+                else outputs.names(screen for screen in outputs.discover() if screen.enabled)
             )
         )
         if not targets:

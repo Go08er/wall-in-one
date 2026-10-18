@@ -61,6 +61,28 @@ def test_all_output_application_repeats_the_background_pair() -> None:
     assert arguments.count("--bg") == 2
 
 
+def test_an_all_output_scene_never_targets_a_switched_off_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = (outputs.Output("DP-1"), outputs.Output("HDMI-A-1", enabled=False))
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: snapshot)
+
+    arguments = SceneRenderer().command("12345")
+
+    roots = [arguments[i + 1] for i, word in enumerate(arguments) if word == "--screen-root"]
+    assert roots == ["DP-1"]
+
+
+def test_only_switched_off_heads_refuse_window_preview_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = (outputs.Output("HDMI-A-1", enabled=False),)
+    monkeypatch.setattr(outputs, "ask_service", lambda *_arguments: snapshot)
+
+    with pytest.raises(scenes.SceneError, match="refusing to open a scene preview window"):
+        SceneRenderer().command("12345")
+
+
 def test_application_without_a_connector_refuses_window_preview_mode() -> None:
     with pytest.raises(scenes.SceneError, match="refusing to open a scene preview window"):
         SceneRenderer().command("12345", available_outputs=())

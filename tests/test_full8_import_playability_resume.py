@@ -18,6 +18,7 @@ import pytest
 
 from tests.test_full8_migration_resume import _stillless_legacy_video
 from tests.test_legacy_migration import (
+    _bundle,
     isolated_xdg,  # noqa: F401 -- a fixture
 )
 from wall_in_one import legacy_migration
@@ -53,7 +54,6 @@ def test_a_still_appearing_after_the_interruption_does_not_block_the_retry(
 ) -> None:
     legacy, _original = _stillless_legacy_video(isolated_xdg)
     journal = _interrupt_after(monkeypatch, legacy, installed_targets)
-    assert journal["nothing_to_play"] == ["Moving"]
     recorded_report = journal["targets"]["report"]
 
     # The video now has a still beside it. Neither the legacy digest nor the
@@ -68,6 +68,7 @@ def test_a_still_appearing_after_the_interruption_does_not_block_the_retry(
     assert "(see the report)" in result.detail, "the report this build staged names it"
     report = legacy_migration.report_path().read_bytes()
     assert hashlib.sha256(report).hexdigest() == recorded_report
+    assert journal["nothing_to_play"] == ["Moving"]
     assert "“Moving” has nothing to play yet" in report.decode()
     assert legacy_migration.marker_path().is_file()
     assert not legacy_migration.journal_path().exists()
@@ -84,7 +85,6 @@ def test_a_deleted_video_after_the_interruption_does_not_block_the_retry(
     video = isolated_xdg / "videos" / "rain.mp4"
     (isolated_xdg / "videos" / "rain-still.png").write_bytes(b"png")
     journal = _interrupt_after(monkeypatch, legacy, installed_targets)
-    assert journal["nothing_to_play"] == []
     recorded_report = journal["targets"]["report"]
 
     video.unlink()
@@ -98,6 +98,7 @@ def test_a_deleted_video_after_the_interruption_does_not_block_the_retry(
     assert "currently missing" not in legacy_migration.report_path().read_text("utf-8")
     report = legacy_migration.report_path().read_bytes()
     assert hashlib.sha256(report).hexdigest() == recorded_report
+    assert journal["nothing_to_play"] == []
     assert not legacy_migration.journal_path().exists()
     assert "already recorded" in legacy_migration.decline(source_dir=legacy).detail
 
@@ -192,3 +193,59 @@ def test_a_tampered_playability_record_is_refused(
         legacy_migration.migrate(source_dir=legacy)
     assert not legacy_migration.marker_path().exists()
     assert legacy_migration.journal_path().exists()
+
+
+def _many_missing_workshop_items(base: Path, count: int) -> Path:
+    """A legacy playlist of ``count`` Workshop items, none installed."""
+    legacy, _original = _stillless_legacy_video(base)
+    config_path = legacy / "config.json"
+    document = json.loads(config_path.read_bytes())
+    entries = []
+    for number in range(count):
+        item = f"{1_000_000_000 + number}"
+        name = f"workshop-{item}"
+        bundle = _bundle(
+            name, media={"kind": "workshop", "source": item}, still={"mode": "automatic"}
+        )
+        document["pairings"][name] = {**bundle, "id": name}
+        entries.append({**bundle, "pairing_id": name})
+    document["playlists"]["moving"]["entries"] = entries
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    return legacy
+
+
+def _resume_a_journal_larger_than_a_megabyte(
+    base: Path, monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    legacy = _many_missing_workshop_items(base, count)
+    journal = _interrupt_after(monkeypatch, legacy, 1)
+    size = legacy_migration.journal_path().stat().st_size
+    assert size > legacy_migration.MAX_JOURNAL_BYTES, size
+    assert journal["report_notes"]
+
+    assert legacy_migration.probe(source_dir=legacy).status == "in-progress"
+    assert legacy_migration.migrate(source_dir=legacy).changed
+    assert not legacy_migration.journal_path().exists()
+    assert legacy_migration.marker_path().is_file()
+
+
+def test_a_journal_past_the_old_cap_still_resumes(
+    isolated_xdg: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _resume_a_journal_larger_than_a_megabyte(isolated_xdg, monkeypatch, 5000)
+
+
+def test_a_journal_that_could_not_be_read_back_is_refused_before_anything_is_written(
+    isolated_xdg: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy, _original = _stillless_legacy_video(isolated_xdg)
+    monkeypatch.setattr(legacy_migration, "MAX_JOURNAL_FILE_BYTES", 200)
+
+    with pytest.raises(legacy_migration.MigrationError, match="nothing was written"):
+        legacy_migration.migrate(source_dir=legacy)
+
+    assert not legacy_migration.journal_path().exists()
+    assert not legacy_migration.report_path().exists()
+    assert not list(legacy_migration.journal_path().parent.glob(".*legacy-migration-v1.stage"))

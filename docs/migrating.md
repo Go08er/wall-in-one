@@ -394,7 +394,8 @@ The importer preserves, subject to current typed limits:
   place of a default that names it), and the app says so. The import records
   what it found in its journal, so an interrupted import that you finish
   later reports what it found when it began, even if a still or a video has
-  appeared or gone meanwhile. One that 0.2.2 began and this version finishes
+  appeared or gone meanwhile (the retired plugin's own automatic stills and
+  Workshop items are read again, so a change to those still stops the resume). One that 0.2.2 began and this version finishes
   keeps the report 0.2.2 staged, which has no such note: only the message
   names the playlist;
 - shared still and palette pairing metadata, including manually selected

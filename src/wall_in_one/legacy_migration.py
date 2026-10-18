@@ -63,6 +63,9 @@ MARKER_FILENAME: Final = "legacy-migration-v1.json"
 REPORT_FILENAME: Final = "legacy-migration-v1.md"
 JOURNAL_FILENAME: Final = ".legacy-migration-v1.journal.json"
 MAX_JOURNAL_BYTES: Final = 1024 * 1024
+#: What a journal may hold: its own fields, and the report's notes twice over
+#: (the record keeps them, as escaped JSON). The marker keeps `MAX_JOURNAL_BYTES`.
+MAX_JOURNAL_FILE_BYTES: Final = MAX_JOURNAL_BYTES + 2 * 4 * 1024 * 1024
 #: The two journal fields an import begun by 0.3.0 or later adds, always
 #: together: the names of the playlists it found with nothing to play, and the
 #: notes its report holds. Both come from reading the library and the wallpaper
@@ -780,8 +783,6 @@ def _migrate_locked(
         converted = _convert(source)
         created_at = _now()
         targets = _targets(source, converted, created_at)
-        _prepare_directories(bool(converted.api_key))
-        _stage_targets(targets)
         journal_document = {
             "version": MIGRATION_VERSION,
             "legacy_source": str(source.directory),
@@ -793,8 +794,18 @@ def _migrate_locked(
             JOURNAL_NOTHING_TO_PLAY: list(converted.nothing_to_play),
             JOURNAL_NOTES: list(converted.notes),
         }
+        journal_text = _json_text(journal_document)
+        # Before anything is staged: a journal this build could not read back
+        # would leave the import stuck half done.
+        if len(journal_text.encode()) > MAX_JOURNAL_FILE_BYTES:
+            raise MigrationError(
+                f"the import's journal would exceed {MAX_JOURNAL_FILE_BYTES} bytes; "
+                "nothing was written"
+            )
+        _prepare_directories(bool(converted.api_key))
+        _stage_targets(targets)
         try:
-            state_file.write_atomic_text(journal_path(), _json_text(journal_document))
+            state_file.write_atomic_text(journal_path(), journal_text)
         except OSError as error:
             raise MigrationError(
                 f"cannot write migration journal {journal_path()}: {error}"
@@ -1273,7 +1284,7 @@ def _check_recorded_notes(
 ) -> None:
     """Refuse a journal whose recorded names and notes do not belong together.
 
-    The notes are authenticated by the report's digest. The names are not
+    The notes are checked against the report digest the journal holds. The names are not
     rendered, so they must be exactly the playlists whose note the recorded
     notes hold, in the order they hold them.
     """
@@ -2365,7 +2376,7 @@ def _path_exists(path: Path) -> bool:
 def _read_journal() -> dict[str, Any] | None:
     target = journal_path()
     try:
-        raw = file_io.read_regular_bytes(target, MAX_JOURNAL_BYTES)
+        raw = file_io.read_regular_bytes(target, MAX_JOURNAL_FILE_BYTES)
     except OSError as error:
         raise MigrationError(f"cannot safely read migration journal {target}: {error}") from error
     if raw is None:
@@ -2374,8 +2385,8 @@ def _read_journal() -> dict[str, Any] | None:
     if type(document.get("version")) is not int or document["version"] != MIGRATION_VERSION:
         raise MigrationError(f"migration journal {target} has an unsupported version")
     required_fields = {"version", "legacy_source", "legacy_digest", "created_at", "targets"}
-    # The record of playlists with nothing to play is the one optional field:
-    # journals 0.2.2 and earlier wrote have none.
+    # The playlists with nothing to play and the report's notes are the optional
+    # fields, always together: journals 0.2.2 and earlier wrote neither.
     if set(document) not in (required_fields, required_fields | _PLAYABILITY_FIELDS):
         raise MigrationError(f"migration journal {target} is incomplete or ambiguous")
     _recorded_path(document["legacy_source"], "migration journal legacy source")
@@ -2408,13 +2419,17 @@ def _targets_as_staged(
     finished with those bytes and no others.
 
     One this build began describes this build's output, whatever has changed
-    in the library since: it recorded the playlists the scan found with
-    nothing to play (`JOURNAL_NOTHING_TO_PLAY`), and the report is rendered
-    from that record, not from a new scan, which only a change outside the
-    import (a still appearing, a video deleted) could make disagree. The
-    record is authenticated by the report's digest in the journal, and by the
-    marker's after it: a record that renders other bytes is refused, as is one
-    that is not what the scan could have returned (`_note_nothing_to_play`).
+    in the library or among the wallpaper files since: it recorded the
+    playlists the scan found with nothing to play and the report's notes
+    (`JOURNAL_NOTHING_TO_PLAY`, `JOURNAL_NOTES`), and the report is rendered
+    from that record, not from a new scan. What the conversion reads from the
+    retired plugin's own automatic stills and Workshop items still comes from
+    those files, so a change to them still stops the resume. The record is
+    checked against the report digest the journal holds (and the marker's
+    after it): a record that renders other bytes is refused, as is one that
+    is not what the scan could have returned (`_note_nothing_to_play`). A
+    record re-digested consistently would be accepted: the report carries no
+    authority, and every target that does is rendered from the legacy source.
 
     One that 0.2.2 or earlier began has no such field and describes theirs,
     which this build can still render (`_targets`, ``as_released``): it is

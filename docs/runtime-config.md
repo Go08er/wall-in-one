@@ -61,23 +61,29 @@ supported document reaches the service main process. A valid supported
 last-known-good document may therefore continue, while a missing, malformed,
 or schema-2 candidate stops the unit once instead of entering a restart loop.
 
-Every compiler resolves the three `[renderer]` programs (`noctalia`,
+Every compiler finds the three `[renderer]` programs (`noctalia`,
 `mpvpaper`, `linux-wallpaperengine`) the same way, so the GUI, a
 `wall-in-one --write-config` from a terminal and the service's preflight
-compile the same bytes from the same authoring state. First come the Nix
-store directories on the caller's `PATH`, where the package's wrapper puts the
-renderers it bundles for every caller. Then the Nix profiles, in NixOS's login
-order (`~/.nix-profile/bin`, `~/.local/state/nix/profile/bin`,
-`/etc/profiles/per-user/$USER/bin`, `/nix/var/nix/profiles/default/bin`,
-`/run/current-system/sw/bin`), then `~/.local/bin`, `/usr/local/bin`,
-`/usr/bin` and `/bin`, and only then every other directory on `PATH`, in
-`PATH` order. A program found nowhere is written as `/usr/bin/<name>`, and the
-service reports it only when an entry needs it. Symlinks are resolved. A
-renderer in one of the standard places therefore compiles to the same path
-from any caller. One installed only somewhere else (`/opt/...`, `~/bin`, a
-custom prefix) is still found, but a terminal and the service can disagree
-about it when their `PATH` differ there, and each run then rewrites
-`runtime.toml`; a link in `~/.local/bin` or `/usr/local/bin` avoids that.
+compile the same bytes from the same authoring state
+([why this order](packaging.md#finding-a-renderer)). First come the
+Nix profiles, in NixOS's login order (`~/.nix-profile/bin`,
+`~/.local/state/nix/profile/bin`, `/etc/profiles/per-user/$USER/bin`,
+`/nix/var/nix/profiles/default/bin`, `/run/current-system/sw/bin`), where the
+NixOS and home-manager modules install the renderers, then `~/.local/bin`,
+`/usr/local/bin`, `/usr/bin` and `/bin`, then every other directory on `PATH`,
+in `PATH` order, and last the Nix store directories on `PATH` (a `nix shell`,
+say), which only that caller sees and nothing keeps from garbage collection.
+The path is written where it was found, not resolved: `~/.nix-profile/bin/mpvpaper`
+survives a profile switch and the collection of the old generation, and a
+renderer update leaves the document's bytes alone. A program found nowhere
+is written as `/usr/bin/<name>`, and the service reports it only when an
+entry needs it; `runtime_config.find_program` tells the app whether it was
+found. A renderer in one of the standard places therefore compiles to the same
+path from any caller. One installed only somewhere else (`/opt/...`, `~/bin`, a
+custom prefix, a store directory) is still found, but a terminal and the
+service can disagree about it when their `PATH` differ there, and each run then
+rewrites `runtime.toml`; a link in `~/.local/bin` or `/usr/local/bin` avoids
+that.
 `--write-config` names each file it wrote (`wrote:`) or removed (`removed:`),
 or says `nothing changed`.
 

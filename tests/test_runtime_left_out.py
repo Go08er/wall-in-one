@@ -461,7 +461,7 @@ def test_a_playlist_under_a_folder_the_scan_could_not_look_into_refuses_the_buil
         runtime_config.publish_changes(settings, session, target)
 
     assert f"{folder}: Permission denied" in str(refused.value)
-    assert "left untouched" in str(refused.value)
+    assert "Nothing was written" in str(refused.value)
     assert target.read_text(encoding="utf-8") == 'schema_version = 4\nlast_known_good = "kept"\n'
 
     # The same profile with the folder readable (a scan that skipped nothing):

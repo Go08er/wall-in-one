@@ -78,9 +78,13 @@ class RuntimeConfigError(Exception):
 class FallbackUnseenError(RuntimeConfigError):
     """All media plays nothing only as far as the scan could look (``place`` is where)."""
 
-    def __init__(self, message: str, place: Unseen) -> None:
+    def __init__(self, message: str, place: Unseen, *, implicit: bool, owner: str) -> None:
         super().__init__(message)
         self.place = place
+        #: No default is chosen (or the chosen one was left out); All media is not named.
+        self.implicit = implicit
+        #: Who names All media when it is named, in words ("schedule rule 'x'").
+        self.owner = owner
 
 
 #: `LeftOut.why`: no playlist answers to the reference, by id or by name.
@@ -1826,6 +1830,8 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
                 f"default playlist is chosen or the chosen one is left out. "
                 f"Nothing was written; {_fallback_advice(place, implicit=True)}",
                 place,
+                implicit=True,
+                owner=_owner_phrase(owner, owner_id),
             )
         raise FallbackUnseenError(
             f"cannot compile runtime configuration because {_owner_phrase(owner, owner_id)} "
@@ -1833,6 +1839,8 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
             f"looked into ({place.note}). Nothing was written; "
             f"{_fallback_advice(place, implicit=False)}",
             place,
+            implicit=False,
+            owner=_owner_phrase(owner, owner_id),
         )
 
     def runtime_playlist(
@@ -1862,8 +1870,8 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
                     f"cannot compile runtime configuration because playlist "
                     f"{authored.name!r}, which {_owner_phrase(owner, owner_id)} names, plays "
                     "nothing only as far as the library scan could look; "
-                    f"{_could_not_look(unseen[authored.id])}. The existing runtime "
-                    f"configuration was left untouched; {_unseen_advice(unseen[authored.id])}"
+                    f"{_could_not_look(unseen[authored.id])}. Nothing was written; "
+                    f"{_unseen_advice(unseen[authored.id])}"
                 )
             left_out.append(LeftOut(owner, owner_id, reference, authored.name, NOTHING_TO_PLAY))
             return None

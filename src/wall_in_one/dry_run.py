@@ -379,10 +379,14 @@ def _judge(
             compiled, compile_error = runtime_config.render(settings_after, after), ""
         except runtime_config.FallbackUnseenError as error:
             compiled, compile_error = "", str(error)
+            way = (
+                "choose a default playlist"
+                if error.implicit
+                else f"remove the reference in {error.owner}"
+            )
             said = (
                 f"All media would have nothing to play while {error.place.path} "
-                "can\u2019t be looked into; make the folder readable first, or choose a default "
-                "playlist"
+                f"can\u2019t be looked into; make the folder readable first, or {way}"
             )
         except runtime_config.RuntimeConfigError as error:
             compiled, compile_error = "", str(error)

@@ -8,6 +8,7 @@ exact private metadata inode; no live profile or media decoder is involved.
 from __future__ import annotations
 
 import errno
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +28,9 @@ def _profile(fixture: Fixture, use: str) -> tuple[config.Settings, Session, Path
         display_mode=config.DISPLAY_MODE_INDEPENDENT,
         theme_source_connector="DP-1",
     )
+    # A playable picture keeps All media non-empty, so that only the playlist
+    # the default, rule or display names can be what refuses.
+    (fixture.root / "photo.png").write_bytes(fixture.capture.read_bytes())
     session = Session(settings, owns_playback=False)
     playlist = session.playlists.create("Adopted video")
     session.playlists.add(playlist.id, fixture.source)
@@ -83,8 +87,13 @@ def test_unreadable_adopted_proof_refuses_instead_of_leaving_out_its_playlist(
     _fail_metadata_read(monkeypatch, blocked, error_number)
     try:
         session.adopt_library(scan.scan(settings.roots))
+        owner = {
+            "default": "the default",
+            "rule": "schedule rule 'adopted-rule'",
+            "display": "display 'DP-1'",
+        }[use]
         with pytest.raises(
-            runtime_config.RuntimeConfigError, match=r"could not look|can.t be looked into"
+            runtime_config.RuntimeConfigError, match=f"{re.escape(owner)}.*could not look"
         ):
             runtime_config.publish_changes(settings, session, target)
         assert target.read_bytes() == before

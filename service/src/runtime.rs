@@ -1087,14 +1087,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
                 if let Some(route) = self.routes.get_mut(&failure.output) {
                     // A renderer exit is a failed attempt to satisfy the
-                    // route's desired state, not an explicit Stop command.
-                    // Keep Playing as the logical state so clients can offer
-                    // Play as a retry, while renderer_failed/motion_active
-                    // describe what is actually resident. Only an explicit
-                    // Stop is sticky across late child-exit observations.
-                    if route.playback_state != PlaybackState::Stopped {
-                        route.playback_state = PlaybackState::Playing;
-                    }
+                    // route's desired state, not a transport command. The
+                    // user's intent (Playing, Paused or Stopped) is left as
+                    // it was: renderer_failed/motion_active describe what is
+                    // actually resident, and Play retries a failed renderer
+                    // from Playing, Paused or Stopped alike. In particular a
+                    // paused route must keep holding its cursor, so the
+                    // cycle guards below still skip it.
                     route.renderer_failed = true;
                     route.last_error = truncate_middle(&failure.message, MAX_LAST_ERROR_BYTES);
                 } else {
@@ -1129,11 +1128,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             // Videos remain retryable: unlike scenes, SystemDriver does not
             // suppress a video after it exits.  Remember that Play has real
             // work to do instead of treating the still fallback as healthy
-            // playback.  Scene retries still reach SystemDriver's session
-            // suppression and fail with the attributable scene diagnostic.
-            if self.playback_state != PlaybackState::Stopped {
-                self.playback_state = PlaybackState::Playing;
-            }
+            // playback.  The transport state (Playing, Paused or Stopped) is
+            // the user's intent and is not touched here: a paused playlist
+            // keeps its cursor, and Play retries the failed renderer.  Scene
+            // retries still reach SystemDriver's session suppression and fail
+            // with the attributable scene diagnostic.
             self.renderer_failed = true;
         }
         let had_pending = self.pending_automatic.is_some();

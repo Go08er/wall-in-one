@@ -7944,3 +7944,174 @@ fn hundreds_of_rules_on_many_displays_cannot_stall_status() {
         started.elapsed()
     );
 }
+
+// A renderer child that exits while the user has paused or stopped must not
+// change that transport intent (HF-2). Pause holds the playlist cursor.
+fn renderer_exit_runtime(
+    independent: bool,
+    label: &str,
+) -> (
+    Runtime<RuntimeDriver>,
+    Arc<Mutex<RuntimeDriverState>>,
+    chrono::NaiveDateTime,
+    PathBuf,
+) {
+    let document = if independent {
+        independent_config()
+    } else {
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+    }
+    .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5")
+    .replace("cycle_enabled = false", "cycle_enabled = true");
+    let mut parsed: Config = toml::from_str(&document).unwrap();
+    parsed.schedules.clear();
+    let first = parsed.playlists[0].entries[1].clone();
+    let mut second = first.clone();
+    second.id = "other-video".into();
+    parsed.playlists[0].entries = vec![first, second];
+    parsed.validate().unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 10, 18)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let root = directory(label);
+    let mut runtime = Runtime::new(
+        root.join("runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    (runtime, state, at, root)
+}
+
+fn queue_renderer_exit(state: &Arc<Mutex<RuntimeDriverState>>, independent: bool) {
+    state
+        .lock()
+        .unwrap()
+        .renderer_failures
+        .push(RendererFailure {
+            entry_id: "video-two".into(),
+            kind: wall_in_one_service::config::EntryKind::Video,
+            scene_id: None,
+            output: if independent { "DP-1" } else { "ALL" }.into(),
+            message: "renderer child exited".into(),
+            permanent_for_session: false,
+        });
+}
+
+fn assert_failed_and_held(
+    runtime: &mut Runtime<RuntimeDriver>,
+    at: chrono::NaiveDateTime,
+    independent: bool,
+    expected_state: &str,
+) {
+    let after = status(runtime, at);
+    assert_eq!(after["playback_state"], expected_state, "{after}");
+    assert_eq!(after["entry_id"], "video-two", "{after}");
+    assert_eq!(after["renderer_failed"], true, "{after}");
+    assert!(
+        after["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("renderer child exited"),
+        "{after}"
+    );
+    assert_eq!(after["motion_active"], false, "{after}");
+    if independent {
+        let row = display_status(runtime, at, "DP-1");
+        assert_eq!(row["playback_state"], expected_state, "{row}");
+        assert_eq!(row["renderer_failed"], true, "{row}");
+    }
+}
+
+#[test]
+fn renderer_exit_while_paused_stays_paused_and_holds_the_cursor() {
+    for independent in [false, true] {
+        let (mut runtime, state, at, root) = renderer_exit_runtime(independent, "exit-paused");
+        assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+        assert_eq!(status(&mut runtime, at)["entry_id"], "video-two");
+        queue_renderer_exit(&state, independent);
+        let applies = state.lock().unwrap().applies.len();
+        let base = Instant::now();
+        runtime.tick(at, base);
+        assert_failed_and_held(&mut runtime, at, independent, "paused");
+        // Past the 5 s cycle interval: Pause must still hold the cursor and
+        // must not render anything new.
+        runtime.tick(at, base + Duration::from_secs(6));
+        runtime.tick(at, base + Duration::from_secs(60));
+        assert_failed_and_held(&mut runtime, at, independent, "paused");
+        assert_eq!(state.lock().unwrap().applies.len(), applies);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn paused_without_a_renderer_exit_stays_paused_after_the_interval() {
+    for independent in [false, true] {
+        let (mut runtime, state, at, root) = renderer_exit_runtime(independent, "exit-control");
+        assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+        let base = Instant::now();
+        runtime.tick(at, base + Duration::from_secs(6));
+        let after = status(&mut runtime, at);
+        assert_eq!(after["playback_state"], "paused", "{after}");
+        assert_eq!(after["entry_id"], "video-two", "{after}");
+        assert_eq!(after["renderer_failed"], false, "{after}");
+        assert!(state.lock().unwrap().motion_active);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn renderer_exit_while_stopped_stays_stopped() {
+    for independent in [false, true] {
+        let (mut runtime, state, at, root) = renderer_exit_runtime(independent, "exit-stopped");
+        assert!(runtime_command(&mut runtime, at, "stop", None).ok);
+        assert_eq!(status(&mut runtime, at)["playback_state"], "stopped");
+        queue_renderer_exit(&state, independent);
+        let base = Instant::now();
+        runtime.tick(at, base);
+        runtime.tick(at, base + Duration::from_secs(6));
+        assert_failed_and_held(&mut runtime, at, independent, "stopped");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn renderer_exit_while_playing_stays_playing_and_reports_the_failure() {
+    for independent in [false, true] {
+        let (mut runtime, state, at, root) = renderer_exit_runtime(independent, "exit-playing");
+        assert_eq!(status(&mut runtime, at)["playback_state"], "playing");
+        queue_renderer_exit(&state, independent);
+        runtime.tick(at, Instant::now());
+        assert_failed_and_held(&mut runtime, at, independent, "playing");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn play_after_a_renderer_exit_while_paused_retries_and_resumes() {
+    for independent in [false, true] {
+        let (mut runtime, state, at, root) = renderer_exit_runtime(independent, "exit-play");
+        assert!(runtime_command(&mut runtime, at, "pause", None).ok);
+        queue_renderer_exit(&state, independent);
+        let base = Instant::now();
+        runtime.tick(at, base + Duration::from_secs(6));
+        assert_failed_and_held(&mut runtime, at, independent, "paused");
+        let applies = state.lock().unwrap().applies.len();
+        let response = runtime_command(&mut runtime, at, "play", None);
+        assert!(response.ok, "{}", response.message);
+        let after = status(&mut runtime, at);
+        assert_eq!(after["playback_state"], "playing", "{after}");
+        assert_eq!(after["entry_id"], "video-two", "{after}");
+        assert_eq!(after["renderer_failed"], false, "{after}");
+        assert_eq!(after["motion_active"], true, "{after}");
+        assert!(state.lock().unwrap().applies.len() > applies);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

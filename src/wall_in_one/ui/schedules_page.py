@@ -468,8 +468,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
             controls.playlist,
             self._display_playback_selected(display, choices),
         )
-        # A renderer failure leaves the resolved still on screen and may keep
-        # the route's logical playback state as ``playing``. A transient
+        # A renderer failure leaves the resolved still on screen and keeps
+        # the route's transport state (playing, paused or stopped) as the
+        # user left it; ``renderer_failed`` marks the retry. A transient
         # failure can be retried with Play. A session-taboo entry cannot: the
         # Library pairing editor explains how to remove it safely.
         playing = display.playback_state == "playing" and not display.renderer_failed

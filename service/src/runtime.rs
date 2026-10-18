@@ -2551,10 +2551,13 @@ impl<D: WallpaperDriver> Runtime<D> {
             && !self.animations_inhibited()
             && let Err(error) = self.driver.set_paused(true)
         {
-            // The newly started renderer is not paused. Do not leave status
-            // claiming otherwise. Undo any partial multi-output pause on a
-            // best-effort basis before reporting the renderer as playing.
-            self.playback_state = PlaybackState::Playing;
+            // The newly started renderer could not be paused. That is a failed
+            // attempt to honor the user's Paused intent, not a Play command:
+            // keep Paused (the cursor stays held, as in independent mode) and
+            // report the failure through renderer_failed below, so Play is
+            // the retry. A multi-output pause can fail after an earlier child
+            // paused, so undo it on a best-effort basis; a resumed child
+            // under a Paused status is released by Play's retry.
             let rollback = self
                 .driver
                 .set_paused(false)

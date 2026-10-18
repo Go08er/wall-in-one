@@ -853,10 +853,11 @@ class MainWindow(Adw.ApplicationWindow):
             )
             self._runtime_menu.set_icon_name("dialog-warning-symbolic")
         elif self._renderer_failed:
-            # Rust deliberately keeps playback_state as playing when a motion
-            # renderer crashes: the paired still remains the active entry and
-            # the user did not press Stop. The primary action nevertheless has
-            # to be Play, which is the daemon's explicit one-shot retry path.
+            # When a motion renderer crashes Rust keeps the user's transport
+            # state (playing, paused or stopped): the paired still remains the
+            # active entry and the user pressed nothing. renderer_failed is
+            # what drives Retry, so the primary action has to be Play, which is
+            # the daemon's explicit one-shot retry path.
             self._runtime_play.set_icon_name("media-playback-start-symbolic")
             self._runtime_play.set_tooltip_text("Retry motion for this wallpaper")
             self._runtime_menu.set_icon_name("media-playback-start-symbolic")

@@ -7999,7 +7999,7 @@ fn queue_renderer_exit(state: &Arc<Mutex<RuntimeDriverState>>, independent: bool
             entry_id: "video-two".into(),
             kind: wall_in_one_service::config::EntryKind::Video,
             scene_id: None,
-            output: if independent { "DP-1" } else { "ALL" }.into(),
+            output: if independent { "DP-1" } else { "" }.into(),
             message: "renderer child exited".into(),
             permanent_for_session: false,
         });
@@ -8016,6 +8016,7 @@ fn assert_failed_and_held(
     if expected_state != "stopped" {
         // Only Stopped keeps cycling its still; Playing and Paused hold here.
         assert_eq!(after["entry_id"], "video-two", "{after}");
+        assert_eq!(after["motion_active"], false, "{after}");
     }
     assert_eq!(after["renderer_failed"], true, "{after}");
     assert!(
@@ -8118,6 +8119,57 @@ fn play_after_a_renderer_exit_while_paused_retries_and_resumes() {
         assert_eq!(after["renderer_failed"], false, "{after}");
         assert_eq!(after["motion_active"], true, "{after}");
         assert!(state.lock().unwrap().applies.len() > applies);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn failing_to_pause_a_scheduled_apply_keeps_paused_and_play_retries() {
+    for independent in [false, true] {
+        let document = if independent {
+            independent_config()
+        } else {
+            config(Path::new("/bin/true"), Path::new("/bin/true"), false)
+        };
+        let parsed: Config = toml::from_str(&document).unwrap();
+        let summer = NaiveDate::from_ymd_opt(2026, 8, 3)
+            .unwrap()
+            .and_hms_opt(23, 0, 0)
+            .unwrap();
+        let winter = NaiveDate::from_ymd_opt(2026, 12, 3)
+            .unwrap()
+            .and_hms_opt(23, 0, 0)
+            .unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: Some(vec!["DP-1".into()]),
+            ..RuntimeDriverState::default()
+        }));
+        let root = directory("pause-fails-scheduled");
+        let mut runtime = Runtime::new(
+            root.join("runtime.toml"),
+            parsed,
+            RuntimeDriver(state.clone()),
+            summer,
+        )
+        .unwrap();
+        runtime.apply_current().unwrap();
+        assert!(runtime_command(&mut runtime, summer, "pause", None).ok);
+        state.lock().unwrap().fail_pause = true;
+        // The schedule moves to the night playlist; the new renderer cannot
+        // be paused, but nobody pressed Play.
+        let base = Instant::now() + Duration::from_secs(600);
+        for step in 0..8 {
+            runtime.tick(winter, base + Duration::from_secs(step * 30));
+        }
+        let held = status(&mut runtime, winter);
+        assert_eq!(held["playback_state"], "paused", "{held}");
+        assert_eq!(held["renderer_failed"], true, "{held}");
+        state.lock().unwrap().fail_pause = false;
+        let response = runtime_command(&mut runtime, winter, "play", None);
+        assert!(response.ok, "{}", response.message);
+        let after = status(&mut runtime, winter);
+        assert_eq!(after["playback_state"], "playing", "{after}");
+        assert_eq!(after["renderer_failed"], false, "{after}");
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -333,3 +333,13 @@ def test_the_package_bundles_ffmpeg_and_no_wallpaper_renderer() -> None:
     ]
     assert re.search(r"^\s*package-closure =$", flake, re.MULTILINE)
 
+
+@pytest.mark.skipif(not FLAKE_PATH.is_file(), reason="not running from a source tree")
+def test_both_halves_of_the_package_are_built_as_one_install_kind() -> None:
+    flake = FLAKE_PATH.read_text(encoding="utf-8")
+    assert re.findall(r'^\s*installKind = "(\w+)";$', flake, re.MULTILINE) == ["nix"]
+    # The service at compile time, the app's test run; then the app's source line.
+    assert flake.count("env.WALL_IN_ONE_INSTALL_KIND = installKind;") == 2
+    assert flake.count("bash tools/set-install-kind.sh ${installKind}") == 1
+    # And the installed pair is checked to agree.
+    assert flake.count("bash ${./tools/check-install-kind.sh} ${installKind}") == 1

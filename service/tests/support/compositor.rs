@@ -59,6 +59,9 @@ pub struct FakeHead {
     pub position: (i32, i32),
     pub scale: f64,
     pub physical_mm: (i32, i32),
+    /// Modes announced beyond the current one, as a compositor flooding the
+    /// client would.
+    pub extra_modes: usize,
 }
 
 impl FakeHead {
@@ -72,6 +75,7 @@ impl FakeHead {
             position: (0, 0),
             scale: 1.0,
             physical_mm: (530, 300),
+            extra_modes: 0,
         }
     }
 }
@@ -79,8 +83,11 @@ impl FakeHead {
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub outputs: Vec<FakeOutput>,
-    /// `None`: no wlr-output-management global at all.
+    /// `None`: no wlr-output-management global at all. Set to `None` once a
+    /// client has the manager, the manager is finished.
     pub heads: Option<Vec<FakeHead>>,
+    /// The zwlr_output_manager_v1 version advertised.
+    pub wlr_version: u32,
     pub wl_output_version: u32,
     /// `None`: no xdg-output global at all.
     pub xdg_output_version: Option<u32>,
@@ -92,6 +99,7 @@ impl Layout {
         Self {
             outputs,
             heads: None,
+            wlr_version: 4,
             wl_output_version: 4,
             xdg_output_version: Some(3),
         }
@@ -103,6 +111,7 @@ struct Shared {
     generation: u64,
     connections: usize,
     silent: bool,
+    released_heads: usize,
 }
 
 pub struct FakeCompositor {
@@ -132,6 +141,7 @@ impl FakeCompositor {
             generation: 0,
             connections: 0,
             silent,
+            released_heads: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let clients = Arc::new(Mutex::new(Vec::new()));
@@ -178,6 +188,11 @@ impl FakeCompositor {
     /// How many connections were accepted so far.
     pub fn connections(&self) -> usize {
         self.shared.lock().unwrap().connections
+    }
+
+    /// How many wlr heads clients have released.
+    pub fn released_heads(&self) -> usize {
+        self.shared.lock().unwrap().released_heads
     }
 }
 
@@ -268,6 +283,7 @@ struct Client {
     heads: Vec<(String, u32, bool)>,
     serial: u32,
     generation: u64,
+    released_heads: usize,
 }
 
 fn serve(mut stream: UnixStream, shared: &Mutex<Shared>, stop: &AtomicBool) {
@@ -309,6 +325,10 @@ fn serve(mut stream: UnixStream, shared: &Mutex<Shared>, stop: &AtomicBool) {
             if !silent {
                 client.handle(&message, &layout, &mut out);
             }
+        }
+        if client.released_heads > 0 {
+            shared.lock().unwrap().released_heads += client.released_heads;
+            client.released_heads = 0;
         }
         if !out.is_empty() && stream.write_all(&out).is_err() {
             return;
@@ -389,7 +409,11 @@ impl Client {
                 self.objects.remove(&object);
                 event(out, DISPLAY, 1, &[Arg::Uint(object)]);
             }
-            (Object::Head | Object::Mode, 0) => {
+            (Object::Head, 0) => {
+                self.objects.remove(&object);
+                self.released_heads += 1;
+            }
+            (Object::Mode, 0) => {
                 self.objects.remove(&object);
             }
             _ => {}
@@ -429,7 +453,13 @@ impl Client {
             self.advertise(registry, XDG_GLOBAL, "zxdg_output_manager_v1", version, out);
         }
         if layout.heads.is_some() {
-            self.advertise(registry, WLR_GLOBAL, "zwlr_output_manager_v1", 4, out);
+            self.advertise(
+                registry,
+                WLR_GLOBAL,
+                "zwlr_output_manager_v1",
+                layout.wlr_version,
+                out,
+            );
         }
     }
 
@@ -533,6 +563,20 @@ impl Client {
         );
         event(out, mode, 1, &[Arg::Int(head.mode.2)]);
         event(out, mode, 2, &[]);
+        for index in 0..head.extra_modes {
+            let extra = self.server_id();
+            self.objects.insert(extra, Object::Mode);
+            event(out, id, 3, &[Arg::Uint(extra)]);
+            event(
+                out,
+                extra,
+                0,
+                &[
+                    Arg::Int(640),
+                    Arg::Int(i32::try_from(index).unwrap_or(i32::MAX)),
+                ],
+            );
+        }
         event(out, id, 4, &[Arg::Int(i32::from(head.enabled))]);
         if head.enabled {
             event(out, id, 5, &[Arg::Uint(mode)]);
@@ -583,7 +627,14 @@ impl Client {
         let Some(manager) = self.wlr_manager else {
             return;
         };
-        let wanted = layout.heads.clone().unwrap_or_default();
+        let Some(wanted) = layout.heads.clone() else {
+            // wlr-output-management withdrawn: the manager is finished, and
+            // its heads with it, with no finished event of their own.
+            event(out, manager, 2, &[]);
+            self.wlr_manager = None;
+            self.heads.clear();
+            return;
+        };
         let mut changed = false;
         for (name, id, enabled) in self.heads.clone() {
             match wanted.iter().find(|head| head.name == name) {

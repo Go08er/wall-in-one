@@ -49,6 +49,12 @@ const MAX_ROUND_TRIPS: usize = 4;
 /// Output globals and heads tracked at once, far above `MAX_OUTPUTS` so that
 /// switched-off heads alone never make the enabled ones unreadable.
 const MAX_TRACKED: usize = 4 * MAX_OUTPUTS;
+/// wlr-output-management modes kept at once, across every head: far more
+/// than real monitors list. Every announced mode is a protocol object the
+/// client keeps until the compositor reuses its id, even once released, so a
+/// compositor announcing more heads or modes than this is not followed: the
+/// connection is dropped, and the next one leaves wlr-output-management out.
+const MAX_TRACKED_MODES: usize = 4096;
 
 const WL_OUTPUT_VERSION: u32 = 4;
 const XDG_OUTPUT_MANAGER_VERSION: u32 = 3;
@@ -119,6 +125,10 @@ pub fn environment_socket(
 pub struct WaylandOutputs {
     socket: Option<PathBuf>,
     session: Option<Session>,
+    /// Set once a compositor announced more wlr-output-management heads or
+    /// modes than are kept: later connections leave that protocol out, so
+    /// switched-off heads are no longer listed, and nothing else changes.
+    without_wlr: bool,
 }
 
 impl WaylandOutputs {
@@ -127,6 +137,7 @@ impl WaylandOutputs {
         Self {
             socket: None,
             session: None,
+            without_wlr: false,
         }
     }
 
@@ -135,6 +146,7 @@ impl WaylandOutputs {
         Self {
             socket: Some(socket),
             session: None,
+            without_wlr: false,
         }
     }
 
@@ -174,20 +186,40 @@ impl OutputSource for WaylandOutputs {
             match session.refresh(deadline) {
                 Ok(()) => return self.snapshot(),
                 Err(error) => {
+                    self.without_wlr |= session.state.wlr_overflow;
                     self.session = None;
                     // A compositor that did not answer in time is not asked
                     // again in the same question: the deadline is the bound.
                     if Instant::now() >= deadline {
                         return Err(error);
                     }
-                    // It went away or restarted: one new connection, within
-                    // what is left of the deadline.
+                    // It went away, restarted, or flooded wlr-output-management:
+                    // one new connection, within what is left of the deadline.
                 }
             }
         }
         let socket = self.socket()?;
-        self.session = Some(Session::open(&socket, deadline)?);
-        self.snapshot()
+        loop {
+            let mut session = Session::connect(&socket, deadline, !self.without_wlr)?;
+            match session.refresh(deadline) {
+                Ok(()) => {
+                    self.session = Some(session);
+                    return self.snapshot();
+                }
+                // Too many heads or modes: once more, without that protocol.
+                Err(_)
+                    if session.state.wlr_overflow
+                        && !self.without_wlr
+                        && Instant::now() < deadline =>
+                {
+                    self.without_wlr = true;
+                }
+                Err(error) => {
+                    self.without_wlr |= session.state.wlr_overflow;
+                    return Err(error);
+                }
+            }
+        }
     }
 }
 
@@ -199,7 +231,8 @@ struct Session {
 }
 
 impl Session {
-    fn open(socket: &Path, deadline: Instant) -> Result<Self, String> {
+    /// Connected and its registry asked for; `refresh` brings what it says.
+    fn connect(socket: &Path, deadline: Instant, use_wlr: bool) -> Result<Self, String> {
         // Bounded, and interrupted by shutdown: a compositor that has stopped
         // accepting fills its listen queue, and a blocking connect would then
         // wait for as long as it stays stopped, SIGTERM included.
@@ -227,14 +260,15 @@ impl Session {
         })?;
         let queue: EventQueue<State> = connection.new_event_queue();
         let registry = connection.display().get_registry(&queue.handle(), ());
-        let mut session = Self {
+        Ok(Self {
             connection,
             queue,
             _registry: registry,
-            state: State::default(),
-        };
-        session.refresh(deadline)?;
-        Ok(session)
+            state: State {
+                use_wlr,
+                ..State::default()
+            },
+        })
     }
 
     /// Bring the snapshot up to date: as many round trips as it takes for
@@ -257,6 +291,13 @@ impl Session {
             self.queue
                 .dispatch_pending(&mut self.state)
                 .map_err(|error| format!("the Wayland connection failed: {error}"))?;
+            // Stopped as soon as it is seen, before reading any more of it.
+            if self.state.wlr_overflow {
+                return Err(format!(
+                    "the compositor announced more than {MAX_TRACKED} output heads or \
+                     {MAX_TRACKED_MODES} output modes"
+                ));
+            }
             if self.state.synced {
                 return Ok(());
             }
@@ -355,6 +396,22 @@ struct Head {
     scale: f64,
     physical_mm: (i32, i32),
     current_mode: Option<zwlr_output_mode_v1::ZwlrOutputModeV1>,
+    /// Every mode announced for this head and not finished yet.
+    modes: Vec<zwlr_output_mode_v1::ZwlrOutputModeV1>,
+}
+
+impl Head {
+    /// Let the head and its modes go, where their version has `release`.
+    fn release(self) {
+        for mode in self.modes {
+            if mode.version() >= RELEASE_VERSION {
+                mode.release();
+            }
+        }
+        if self.head.version() >= RELEASE_VERSION {
+            self.head.release();
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -377,6 +434,11 @@ struct State {
     /// after the sync that ended it.
     bound: bool,
     too_many: bool,
+    /// Whether to bind wlr-output-management when it is offered.
+    use_wlr: bool,
+    /// It announced more heads or modes than are kept: the connection is not
+    /// used further.
+    wlr_overflow: bool,
 }
 
 impl State {
@@ -431,11 +493,12 @@ impl State {
                 "the compositor reported more than the supported {MAX_OUTPUTS} outputs"
             ));
         }
-        let heads: &[Head] = if self.heads_complete && self.wlr_manager.is_some() {
-            &self.heads
-        } else {
-            &[]
-        };
+        let heads: &[Head] =
+            if self.heads_complete && self.wlr_manager.is_some() && !self.wlr_overflow {
+                &self.heads
+            } else {
+                &[]
+            };
         let mut found: Vec<Output> = Vec::new();
         for entry in &self.outputs {
             let Some(current) = &entry.current else {
@@ -641,7 +704,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     state.xdg_manager = Some(manager);
                     state.bound = true;
                 }
-                "zwlr_output_manager_v1" if state.wlr_manager.is_none() => {
+                "zwlr_output_manager_v1" if state.use_wlr && state.wlr_manager.is_none() => {
                     state.wlr_manager = Some(registry.bind(
                         name,
                         version.min(WLR_OUTPUT_MANAGER_VERSION),
@@ -784,11 +847,12 @@ impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for State {
         match event {
             zwlr_output_manager_v1::Event::Head { head } => {
                 if state.heads.len() >= MAX_TRACKED {
-                    // Listing switched-off heads is a courtesy; past the
-                    // ceiling they are let go rather than kept.
+                    // Past the ceiling: let it go where the version allows,
+                    // and stop following this manager (`wlr_overflow`).
                     if head.version() >= RELEASE_VERSION {
                         head.release();
                     }
+                    state.wlr_overflow = true;
                     return;
                 }
                 state.heads.push(Head {
@@ -801,6 +865,7 @@ impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for State {
                     scale: 0.0,
                     physical_mm: (0, 0),
                     current_mode: None,
+                    modes: Vec::new(),
                 });
             }
             zwlr_output_manager_v1::Event::Done { .. } => state.heads_complete = true,
@@ -828,12 +893,14 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let zwlr_output_head_v1::Event::Finished = event {
-            state.heads.retain(|head| head.head != *proxy);
-            if proxy.version() >= RELEASE_VERSION {
+            if let Some(index) = state.heads.iter().position(|head| head.head == *proxy) {
+                state.heads.swap_remove(index).release();
+            } else if proxy.version() >= RELEASE_VERSION {
                 proxy.release();
             }
             return;
         }
+        let tracked: usize = state.heads.iter().map(|head| head.modes.len()).sum();
         let Some(head) = state.heads.iter_mut().find(|head| head.head == *proxy) else {
             return;
         };
@@ -848,6 +915,16 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for State {
             zwlr_output_head_v1::Event::Scale { scale } => head.scale = scale,
             zwlr_output_head_v1::Event::Make { make } => head.make = label(make),
             zwlr_output_head_v1::Event::Model { model } => head.model = label(model),
+            zwlr_output_head_v1::Event::Mode { mode } => {
+                if tracked < MAX_TRACKED_MODES {
+                    head.modes.push(mode);
+                } else {
+                    if mode.version() >= RELEASE_VERSION {
+                        mode.release();
+                    }
+                    state.wlr_overflow = true;
+                }
+            }
             _ => {}
         }
     }
@@ -862,7 +939,7 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for State {
 
 impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, Mutex<ModeState>> for State {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         proxy: &zwlr_output_mode_v1::ZwlrOutputModeV1,
         event: zwlr_output_mode_v1::Event,
         data: &Mutex<ModeState>,
@@ -880,8 +957,13 @@ impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, Mutex<ModeState>> for State
                     mode.refresh = refresh;
                 }
             }
-            zwlr_output_mode_v1::Event::Finished if proxy.version() >= RELEASE_VERSION => {
-                proxy.release();
+            zwlr_output_mode_v1::Event::Finished => {
+                for head in &mut state.heads {
+                    head.modes.retain(|mode| mode != proxy);
+                }
+                if proxy.version() >= RELEASE_VERSION {
+                    proxy.release();
+                }
             }
             _ => {}
         }

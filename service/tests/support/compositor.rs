@@ -194,6 +194,56 @@ impl Drop for FakeCompositor {
     }
 }
 
+/// A compositor that has stopped: its socket listens but never accepts.
+///
+/// The listen queue holds one connection (backlog 0), as a libwayland
+/// compositor's holds 129, so the second connection finds it full, which is
+/// where a blocking connect would wait for as long as the compositor stays
+/// stopped.
+pub struct WedgedCompositor {
+    path: PathBuf,
+    descriptor: std::os::fd::OwnedFd,
+}
+
+impl WedgedCompositor {
+    pub fn start(path: &Path) -> Self {
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: a fresh socket, bound to a path of the test's own and
+        // owned at once; the address is zeroed and filled within bounds.
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(fd >= 0, "socket");
+            let descriptor = std::os::fd::OwnedFd::from_raw_fd(fd);
+            let mut address: libc::sockaddr_un = std::mem::zeroed();
+            address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            let bytes = path.as_os_str().as_bytes();
+            assert!(bytes.len() < address.sun_path.len(), "socket path too long");
+            for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+                *slot = *byte as libc::c_char;
+            }
+            let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            assert_eq!(
+                libc::bind(fd, (&raw const address).cast(), length),
+                0,
+                "bind"
+            );
+            assert_eq!(libc::listen(fd, 0), 0, "listen");
+            Self {
+                path: path.to_path_buf(),
+                descriptor,
+            }
+        }
+    }
+}
+
+impl Drop for WedgedCompositor {
+    fn drop(&mut self) {
+        // The descriptor closes with the struct; the path goes with it.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Object {
     Registry,

@@ -31,8 +31,12 @@ A compositor without wlr-output-management has no disabled heads to list, and
 nothing else changes.
 
 The service asks once per wallpaper hand-over and every five seconds, as it
-asked niri before: one bounded round trip (three seconds) that also takes in
-any outputs added or removed since the last one. A service that starts before
+asked niri before: one round trip that also takes in any outputs added or
+removed since the last one. Each question, connecting included, ends within
+three seconds, as the niri helper did, and a shutdown ends it at once. A
+compositor that has stopped accepting or answering therefore holds the
+service for at most three seconds per question, and is not asked again until
+the next one. A service that starts before
 the compositor finds no socket; it reports that in `output_discovery_error`,
 keeps the explicit display assignments, retries the initial apply inside the
 startup window, and connects on a later probe.

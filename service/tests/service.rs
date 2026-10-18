@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use support::compositor::{FakeCompositor, FakeOutput, Layout};
+use support::compositor::{FakeCompositor, FakeOutput, Layout, WedgedCompositor};
 use wall_in_one_service::config::{Config, Overrides, RendererSettings};
 use wall_in_one_service::outputs::{Output, OutputSource};
 use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
@@ -6712,6 +6712,97 @@ fn initial_all_output_scene_waits_for_the_compositor_without_retrying_a_crashed_
     drop(compositor);
     fs::remove_dir_all(root).unwrap();
 }
+/// `status`, or `None` when the service did not answer within `wait`.
+fn status_within(socket: &Path, wait: Duration) -> Option<serde_json::Value> {
+    let stream = UnixStream::connect(socket).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    stream.set_write_timeout(Some(wait)).ok()?;
+    let mut writer = stream.try_clone().ok()?;
+    writeln!(writer, "{{\"verb\":\"status\"}}").ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    serde_json::from_str(&line).ok()
+}
+
+#[test]
+fn a_compositor_that_stopped_accepting_never_stalls_the_service_or_its_shutdown() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("wedged-compositor");
+    let wayland = root.join("wayland-0");
+    let compositor = WedgedCompositor::start(&wayland);
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, config(&noctalia, &noctalia, false)).unwrap();
+    let socket = root.join("runtime.sock");
+    let mut child = service_command()
+        .env("WAYLAND_DISPLAY", &wayland)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    let ready = Instant::now() + Duration::from_secs(10);
+    while status_within(&socket, Duration::from_secs(5)).is_none() {
+        assert!(Instant::now() < ready, "the service never answered");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Long enough for several five-second probes, each of which may hold the
+    // loop for one three-second question, and no longer.
+    let started = Instant::now();
+    let mut unanswered = Vec::new();
+    let mut reported = String::new();
+    while started.elapsed() < Duration::from_secs(22) {
+        let asked = started.elapsed();
+        match status_within(&socket, Duration::from_secs(4)) {
+            Some(reply) => {
+                let status: serde_json::Value =
+                    serde_json::from_str(reply["message"].as_str().unwrap()).unwrap();
+                reported = status["output_discovery_error"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+            }
+            None => unanswered.push(asked),
+        }
+        thread::sleep(Duration::from_millis(400));
+    }
+
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let stopping = Instant::now();
+    let stopped = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if stopping.elapsed() > Duration::from_secs(8) {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    if !stopped {
+        // Release it so the test can clean up, then fail.
+        drop(compositor);
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("SIGTERM did not stop the service within 8 s");
+    }
+    drop(compositor);
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        unanswered.is_empty(),
+        "status went unanswered at {unanswered:?}"
+    );
+    assert!(
+        reported.starts_with("cannot connect to the Wayland compositor")
+            || reported.contains("did not answer within"),
+        "{reported}"
+    );
+}
+
 #[test]
 fn successful_reload_apply_supersedes_the_pending_startup_retry() {
     use std::os::unix::fs::PermissionsExt;

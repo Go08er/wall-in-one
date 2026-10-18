@@ -9,16 +9,16 @@
 //! `wl_output` still names every display a wallpaper can be put on.
 //!
 //! One connection is kept for the life of the service. Each question is one
-//! bounded round trip on it, which also takes in every output added or
-//! removed since the last; a connection the compositor closed is replaced by
-//! a new one on the next question.
+//! round trip on it, which also takes in every output added or removed since
+//! the last; a connection the compositor closed is replaced by a new one.
+//! Every question, connecting included, ends within `DISCOVERY_TIMEOUT`, and
+//! a shutdown ends it sooner.
 
-use crate::renderer::{IPC_ABANDONED, MAX_OUTPUT_NAME_BYTES, usable_output_name};
+use crate::renderer::{IPC_ABANDONED, MAX_OUTPUT_NAME_BYTES, connect_until, usable_output_name};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
@@ -171,12 +171,19 @@ impl OutputSource for WaylandOutputs {
     fn outputs(&mut self) -> Result<Vec<Output>, String> {
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
         if let Some(session) = self.session.as_mut() {
-            if session.refresh(deadline).is_ok() {
-                return self.snapshot();
+            match session.refresh(deadline) {
+                Ok(()) => return self.snapshot(),
+                Err(error) => {
+                    self.session = None;
+                    // A compositor that did not answer in time is not asked
+                    // again in the same question: the deadline is the bound.
+                    if Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    // It went away or restarted: one new connection, within
+                    // what is left of the deadline.
+                }
             }
-            // The compositor went away or restarted. One new connection,
-            // within the same deadline.
-            self.session = None;
         }
         let socket = self.socket()?;
         self.session = Some(Session::open(&socket, deadline)?);
@@ -193,12 +200,25 @@ struct Session {
 
 impl Session {
     fn open(socket: &Path, deadline: Instant) -> Result<Self, String> {
-        let stream = UnixStream::connect(socket).map_err(|error| {
-            format!(
-                "cannot connect to the Wayland compositor at {}: {error}",
-                socket.display()
-            )
-        })?;
+        // Bounded, and interrupted by shutdown: a compositor that has stopped
+        // accepting fills its listen queue, and a blocking connect would then
+        // wait for as long as it stays stopped, SIGTERM included.
+        let stream =
+            connect_until(socket, deadline, &IPC_ABANDONED).map_err(|error| {
+                match error.kind() {
+                    ErrorKind::TimedOut => format!(
+                        "cannot connect to the Wayland compositor at {}: it did not accept the \
+                     connection within {} ms",
+                        socket.display(),
+                        DISCOVERY_TIMEOUT.as_millis()
+                    ),
+                    ErrorKind::Interrupted => "output discovery was abandoned for shutdown".into(),
+                    _ => format!(
+                        "cannot connect to the Wayland compositor at {}: {error}",
+                        socket.display()
+                    ),
+                }
+            })?;
         let connection = Connection::from_socket(stream).map_err(|error| {
             format!(
                 "cannot use the Wayland connection at {}: {error}",

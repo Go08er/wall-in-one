@@ -7,8 +7,10 @@ mod support;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use support::compositor::{FakeCompositor, FakeHead, FakeOutput, Layout};
+use support::compositor::{FakeCompositor, FakeHead, FakeOutput, Layout, WedgedCompositor};
 use wall_in_one_service::outputs::{Output, OutputSource, WaylandOutputs};
 
 /// A socket path in a fresh directory, short enough for a Unix socket.
@@ -337,5 +339,41 @@ fn a_compositor_that_never_answers_is_given_up_on_at_the_deadline() {
     let waited = started.elapsed();
     assert!(waited >= Duration::from_millis(2900), "{waited:?}");
     assert!(waited < Duration::from_secs(6), "{waited:?}");
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn every_question_to_a_compositor_that_stopped_accepting_ends_at_its_deadline() {
+    // The first connection fills the stopped compositor's queue; every later
+    // one finds it full. Asked on a thread, so a question that never ends
+    // fails this test instead of hanging it.
+    let path = socket("wedged");
+    let _compositor = WedgedCompositor::start(&path);
+    let (sender, receiver) = mpsc::channel();
+    let asked = path.clone();
+    thread::spawn(move || {
+        let mut source = WaylandOutputs::at(asked);
+        for _ in 0..3 {
+            let started = Instant::now();
+            let result = source.outputs();
+            if sender.send((started.elapsed(), result)).is_err() {
+                return;
+            }
+        }
+    });
+    for question in 0..3 {
+        let Ok((waited, result)) = receiver.recv_timeout(Duration::from_secs(10)) else {
+            panic!("question {question} to a stopped compositor did not end within 10 s");
+        };
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("did not answer within") || error.contains("did not accept"),
+            "question {question}: {error}"
+        );
+        assert!(
+            waited < Duration::from_secs(4),
+            "question {question} took {waited:?}"
+        );
+    }
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

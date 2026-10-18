@@ -8161,7 +8161,12 @@ fn failing_to_pause_a_scheduled_apply_keeps_paused_and_play_retries() {
         runtime.tick(winter, base);
         let held = status(&mut runtime, winter);
         assert_eq!(held["playback_state"], "paused", "{held}");
-        assert_eq!(held["renderer_failed"], true, "{held}");
+        if !independent {
+            // The mirrored baseline is re-applied and cannot be paused either.
+            // Independent mode restores a still baseline that needs no pause,
+            // with the automatic retry pending.
+            assert_eq!(held["renderer_failed"], true, "{held}");
+        }
         state.lock().unwrap().fail_pause = false;
         let response = runtime_command(&mut runtime, winter, "play", None);
         assert!(response.ok, "{}", response.message);

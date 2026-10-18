@@ -28,7 +28,10 @@ The displays a wallpaper can be put on are the enabled outputs: the
 wlr-output-management (niri 26.04, Sway, Hyprland and the wlroots compositors
 offer it). They are listed with `enabled: false` and never become a renderer target.
 A compositor without wlr-output-management has no disabled heads to list, and
-nothing else changes.
+nothing else changes. Nor is a compositor followed that announces more heads
+or modes over it than the service keeps (256 heads, 4096 modes): the service
+drops that connection and goes on without wlr-output-management, listing no
+switched-off heads.
 
 The service asks once per wallpaper hand-over and every five seconds, as it
 asked niri before: one round trip that also takes in any outputs added or

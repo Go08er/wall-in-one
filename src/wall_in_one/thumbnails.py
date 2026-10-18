@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import paths, worker_processes
+from wall_in_one import file_io, paths, worker_processes
 from wall_in_one.library.model import Kind, MediaItem
 
 #: Tile geometry. 16:9 because that is what most wallpapers are, and a grid of
@@ -535,10 +535,16 @@ def to_displayable(
 
 @dataclass(frozen=True, slots=True)
 class _Entry:
-    """One file in the cache directory that this module wrote."""
+    """One file in the cache directory that this module wrote.
+
+    ``fingerprint`` is the file's generation evidence when it was scanned: device,
+    inode, size, modification time and change time. The inode alone is not enough,
+    since a filesystem such as ext4 hands a freed inode straight to the next file
+    created, so a replacement at the same name can share it.
+    """
 
     name: str
-    identity: tuple[int, int]
+    fingerprint: file_io.FileFingerprint
     size: int
     used_at: float
 
@@ -633,7 +639,7 @@ def _scan(descriptor: int) -> tuple[list[_Entry], list[_Entry]]:
                 bucket.append(
                     _Entry(
                         candidate.name,
-                        (status.st_dev, status.st_ino),
+                        file_io.file_fingerprint(status),
                         status.st_size,
                         status.st_mtime,
                     )
@@ -649,8 +655,11 @@ def _scan(descriptor: int) -> tuple[list[_Entry], list[_Entry]]:
 def _discard(descriptor: int, entry: _Entry) -> bool:
     """Unlink one entry inside the pinned directory, if it is still the scanned file.
 
-    A different file now at that name (a fresh thumbnail, or anything else) is
-    left alone. A second instance having removed it already counts as done.
+    "Still the scanned file" means the whole fingerprint matches (device, inode,
+    size, modification and change time), not the inode alone: a file created
+    afterwards has a new change time even when its inode was reused. A different
+    file now at that name (a fresh thumbnail, or anything else) is left alone.
+    A second instance having removed it already counts as done.
     """
     try:
         current = os.stat(entry.name, dir_fd=descriptor, follow_symlinks=False)
@@ -658,7 +667,7 @@ def _discard(descriptor: int, entry: _Entry) -> bool:
         return True
     except OSError:
         return False
-    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != entry.identity:
+    if not stat.S_ISREG(current.st_mode) or file_io.file_fingerprint(current) != entry.fingerprint:
         return False
     try:
         os.unlink(entry.name, dir_fd=descriptor)

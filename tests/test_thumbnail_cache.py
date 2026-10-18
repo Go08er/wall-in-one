@@ -498,6 +498,30 @@ def test_a_cache_directory_that_is_a_link_is_refused_and_nothing_is_deleted(
     assert lookalike.exists()
 
 
+def test_eviction_leaves_a_file_rewritten_in_place_after_the_scan(
+    cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same inode, new contents: a reused inode number on any filesystem (ext4 does it)."""
+    scanned = _entry(cache, 0)
+    real_scan = thumbnails._scan
+    rewritten = _png(b"\x02\x02\x02")
+    inodes: list[int] = []
+
+    def scan_then_rewrite(descriptor: int) -> tuple[list[object], list[object]]:
+        found = real_scan(descriptor)
+        inodes.append(scanned.stat().st_ino)
+        with scanned.open("r+b") as handle:
+            handle.truncate(0)
+            handle.write(rewritten)
+        assert scanned.stat().st_ino == inodes[0]
+        return found  # type: ignore[return-value]
+
+    monkeypatch.setattr(thumbnails, "_scan", scan_then_rewrite)
+
+    assert thumbnails.clear() == 0
+    assert scanned.read_bytes() == rewritten
+
+
 def test_eviction_leaves_a_file_that_replaced_a_scanned_entry(
     cache: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

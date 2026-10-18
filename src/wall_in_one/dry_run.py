@@ -51,7 +51,7 @@ from wall_in_one.library import (
     schedules,
     workshop,
 )
-from wall_in_one.library.model import Library, MediaItem
+from wall_in_one.library.model import Library, MediaItem, UnseenKind
 from wall_in_one.library.playlists import Playlist
 from wall_in_one.session import SAVED_PLAYLISTS, SAVED_USES, Scanner, Session
 
@@ -384,9 +384,14 @@ def _judge(
                 if error.implicit
                 else f"remove the reference in {error.owner}"
             )
+            remedy = (
+                "make the library smaller"
+                if error.place.kind is UnseenKind.LIMIT
+                else "make the folder readable"
+            )
             said = (
                 f"All media would have nothing to play while {error.place.path} "
-                f"can\u2019t be looked into; make the folder readable first, or {way}"
+                f"can\u2019t be looked into; {remedy} first, or {way}"
             )
         except runtime_config.RuntimeConfigError as error:
             compiled, compile_error = "", str(error)

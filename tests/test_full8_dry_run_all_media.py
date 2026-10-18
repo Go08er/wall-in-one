@@ -5,14 +5,17 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from wall_in_one import config, dry_run, runtime_config
 from wall_in_one.library import displays, favourites, pairings, playlists, removals, schedules
 from wall_in_one.library.model import Kind, Library, MediaItem, Unseen, UnseenKind
 from wall_in_one.session import Session
 
 
-def test_deleting_the_last_wallpaper_beside_an_unreadable_folder_is_worded_as_a_removal(
-    tmp_path: Path,
+@pytest.mark.parametrize("kind", (UnseenKind.UNREADABLE, UnseenKind.LIMIT))
+def test_deleting_the_last_wallpaper_beside_an_unseen_folder_is_worded_as_a_removal(
+    tmp_path: Path, kind: UnseenKind
 ) -> None:
     root = tmp_path / "library"
     locked = root / "locked"
@@ -32,7 +35,7 @@ def test_deleting_the_last_wallpaper_beside_an_unreadable_folder_is_worded_as_a_
         library = Library(
             roots=(root,),
             items=(picture,),
-            unseen=(Unseen(locked, UnseenKind.UNREADABLE, f"{locked}: Permission denied"),),
+            unseen=(Unseen(locked, kind, f"{locked}: {kind.value}"),),
         )
         session.adopt_library(library)
 
@@ -56,14 +59,21 @@ def test_deleting_the_last_wallpaper_beside_an_unreadable_folder_is_worded_as_a_
         assert "choose a default playlist" in text
         assert "remove the reference" not in text
         assert "cannot compile" not in text
+        if kind is UnseenKind.LIMIT:
+            assert "make the library smaller" in text
+            assert "make the folder readable" not in text
+        else:
+            assert "make the folder readable" in text
+            assert "make the library smaller" not in text
         # The compiler's own sentence is still what `compile_error` holds.
         assert "cannot compile" in verdict.compile_error
     finally:
         session.shutdown()
 
 
+@pytest.mark.parametrize("kind", (UnseenKind.UNREADABLE, UnseenKind.LIMIT))
 def test_deleting_the_last_compiling_star_names_the_rule_that_names_all_media(
-    tmp_path: Path,
+    tmp_path: Path, kind: UnseenKind
 ) -> None:
     """A default is chosen already: the way out is the rule, not 'choose a default'."""
     root = tmp_path / "library"
@@ -89,10 +99,11 @@ def test_deleting_the_last_compiling_star_names_the_rule_that_names_all_media(
         owns_playback=False,
     )
     try:
+        unseen = root if kind is UnseenKind.LIMIT else video.path
         library = Library(
             roots=(root,),
             items=(star, video, other),
-            unseen=(Unseen(video.path, UnseenKind.UNREADABLE, f"{video.path}: its still"),),
+            unseen=(Unseen(unseen, kind, f"{unseen}: {kind.value}"),),
         )
         session.adopt_library(library)
 
@@ -111,8 +122,14 @@ def test_deleting_the_last_compiling_star_names_the_rule_that_names_all_media(
 
         assert len(verdict.refusals) == 1
         text = verdict.refusals[0]
-        assert text.startswith(f"All media would have nothing to play while {video.path} ")
+        assert text.startswith(f"All media would have nothing to play while {unseen} ")
         assert "remove the reference in schedule rule 'night'" in text
         assert "choose a default playlist" not in text
+        if kind is UnseenKind.LIMIT:
+            assert "make the library smaller" in text
+            assert "make the folder readable" not in text
+        else:
+            assert "make the folder readable" in text
+            assert "make the library smaller" not in text
     finally:
         session.shutdown()

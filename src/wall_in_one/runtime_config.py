@@ -47,6 +47,16 @@ MAX_RUNTIME_OVERRIDES_BYTES: Final = 1024 * 1024
 FALLBACK_PLAYLIST_ID: Final = "all-media"
 FALLBACK_PLAYLIST_NAME: Final = "All media"
 
+
+def is_fallback_reference(reference: str) -> bool:
+    """Whether ``reference`` names the generated All media playlist, as the compiler matches it.
+
+    Exactly its id or its name (no case folding): the built-in is generated
+    here, never authored, so a reference to it is not dangling.
+    """
+    return reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME)
+
+
 # Versioned Rust wire bounds. The compiler must enforce these before atomic
 # installation: publishing syntactically valid TOML that the service rejects
 # would stop rotation while destroying the previous working document.
@@ -887,7 +897,7 @@ def use_refusal(reference: str, session: Session) -> str:
     every wallpaper playback skips compiles but never shows anything. "All
     media" can always be used.
     """
-    if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
+    if is_fallback_reference(reference):
         return ""
     playlist = find_playlist(reference, session)
     if playlist is None:
@@ -1852,7 +1862,7 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
         rule that is turned off). It is not emitted when it can't be used, and
         is neither said nor a reason to refuse.
         """
-        if reference in (FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME):
+        if is_fallback_reference(reference):
             if not quiet:
                 require_known_fallback(owner, owner_id)
             return FALLBACK_PLAYLIST_ID

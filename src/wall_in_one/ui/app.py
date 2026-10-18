@@ -945,7 +945,9 @@ class Application(Adw.Application):
 
         A reference is to a playlist's id, but an older profile's default,
         rule or display assignment may name its playlist by name, which the
-        compiler resolves too (by id, then by name, ignoring case). Such a
+        compiler resolves too (by id, then by name, ignoring case). The
+        generated All media playlist is never authored but is always valid,
+        by its id or its exact name, so a reference to it is left alone. Such a
         reference is not dangling: it is pointed at the playlist's id, in the
         existing key or record, so it keeps working and a later rename can't
         leave it naming nothing. Only a reference that resolves to no
@@ -984,7 +986,11 @@ class Application(Adw.Application):
         elif schedule_store.fault is not None:
             failures.append(f"schedule rules: {schedule_store.fault}")
         else:
-            dangling = sorted({rule.playlist for rule in schedule_store.rules} - valid)
+            dangling = sorted(
+                reference
+                for reference in {rule.playlist for rule in schedule_store.rules} - valid
+                if not runtime_config.is_fallback_reference(reference)
+            )
             for playlist_id in dangling:
                 target = named(playlist_id)
                 try:
@@ -1005,7 +1011,11 @@ class Application(Adw.Application):
         elif display_store.fault is not None:
             failures.append(f"display assignments: {display_store.fault}")
         else:
-            dangling = sorted({playlist for _connector, playlist in display_store.all()} - valid)
+            dangling = sorted(
+                reference
+                for reference in {playlist for _connector, playlist in display_store.all()} - valid
+                if not runtime_config.is_fallback_reference(reference)
+            )
             for playlist_id in dangling:
                 target = named(playlist_id)
                 try:
@@ -1024,7 +1034,7 @@ class Application(Adw.Application):
         try:
             loaded = config.load_strict_document()
             active = loaded.settings.active_playlist
-            if active and active not in valid:
+            if active and active not in valid and not runtime_config.is_fallback_reference(active):
                 target = named(active)
                 try:
                     saved_settings = _settings_published(

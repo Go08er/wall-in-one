@@ -25,8 +25,8 @@ It reads:
 The displays a wallpaper can be put on are the enabled outputs: the
 `wl_output` globals with a usable connector name. A compositor advertises no
 `wl_output` for a disabled head, so disabled heads come only from
-wlr-output-management (niri, Sway, Hyprland and other wlroots compositors offer
-it). They are listed with `enabled: false` and never become a renderer target.
+wlr-output-management (niri 26.04, Sway, Hyprland and the wlroots compositors
+offer it). They are listed with `enabled: false` and never become a renderer target.
 A compositor without wlr-output-management has no disabled heads to list, and
 nothing else changes.
 

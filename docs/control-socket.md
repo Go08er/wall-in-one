@@ -117,7 +117,7 @@ array, sorted by connector, of at most 64 rows:
 | Field | Meaning |
 | --- | --- |
 | `name` | The connector (`eDP-1`), as every renderer is given it. |
-| `enabled` | `false` for a head wlr-output-management reports switched off. It is listed, never rendered on, and has no row in `displays`. |
+| `enabled` | `false` for a head wlr-output-management reports switched off. It is listed, never rendered on, and never a connected display in `displays` (a configured assignment for it keeps its row with `connected = false`). |
 | `make`, `model` | The compositor's description; may be empty. |
 | `x`, `y`, `width`, `height` | Logical position and size; the size is `0` when the compositor has no xdg-output. |
 | `scale` | The compositor's scale, fractional where it says so. |

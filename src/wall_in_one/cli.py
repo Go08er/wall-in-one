@@ -485,12 +485,13 @@ def _warn_unknown_settings(unknown_keys: Sequence[str]) -> None:
 def _warn_left_out(left_out: Sequence[runtime_config.LeftOut]) -> None:
     """Say what a compile nobody watches was built without: one ``warning:`` line each.
 
-    The compiler never refuses over a playlist that can't play. A default, a
+    The compiler does not refuse over a playlist that can't play. A default, a
     schedule rule or a display's own playlist that names one, or names a
     playlist that doesn't exist, is left out and the rest is published
     (`runtime_config.LeftOut`), so the command exits as for a clean compile:
     refusing would stop every publication and, on a profile that has never
-    published, the service with it. Each line says which reference, whose it
+    published, the service with it. The exception is where the scan could not
+    look (`runtime_config._compile`): there it refuses, All media included. Each line says which reference, whose it
     is and why. A store that could not be read is a different thing: the
     compiler refuses that file by name.
     """

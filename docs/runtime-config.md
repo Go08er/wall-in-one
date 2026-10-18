@@ -84,14 +84,20 @@ still refuses the compile, naming the file, and the last document stays. So
 does a playlist with nothing to play that the default, a rule or a display
 names, when the library scan **could not look into** a place its files may
 be in: a listing or stat of the folder (or one above it) failed, or a scan
-limit stopped it (65536 entries examined, 4096 wallpapers, 8 levels deep). The
-same goes for a video with no still only because a place its still would be in
-could not be looked at (a stat or read of its sidecar, a generated still, or
-the folder holding them failed): a video with no still at all is "no still
-yet" and is left out.
+limit stopped it (65536 entries examined, 4096 wallpapers, 8 levels deep).
+"All media" counts, whether it is named, implicit (no default chosen), or what
+plays because the chosen default was left out. For All media, "a place its files
+may be in" is any library folder or, with favourites only, the folder of a
+favourite. The same goes for a video with no still only because a place its
+still would be in could not be looked at (a stat or read of its sidecar, a
+generated still, the proof of an adopted capture, meaning its metadata or the
+Automatic Stills marker, or the folder holding them failed): a video with no
+still at all is "no still yet" and is left out.
 "Couldn't look" is never "nothing there". The refusal names the folder (or the video), and
 the last document stays until the folder can be read (or, past a limit, the
-library made smaller) or the reference is removed. A library folder that is
+library made smaller) or the reference is removed. For an implicit All media
+there is no reference to remove: choose a default playlist, or remove the
+folder from the library. A library folder that is
 absent, not a folder, or a symbolic link (an unmounted drive, or one removed
 for good) was *looked at*: nothing usable is there, so such a playlist is left
 out and said like any other that can't play, and the rest is published until

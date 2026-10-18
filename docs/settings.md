@@ -102,8 +102,9 @@ read-only mount, or a tool that manages the files in it. Wall-in-One reads
   wallpaper service's startup check, `--write-config` and the health sync
   print a `warning:` line naming the file and the key, build the runtime
   document with "All media" as the default, and exit as usual (not when the
-  library scan could not look into a folder the playlist's files may be in:
-  then the build refuses, naming the folder, and `--write-config` exits 1).
+  library scan could not look into a folder the playlist's files may be in,
+  or when All media itself would play nothing for that reason: then the build
+  refuses, naming the folder, and `--write-config` exits 1).
   Once a
   playlist with that name has something to play, it is the default again.
   Where the file can be saved, the app clears a default that names no

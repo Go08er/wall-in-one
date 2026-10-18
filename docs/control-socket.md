@@ -179,7 +179,8 @@ wallpapers that are not here keeps them -- an unmounted drive is not a deletion.
 A playlist with no resolvable entries, like an empty one, is not in the
 runtime configuration. Whatever names it is left out and said, and everything
 else is published (unless the library scan could not look into a folder its
-files may be in, which refuses the build instead; see
+files may be in, or "All media" itself would play nothing for that reason,
+which refuses the build instead; see
 [the runtime document](runtime-config.md)): the default plays "All media" instead, and a schedule rule
 or a display's own playlist that names it doesn't apply until the media is
 back or the playlist is repaired. The app says which and why once, in a toast

@@ -57,6 +57,12 @@
         # spelled once here so the three names cannot drift apart.
         applicationId = "dev.goober.WallInOne";
 
+        # What kind of install these packages are (docs/packaging.md). Both
+        # halves are built with it, the service at compile time and the app
+        # by rewriting its one source line, and the desktop check runs
+        # tools/check-install-kind.sh to prove the installed pair agrees.
+        installKind = "nix";
+
         # Runtime tools bundled with the app. Noctalia remains the selected
         # shell endpoint rather than another copy in this closure: authoring
         # works without it, while runtime status reports application failures.
@@ -85,6 +91,7 @@
             ];
           };
           cargoLock.lockFile = ./service/Cargo.lock;
+          env.WALL_IN_ONE_INSTALL_KIND = installKind;
           buildInputs = [ powerDbus ];
           nativeCheckInputs = [ pkgs.dbus ];
           doCheck = true;
@@ -120,6 +127,14 @@
           src = ./.;
 
           build-system = [ python.pkgs.setuptools ];
+
+          # The app's half of the install kind; the service has its own above.
+          # The variable is for the test run, which checks that the module
+          # says the same as the service's build does.
+          postPatch = ''
+            bash tools/set-install-kind.sh ${installKind}
+          '';
+          env.WALL_IN_ONE_INSTALL_KIND = installKind;
 
           dependencies = [ python.pkgs.pygobject3 ];
 
@@ -519,6 +534,9 @@
                   | grep -Fx 'wall-in-one ${wall-in-one.version}'
                 ${wall-in-one}/bin/wall-in-one-service --version \
                   | grep -Fx 'wall-in-one-service ${wall-in-one-service.version}'
+                # Both halves of the package say the same install kind.
+                bash ${./tools/check-install-kind.sh} ${installKind} \
+                  ${wall-in-one}/bin/wall-in-one ${wall-in-one}/bin/wall-in-one-service
                 # The package wrapper adds site-packages after interpreter
                 # startup. Subinterpreters begin from the original path
                 # configuration, so exercise every isolated MotionBGS worker

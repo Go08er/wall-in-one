@@ -983,12 +983,15 @@ impl SystemDriver {
             .filter(|output| output.enabled)
             .cloned()
             .collect();
-        self.published = reported;
         if enabled.is_empty() {
-            Err("the compositor reported no enabled outputs; paired still remains applied".into())
-        } else {
-            Ok(enabled)
+            // A failure like any other: `published` keeps the last snapshot
+            // that succeeded, as status documents.
+            return Err(
+                "the compositor reported no enabled outputs; paired still remains applied".into(),
+            );
         }
+        self.published = reported;
+        Ok(enabled)
     }
 
     fn live_outputs(&mut self) -> Result<Vec<Output>, String> {

@@ -81,6 +81,31 @@ impl OutputSource for FixedOutputs {
     }
 }
 
+/// A display source a test changes while it is in use, as a compositor does
+/// when a monitor is switched off, unplugged or plugged in.
+#[derive(Clone, Default)]
+struct SwitchableOutputs(Arc<Mutex<Vec<Output>>>);
+
+impl SwitchableOutputs {
+    fn set(&self, outputs: Vec<Output>) {
+        *self.0.lock().unwrap() = outputs;
+    }
+}
+
+impl OutputSource for SwitchableOutputs {
+    fn outputs(&mut self) -> Result<Vec<Output>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+
+fn switched_off(name: &str) -> Output {
+    Output {
+        name: name.into(),
+        enabled: false,
+        ..Output::default()
+    }
+}
+
 fn live(name: &str, refresh_millihz: Option<u64>) -> Output {
     Output {
         name: name.into(),
@@ -799,7 +824,39 @@ fn a_compositor_with_only_switched_off_heads_is_a_readiness_error() {
         error.contains("the compositor reported no enabled outputs"),
         "{error}"
     );
-    assert_eq!(driver.published_outputs().len(), 1);
+    assert!(
+        driver.published_outputs().is_empty(),
+        "nothing succeeded yet"
+    );
+}
+
+#[test]
+fn a_failed_question_keeps_the_last_published_snapshot() {
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        true,
+    ))
+    .unwrap();
+    let source = SwitchableOutputs::default();
+    source.set(vec![
+        live("DP-1", Some(60_000)),
+        live("eDP-1", Some(60_000)),
+    ]);
+    let mut driver = SystemDriver::with_output_source(
+        parsed.renderer.clone(),
+        Path::new("/wall-in-one-runtime.sock"),
+        Box::new(source.clone()),
+    );
+    driver.connected_outputs().unwrap();
+    let published = driver.published_outputs().to_vec();
+    assert_eq!(published.len(), 2);
+
+    // Every head switched off: discovery fails, and status keeps saying
+    // what the last successful answer was.
+    source.set(vec![switched_off("DP-1"), switched_off("eDP-1")]);
+    assert!(driver.connected_outputs().is_err());
+    assert_eq!(driver.published_outputs(), published.as_slice());
 }
 
 #[test]

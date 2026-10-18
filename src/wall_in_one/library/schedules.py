@@ -22,7 +22,7 @@ the alternative is making them write two rules.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1128,8 +1128,13 @@ def describe(
     at: datetime,
     names: Mapping[str, str] | None = None,
     connector: str = "",
+    omitted: Collection[str] = (),
 ) -> str:
     """The schedule as rows, marking which rule is in force right now.
+
+    ``omitted``: ids of rules the runtime compiler leaves out
+    (`Session.compiling_schedule_rules`). They are listed, but none is in
+    force, and the winner is found among the others.
 
     ``names`` maps playlist ids to what they are called. Rules store the id,
     because a rename must not break a schedule -- but a listing full of
@@ -1137,7 +1142,8 @@ def describe(
     The rule's own name, if it has one, comes last so the earlier columns
     stay where scripts already find them; ``-`` means none.
     """
-    winner = resolve(rules, at, connector)
+    applying = [rule for rule in rules if rule.id not in omitted]
+    winner = resolve(applying, at, connector)
     default = (names or {}).get(active, active) if active else "(All media)"
     lines = [
         f"# schedule: {len(rules)} rules, default {default}",
@@ -1145,7 +1151,7 @@ def describe(
     ]
     # The last match wins, so only the final matching rule is in force.
     last_match = ""
-    for rule in rules:
+    for rule in applying:
         if rule.matches(at, connector):
             last_match = rule.id
     known = names or {}

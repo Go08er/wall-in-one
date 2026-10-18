@@ -6526,7 +6526,9 @@ class Application(Adw.Application):
         if self._runtime_is_running():
             return GLib.SOURCE_CONTINUE
         # Only redraws when the calendar actually asks for a different
-        # playlist, so a quiet minute costs one comparison.
+        # playlist. A quiet minute costs the rules' time matching and one
+        # comparison: the library is indexed only once a matching rule names
+        # a playlist (`Session.compiling_schedule_rules`).
         if self._session.schedule_changed():
             # A scheduled playlist switch is a playback event, not merely a
             # cursor rebuild. This runs in service mode too, where no window
@@ -7934,12 +7936,14 @@ class _Commands:
 
     def show_schedule(self) -> Response:
         session = self._app.session
+        kept = {rule.id for rule in session.compiling_schedule_rules()}
         return Response.success(
             schedules.describe(
                 session.schedules.rules,
                 session.settings.active_playlist,
                 datetime.now(),
                 {one.id: one.name for one in session.playlists.all()},
+                omitted={rule.id for rule in session.schedules.rules} - kept,
             )
         )
 

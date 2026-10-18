@@ -1923,15 +1923,30 @@ class Session:
             named = self._playlists.by_name(default)
             if named is not None:
                 default = named.id
+        at = self._now()
+        kept = self.compiling_schedule_rules(at)
+        return schedules.effective(kept, default, at)
+
+    def compiling_schedule_rules(self, at: datetime | None = None) -> tuple[schedules.Rule, ...]:
+        """The saved rules the runtime compiler keeps, in order.
+
+        One answer for everything that asks which rules apply: compatibility
+        playback (`_scheduled_playlist`) and ``ctl schedule``, so neither can
+        drift from the document. A rule is kept when its playlist is All
+        media, or exists and holds a wallpaper the compiler keeps (emitted,
+        Borked or not). With ``at``, only the rules matching that moment are
+        looked at, and returned: the library is indexed lazily, once a
+        matching rule names a playlist, so a quiet minute costs the matching
+        only.
+        """
         # Local to avoid the compiler's import of Session becoming a cycle.
         from wall_in_one import runtime_config
 
-        at = self._now()
-        known = runtime_config.library_index(self)
+        known: dict[Path, MediaItem] | None = None
         compiles: dict[str, bool] = {}
         kept: list[schedules.Rule] = []
         for rule in self._schedules.rules:
-            if not rule.matches(at):
+            if at is not None and not rule.matches(at):
                 continue
             if rule.playlist in (
                 runtime_config.FALLBACK_PLAYLIST_ID,
@@ -1943,13 +1958,15 @@ class Session:
             if authored is None:
                 continue
             if authored.id not in compiles:
+                if known is None:
+                    known = runtime_config.library_index(self)
                 compiles[authored.id] = any(
                     runtime_config.entry_playability(known.get(entry.path), self).compiles
                     for entry in authored.entries
                 )
             if compiles[authored.id]:
                 kept.append(rule)
-        return schedules.effective(kept, default, at)
+        return tuple(kept)
 
     @property
     def manual_playlist(self) -> str | None:

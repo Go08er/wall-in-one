@@ -330,6 +330,27 @@
             wallInOneService = wall-in-one-service;
           };
 
+          # CI's Rust lint step (.github/workflows/ci.yml), here so that a gate
+          # catches it: rustfmt, then clippy on every target with warnings as
+          # errors, offline from the package's own vendored crates.
+          clippy = pkgs.stdenv.mkDerivation {
+            name = "wall-in-one-service-clippy";
+            inherit (wall-in-one-service) src cargoDeps;
+            nativeBuildInputs = [
+              pkgs.rustPlatform.cargoSetupHook
+              pkgs.cargo
+              pkgs.rustc
+              pkgs.clippy
+              pkgs.rustfmt
+            ];
+            buildInputs = [ powerDbus ];
+            buildPhase = ''
+              cargo fmt --check
+              cargo clippy --offline --all-targets -- -D warnings
+            '';
+            installPhase = "touch $out";
+          };
+
           # Widget identity, focus, scroll-position and asynchronous GTK
           # delivery regressions need a real display.  Keep those tests out of
           # the package's ordinary checkPhase (which must remain usable in a

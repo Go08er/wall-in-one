@@ -9642,3 +9642,34 @@ fn missing_renderers_fit_the_status_at_the_ceiling_whatever_their_paths() {
     assert_eq!(snapshot["displays"].as_array().unwrap().len(), 128);
     assert_eq!(snapshot["playlists"].as_array().unwrap().len(), 65);
 }
+
+#[test]
+fn a_program_that_cannot_be_executed_is_a_failure_not_a_missing_renderer() {
+    // There, executable, and not a program: exec says "Exec format error",
+    // which no install fixes. It stays an apply failure, retried and then
+    // quarantined like any other (the VM test's health persistence uses it).
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("renderer-not-a-program");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(&mpvpaper, "not a program\n").unwrap();
+    fs::set_permissions(&mpvpaper, fs::Permissions::from_mode(0o755)).unwrap();
+    let engine = root.join("absent-linux-wallpaperengine");
+    let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, false);
+    let error = runtime.apply_current().unwrap_err();
+    assert!(error.contains("cannot start mpvpaper"), "{error}");
+    let shown = status(&mut runtime, noon());
+    assert_eq!(shown["missing_renderers"], serde_json::json!([]), "{shown}");
+    assert_eq!(shown["renderer_failed"], true);
+    let started = Instant::now();
+    assert!(runtime.schedule_initial_apply_retry(started));
+    runtime.tick(noon(), started + Duration::from_secs(2));
+    runtime.tick(noon(), started + Duration::from_secs(4));
+    let quarantined = status(&mut runtime, noon());
+    assert_eq!(
+        quarantined["taboo_entries"][0]["entry_id"], "video-a",
+        "{quarantined}"
+    );
+    assert_eq!(quarantined["taboo_entries"][0]["source"], "automatic-apply");
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}

@@ -42,17 +42,18 @@ Starting a renderer can fail in two ways that look alike in a log:
   interpreter is missing) or `PermissionDenied` (a file that is not
   executable, or a mount that forbids it). No child ever existed.
 - **The program started but could not run.** The child exits with status 127
-  within five seconds of its spawn (`LOADER_FAILURE_WINDOW`): the dynamic
-  loader could not find a library ("error while loading shared libraries", the
+  and the dynamic loader's "error while loading shared libraries" (the
   commonest way an Arch `linux-wallpaperengine-git` breaks after a soname
-  bump), or a wrapper script could not find what it runs. Both happen before
-  the renderer's own code runs, within milliseconds, and the service looks at
-  its children every few tens of milliseconds, so five seconds is room for a
-  loaded machine and a slow disk without reaching anything a renderer that drew
-  a frame would do.
+  bump), whenever that exit is noticed: the service's loop can be held past
+  any window by a slow Noctalia. A bare 127, which a wrapper script gives when
+  it cannot find what it runs, counts only within five seconds of the spawn
+  (`LOADER_FAILURE_WINDOW`). Both happen before the renderer's own code runs,
+  within milliseconds, and the service looks at its children every few tens
+  of milliseconds, so five seconds is room for a loaded machine and a slow
+  disk without reaching anything a renderer that drew a frame would do.
 - **A child ran and then failed.** mpvpaper or linux-wallpaperengine ran and
-  exited: a codec it lacks, a scene it cannot render, a crash, or a 127 after
-  the window.
+  exited: a codec it lacks, a scene it cannot render, a crash, or a bare 127
+  after the window.
 
 Until now both were the same `Err` from the driver. An automatic apply (start-up,
 rotation, a schedule change, a display plugged in) retried it twice, then marked
@@ -121,9 +122,10 @@ picked, minus its motion.
   then linux-wallpaperengine), each `{"program": "mpvpaper", "path":
   "/usr/bin/mpvpaper", "reason": "not-found"}`. `reason` is `not-found`
   (nothing at the path), `not-executable` (something there that cannot be
-  executed) or `cannot-run` (an executable that cannot run here: its
-  interpreter or a library is missing, or its file system forbids it). Empty
-  means none. It is additive: `status_version` stays 2, and a client that does
+  executed), `cannot-run` (an executable that cannot run here: its
+  interpreter or a library is missing, or its file system forbids it) or
+  `no-access` (a folder on the way to the path does not let the service in,
+  so what is there cannot be told). Empty means none. It is additive: `status_version` stays 2, and a client that does
   not know it is unaffected. `path` is the path the document names, cut in the
   middle with the usual `[truncated]` marker past 1024 bytes. Neither status
   budget counts the configured program paths (counting them would refuse a
@@ -140,7 +142,11 @@ Each record keeps the identity of what was at the path when it failed: its
 device, inode, size, modification time and mode, or that nothing was there.
 
 - **A spawn of that program succeeds**, on any display: the program is there.
-  (The other displays it left on a still keep their own marks, below.)
+  (The other displays it left on a still keep their own marks, below.) A
+  program recorded as `cannot-run` starts just as well and exits 127 a moment
+  later, so its record stays until a child of it has outlived the five-second
+  window: a status in between must not say it can run now, or the windows
+  would say it is missing all over again.
 - **A reload whose renderer settings changed** (a new path for a program, as
   when a Nix profile now has it): the driver is reconfigured, which forgets
   every record, and every display is applied again.
@@ -265,9 +271,12 @@ The link is one constant, `setup_check.COMPANION_URL`
   or a headless check. It exits 0 when nothing required is missing, 1 when
   something is (as `--legacy-migration-status` does for a decision it needs),
   and 2 when it couldn't tell: the check itself failed (said on stderr, never
-  a traceback) or the service didn't answer in time. It imports no GTK. Unlike
-  the window it asks the service once, so a service that does not answer in
-  time is a finding there, and exit 2.
+  a traceback) or the service didn't answer in time and nothing else required
+  is missing (a slow service never hides a finding that is certain, such as
+  Noctalia not being installed: that is 1). It imports no GTK. Unlike the
+  window it asks the service once, so a service that does not answer in time
+  is a finding there. A row the service sent without its path (at its
+  reply's limit) is read as the path found here, never as an empty name.
 - The window looks on the application's setup lane, each look on a daemon
   thread: a look only reads, and one that hangs (a mount that stopped
   answering) must never hold the app's quit, so the lane is closed without

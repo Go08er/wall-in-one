@@ -152,9 +152,13 @@ the service could not start at all, because nothing is at the path
 `runtime.toml` names or it is not executable there. It is a top-level array,
 mpvpaper first, of at most two rows, each `{"program": "mpvpaper", "path":
 "/usr/bin/mpvpaper", "reason": "not-found"}` (the path cut in the middle past
-1024 bytes; `reason` is `not-found`, `not-executable` or `cannot-run`); empty
-means none. A renderer whose child exits with status 127 within five seconds of
-its spawn (a missing library) is one that cannot run, too. Like `outputs`, it
+1024 bytes; `reason` is `not-found`, `not-executable`, `cannot-run`, or
+`no-access` when a folder on the way does not let the service in); empty means
+none. A renderer whose child exits with status 127 and the loader's "error
+while loading shared libraries" (a missing library) is one that cannot run,
+too, however late the exit is noticed, and so is a bare 127 within five seconds
+of its spawn; a `cannot-run` record stays until a child of that program has
+run for longer. Like `outputs`, it
 never takes a taboo record's place: at the reply's limit a row's path is left
 empty, then the rows are left out. A display whose entry needs such a program shows that entry's
 still, with `renderer_failed: true` and the program, path and error in its

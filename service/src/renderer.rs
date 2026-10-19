@@ -318,21 +318,154 @@ pub trait WallpaperDriver: Send {
 /// The two renderer programs, in the order `missing_renderers` reports them.
 pub const RENDERER_PROGRAMS: [&str; 2] = ["mpvpaper", "linux-wallpaperengine"];
 
-/// A renderer program that could not be started at all: the spawn of the
-/// path the document names failed with `NotFound` (nothing there, or a
-/// script whose interpreter is missing) or `PermissionDenied` (not
-/// executable here). No child ever existed, so this says nothing about the
-/// wallpaper: the driver shows the entry's still instead of motion, and the
-/// apply succeeds. A renderer that started and then exited is a
-/// `RendererFailure`, as before. See docs/missing-components.md.
+/// How long after its spawn a renderer that exits with status 127 is taken
+/// as one that could not run at all rather than one that failed. 127 is what
+/// the dynamic loader exits with when a library is missing ("error while
+/// loading shared libraries") and what a shell exits with for a command it
+/// cannot find, both before the program's own code runs. The loader fails
+/// within milliseconds of the exec, and the service looks at its children
+/// every few tens of milliseconds, so five seconds leaves room for a loaded
+/// machine and a slow disk while staying far below anything a renderer that
+/// drew a frame would do; one that runs that long and then exits 127 is
+/// failing in its own code, and stays a failure.
+pub const LOADER_FAILURE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Why a renderer program could not run (`missing_renderers`'s `reason`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingReason {
+    /// Nothing is at the path.
+    NotFound,
+    /// Something is there that is not an executable file.
+    NotExecutable,
+    /// An executable file is there, and cannot run here: its interpreter or a
+    /// library is missing, or its file system forbids running it.
+    CannotRun,
+}
+
+impl MissingReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::NotExecutable => "not-executable",
+            Self::CannotRun => "cannot-run",
+        }
+    }
+}
+
+/// What is at a renderer's path, enough to tell a later install from the
+/// same file. A reload tries a program again only once this changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathIdentity {
+    Absent,
+    Present {
+        dev: u64,
+        ino: u64,
+        size: u64,
+        mtime: i64,
+        mtime_nsec: i64,
+        mode: u32,
+    },
+    Unreadable(std::io::ErrorKind),
+}
+
+impl PathIdentity {
+    /// The identity of what `path` names now, symbolic links followed (a
+    /// profile switch re-points one, and that is a change).
+    pub fn of(path: &Path) -> Self {
+        match fs::metadata(path) {
+            Ok(metadata) => Self::Present {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                size: metadata.size(),
+                mtime: metadata.mtime(),
+                mtime_nsec: metadata.mtime_nsec(),
+                mode: metadata.mode(),
+            },
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Self::Absent
+            }
+            Err(error) => Self::Unreadable(error.kind()),
+        }
+    }
+
+    fn executable_file(&self) -> bool {
+        matches!(self, Self::Present { mode, .. } if (mode & libc::S_IFMT) == libc::S_IFREG && (mode & 0o111) != 0)
+    }
+}
+
+/// A renderer program that could not run at all, so nothing about the
+/// wallpaper: the spawn of the path the document names failed with
+/// `NotFound` or `PermissionDenied`, or the child exited with status 127
+/// within `LOADER_FAILURE_WINDOW` (a missing library). The driver shows the
+/// entry's still instead of motion and nothing is held against the entry. A
+/// renderer that ran and then exited is a `RendererFailure`, as before. See
+/// docs/missing-components.md.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MissingRenderer {
     /// One of `RENDERER_PROGRAMS`.
     pub program: &'static str,
     /// The path the document names for it.
     pub path: String,
-    /// What the spawn said, e.g. `No such file or directory (os error 2)`.
+    /// What went wrong, e.g. `No such file or directory (os error 2)`.
     pub error: String,
+    pub reason: MissingReason,
+    /// What was at `path` then.
+    pub identity: PathIdentity,
+}
+
+impl MissingRenderer {
+    /// A record for `program` at `path`, its reason told from the spawn's
+    /// error and what is at the path.
+    pub fn from_spawn(program: &'static str, path: &Path, error: &std::io::Error) -> Self {
+        let identity = PathIdentity::of(path);
+        let reason = match (&identity, error.kind()) {
+            (PathIdentity::Absent, _) => MissingReason::NotFound,
+            (identity, std::io::ErrorKind::PermissionDenied) if !identity.executable_file() => {
+                MissingReason::NotExecutable
+            }
+            _ => MissingReason::CannotRun,
+        };
+        Self {
+            program,
+            path: path.display().to_string(),
+            error: error.to_string(),
+            reason,
+            identity,
+        }
+    }
+
+    /// The renderer is missing, or cannot run here, in a few words.
+    pub fn short(&self) -> String {
+        match self.reason {
+            MissingReason::NotFound => format!("{} is missing", self.program),
+            MissingReason::NotExecutable | MissingReason::CannotRun => {
+                format!("{} cannot run here", self.program)
+            }
+        }
+    }
+
+    /// What a display showing its still because of it says (`last_error`).
+    pub fn diagnostic(&self) -> String {
+        match self.reason {
+            MissingReason::NotFound => format!(
+                "{}: cannot start {}: {}; paired still is active",
+                self.short(),
+                self.path,
+                self.error
+            ),
+            MissingReason::NotExecutable | MissingReason::CannotRun => format!(
+                "{}: {}: {}; paired still is active",
+                self.short(),
+                self.path,
+                self.error
+            ),
+        }
+    }
 }
 
 /// Why a renderer did not start: its program is missing, or anything else.
@@ -358,11 +491,14 @@ fn program_missing(error: &std::io::Error) -> bool {
     )
 }
 
-/// Whether `path` is now an executable file, before a reload tries it again.
-fn now_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+/// What a renderer that exited with status 127 said about why, for its
+/// record: the loader's line when there is one.
+fn loader_failure(diagnostics: &str) -> String {
+    diagnostics
+        .lines()
+        .find(|line| line.contains("error while loading shared libraries"))
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| "it exited with status 127 as it started".to_string())
 }
 
 /// An owned renderer-exit report. Runtime policy needs the entry identity,
@@ -384,6 +520,8 @@ pub struct Mpvpaper {
     diagnostics: Option<BoundedCapture>,
     pause_transport: PauseTransport,
     socket_namespace: u64,
+    /// When the running child was spawned.
+    started: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -406,6 +544,7 @@ impl Mpvpaper {
             diagnostics: None,
             pause_transport: PauseTransport::None,
             socket_namespace,
+            started: None,
         }
     }
 
@@ -553,6 +692,7 @@ impl Mpvpaper {
         self.child = Some(child);
         self.socket = socket;
         self.pause_transport = PauseTransport::None;
+        self.started = Some(Instant::now());
         options.clear();
         Ok(())
     }
@@ -965,6 +1105,7 @@ struct ActiveScene {
     entry: Entry,
     output: String,
     diagnostics: Option<BoundedCapture>,
+    started: Instant,
 }
 
 impl SystemDriver {
@@ -1196,6 +1337,7 @@ impl SystemDriver {
                 entry: entry.clone(),
                 output: output.to_string(),
                 diagnostics,
+                started: Instant::now(),
             },
         );
         Ok(())
@@ -1239,18 +1381,51 @@ impl SystemDriver {
             Err(StartError::Missing(error)) => {
                 // Not this wallpaper's fault: its still is already applied
                 // and stays. The runtime reports the program, not the entry.
-                let record = MissingRenderer {
-                    program: RENDERER_PROGRAMS[index],
-                    path: self.program_path(index).display().to_string(),
-                    error: error.to_string(),
-                };
-                self.missing_motion
-                    .insert(Self::key(output), (output.to_string(), record.clone()));
-                self.missing[index] = Some(record);
+                let record = MissingRenderer::from_spawn(
+                    RENDERER_PROGRAMS[index],
+                    self.program_path(index),
+                    &error,
+                );
+                self.record_missing(index, output, record);
                 Ok(())
             }
             Err(StartError::Failed(message)) => Err(message),
         }
+    }
+
+    /// `output` shows its still because `record`'s program could not run.
+    fn record_missing(&mut self, index: usize, output: &str, record: MissingRenderer) {
+        self.missing_motion
+            .insert(Self::key(output), (output.to_string(), record.clone()));
+        self.missing[index] = Some(record);
+    }
+
+    /// A renderer that exited with status 127 right after its spawn could
+    /// not run: a missing library, or a wrapper that could not find what it
+    /// runs. Its display keeps the still the exit already restored, and the
+    /// program is recorded as missing instead of the entry being blamed.
+    fn loader_failed(
+        &mut self,
+        index: usize,
+        output: &str,
+        status: ExitStatus,
+        started: Option<Instant>,
+        diagnostics: &str,
+    ) -> Option<MissingRenderer> {
+        let early = started.is_some_and(|started| started.elapsed() <= LOADER_FAILURE_WINDOW);
+        if status.code() != Some(127) || !early {
+            return None;
+        }
+        let path = self.program_path(index).to_path_buf();
+        let record = MissingRenderer {
+            program: RENDERER_PROGRAMS[index],
+            path: path.display().to_string(),
+            error: loader_failure(diagnostics),
+            reason: MissingReason::CannotRun,
+            identity: PathIdentity::of(&path),
+        };
+        self.record_missing(index, output, record.clone());
+        Some(record)
     }
 
     /// The path the document names for `RENDERER_PROGRAMS[index]`.
@@ -1468,25 +1643,38 @@ impl WallpaperDriver for SystemDriver {
         let mut failures = Vec::new();
         let mut exited_videos = Vec::new();
         for (key, active) in &mut self.videos {
+            let started = active.renderer.started;
             match active.renderer.take_exit() {
                 Ok(Some((status, diagnostics))) => {
-                    exited_videos.push((key.clone(), status.to_string(), diagnostics));
+                    exited_videos.push((
+                        key.clone(),
+                        status.to_string(),
+                        diagnostics,
+                        Some(status),
+                        started,
+                    ));
                 }
                 Ok(None) => {}
-                Err(error) => exited_videos.push((key.clone(), error, String::new())),
+                Err(error) => exited_videos.push((key.clone(), error, String::new(), None, None)),
             }
         }
-        for (key, status, diagnostics) in exited_videos {
+        for (key, status, diagnostics, exit, started) in exited_videos {
             if let Some(active) = self.videos.remove(&key) {
                 let fallback = self.still(&active.entry, &active.output);
-                let message = Self::failure_message(
-                    "mpvpaper",
-                    &active.entry,
-                    &active.output,
-                    &status,
-                    &diagnostics,
-                    fallback,
-                );
+                let missing = exit.and_then(|exit| {
+                    self.loader_failed(0, &active.output, exit, started, &diagnostics)
+                });
+                let message = match missing {
+                    Some(record) => record.diagnostic(),
+                    None => Self::failure_message(
+                        "mpvpaper",
+                        &active.entry,
+                        &active.output,
+                        &status,
+                        &diagnostics,
+                        fallback,
+                    ),
+                };
                 failures.push(RendererFailure {
                     entry_id: active.entry.id.clone(),
                     kind: active.entry.kind,
@@ -1501,16 +1689,19 @@ impl WallpaperDriver for SystemDriver {
         let mut exited_scenes = Vec::new();
         for (key, active) in &mut self.scenes {
             match active.child.try_wait() {
-                Ok(Some(status)) => exited_scenes.push((key.clone(), status.to_string(), false)),
+                Ok(Some(status)) => {
+                    exited_scenes.push((key.clone(), status.to_string(), false, Some(status)))
+                }
                 Ok(None) => {}
                 Err(error) => exited_scenes.push((
                     key.clone(),
                     format!("cannot inspect linux-wallpaperengine: {error}"),
                     true,
+                    None,
                 )),
             }
         }
-        for (key, status, must_stop) in exited_scenes {
+        for (key, status, must_stop, exit) in exited_scenes {
             if let Some(mut active) = self.scenes.remove(&key) {
                 if must_stop {
                     // Dropping Child would orphan a renderer that may still
@@ -1530,21 +1721,31 @@ impl WallpaperDriver for SystemDriver {
                     .map(|capture| diagnostic(&capture.finish()))
                     .unwrap_or_default();
                 let fallback = self.still(&active.entry, &active.output);
-                let message = Self::failure_message(
-                    "linux-wallpaperengine",
-                    &active.entry,
-                    &active.output,
-                    &status,
-                    &diagnostics,
-                    fallback,
-                );
+                let started = Some(active.started);
+                let missing = exit.and_then(|exit| {
+                    self.loader_failed(1, &active.output, exit, started, &diagnostics)
+                });
+                // A scene renderer that could not run is not a scene that
+                // crashed it: no quarantine (docs/missing-components.md).
+                let permanent_for_session = missing.is_none();
+                let message = match missing {
+                    Some(record) => record.diagnostic(),
+                    None => Self::failure_message(
+                        "linux-wallpaperengine",
+                        &active.entry,
+                        &active.output,
+                        &status,
+                        &diagnostics,
+                        fallback,
+                    ),
+                };
                 failures.push(RendererFailure {
                     entry_id: active.entry.id.clone(),
                     kind: active.entry.kind,
                     scene_id: active.entry.scene_id.clone(),
                     output: active.output.clone(),
                     message,
-                    permanent_for_session: true,
+                    permanent_for_session,
                 });
             }
         }
@@ -1569,14 +1770,24 @@ impl WallpaperDriver for SystemDriver {
     fn recheck_missing_renderers(&mut self) -> Vec<String> {
         let mut outputs = Vec::new();
         for (index, program) in RENDERER_PROGRAMS.iter().enumerate() {
-            if self.missing[index].is_none() || !now_executable(self.program_path(index)) {
-                continue;
+            // Only what changed at the path is worth another try: a program
+            // installed, replaced or re-pointed. The same file that could not
+            // run would only fail the same way, after setting every still and
+            // palette again.
+            let now = PathIdentity::of(self.program_path(index));
+            if self.missing[index]
+                .as_ref()
+                .is_some_and(|record| record.identity != now)
+            {
+                self.missing[index] = None;
             }
-            self.missing[index] = None;
+            // Every display still showing a still for it, whether or not the
+            // program has since started on another one (which clears the
+            // record above, not the other displays' marks).
             outputs.extend(
                 self.missing_motion
                     .values()
-                    .filter(|(_, record)| record.program == *program)
+                    .filter(|(_, record)| record.program == *program && record.identity != now)
                     .map(|(output, _)| output.clone()),
             );
         }

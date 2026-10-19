@@ -14,7 +14,7 @@ use wall_in_one_service::config::{Config, Overrides, RendererSettings};
 use wall_in_one_service::outputs::{Output, OutputSource};
 use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
 use wall_in_one_service::renderer::{
-    MissingRenderer, RendererFailure, SystemDriver, WallpaperDriver,
+    MissingReason, MissingRenderer, PathIdentity, RendererFailure, SystemDriver, WallpaperDriver,
 };
 use wall_in_one_service::runtime::{Runtime, wall_clock_after};
 
@@ -9299,7 +9299,11 @@ fn wallpapers_set(log: &Path) -> Vec<String> {
 }
 
 fn missing(program: &str, path: &Path) -> serde_json::Value {
-    serde_json::json!({"program": program, "path": path.display().to_string()})
+    missing_because(program, path, "not-found")
+}
+
+fn missing_because(program: &str, path: &Path, reason: &str) -> serde_json::Value {
+    serde_json::json!({"program": program, "path": path.display().to_string(), "reason": reason})
 }
 
 /// Neither a taboo nor anything else the health sync would save or chase.
@@ -9446,7 +9450,7 @@ fn a_renderer_that_is_not_executable_is_missing_too() {
     assert_no_entry_was_blamed(&shown);
     assert_eq!(
         shown["missing_renderers"],
-        serde_json::json!([missing("mpvpaper", &mpvpaper)])
+        serde_json::json!([missing_because("mpvpaper", &mpvpaper, "not-executable")])
     );
     assert!(
         shown["last_error"]
@@ -9631,6 +9635,8 @@ fn missing_renderers_fit_the_status_at_the_ceiling_whatever_their_paths() {
                 program,
                 path: longest.clone(),
                 error: "No such file or directory (os error 2)".into(),
+                reason: MissingReason::NotFound,
+                identity: PathIdentity::Absent,
             })
             .collect(),
         ..RuntimeDriverState::default()
@@ -9784,4 +9790,272 @@ fn a_display_that_leaves_drops_its_missing_renderer_mark() {
         runtime.shutdown();
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+fn reloaded<D: WallpaperDriver>(runtime: &mut Runtime<D>) -> Response {
+    let answer = without_text_file_busy(|| {
+        let response = runtime_command(runtime, noon(), "reload", None);
+        if response.ok {
+            Ok(response)
+        } else {
+            Err(response.message)
+        }
+    });
+    answer.unwrap_or_else(|message| panic!("reload refused: {message}"))
+}
+
+#[test]
+fn a_reload_recovers_every_display_left_on_a_still_after_another_started_the_program() {
+    // Review probe A1. Both displays on the playlist that starts with the
+    // video; Play on DP-1 starts the program that appeared, which clears the
+    // service's record, and HDMI-A-1 must still come back on the reload.
+    let root = directory("missing-renderer-sibling");
+    let mpvpaper = root.join("mpvpaper");
+    let engine = root.join("absent-linux-wallpaperengine");
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
+    let (mut runtime, _log) = missing_renderer_runtime_over(
+        &root,
+        &mpvpaper,
+        &engine,
+        true,
+        |document| {
+            document.replace(
+                "connector = \"HDMI-A-1\"\nplaylist = \"stills\"",
+                "connector = \"HDMI-A-1\"\nplaylist = \"clips\"",
+            )
+        },
+        &source,
+    );
+    start_up_as_the_service_does(&mut runtime);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = display_status(&mut runtime, noon(), connector);
+        assert_eq!(row["entry_id"], "video-a", "{row}");
+        assert_eq!(row["renderer_failed"], true, "{row}");
+    }
+    script(&mpvpaper, "exec sleep 30");
+    let played = without_text_file_busy(|| {
+        let response = runtime_command(&mut runtime, noon(), "on", Some("DP-1 play"));
+        if response.ok {
+            Ok(response)
+        } else {
+            Err(response.message)
+        }
+    });
+    assert!(played.is_ok(), "{played:?}");
+    assert_eq!(
+        status(&mut runtime, noon())["missing_renderers"],
+        serde_json::json!([])
+    );
+    reloaded(&mut runtime);
+    let other = display_status(&mut runtime, noon(), "HDMI-A-1");
+    assert_eq!(other["motion_active"], true, "{other}");
+    assert_eq!(other["renderer_failed"], false, "{other}");
+    assert_eq!(other["last_error"], "", "{other}");
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_reload_that_changes_nothing_changes_nothing_for_a_renderer_that_cannot_run() {
+    // Review probe A2: an executable whose interpreter is missing. The same
+    // file can only fail the same way, so a reload leaves it be until the
+    // file changes, and then tries it again.
+    use std::os::unix::fs::PermissionsExt;
+    for independent in [false, true] {
+        let root = directory(&format!("missing-renderer-cannot-run-{independent}"));
+        let mpvpaper = root.join("mpvpaper");
+        fs::write(&mpvpaper, "#!/nonexistent/interpreter\n").unwrap();
+        fs::set_permissions(&mpvpaper, fs::Permissions::from_mode(0o755)).unwrap();
+        let engine = root.join("absent-linux-wallpaperengine");
+        let (mut runtime, log) = missing_renderer_runtime(&root, &mpvpaper, &engine, independent);
+        start_up_as_the_service_does(&mut runtime);
+        let shown = status(&mut runtime, noon());
+        assert_eq!(
+            shown["missing_renderers"],
+            serde_json::json!([missing_because("mpvpaper", &mpvpaper, "cannot-run")]),
+            "{independent}: {shown}"
+        );
+        let video = if independent {
+            display_status(&mut runtime, noon(), "DP-1")
+        } else {
+            shown["displays"][0].clone()
+        };
+        let error = video["last_error"].as_str().unwrap();
+        assert!(error.contains("mpvpaper cannot run here"), "{error}");
+        let calls = fs::read_to_string(&log).unwrap().lines().count();
+        for _ in 0..3 {
+            reloaded(&mut runtime);
+        }
+        assert_eq!(
+            fs::read_to_string(&log).unwrap().lines().count(),
+            calls,
+            "{independent}: reloads that changed nothing ran noctalia again"
+        );
+        // A fixed program is a changed file: the next reload starts it.
+        script(&mpvpaper, "exec sleep 30");
+        reloaded(&mut runtime);
+        let playing = status(&mut runtime, noon());
+        assert_eq!(
+            playing["missing_renderers"],
+            serde_json::json!([]),
+            "{independent}"
+        );
+        let video = if independent {
+            display_status(&mut runtime, noon(), "DP-1")
+        } else {
+            playing["displays"][0].clone()
+        };
+        assert_eq!(video["motion_active"], true, "{independent}: {video}");
+        runtime.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn a_no_op_reload_never_restarts_a_healthy_scene_on_another_display() {
+    // Review probe A3: mirrored, with assignments. DP-1's mpvpaper cannot
+    // run; HDMI-A-1's scene runs and must not be torn down and started again
+    // by each reload that changes nothing.
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("missing-renderer-healthy-scene");
+    let mpvpaper = root.join("mpvpaper");
+    fs::write(&mpvpaper, "#!/nonexistent/interpreter\n").unwrap();
+    fs::set_permissions(&mpvpaper, fs::Permissions::from_mode(0o755)).unwrap();
+    let engine = root.join("linux-wallpaperengine");
+    let starts = root.join("engine-starts.log");
+    script(&engine, &format!("echo start >> {starts:?}; exec sleep 30"));
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
+    let (mut runtime, _log) = missing_renderer_runtime_over(
+        &root,
+        &mpvpaper,
+        &engine,
+        true,
+        |document| {
+            document
+                .replace(
+                    "display_mode = \"independent\"",
+                    "display_mode = \"mirrored\"",
+                )
+                .replace(
+                    "connector = \"HDMI-A-1\"\nplaylist = \"stills\"",
+                    "connector = \"HDMI-A-1\"\nplaylist = \"scenes\"",
+                )
+                + "[[playlists]]\nid = \"scenes\"\nname = \"Scenes\"\n\
+                   [[playlists.entries]]\nid = \"scene-x\"\nkind = \"scene\"\n\
+                   still = \"/tmp/x.png\"\nscene_id = \"777\"\n\
+                   palette = { kind = \"keep\", mode = \"keep\" }\n"
+        },
+        &source,
+    );
+    without_text_file_busy(|| runtime.apply_current()).unwrap();
+    let count = |path: &Path| fs::read_to_string(path).unwrap_or_default().lines().count();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count(&starts) < 1 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(count(&starts), 1, "the scene started once");
+    for _ in 0..3 {
+        reloaded(&mut runtime);
+    }
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        count(&starts),
+        1,
+        "a reload that changed nothing restarted it"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_renderer_whose_libraries_are_missing_is_a_missing_renderer_not_a_crashed_scene() {
+    // Review probe A5: the loader exits 127 before the renderer runs; the
+    // scene is not quarantined, and the reason names the library.
+    let root = directory("renderer-missing-library");
+    let mpvpaper = root.join("absent-mpvpaper");
+    let engine = root.join("linux-wallpaperengine");
+    script(
+        &engine,
+        "echo 'linux-wallpaperengine: error while loading shared libraries: libboost_filesystem.so.1.83.0: cannot open shared object file: No such file or directory' >&2; exit 127",
+    );
+    let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, false);
+    let started = Instant::now();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut snapshot = status(&mut runtime, noon());
+    while Instant::now() < deadline {
+        runtime.tick(noon(), started);
+        snapshot = status(&mut runtime, noon());
+        if snapshot["missing_renderers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["program"] == "linux-wallpaperengine")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(snapshot["entry_id"], "scene-b", "{snapshot}");
+    assert_no_entry_was_blamed(&snapshot);
+    assert_eq!(
+        snapshot["missing_renderers"],
+        serde_json::json!([
+            missing("mpvpaper", &mpvpaper),
+            missing_because("linux-wallpaperengine", &engine, "cannot-run")
+        ])
+    );
+    assert_eq!(snapshot["renderer_failed"], true);
+    let error = snapshot["last_error"].as_str().unwrap();
+    assert!(
+        error.contains("linux-wallpaperengine cannot run here"),
+        "{error}"
+    );
+    assert!(
+        error.contains("error while loading shared libraries: libboost_filesystem"),
+        "{error}"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_renderer_that_exits_127_after_it_ran_is_still_a_crash() {
+    // Past `LOADER_FAILURE_WINDOW` a 127 is the renderer's own doing.
+    let root = directory("renderer-late-127");
+    let mpvpaper = root.join("absent-mpvpaper");
+    let engine = root.join("linux-wallpaperengine");
+    let window = wall_in_one_service::renderer::LOADER_FAILURE_WINDOW;
+    script(
+        &engine,
+        &format!("sleep {}; exit 127", window.as_secs() + 1),
+    );
+    let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, false);
+    let started = Instant::now();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    let deadline = Instant::now() + window + Duration::from_secs(10);
+    let mut snapshot = status(&mut runtime, noon());
+    while Instant::now() < deadline {
+        runtime.tick(noon(), started);
+        snapshot = status(&mut runtime, noon());
+        if !snapshot["taboo_entries"].as_array().unwrap().is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        snapshot["taboo_entries"][0]["entry_id"], "scene-b",
+        "{snapshot}"
+    );
+    assert_eq!(snapshot["taboo_entries"][0]["source"], "renderer-crash");
+    assert_eq!(
+        snapshot["missing_renderers"],
+        serde_json::json!([missing("mpvpaper", &mpvpaper)])
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
 }

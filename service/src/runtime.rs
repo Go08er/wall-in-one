@@ -165,11 +165,12 @@ pub struct Status<'a> {
     /// stale. Not part of the configuration's status budget: the
     /// compositor, not the document, decides its size.
     pub outputs: &'a [Output],
-    /// The renderer programs the service could not start at all (nothing at
-    /// the path, or not executable), mpvpaper first. Empty when none. Added
-    /// in 0.4.0. Such a program is never a taboo or a failure report: the
-    /// displays that needed it show their still, with `renderer_failed` and
-    /// `last_error` saying why. See docs/missing-components.md.
+    /// The renderer programs the service could not run at all (nothing at
+    /// the path, not executable, or unable to run here), mpvpaper first.
+    /// Empty when none. Added in 0.4.0. Such a program is never a taboo or a
+    /// failure report: the displays that needed it show their still, with
+    /// `renderer_failed` and `last_error` saying why. See
+    /// docs/missing-components.md.
     pub missing_renderers: Vec<MissingRendererStatus>,
 }
 
@@ -177,6 +178,8 @@ pub struct Status<'a> {
 pub struct MissingRendererStatus {
     pub program: &'static str,
     pub path: String,
+    /// `not-found`, `not-executable` or `cannot-run`.
+    pub reason: &'static str,
 }
 
 impl MissingRendererStatus {
@@ -184,19 +187,14 @@ impl MissingRendererStatus {
         Self {
             program: record.program,
             path: truncate_middle(&record.path, MAX_MISSING_RENDERER_PATH_BYTES),
+            reason: record.reason.as_str(),
         }
     }
 }
 
 /// What a display that shows its still for a missing renderer says.
 fn missing_renderer_diagnostic(record: &MissingRenderer) -> String {
-    truncate_middle(
-        &format!(
-            "{} is missing: cannot start {}: {}; paired still is active",
-            record.program, record.path, record.error
-        ),
-        MAX_LAST_ERROR_BYTES,
-    )
+    truncate_middle(&record.diagnostic(), MAX_LAST_ERROR_BYTES)
 }
 
 #[derive(Debug, Serialize)]

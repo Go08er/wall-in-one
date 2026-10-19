@@ -604,6 +604,9 @@ class MainWindow(Adw.ApplicationWindow):
     # -- display ---------------------------------------------------------
 
     def show_library(self, session: Session) -> None:
+        # Whether the library has videos or scenes decides whether no
+        # renderer at all is worth the setup card.
+        self._setup_card.library_changed()
         library = session.library
         self._management_session = session
         # A Media removal or an authoring-socket rescan may have changed which

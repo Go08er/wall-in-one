@@ -347,6 +347,9 @@ class NextWindow(ShellWindow):
     def show_library(self, session: Session) -> None:
         """Show the newly installed library, its favourites and playlists."""
         self._state.reload()
+        # Whether it has videos or scenes decides whether no renderer at all
+        # is worth the setup card.
+        self.setup_card.library_changed()
 
     def show_library_scanning(self, scanning: bool) -> None:
         """Mark the Library while a scan runs; the shown cards stay."""

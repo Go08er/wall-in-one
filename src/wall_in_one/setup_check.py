@@ -70,6 +70,11 @@ MAX_MANIFESTS: Final = 4096
 #: a folder far past it is no plugin folder, and listing it would stall.
 MAX_LISTED: Final = 16384
 
+#: `--setup-status`'s exit statuses (docs/missing-components.md).
+EXIT_ALL_PRESENT: Final = 0
+EXIT_REQUIRED_MISSING: Final = 1
+EXIT_COULD_NOT_TELL: Final = 2
+
 
 type ServiceState = Literal["running", "not-running", "not-answering", "unknown"]
 type CompanionState = Literal["installed", "absent", "unknown"]
@@ -77,10 +82,16 @@ type CompanionState = Literal["installed", "absent", "unknown"]
 
 @dataclass(frozen=True, slots=True)
 class MissingRenderer:
-    """A renderer the service reported it could not start, and where it looked."""
+    """A renderer the service reported it could not run, where it looked, and why.
+
+    ``reason`` is ``not-found``, ``not-executable`` or ``cannot-run`` (an
+    executable that can't run here: its interpreter or a library is missing);
+    a service without it said nothing more than "not found".
+    """
 
     program: str
     path: str
+    reason: str = "not-found"
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +231,7 @@ def _service_findings(local: Local, service: Service, kind: InstallKind) -> list
                 _service_fix(kind),
             )
         ]
+    installed = local.companion.state == "installed"
     if local.unit is False:
         return [
             Finding(
@@ -228,8 +240,16 @@ def _service_findings(local: Local, service: Service, kind: InstallKind) -> list
                 "The wallpaper service isn't running",
                 f"There is no user unit for {program.path} where systemd looks, so the "
                 "companion plugin is what starts it.",
-                "Install the companion plugin: it starts the service directly when there "
-                f"is no unit ({COMPANION_INSTALL}).",
+                (
+                    "The companion plugin is installed but hasn't started it: check that "
+                    f"it is enabled (noctalia msg plugins enable {COMPANION_ID}) and that "
+                    "Noctalia is running."
+                )
+                if installed
+                else (
+                    "Install the companion plugin: it starts the service directly when "
+                    f"there is no unit ({COMPANION_INSTALL})."
+                ),
                 COMPANION_URL,
             )
         ]
@@ -244,23 +264,36 @@ def _service_findings(local: Local, service: Service, kind: InstallKind) -> list
             True,
             "The wallpaper service isn't running",
             f"{unit}, but nothing answers.",
-            f"Start it with systemctl --user enable --now {SERVICE_UNIT}, or install the "
-            "companion plugin, which starts it for you.",
+            f"Start it with systemctl --user enable --now {SERVICE_UNIT}, or "
+            + (
+                "make sure the companion plugin, which starts it, is enabled in Noctalia."
+                if installed
+                else "install the companion plugin, which starts it for you."
+            ),
             COMPANION_URL,
         )
     ]
 
 
-def _renderer_findings(local: Local, service: Service, kind: InstallKind) -> list[Finding]:
+def _renderer_findings(
+    local: Local, service: Service, kind: InstallKind, motion: bool | None
+) -> list[Finding]:
     absent = [name for name in RENDERERS if not local.program(name).found]
     if len(absent) == len(RENDERERS):
+        # Required only when the library has something that needs one: a
+        # library of stills plays whole without either.
         return [
             Finding(
                 "renderers",
-                True,
+                motion is True,
                 "No wallpaper renderer is installed",
                 "Videos and Wallpaper Engine scenes show only their stills: mpvpaper plays "
-                "videos, linux-wallpaperengine plays scenes.",
+                "videos, linux-wallpaperengine plays scenes."
+                + (
+                    ""
+                    if motion is True
+                    else " Nothing in your library needs one yet, so this can wait."
+                ),
                 " ".join(
                     f"{name}: {_renderer_fix(name, kind)}"
                     if kind != "system"
@@ -270,10 +303,34 @@ def _renderer_findings(local: Local, service: Service, kind: InstallKind) -> lis
             )
         ]
     found: list[Finding] = []
-    reported = {missing.program: missing.path for missing in service.missing}
+    reported = {missing.program: missing for missing in service.missing}
     for name in RENDERERS:
         program = local.program(name)
-        if not program.found:
+        record = reported.get(name)
+        cannot_run = record is not None and record.reason in ("cannot-run", "not-executable")
+        same_path = record is not None and record.path == str(program.path)
+        if cannot_run and (same_path or not program.found):
+            # Installed, and the service tried it and it can't run here:
+            # Check Again can't fix that, a working install can.
+            assert record is not None
+            found.append(
+                Finding(
+                    f"renderer:{name}",
+                    False,
+                    f"{name} is installed but can't run here",
+                    (
+                        f"{record.path} is not an executable file."
+                        if record.reason == "not-executable"
+                        else f"The wallpaper service found {record.path} but it couldn't "
+                        "run: a program or library it needs is missing, or its folder "
+                        "doesn't allow running programs."
+                    )
+                    + f" Until it can, {_KIND_OF[name].lower()} show their still.",
+                    f"Run {record.path} in a terminal to see why. Reinstalling it usually "
+                    f"fixes it: {_renderer_fix(name, kind)}",
+                )
+            )
+        elif not program.found:
             found.append(
                 Finding(
                     f"renderer:{name}",
@@ -283,12 +340,11 @@ def _renderer_findings(local: Local, service: Service, kind: InstallKind) -> lis
                     _renderer_fix(name, kind),
                 )
             )
-        elif name in reported:
-            path = reported[name]
+        elif record is not None:
             detail = (
-                f"Its configuration names {path}, and {name} is at {program.path} now."
-                if path != str(program.path)
-                else f"It couldn't start {path} when it last tried, and {name} is there now."
+                f"Its configuration names {record.path}, and {name} is at {program.path} now."
+                if not same_path
+                else f"It couldn't start {record.path} when it last tried, and {name} is there now."
             )
             found.append(
                 Finding(
@@ -349,12 +405,20 @@ def _companion_findings(local: Local) -> list[Finding]:
     ]
 
 
-def findings(kind: InstallKind, local: Local, service: Service) -> tuple[Finding, ...]:
-    """What is missing, most important first: the service, Noctalia, renderers, companion."""
+def findings(
+    kind: InstallKind, local: Local, service: Service, *, motion: bool | None = None
+) -> tuple[Finding, ...]:
+    """What is missing, most important first: the service, Noctalia, renderers, companion.
+
+    ``motion`` is whether the library has a video or a scene (`motion_in_library`,
+    `motion_in_document`); having no renderer at all is required only then, so
+    a library of stills gets no notice for it. None is "not known", which
+    counts as no.
+    """
     return (
         *_service_findings(local, service, kind),
         *_noctalia_findings(local, kind),
-        *_renderer_findings(local, service, kind),
+        *_renderer_findings(local, service, kind, motion),
         *_companion_findings(local),
     )
 
@@ -612,11 +676,45 @@ def local(environ: Mapping[str, str] | None = None) -> Local:
     )
 
 
+#: Entry kinds that need a renderer.
+_MOTION: Final = frozenset({"video", "scene"})
+
+
+def motion_in_library(kinds: Iterable[object]) -> bool:
+    """Whether any of a library's item kinds (``Kind`` or its value) needs a renderer."""
+    return any(getattr(kind, "value", kind) in _MOTION for kind in kinds)
+
+
+def motion_in_document(path: Path) -> bool | None:
+    """Whether the compiled ``runtime.toml`` at ``path`` has a video or scene entry.
+
+    What a terminal knows of the library without scanning it. False when
+    there is no document (nothing was ever compiled, so nothing plays);
+    None when it can't be read.
+    """
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except OSError, ValueError, RecursionError:
+        return None
+    playlists = document.get("playlists")
+    if not isinstance(playlists, list):
+        return None
+    return any(
+        isinstance(entry, Mapping) and entry.get("kind") in _MOTION
+        for playlist in playlists
+        if isinstance(playlist, Mapping)
+        for entry in (playlist.get("entries") or [])
+    )
+
+
 def service_from_status(status: object) -> Service:
-    """A running service's status reply: what it could not start (0.4's ``missing_renderers``).
+    """A running service's status reply: what it could not run (0.4's ``missing_renderers``).
 
     A 0.3 service has no such key; then it is "nothing reported". Rows that
-    are not what 0.4 sends are skipped.
+    are not what 0.4 sends are skipped; a row without a ``reason`` is
+    ``not-found``.
     """
     raw = status.get("missing_renderers") if isinstance(status, Mapping) else None
     missing: list[MissingRenderer] = []
@@ -624,10 +722,19 @@ def service_from_status(status: object) -> Service:
         for row in raw[: len(RENDERERS)]:
             if not isinstance(row, Mapping):
                 continue
-            program, path = row.get("program"), row.get("path")
+            program, path, reason = row.get("program"), row.get("path"), row.get("reason")
             if program in RENDERERS and isinstance(path, str) and isinstance(program, str):
-                missing.append(MissingRenderer(program, path))
+                missing.append(
+                    MissingRenderer(
+                        program,
+                        path,
+                        reason if reason in _REASONS and isinstance(reason, str) else "not-found",
+                    )
+                )
     return Service("running", tuple(missing))
+
+
+_REASONS: Final = frozenset({"not-found", "not-executable", "cannot-run"})
 
 
 def ask_service(timeout: float) -> Service:

@@ -207,7 +207,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "say what Wall-in-One needs that is missing and how to get it; "
-            "exits 1 when something required is missing"
+            "exits 1 when something required is missing, 2 when it couldn't tell"
         ),
     )
 
@@ -830,20 +830,33 @@ def _setup_status() -> int:
     """``--setup-status``: the window's setup findings as text (docs/missing-components.md).
 
     Read-only, with no GTK: the programs, the service's unit and the
-    companion are looked for, and the service is asked once. Exits 1 when
-    something required is missing, as ``--legacy-migration-status`` does for
-    a decision it needs, so a script can act on it.
+    companion are looked for, the compiled runtime document says whether the
+    library has videos or scenes, and the service is asked once. Exits 0 when
+    nothing required is missing, 1 when something is, as
+    ``--legacy-migration-status`` does for a decision it needs, and 2 when it
+    couldn't tell: the check itself failed, or the service didn't answer in
+    time.
     """
     from wall_in_one import setup_check
     from wall_in_one.control import client
 
-    found = setup_check.findings(
-        install_kind.INSTALL_KIND,
-        setup_check.local(),
-        setup_check.ask_service(client.TIMEOUT),
-    )
+    try:
+        service = setup_check.ask_service(client.TIMEOUT)
+        found = setup_check.findings(
+            install_kind.INSTALL_KIND,
+            setup_check.local(),
+            service,
+            motion=setup_check.motion_in_document(paths.runtime_config_path()),
+        )
+    except Exception as error:  # say it, never a traceback
+        print(f"error: the setup check failed: {error}", file=sys.stderr)
+        return setup_check.EXIT_COULD_NOT_TELL
     print(setup_check.report(found))
-    return 1 if setup_check.required(found) else 0
+    if service.state == "not-answering":
+        return setup_check.EXIT_COULD_NOT_TELL
+    if setup_check.required(found):
+        return setup_check.EXIT_REQUIRED_MISSING
+    return setup_check.EXIT_ALL_PRESENT
 
 
 def _choose_window_renderer(environ: MutableMapping[str, str] | None = None) -> None:

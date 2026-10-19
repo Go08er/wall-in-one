@@ -320,6 +320,29 @@ def test_not_now_holds_for_the_session_until_a_finding_changes(
         window.destroy()
 
 
+def test_no_renderer_at_all_is_no_card_for_a_library_of_stills(
+    machine: _Machine, application: _Application
+) -> None:
+    """The owner's rule: a stills-only library needs no renderer, so no card every session."""
+    machine.local = _machine("mpvpaper", "linux-wallpaperengine")
+    application.session.library.items = _STILLS_LIBRARY
+    card = SetupCard(application, lambda: None)  # type: ignore[arg-type]
+    window, painted = _present(card)
+    try:
+        card.start()
+        _looked(application, painted, lambda: card.watch.findings is not None, "the first look")
+        assert [(f.key, f.required) for f in card.watch.findings or ()] == [("renderers", False)]
+        assert not card.get_reveal_child()
+
+        # A rescan finds a video: the window says so, and the card looks again.
+        application.session.library.items = _VIDEO_LIBRARY
+        card.library_changed()
+        _looked(application, painted, card.get_reveal_child, "the card after the rescan")
+        assert [finding.key for finding in card.shown] == ["renderers"]
+    finally:
+        window.destroy()
+
+
 def test_the_setup_lane_never_waits_for_a_look_that_hangs() -> None:
     """A look stuck on a dead mount must not hold the app's quit."""
     lane = SetupLane()

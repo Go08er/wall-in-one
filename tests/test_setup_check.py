@@ -63,7 +63,9 @@ def test_nothing_is_said_when_everything_is_there() -> None:
 def test_no_renderer_at_all_is_one_required_finding_with_each_install_kinds_fix() -> None:
     fixes = {}
     for kind in INSTALL_KINDS:
-        found = setup_check.findings(kind, _local(missing=setup_check.RENDERERS), RUNNING)
+        found = setup_check.findings(
+            kind, _local(missing=setup_check.RENDERERS), RUNNING, motion=True
+        )
         assert _keys(found) == [("renderers", True)], kind
         fixes[kind] = found[0].fix
     assert "programs.wall-in-one" in fixes["nix"]
@@ -134,8 +136,10 @@ def test_a_service_that_does_not_run_says_what_would_start_it() -> None:
     assert "systemctl --user enable --now wall-in-one.service" in with_unit[0].fix
     assert with_unit[0].link == setup_check.COMPANION_URL
 
-    without_unit = setup_check.findings("source", _local(unit=False), stopped)
-    assert _keys(without_unit) == [("service", True)]
+    without_unit = setup_check.findings(
+        "source", _local(unit=False, companion=Companion("absent")), stopped
+    )
+    assert _keys(without_unit) == [("service", True), ("companion", False)]
     assert "no user unit" in without_unit[0].detail
     assert "companion plugin" in without_unit[0].fix
     assert setup_check.COMPANION_INSTALL in without_unit[0].fix
@@ -215,7 +219,9 @@ def test_findings_come_most_important_first_and_change_when_their_text_does() ->
 
 def test_the_report_lists_required_first_with_each_fix() -> None:
     found = setup_check.findings(
-        "nix", _local(missing=("mpvpaper",), unit=False), Service("not-running")
+        "nix",
+        _local(missing=("mpvpaper",), unit=False, companion=Companion("absent")),
+        Service("not-running"),
     )
     text = setup_check.report(reversed(found))
     lines = text.splitlines()
@@ -448,7 +454,8 @@ def test_setup_status_prints_the_findings_and_fails_while_something_required_is_
     out = capsys.readouterr().out
     assert out.startswith("required: The wallpaper service isn't installed.\n")
     assert "required: Noctalia isn't installed." in out
-    assert "required: No wallpaper renderer is installed." in out
+    # Nothing was ever compiled here, so nothing in the library needs one.
+    assert "optional: No wallpaper renderer is installed." in out
     assert setup_check.AFTER_INSTALLING in out
 
 
@@ -627,4 +634,109 @@ def test_setup_status_imports_no_gtk_and_writes_nothing(tmp_path: Path) -> None:
     after = sorted(str(path) for path in root.rglob("*"))
     assert "NO-GI" in done.stdout, done.stdout + done.stderr
     assert after == before, set(after) - set(before)
-    assert done.returncode == 1, done  # no service answers
+    assert done.returncode == setup_check.EXIT_REQUIRED_MISSING, done  # no service answers
+
+
+# -- why a renderer is missing, and stills-only libraries -------------------------------
+
+
+def test_a_renderer_that_cannot_run_says_so_and_not_check_again() -> None:
+    for reason, said in (
+        ("cannot-run", "it couldn't run"),
+        ("not-executable", "is not an executable file"),
+    ):
+        service = Service("running", (MissingRenderer("mpvpaper", "/usr/bin/mpvpaper", reason),))
+        (finding,) = setup_check.findings("system", _local(), service)
+        assert (finding.key, finding.required) == ("renderer:mpvpaper", False)
+        assert finding.title == "mpvpaper is installed but can't run here"
+        assert said in finding.detail
+        assert "Check Again" not in finding.fix
+        assert "Run /usr/bin/mpvpaper in a terminal" in finding.fix
+        assert "AUR" in finding.fix
+
+
+def test_no_renderer_at_all_is_required_only_for_a_library_with_videos_or_scenes() -> None:
+    nothing = _local(missing=setup_check.RENDERERS)
+    for motion, required in ((True, True), (False, False), (None, False)):
+        found = setup_check.findings("nix", nothing, RUNNING, motion=motion)
+        assert _keys(found) == [("renderers", required)], motion
+    assert "can wait" in setup_check.findings("nix", nothing, RUNNING, motion=False)[0].detail
+
+
+def test_what_the_library_and_the_compiled_document_say_about_motion(tmp_path: Path) -> None:
+    from wall_in_one.library.model import Kind
+
+    assert setup_check.motion_in_library([Kind.STILL, Kind.VIDEO])
+    assert setup_check.motion_in_library(["scene"])
+    assert not setup_check.motion_in_library([Kind.STILL])
+    assert not setup_check.motion_in_library([])
+    document = tmp_path / "runtime.toml"
+    assert setup_check.motion_in_document(document) is False, "nothing compiled"
+    document.write_text('[[playlists]]\nid = "a"\n[[playlists.entries]]\nkind = "still"\n')
+    assert setup_check.motion_in_document(document) is False
+    document.write_text('[[playlists]]\nid = "a"\n[[playlists.entries]]\nkind = "video"\n')
+    assert setup_check.motion_in_document(document) is True
+    document.write_text("not = [toml")
+    assert setup_check.motion_in_document(document) is None
+
+
+def test_setup_status_needs_a_renderer_for_a_library_with_videos(
+    this_test_machine: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from wall_in_one import paths
+
+    monkeypatch.setattr(programs, "program_directories", lambda: (this_test_machine / "bin",))
+    document = paths.runtime_config_path()
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text('[[playlists]]\nid = "a"\n[[playlists.entries]]\nkind = "scene"\n')
+    try:
+        assert cli.main(["--setup-status"]) == setup_check.EXIT_REQUIRED_MISSING
+    finally:
+        document.unlink()
+    assert "required: No wallpaper renderer is installed." in capsys.readouterr().out
+
+
+def test_setup_status_exits_2_when_it_could_not_tell(
+    this_test_machine: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(programs, "program_directories", lambda: (this_test_machine / "bin",))
+    monkeypatch.setattr(
+        setup_check, "ask_service", lambda _timeout: Service("not-answering", detail="timed out")
+    )
+    assert cli.main(["--setup-status"]) == setup_check.EXIT_COULD_NOT_TELL
+    assert "isn't answering" in capsys.readouterr().out
+
+    def broken(_environ: object = None) -> Local:
+        raise RuntimeError("the disk went away")
+
+    monkeypatch.setattr(setup_check, "local", broken)
+    monkeypatch.setattr(setup_check, "ask_service", lambda _timeout: RUNNING)
+    assert cli.main(["--setup-status"]) == setup_check.EXIT_COULD_NOT_TELL
+    captured = capsys.readouterr()
+    assert "the setup check failed: the disk went away" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_the_service_advice_knows_the_companion_is_installed() -> None:
+    stopped = Service("not-running")
+    without_unit = setup_check.findings("source", _local(unit=False), stopped)
+    assert "is installed but hasn't started it" in without_unit[0].fix
+    assert "Install the companion" not in without_unit[0].fix
+    with_unit = setup_check.findings("nix", _local(unit=True), stopped)
+    assert "enabled in Noctalia" in with_unit[0].fix
+    assert "install the companion" not in with_unit[0].fix
+    absent = setup_check.findings("nix", _local(unit=False, companion=Companion("absent")), stopped)
+    assert absent[0].fix.startswith("Install the companion plugin")
+
+
+def test_a_status_row_says_why_and_an_older_one_is_not_found() -> None:
+    status = {
+        "missing_renderers": [
+            {"program": "mpvpaper", "path": "/a", "reason": "cannot-run"},
+            {"program": "linux-wallpaperengine", "path": "/b"},
+        ]
+    }
+    assert setup_check.service_from_status(status).missing == (
+        MissingRenderer("mpvpaper", "/a", "cannot-run"),
+        MissingRenderer("linux-wallpaperengine", "/b", "not-found"),
+    )

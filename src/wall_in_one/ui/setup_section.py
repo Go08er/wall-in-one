@@ -6,7 +6,9 @@ shows it. The programs, the service's unit and the companion are looked for
 off GTK (`SetupLane`: the application's ``setup_lane``), whose results reach
 GTK at ``GLib.PRIORITY_DEFAULT``. A look only reads, and one that hangs (a
 dead mount) must never hold the app's exit, so each runs on a daemon thread
-and the lane is closed without waiting. The service's state is the
+and the lane is closed without waiting. Whether the library has a video or
+a scene, which decides whether no renderer at all is worth the card, is
+read from the library the application holds. The service's state is the
 status the application already polls (`RuntimeStatusModel`), so nothing is
 said about the service before its first answer, and a service the companion
 starts a moment later takes the finding away by itself.
@@ -130,6 +132,7 @@ class SetupWatch:
         self._shown = shown
         self._lane: SetupLane | None = None
         self._local: Local | None = None
+        self._motion: bool | None = None
         self._service = Service("unknown")
         self._unsubscribe: Callable[[], None] | None = None
         self._looking = False
@@ -160,8 +163,21 @@ class SetupWatch:
             return
         lane = self._lane_now()
         self._looking = True
-        if not lane.submit(setup_check.local, self._landed):
+        items = self._library_items()
+
+        def look() -> tuple[Local, bool]:
+            kinds = (getattr(item, "kind", None) for item in items)
+            return setup_check.local(), setup_check.motion_in_library(kinds)
+
+        if not lane.submit(look, self._landed):
             self._looking = False
+
+    def _library_items(self) -> tuple[object, ...]:
+        """The library's items, as the application holds them (a tuple: no copy, no scan)."""
+        session = getattr(self._app, "session", None)
+        library = getattr(session, "library", None)
+        items = getattr(library, "items", ())
+        return tuple(items)
 
     def stop(self) -> None:
         self._stopped = True
@@ -180,13 +196,13 @@ class SetupWatch:
             self._lane = lane if isinstance(lane, SetupLane) else SetupLane()
         return self._lane
 
-    def _landed(self, local: Local | None, error: str) -> None:
+    def _landed(self, looked: tuple[Local, bool] | None, error: str) -> None:
         self._looking = False
         if self._stopped:
             return
         # A look that failed says so, rather than what an older look found.
-        self._local = local
-        self.error = "" if local is not None else error or "Couldn't check"
+        self._local, self._motion = looked if looked is not None else (None, None)
+        self.error = "" if looked is not None else error or "Couldn't check"
         self._emit()
         if self._again:
             self._again = False
@@ -204,7 +220,7 @@ class SetupWatch:
             self.findings = None
         else:
             self.findings = setup_check.findings(
-                install_kind.INSTALL_KIND, self._local, self._service
+                install_kind.INSTALL_KIND, self._local, self._service, motion=self._motion
             )
         self._shown(self.findings, self.error)
 
@@ -277,6 +293,11 @@ class SetupCard(Gtk.Revealer):
     def start(self) -> None:
         """When the window first appears: follow the service and look once."""
         self._watch.start()
+
+    def library_changed(self) -> None:
+        """The library was scanned again: look again, once started."""
+        if self._watch.findings is not None or self._watch.looking:
+            self._watch.look()
 
     def stop(self) -> None:
         """With its window's teardown: stop following the service.

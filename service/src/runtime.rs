@@ -2639,6 +2639,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let played = targets[0].entry.id.clone();
         let mut errors = Vec::new();
         let mut static_fallbacks = Vec::new();
+        let mut missing_programs: Vec<String> = Vec::new();
         for target in targets {
             let mut settings = self.effective_motion_settings(&target.output, self.playback_state);
             if let Some(diagnostic) =
@@ -2663,6 +2664,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                         } else {
                             format!("{}: {diagnostic}", target.output)
                         });
+                        let short = missing.short();
+                        if !missing_programs.contains(&short) {
+                            missing_programs.push(short);
+                        }
                     }
                 }
                 Err(error) => {
@@ -2710,10 +2715,20 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.last_error = bounded_failure_summary(&static_fallbacks);
                 self.renderer_failed = true;
             }
-            Ok(match self.playback_state {
+            let reply = match self.playback_state {
                 PlaybackState::Playing => format!("playing {played}"),
                 PlaybackState::Paused => format!("paused {played}"),
                 PlaybackState::Stopped => format!("showing {played}; motion stopped"),
+            };
+            // A command that landed on a video or scene whose renderer can't
+            // run succeeds, and says that only the still shows.
+            Ok(if missing_programs.is_empty() {
+                reply
+            } else {
+                format!(
+                    "{reply}; only its still shows: {}",
+                    missing_programs.join(", ")
+                )
             })
         } else {
             let error = errors.join("; ");
@@ -3394,6 +3409,23 @@ impl<D: WallpaperDriver> Runtime<D> {
         .map(|message| {
             let scope = connector.map_or("all displays".to_string(), |one| one.to_string());
             format!("{scope}: {message}")
+        })
+        .map(|message| {
+            // A display that landed on a video or scene whose renderer can't
+            // run shows its still, and the reply says so.
+            let stills: Vec<String> = connectors
+                .iter()
+                .filter_map(|connector| {
+                    self.driver
+                        .motion_missing(connector)
+                        .map(|missing| format!("{connector} shows its still: {}", missing.short()))
+                })
+                .collect();
+            if stills.is_empty() {
+                message
+            } else {
+                format!("{message}; {}", stills.join("; "))
+            }
         })
     }
 

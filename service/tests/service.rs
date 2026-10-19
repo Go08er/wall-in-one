@@ -10139,6 +10139,40 @@ fn a_renderer_that_exits_127_after_it_ran_is_still_a_crash() {
 }
 
 #[test]
+fn a_command_onto_a_wallpaper_whose_renderer_is_missing_says_only_its_still_shows() {
+    for independent in [false, true] {
+        let root = directory(&format!("missing-renderer-reply-{independent}"));
+        let mpvpaper = root.join("absent-mpvpaper");
+        let engine = root.join("absent-linux-wallpaperengine");
+        let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, independent);
+        runtime.apply_current().unwrap();
+        // video-a, then next (the scene), then next (the still).
+        let (verb, argument) = if independent {
+            ("on", Some("DP-1 next"))
+        } else {
+            ("next", None)
+        };
+        let scene = runtime_command(&mut runtime, noon(), verb, argument);
+        assert!(scene.ok, "{}", scene.message);
+        assert!(
+            scene.message.contains("still")
+                && scene.message.contains("linux-wallpaperengine is missing"),
+            "{independent}: {}",
+            scene.message
+        );
+        let still = runtime_command(&mut runtime, noon(), verb, argument);
+        assert!(still.ok, "{}", still.message);
+        assert!(
+            !still.message.contains("is missing"),
+            "{independent}: {}",
+            still.message
+        );
+        runtime.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn a_reload_refused_for_a_display_says_which_and_keeps_the_configuration() {
     // Review probe A6: a detached display assigned a playlist with nothing
     // in it. The reload is refused, in the words every reload refusal uses.

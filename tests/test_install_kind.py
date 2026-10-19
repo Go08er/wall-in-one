@@ -203,3 +203,55 @@ def test_a_release_that_prints_no_kind_fails(tmp_path: Path) -> None:
     app = _program(tmp_path, "wall-in-one", "wall-in-one 0.3.2")
     service = _program(tmp_path, "wall-in-one-service", "wall-in-one-service 0.3.2")
     assert _check("source", app, service).returncode == 1
+
+
+def _check_with(tmp_path: Path, app: tuple[str, ...], service: tuple[str, ...]) -> str:
+    result = _check(
+        "system",
+        _program(tmp_path / "app", "wall-in-one", *app),
+        _program(tmp_path / "service", "wall-in-one-service", *service),
+    )
+    assert result.returncode == 1, result
+    return result.stderr
+
+
+def test_a_version_flag_that_fails_names_the_program(tmp_path: Path) -> None:
+    broken = tmp_path / "service" / "wall-in-one-service"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    broken.chmod(0o755)
+    app = _program(tmp_path / "app", "wall-in-one", "wall-in-one 0.4.0", "install kind: system")
+    result = _check("system", app, broken)
+    assert result.returncode == 1
+    assert f"{broken} --version failed" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("app", "service", "said"),
+    [
+        (  # a third line
+            ("wall-in-one 0.4.0", "install kind: system", "extra"),
+            ("wall-in-one-service 0.4.0", "install kind: system"),
+            "printed 3 lines",
+        ),
+        (  # the halves swapped
+            ("wall-in-one-service 0.4.0", "install kind: system"),
+            ("wall-in-one 0.4.0", "install kind: system"),
+            "expected 'wall-in-one <version>'",
+        ),
+        (  # two releases in one package
+            ("wall-in-one 0.4.0", "install kind: system"),
+            ("wall-in-one-service 0.3.2", "install kind: system"),
+            "is 0.3.2, but",
+        ),
+        (  # no version
+            ("wall-in-one ", "install kind: system"),
+            ("wall-in-one-service 0.4.0", "install kind: system"),
+            "expected 'wall-in-one <version>'",
+        ),
+    ],
+)
+def test_the_first_line_and_the_line_count_are_checked_too(
+    tmp_path: Path, app: tuple[str, ...], service: tuple[str, ...], said: str
+) -> None:
+    assert said in _check_with(tmp_path, app, service)

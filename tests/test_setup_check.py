@@ -768,3 +768,32 @@ def test_only_a_missing_renderers_own_words_count_as_said_already() -> None:
     assert not setup_check.only_missing_renderers(
         f'{one}; HDMI-A-1: video entry "v" stopped because mpvpaper exited (exit status: 1)'
     )
+
+
+# -- re-review of r9-int-fix-a (probes-a2) ------------------------------------------------
+
+
+def test_a_renderer_the_service_cannot_reach_says_so() -> None:
+    """A folder on the way that doesn't let the service in (re-review N3)."""
+    status = {
+        "missing_renderers": [
+            {"program": "mpvpaper", "path": "/opt/x/mpvpaper", "reason": "no-access"}
+        ]
+    }
+    service = setup_check.service_from_status(status)
+    assert service.missing == (MissingRenderer("mpvpaper", "/opt/x/mpvpaper", "no-access"),)
+    local = Local(
+        (
+            _program("mpvpaper", True, "/opt/x"),
+            _program("linux-wallpaperengine", True),
+            _program("noctalia", True),
+            _program("wall-in-one-service", True),
+        ),
+        True,
+        INSTALLED,
+    )
+    (finding,) = setup_check.findings("nix", local, service)
+    assert finding.title == "The wallpaper service can't reach mpvpaper"
+    assert "doesn't let it in" in finding.detail
+    assert "not an executable" not in finding.detail
+    assert "Check Again" not in finding.fix

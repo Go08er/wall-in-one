@@ -10377,3 +10377,32 @@ fn a_loader_failure_noticed_late_is_still_not_a_crashed_scene() {
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_renderer_behind_a_folder_the_service_cannot_enter_is_no_access() {
+    // Re-review nit N3: a parent folder that cannot be searched used to read
+    // as "not-executable", which says nothing true about the program.
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root enters every folder
+    }
+    let root = directory("renderer-no-access");
+    let locked = root.join("locked");
+    fs::create_dir(&locked).unwrap();
+    let mpvpaper = locked.join("mpvpaper");
+    script(&mpvpaper, "exec sleep 30");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).unwrap();
+    let engine = root.join("absent-linux-wallpaperengine");
+    let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, false);
+    start_up_as_the_service_does(&mut runtime);
+    let shown = status(&mut runtime, noon());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_no_entry_was_blamed(&shown);
+    assert_eq!(
+        shown["missing_renderers"],
+        serde_json::json!([missing_because("mpvpaper", &mpvpaper, "no-access")]),
+        "{shown}"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}

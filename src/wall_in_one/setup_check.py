@@ -92,9 +92,10 @@ type CompanionState = Literal["installed", "absent", "unknown"]
 class MissingRenderer:
     """A renderer the service reported it could not run, where it looked, and why.
 
-    ``reason`` is ``not-found``, ``not-executable`` or ``cannot-run`` (an
-    executable that can't run here: its interpreter or a library is missing);
-    a service without it said nothing more than "not found".
+    ``reason`` is ``not-found``, ``not-executable``, ``cannot-run`` (an
+    executable that can't run here: its interpreter or a library is missing)
+    or ``no-access`` (a folder on the way doesn't let the service in); a
+    service without it said nothing more than "not found".
     """
 
     program: str
@@ -315,12 +316,29 @@ def _renderer_findings(
     for name in RENDERERS:
         program = local.program(name)
         record = reported.get(name)
-        cannot_run = record is not None and record.reason in ("cannot-run", "not-executable")
+        cannot_run = record is not None and record.reason in (
+            "cannot-run",
+            "not-executable",
+            "no-access",
+        )
         same_path = record is not None and record.path == str(program.path)
         if cannot_run and (same_path or not program.found):
             # Installed, and the service tried it and it can't run here:
             # Check Again can't fix that, a working install can.
             assert record is not None
+            if record.reason == "no-access":
+                found.append(
+                    Finding(
+                        f"renderer:{name}",
+                        False,
+                        f"The wallpaper service can't reach {name}",
+                        f"A folder on the way to {record.path} doesn't let it in. Until it "
+                        f"can, {_KIND_OF[name].lower()} show their still.",
+                        f"Let it into that folder, or install {name} where it can reach "
+                        f"it: {_renderer_fix(name, kind)}",
+                    )
+                )
+                continue
             found.append(
                 Finding(
                     f"renderer:{name}",
@@ -768,7 +786,7 @@ def service_from_status(status: object) -> Service:
     return Service("running", tuple(missing))
 
 
-_REASONS: Final = frozenset({"not-found", "not-executable", "cannot-run"})
+_REASONS: Final = frozenset({"not-found", "not-executable", "cannot-run", "no-access"})
 
 
 def ask_service(timeout: float) -> Service:

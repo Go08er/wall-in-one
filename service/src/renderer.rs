@@ -344,6 +344,9 @@ pub enum MissingReason {
     /// An executable file is there, and cannot run here: its interpreter or a
     /// library is missing, or its file system forbids running it.
     CannotRun,
+    /// The path cannot be reached: a folder on the way does not let the
+    /// service in, so what is there (if anything) cannot be told.
+    NoAccess,
 }
 
 impl MissingReason {
@@ -352,6 +355,7 @@ impl MissingReason {
             Self::NotFound => "not-found",
             Self::NotExecutable => "not-executable",
             Self::CannotRun => "cannot-run",
+            Self::NoAccess => "no-access",
         }
     }
 }
@@ -429,6 +433,8 @@ impl MissingRenderer {
         let identity = PathIdentity::of(path);
         let reason = match (&identity, error.kind()) {
             (PathIdentity::Absent, _) => MissingReason::NotFound,
+            // The path itself could not be looked at: a folder on the way.
+            (PathIdentity::Unreadable(_), _) => MissingReason::NoAccess,
             (identity, std::io::ErrorKind::PermissionDenied) if !identity.executable_file() => {
                 MissingReason::NotExecutable
             }
@@ -447,7 +453,7 @@ impl MissingRenderer {
     pub fn short(&self) -> String {
         match self.reason {
             MissingReason::NotFound => format!("{} is missing", self.program),
-            MissingReason::NotExecutable | MissingReason::CannotRun => {
+            MissingReason::NotExecutable | MissingReason::CannotRun | MissingReason::NoAccess => {
                 format!("{} cannot run here", self.program)
             }
         }
@@ -462,12 +468,14 @@ impl MissingRenderer {
                 self.path,
                 self.error
             ),
-            MissingReason::NotExecutable | MissingReason::CannotRun => format!(
-                "{}: {}: {}; paired still is active",
-                self.short(),
-                self.path,
-                self.error
-            ),
+            MissingReason::NotExecutable | MissingReason::CannotRun | MissingReason::NoAccess => {
+                format!(
+                    "{}: {}: {}; paired still is active",
+                    self.short(),
+                    self.path,
+                    self.error
+                )
+            }
         }
     }
 }

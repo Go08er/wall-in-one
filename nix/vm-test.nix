@@ -846,8 +846,11 @@ pkgs.testers.runNixOSTest {
         )
 
         # Isolate ExecStop from the regular timer, then make mpvpaper exec fail
-        # synchronously when the injected clock selects that video rule. The
-        # runtime document is edited without changing its declared generation.
+        # synchronously when the injected clock selects that video rule: an
+        # executable that is not a program ("Exec format error"). A program
+        # that is not there at all is a missing renderer, never a failure
+        # (docs/missing-components.md). The runtime document is edited
+        # without changing its declared generation.
         # Leave those injected bytes installed until stop: a pre-stop
         # --write-config is an atomic rename which wakes Rust's one-second file
         # watcher and can occupy the single runtime thread while the bounded
@@ -861,9 +864,11 @@ pkgs.testers.runNixOSTest {
                 "wall-in-one-health-sync.service"
             )
         )
-        machine.fail("test -e /tmp/missing-mpvpaper")
         machine.succeed(
-            "sed -i 's|^mpvpaper_program = .*|mpvpaper_program = \"/tmp/missing-mpvpaper\"|' "
+            "echo 'not a program' > /tmp/broken-mpvpaper && chmod 0755 /tmp/broken-mpvpaper"
+        )
+        machine.succeed(
+            "sed -i 's|^mpvpaper_program = .*|mpvpaper_program = \"/tmp/broken-mpvpaper\"|' "
             "${home}/.local/state/wall-in-one/runtime.toml"
         )
         assert "reloaded" in ctl("reload")
@@ -891,7 +896,7 @@ pkgs.testers.runNixOSTest {
             "or .health.state? != \"borked\")' " + pairings_document
         )
         machine.succeed(
-            "grep -Fx 'mpvpaper_program = \"/tmp/missing-mpvpaper\"' "
+            "grep -Fx 'mpvpaper_program = \"/tmp/broken-mpvpaper\"' "
             "${home}/.local/state/wall-in-one/runtime.toml"
         )
         machine.succeed(as_user("systemctl --user stop wall-in-one.service"))

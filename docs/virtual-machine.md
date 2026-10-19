@@ -221,7 +221,7 @@ verifies that:
 - two outputs added with `swaymsg create_output` are published within one
   five-second probe. So is `swaymsg output HEADLESS-3 disable` and `enable`:
   the switched-off head stays listed with `enabled: false`. The test prints
-  each latency and fails one over ten seconds;
+  each latency and fails one over fifteen seconds (the probe's five plus slack for a loaded runner);
 - in mirrored mode, an all-output scene starts one linux-wallpaperengine with a
   `--screen-root` for each enabled output and none for the switched-off one,
   and is started again as the head goes off and on;
@@ -236,8 +236,9 @@ verifies that:
 The renderers are the same kind of stand-in as above, a program that records
 its command line, put in `runtime.toml` in place of the installed one. The
 scene is a playlist added to `runtime.toml` by hand, since authoring one needs
-a Steam Workshop tree. The screenshot `sway-desktop.png` shows Noctalia's bar
-and the still on `HEADLESS-1`.
+a Steam Workshop tree. The test saves a screenshot of `HEADLESS-1`,
+`sway-desktop.png`, for a person to look at; it checks only that the file
+is not tiny, not what is in it.
 
 The guest clock is changed only inside the disposable VM. All guest config,
 state, cache, media, and runtime sockets live under the guest's own home or

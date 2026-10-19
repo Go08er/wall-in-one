@@ -1,0 +1,152 @@
+"""packaging/arch/aur-release.sh, offline: the tarball comes from WIO_AUR_TARBALL.
+
+The script is what turns the checked-in PKGBUILD (``sha256sums=('SKIP')``)
+into the one published to the AUR, so its refusals are the point. Nothing here
+touches the network. docs/packaging.md, "Arch release checklist".
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import os
+import re
+import shutil
+import subprocess
+import tarfile
+from pathlib import Path
+
+import pytest
+
+ARCH = Path(__file__).resolve().parents[1] / "packaging" / "arch"
+
+pytestmark = pytest.mark.skipif(
+    not (ARCH / "aur-release.sh").is_file() or shutil.which("bash") is None,
+    reason="not running from a source tree",
+)
+
+
+def _pkgver() -> str:
+    match = re.search(r"^pkgver=(.+)$", (ARCH / "PKGBUILD").read_text(), re.MULTILINE)
+    assert match
+    return match.group(1)
+
+
+def _tarball(path: Path, top: str, extra: tuple[str, ...] = ()) -> bytes:
+    with tarfile.open(path, "w:gz") as archive:
+        for name in (f"{top}/", f"{top}/LICENSE", *extra):
+            info = tarfile.TarInfo(name)
+            if name.endswith("/"):
+                info.type = tarfile.DIRTYPE
+                archive.addfile(info)
+            else:
+                data = b"x"
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    return path.read_bytes()
+
+
+@pytest.fixture
+def release(tmp_path: Path) -> Path:
+    """A copy of the script, PKGBUILD and .SRCINFO to run against (and edit)."""
+    directory = tmp_path / "arch"
+    directory.mkdir()
+    for name in ("aur-release.sh", "PKGBUILD", ".SRCINFO"):
+        shutil.copy(ARCH / name, directory / name)
+    return directory
+
+
+def _run(
+    release: Path, tmp_path: Path, tag: str, tarball: Path
+) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "TMPDIR": str(tmp_path), "WIO_AUR_TARBALL": str(tarball)}
+    return subprocess.run(
+        ["bash", str(release / "aur-release.sh"), tag, str(tmp_path / "out")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_a_good_tarball_gives_a_release_pkgbuild_and_srcinfo_with_its_sum(
+    release: Path, tmp_path: Path
+) -> None:
+    pkgver = _pkgver()
+    tarball = tmp_path / "t.tar.gz"
+    sum_ = hashlib.sha256(_tarball(tarball, f"wall-in-one-{pkgver}")).hexdigest()
+    result = _run(release, tmp_path, f"v{pkgver}", tarball)
+    assert result.returncode == 0, result.stderr
+    pkgbuild = (tmp_path / "out" / "PKGBUILD").read_text()
+    srcinfo = (tmp_path / "out" / ".SRCINFO").read_text()
+    assert f"sha256sums=('{sum_}')\n" in pkgbuild
+    assert f"\tsha256sums = {sum_}\n" in srcinfo
+    assert "SKIP" not in pkgbuild + srcinfo
+    # Nothing else changed: the checked-in files with the sum put in and the TODO gone.
+    original = (release / "PKGBUILD").read_text()
+    assert [line for line in pkgbuild.splitlines() if not line.startswith("#")] == [
+        line.replace("'SKIP'", f"'{sum_}'")
+        for line in original.splitlines()
+        if not line.startswith("#")
+    ]
+    assert srcinfo == (release / ".SRCINFO").read_text().replace("SKIP", sum_)
+    assert not any((release / name).read_text().count(sum_) for name in ("PKGBUILD", ".SRCINFO"))
+
+
+@pytest.mark.parametrize("tag", ["v0.0.1", "0.4.0", "v0.4.0-rc1"])
+def test_a_tag_that_is_not_v_pkgver_is_refused(release: Path, tmp_path: Path, tag: str) -> None:
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}")
+    if tag == f"v{_pkgver()}":
+        pytest.skip("this is the current tag")
+    result = _run(release, tmp_path, tag, tarball)
+    assert result.returncode == 1
+    assert "is not v" in result.stderr
+    assert not (tmp_path / "out" / "PKGBUILD").exists()
+
+
+def test_a_tarball_with_another_top_directory_is_refused(release: Path, tmp_path: Path) -> None:
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, "wall-in-one-9.9.9")
+    result = _run(release, tmp_path, f"v{_pkgver()}", tarball)
+    assert result.returncode == 1
+    assert "outside" in result.stderr
+    assert not (tmp_path / "out" / "PKGBUILD").exists()
+
+
+def test_a_tarball_with_a_stray_top_level_entry_is_refused(release: Path, tmp_path: Path) -> None:
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}", extra=("stray",))
+    assert _run(release, tmp_path, f"v{_pkgver()}", tarball).returncode == 1
+
+
+def test_something_that_is_not_a_tarball_is_refused(release: Path, tmp_path: Path) -> None:
+    tarball = tmp_path / "t.tar.gz"
+    tarball.write_bytes(b"<html>Not Found</html>")
+    result = _run(release, tmp_path, f"v{_pkgver()}", tarball)
+    assert result.returncode == 1
+    assert "not a gzip tarball" in result.stderr
+
+
+@pytest.mark.parametrize("name", ["PKGBUILD", ".SRCINFO"])
+def test_files_not_in_the_expected_shape_are_refused(
+    release: Path, tmp_path: Path, name: str
+) -> None:
+    """If the SKIP line is not there to replace, a SKIP might survive: so it refuses."""
+    path = release / name
+    path.write_text(path.read_text().replace("SKIP", "SKIP' 'SKIP" if name == "PKGBUILD" else "x"))
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}")
+    result = _run(release, tmp_path, f"v{_pkgver()}", tarball)
+    assert result.returncode == 1
+    assert not (tmp_path / "out" / "PKGBUILD").exists()
+
+
+def test_a_skip_elsewhere_in_the_pkgbuild_stops_the_release(release: Path, tmp_path: Path) -> None:
+    path = release / "PKGBUILD"
+    path.write_text(path.read_text() + "\nmd5sums=('SKIP')\n")
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}")
+    result = _run(release, tmp_path, f"v{_pkgver()}", tarball)
+    assert result.returncode == 1
+    assert "SKIP would remain" in result.stderr
+    assert not (tmp_path / "out" / "PKGBUILD").exists()

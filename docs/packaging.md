@@ -227,6 +227,42 @@ user's Steam library and are never packaged.
   that package's wrapper, never in a profile's `bin`, so the lookup never
   finds them.
 
+## Arch release checklist
+
+`packaging/arch/PKGBUILD` is checked in with `sha256sums=('SKIP')`: CI builds
+a tarball of the checkout (`packaging/arch/local-build.sh`), so it never
+downloads the tag's tarball and has no real checksum to use. The PKGBUILD that
+is published is made from it after the tag exists, in this order:
+
+1. **Bump the versions** in one commit: `pyproject.toml`, `wall_in_one`'s
+   `__version__`, `service/Cargo.toml` and `Cargo.lock`, `flake.nix`, and the
+   PKGBUILD's `pkgver` (with `pkgrel=1`). `tests/test_packaging.py` checks the first
+   four against each other, a test compares the PKGBUILD's `pkgver` with
+   `__version__`, `tests/test_arch_srcinfo.py` checks `.SRCINFO` against the
+   PKGBUILD, and the package fails to build if the programs' `--version` is not `pkgver`
+   (`package()` and the Arch CI smoke test both compare line 1 exactly).
+2. **Run the release gates and the Arch job** (`arch.yml` runs on `release/**`
+   and on demand), and tag `v<pkgver>`.
+3. **Run `packaging/arch/aur-release.sh v<pkgver> <directory>`.** It downloads
+   GitHub's tarball for the tag, refuses unless its only top-level directory
+   is `wall-in-one-<pkgver>`, computes the sha256, and writes the release
+   `PKGBUILD` (real checksum, no `TODO`) and a matching `.SRCINFO` into the
+   directory, changing nothing in the repository. It refuses if the tag is not
+   `v<pkgver>` or any `SKIP` would remain. Commit nothing from this directory
+   to the main repository, and do not hand-edit its files.
+4. **Check the result on Arch** if you have a machine or container: in that
+   directory, `makepkg --verifysource` downloads the source again and checks
+   it against the sum; `makepkg --printsrcinfo | diff - .SRCINFO` shows the
+   `.SRCINFO` is what makepkg writes. (Without Arch, the `.SRCINFO` is the
+   checked-in one with only the sum filled in, which `tests/test_aur_release.py`
+   verifies offline.)
+5. **Publish to the AUR.** This pushes to the owner's AUR account, so it needs
+   the owner's approval and is never done by an agent: copy the two files into
+   the AUR repository `wall-in-one`, commit, and push.
+
+If a later fix needs another package build of the same release, raise `pkgrel`
+in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 5.
+
 ## How it is tested
 
 - The lookup, with fake profiles, store directories and `PATH`s
@@ -239,6 +275,11 @@ user's Steam library and are never packaged.
 - The install kind: `tests/test_install_kind.py` (the CLI, the update report,
   the line a package rewrites) and the service's own tests (`status`,
   `--version`, the accepted values).
+- The Arch package: `tests/test_arch_srcinfo.py` (every makepkg variable of
+  the PKGBUILD is in `.SRCINFO`, and the other way round),
+  `tests/test_aur_release.py` (the release script, offline against a tarball
+  it is given) and the `arch.yml` job (the build, `check()`, install, smoke
+  and GUI tests, in a clean Arch container).
 - `desktop`: the installed package's two programs report the same kind,
   `nix`. `package-closure`: no renderer in the closure, FFmpeg in it.
 - `modules`: both modules evaluated, through the flake and by path, with

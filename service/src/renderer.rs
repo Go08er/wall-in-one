@@ -293,7 +293,76 @@ pub trait WallpaperDriver: Send {
     fn motion_active(&self, _output: &str) -> bool {
         false
     }
+    /// The renderer programs that could not be started at all, in the order
+    /// of `RENDERER_PROGRAMS`, at most one record each. A record goes when a
+    /// spawn of that program succeeds, when the driver is reconfigured, and
+    /// in `recheck_missing_renderers`. Empty for drivers that start nothing.
+    fn missing_renderers(&self) -> Vec<MissingRenderer> {
+        Vec::new()
+    }
+    /// The missing program behind `output`'s last motion start, when that
+    /// start found its renderer missing and showed the still instead. Gone
+    /// once the output is stopped or applied again.
+    fn motion_missing(&self, _output: &str) -> Option<MissingRenderer> {
+        None
+    }
+    /// For a reload that does not change the renderer settings: forget each
+    /// missing program whose path is now an executable file, and return the
+    /// outputs showing a still because of it, which the reload applies again.
+    fn recheck_missing_renderers(&mut self) -> Vec<String> {
+        Vec::new()
+    }
     fn stop(&mut self);
+}
+
+/// The two renderer programs, in the order `missing_renderers` reports them.
+pub const RENDERER_PROGRAMS: [&str; 2] = ["mpvpaper", "linux-wallpaperengine"];
+
+/// A renderer program that could not be started at all: the spawn of the
+/// path the document names failed with `NotFound` (nothing there, or a
+/// script whose interpreter is missing) or `PermissionDenied` (not
+/// executable here). No child ever existed, so this says nothing about the
+/// wallpaper: the driver shows the entry's still instead of motion, and the
+/// apply succeeds. A renderer that started and then exited is a
+/// `RendererFailure`, as before. See docs/missing-components.md.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingRenderer {
+    /// One of `RENDERER_PROGRAMS`.
+    pub program: &'static str,
+    /// The path the document names for it.
+    pub path: String,
+    /// What the spawn said, e.g. `No such file or directory (os error 2)`.
+    pub error: String,
+}
+
+/// Why a renderer did not start: its program is missing, or anything else.
+enum StartError {
+    Missing(std::io::Error),
+    Failed(String),
+}
+
+impl StartError {
+    fn into_message(self, program: &str) -> String {
+        match self {
+            Self::Missing(error) => format!("cannot start {program}: {error}"),
+            Self::Failed(message) => message,
+        }
+    }
+}
+
+/// Whether a spawn error means the program itself could not be started.
+fn program_missing(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    )
+}
+
+/// Whether `path` is now an executable file, before a reload tries it again.
+fn now_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 /// An owned renderer-exit report. Runtime policy needs the entry identity,
@@ -407,18 +476,19 @@ impl Default for Mpvpaper {
     }
 }
 
-impl VideoRenderer for Mpvpaper {
-    fn start(
+impl Mpvpaper {
+    /// `VideoRenderer::start`, saying whether the program itself is missing.
+    fn launch(
         &mut self,
         entry: &Entry,
         output: &str,
         settings: &RendererSettings,
         refresh_millihz: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), StartError> {
         let video = entry
             .motion
             .as_ref()
-            .ok_or("video entry has no motion path")?;
+            .ok_or_else(|| StartError::Failed("video entry has no motion path".into()))?;
         self.stop();
         let socket = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -469,9 +539,13 @@ impl VideoRenderer for Mpvpaper {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot start mpvpaper: {error}"))?;
+        let mut child = command.spawn().map_err(|error| {
+            if program_missing(&error) {
+                StartError::Missing(error)
+            } else {
+                StartError::Failed(format!("cannot start mpvpaper: {error}"))
+            }
+        })?;
         self.diagnostics = child
             .stderr
             .take()
@@ -481,6 +555,19 @@ impl VideoRenderer for Mpvpaper {
         self.pause_transport = PauseTransport::None;
         options.clear();
         Ok(())
+    }
+}
+
+impl VideoRenderer for Mpvpaper {
+    fn start(
+        &mut self,
+        entry: &Entry,
+        output: &str,
+        settings: &RendererSettings,
+        refresh_millihz: Option<u64>,
+    ) -> Result<(), String> {
+        self.launch(entry, output, settings, refresh_millihz)
+            .map_err(|error| error.into_message("mpvpaper"))
     }
 
     fn stop(&mut self) {
@@ -750,6 +837,12 @@ pub struct SystemDriver {
     published: Vec<Output>,
     socket_namespace: u64,
     animations_inhibited: bool,
+    /// Each renderer program that could not be started at all, by its index
+    /// in `RENDERER_PROGRAMS`.
+    missing: [Option<MissingRenderer>; 2],
+    /// The outputs (by `key`) that show their still because their renderer
+    /// is missing: the output as the runtime names it, and what was missing.
+    missing_motion: HashMap<String, (String, MissingRenderer)>,
 }
 
 struct ActiveVideo {
@@ -904,6 +997,8 @@ impl SystemDriver {
             published: Vec::new(),
             socket_namespace: renderer_socket_namespace(socket),
             animations_inhibited: false,
+            missing: [None, None],
+            missing_motion: HashMap::new(),
         }
     }
 
@@ -917,6 +1012,7 @@ impl SystemDriver {
 
     fn stop_output(&mut self, output: &str) {
         let key = Self::key(output);
+        self.missing_motion.remove(&key);
         if let Some(mut video) = self.videos.remove(&key) {
             video.renderer.stop();
         }
@@ -1044,16 +1140,16 @@ impl SystemDriver {
         command.arg("--bg").arg(scene);
     }
 
-    fn start_scene(&mut self, entry: &Entry, output: &str) -> Result<(), String> {
+    fn start_scene(&mut self, entry: &Entry, output: &str) -> Result<(), StartError> {
         if !self.settings.own_scene_renderer {
-            return Err(
+            return Err(StartError::Failed(
                 "scene renderer ownership is disabled; paired still remains applied".into(),
-            );
+            ));
         }
         let scene = entry
             .scene_id
             .as_ref()
-            .ok_or("scene entry has no scene id")?;
+            .ok_or_else(|| StartError::Failed("scene entry has no scene id".into()))?;
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
         command
             .arg("--layer")
@@ -1071,7 +1167,7 @@ impl SystemDriver {
             command.arg("--no-fullscreen-pause");
         }
         if output.is_empty() {
-            for connector in self.current_outputs()? {
+            for connector in self.current_outputs().map_err(StartError::Failed)? {
                 self.add_scene_target(&mut command, &connector, scene);
             }
         } else {
@@ -1082,9 +1178,13 @@ impl SystemDriver {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot start linux-wallpaperengine: {error}"))?;
+        let mut child = command.spawn().map_err(|error| {
+            if program_missing(&error) {
+                StartError::Missing(error)
+            } else {
+                StartError::Failed(format!("cannot start linux-wallpaperengine: {error}"))
+            }
+        })?;
         let diagnostics = child
             .stderr
             .take()
@@ -1110,23 +1210,55 @@ impl SystemDriver {
         if !runtime.dynamics_enabled || self.animations_inhibited {
             return Ok(());
         }
-        match entry.kind {
-            EntryKind::Still => Ok(()),
+        let (index, started) = match entry.kind {
+            EntryKind::Still => return Ok(()),
             EntryKind::Video => {
                 let mut video = Mpvpaper::new_in_namespace(self.socket_namespace);
                 let refresh = self.interpolation_refresh(output);
-                video.start(entry, output, &self.settings, refresh)?;
-                self.videos.insert(
-                    Self::key(output),
-                    ActiveVideo {
-                        renderer: video,
-                        entry: entry.clone(),
-                        output: output.to_string(),
-                    },
-                );
+                let started = video.launch(entry, output, &self.settings, refresh);
+                if started.is_ok() {
+                    self.videos.insert(
+                        Self::key(output),
+                        ActiveVideo {
+                            renderer: video,
+                            entry: entry.clone(),
+                            output: output.to_string(),
+                        },
+                    );
+                }
+                (0, started)
+            }
+            EntryKind::Scene => (1, self.start_scene(entry, output)),
+        };
+        match started {
+            Ok(()) => {
+                // The program is there: whatever an earlier spawn said.
+                self.missing[index] = None;
                 Ok(())
             }
-            EntryKind::Scene => self.start_scene(entry, output),
+            Err(StartError::Missing(error)) => {
+                // Not this wallpaper's fault: its still is already applied
+                // and stays. The runtime reports the program, not the entry.
+                let record = MissingRenderer {
+                    program: RENDERER_PROGRAMS[index],
+                    path: self.program_path(index).display().to_string(),
+                    error: error.to_string(),
+                };
+                self.missing_motion
+                    .insert(Self::key(output), (output.to_string(), record.clone()));
+                self.missing[index] = Some(record);
+                Ok(())
+            }
+            Err(StartError::Failed(message)) => Err(message),
+        }
+    }
+
+    /// The path the document names for `RENDERER_PROGRAMS[index]`.
+    fn program_path(&self, index: usize) -> &Path {
+        if index == 0 {
+            &self.settings.mpvpaper_program
+        } else {
+            &self.settings.linux_wallpaperengine_program
         }
     }
 
@@ -1323,6 +1455,8 @@ impl WallpaperDriver for SystemDriver {
 
     fn reconfigure(&mut self, settings: RendererSettings) {
         self.stop();
+        // Other program paths, or the same ones: the next spawn says again.
+        self.missing = [None, None];
         self.settings = settings;
     }
 
@@ -1418,7 +1552,36 @@ impl WallpaperDriver for SystemDriver {
         self.videos.contains_key(&key) || self.scenes.contains_key(&key)
     }
 
+    fn missing_renderers(&self) -> Vec<MissingRenderer> {
+        self.missing.iter().flatten().cloned().collect()
+    }
+
+    fn motion_missing(&self, output: &str) -> Option<MissingRenderer> {
+        self.missing_motion
+            .get(&Self::key(output))
+            .map(|(_, record)| record.clone())
+    }
+
+    fn recheck_missing_renderers(&mut self) -> Vec<String> {
+        let mut outputs = Vec::new();
+        for (index, program) in RENDERER_PROGRAMS.iter().enumerate() {
+            if self.missing[index].is_none() || !now_executable(self.program_path(index)) {
+                continue;
+            }
+            self.missing[index] = None;
+            outputs.extend(
+                self.missing_motion
+                    .values()
+                    .filter(|(_, record)| record.program == *program)
+                    .map(|(output, _)| output.clone()),
+            );
+        }
+        outputs.sort();
+        outputs
+    }
+
     fn stop(&mut self) {
+        self.missing_motion.clear();
         for (_, mut video) in self.videos.drain() {
             video.renderer.stop();
         }

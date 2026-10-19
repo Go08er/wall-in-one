@@ -5,7 +5,7 @@ use crate::config::{
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response, success_fits};
-use crate::renderer::{MAX_OUTPUT_NAME_BYTES, RendererFailure, WallpaperDriver};
+use crate::renderer::{MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver};
 use crate::schedule;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
@@ -26,6 +26,11 @@ const MAX_RETAINED_DISPLAY_ROUTES: usize = 64;
 const MAX_STATUS_DISPLAY_ROWS: usize = MAX_LIVE_DISPLAY_ROUTES + MAX_RETAINED_DISPLAY_ROUTES;
 const MAX_DISPLAY_ERROR_BYTES: usize = MAX_DISPLAY_DIAGNOSTIC_TOTAL_BYTES / MAX_STATUS_DISPLAY_ROWS;
 const TRUNCATION_MARKER: &str = " ... [truncated] ... ";
+/// The longest path `missing_renderers` reports, cut in the middle past it.
+/// Two records at this size are a fixed part of the status, inside its
+/// structural reserve, whatever program paths the document names (neither
+/// status budget counts them). See docs/missing-components.md.
+const MAX_MISSING_RENDERER_PATH_BYTES: usize = 1024;
 /// Rule checks one status reply may spend finding every display's next
 /// schedule boundary (`schedule::next_change`). A profile with a few dozen
 /// rules on a few displays needs well under a tenth of it; only hundreds of
@@ -160,6 +165,38 @@ pub struct Status<'a> {
     /// stale. Not part of the configuration's status budget: the
     /// compositor, not the document, decides its size.
     pub outputs: &'a [Output],
+    /// The renderer programs the service could not start at all (nothing at
+    /// the path, or not executable), mpvpaper first. Empty when none. Added
+    /// in 0.4.0. Such a program is never a taboo or a failure report: the
+    /// displays that needed it show their still, with `renderer_failed` and
+    /// `last_error` saying why. See docs/missing-components.md.
+    pub missing_renderers: Vec<MissingRendererStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MissingRendererStatus {
+    pub program: &'static str,
+    pub path: String,
+}
+
+impl MissingRendererStatus {
+    fn of(record: &MissingRenderer) -> Self {
+        Self {
+            program: record.program,
+            path: truncate_middle(&record.path, MAX_MISSING_RENDERER_PATH_BYTES),
+        }
+    }
+}
+
+/// What a display that shows its still for a missing renderer says.
+fn missing_renderer_diagnostic(record: &MissingRenderer) -> String {
+    truncate_middle(
+        &format!(
+            "{} is missing: cannot start {}: {}; paired still is active",
+            record.program, record.path, record.error
+        ),
+        MAX_LAST_ERROR_BYTES,
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -761,6 +798,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let targets = self.current_targets(&self.target_outputs);
         let mut errors = Vec::new();
+        let mut missing_notes = Vec::new();
         let mut resumed = false;
         self.driver.begin_apply();
         for target in targets {
@@ -780,7 +818,24 @@ impl<D: WallpaperDriver> Runtime<D> {
             let result =
                 self.driver
                     .start_motion_only(&target.entry, &target.output, &self.config.settings);
-            if let Err(error) = result {
+            let missing = result
+                .is_ok()
+                .then(|| self.driver.motion_missing(&target.output))
+                .flatten();
+            if let Some(missing) = missing {
+                // Still up, as before the restriction; say why it stays.
+                let diagnostic = missing_renderer_diagnostic(&missing);
+                self.power_released_outputs.remove(&target.output);
+                if let Some(route) = self.routes.get_mut(&target.output) {
+                    route.renderer_failed = true;
+                    route.last_error.clone_from(&diagnostic);
+                }
+                missing_notes.push(if target.output.is_empty() {
+                    diagnostic
+                } else {
+                    format!("{}: {diagnostic}", target.output)
+                });
+            } else if let Err(error) = result {
                 let message =
                     format!("could not resume animation after battery restriction: {error}");
                 if let Some(route) = self.routes.get_mut(&target.output) {
@@ -800,6 +855,9 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.driver.end_apply();
         if !errors.is_empty() {
             self.last_error = bounded_failure_summary(&errors);
+            self.renderer_failed = true;
+        } else if !missing_notes.is_empty() && !self.is_independent() {
+            self.last_error = bounded_failure_summary(&missing_notes);
             self.renderer_failed = true;
         } else if resumed && !self.is_independent() {
             self.renderer_failed = false;
@@ -2575,20 +2633,35 @@ impl<D: WallpaperDriver> Runtime<D> {
                     format!("{}: {diagnostic}", target.output)
                 });
             }
-            if let Err(error) = self.driver.apply(&target.entry, &target.output, &settings) {
-                self.last_apply_failures.push(ApplyFailure {
-                    key: EntryKey {
-                        playlist_id: target.playlist_id,
-                        entry_id: target.entry.id,
-                    },
-                    output: target.output.clone(),
-                    reason: error.clone(),
-                });
-                errors.push(if target.output.is_empty() {
-                    error
-                } else {
-                    format!("{}: {error}", target.output)
-                });
+            match self.driver.apply(&target.entry, &target.output, &settings) {
+                Ok(()) => {
+                    // The renderer program is not there: the still is up and
+                    // the entry is fine, so this is said like a taboo's still,
+                    // never recorded against the entry.
+                    if let Some(missing) = self.driver.motion_missing(&target.output) {
+                        let diagnostic = missing_renderer_diagnostic(&missing);
+                        static_fallbacks.push(if target.output.is_empty() {
+                            diagnostic
+                        } else {
+                            format!("{}: {diagnostic}", target.output)
+                        });
+                    }
+                }
+                Err(error) => {
+                    self.last_apply_failures.push(ApplyFailure {
+                        key: EntryKey {
+                            playlist_id: target.playlist_id,
+                            entry_id: target.entry.id,
+                        },
+                        output: target.output.clone(),
+                        reason: error.clone(),
+                    });
+                    errors.push(if target.output.is_empty() {
+                        error
+                    } else {
+                        format!("{}: {error}", target.output)
+                    });
+                }
             }
         }
         if self.playback_state == PlaybackState::Paused
@@ -2797,6 +2870,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                     reason: error.clone(),
                 });
                 errors.push(format!("{} renderer: {error}", target.output));
+                continue;
+            }
+            if let Some(missing) = self.driver.motion_missing(&target.output) {
+                // Its still stays up; the entry is not at fault (see above).
+                static_fallbacks
+                    .insert(target.output.clone(), missing_renderer_diagnostic(&missing));
                 continue;
             }
             if playback == PlaybackState::Paused
@@ -4107,10 +4186,33 @@ impl<D: WallpaperDriver> Runtime<D> {
         } else {
             HashSet::new()
         };
+        // A program the driver could not start may be there now (on Arch,
+        // the package put it at the very path the document already named, so
+        // the recompiled document is the same): the displays that show a
+        // still for it are applied again. A renderer change applies every
+        // display anyway, after a reconfigure that forgets every record.
+        let recovered: Vec<String> = if renderer_changed {
+            Vec::new()
+        } else {
+            self.driver.recheck_missing_renderers()
+        };
+        let mut independent_apply_outputs = independent_apply_outputs;
+        if self.is_independent() {
+            independent_apply_outputs.extend(
+                recovered
+                    .iter()
+                    .filter(|output| self.target_outputs.contains(output))
+                    .cloned(),
+            );
+        }
         let apply_needed = if self.is_independent() {
             !independent_apply_outputs.is_empty()
         } else {
-            mode_changed || renderer_changed || dynamics_changed || targets_changed
+            mode_changed
+                || renderer_changed
+                || dynamics_changed
+                || targets_changed
+                || !recovered.is_empty()
         };
         // Noctalia owns one shell-global palette. Changing only which display
         // supplies it must not tear down any otherwise unchanged renderer.
@@ -5091,6 +5193,12 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 &[]
             },
+            missing_renderers: self
+                .driver
+                .missing_renderers()
+                .iter()
+                .map(MissingRendererStatus::of)
+                .collect(),
         })
         .map_err(|error| error.to_string())
     }
@@ -5476,6 +5584,12 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 &[]
             },
+            missing_renderers: self
+                .driver
+                .missing_renderers()
+                .iter()
+                .map(MissingRendererStatus::of)
+                .collect(),
         })
         .map_err(|error| error.to_string())
     }

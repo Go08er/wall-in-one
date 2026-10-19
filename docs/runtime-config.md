@@ -268,7 +268,11 @@ retry; an accepted explicit command or successful reload supersedes it. A
 disconnected route cancels its pending candidate and evaluates the current
 clock when it reconnects. This is distinct from a child renderer exit: a
 renderer which started and later died is never automatically restarted, and a
-linux-wallpaperengine scene crash becomes taboo immediately.
+linux-wallpaperengine scene crash becomes taboo immediately. A renderer program
+that could not be started at all (nothing at its path, or not executable) is
+neither: the entry's still is shown, the hand-over succeeds, and status reports
+the program in `missing_renderers`, never the entry
+([missing components](missing-components.md#the-service-without-a-renderer)).
 
 Display assignments are the baseline when no schedule rule matches. A matching
 schedule rule overrides assignments for its window, and a manual

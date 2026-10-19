@@ -144,8 +144,24 @@ one while `output_discovery_error` says discovery is failing. In the rare case
 that it would push `status` over the reply limit, it is left empty, before
 any taboo record is left out and rather than failing the reply.
 
-Apart from `outputs`, `status` keeps its shape, so a client that does not know
-`outputs` is unaffected. One meaning changed in 0.4.0: a display switched off
+## Missing renderers
+
+From 0.4.0, `status` also carries `missing_renderers`: the renderer programs
+the service could not start at all, because nothing is at the path
+`runtime.toml` names or it is not executable there. It is a top-level array,
+mpvpaper first, of at most two rows, each `{"program": "mpvpaper", "path":
+"/usr/bin/mpvpaper"}` (the path cut in the middle past 1024 bytes); empty
+means none. A display whose entry needs such a program shows that entry's
+still, with `renderer_failed: true` and the program, path and error in its
+`last_error`, so Play retries; the entry is never made taboo, retried as a
+failure or listed in `taboo_entries`. A record goes when that program next
+starts, when a reload changes the renderer settings, and on a reload once the
+path holds an executable file (the reload then starts it on those displays).
+A renderer that started and then exited is still an ordinary renderer failure.
+See [missing components](missing-components.md#the-service-without-a-renderer).
+
+Apart from `outputs` and `missing_renderers`, `status` keeps its shape, so a
+client that does not know them is unaffected. One meaning changed in 0.4.0: a display switched off
 in the compositor is `connected: false` in `displays` and is treated exactly
 like an unplugged one (its renderer stops; switched back on, its assignment is
 applied again). With niri, 0.3.x reported it as connected. The app's window
@@ -161,7 +177,8 @@ Python renderer. Assignment and schedule edits are still configuration and are
 not accepted through `on`.
 
 An automatic startup, schedule or cycle hand-over which cannot apply gets three
-attempts total, two seconds apart. The service keeps or restores the
+attempts total, two seconds apart (a renderer program that is not there is not
+such a failure: see [missing renderers](#missing-renderers)). The service keeps or restores the
 last-known-good still between attempts; after the third failure it marks that
 resolved entry taboo for the session and advances to another usable candidate.
 An already-started renderer which later exits does not enter that retry machine:

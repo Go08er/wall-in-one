@@ -113,7 +113,19 @@ package() {
 
   # Last: both installed halves must say they are a `system` install, and the
   # same release. The Python half is run from $pkgdir's site-packages.
-  PYTHONPATH="$pkgdir$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
-    tools/check-install-kind.sh system \
+  local site
+  site="$pkgdir$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+  PYTHONPATH="$site" tools/check-install-kind.sh system \
     "$pkgdir/usr/bin/wall-in-one" "$pkgdir/usr/bin/wall-in-one-service"
+  # ... and the release is this package's pkgver. The check above only makes
+  # the halves agree with each other; if the version was not bumped before
+  # tagging, both would say the old one and ship under the new package name.
+  local program shipped
+  for program in wall-in-one wall-in-one-service; do
+    shipped=$(PYTHONPATH="$site" "$pkgdir/usr/bin/$program" --version | sed -n 1p)
+    if [[ $shipped != "$program $pkgver" ]]; then
+      error "$program --version says '$shipped', expected '$program $pkgver'"
+      return 1
+    fi
+  done
 }

@@ -731,8 +731,11 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
         else:
             if not reload_response.ok:
                 print(
-                    f"error: {saved_subject} was saved but reload was rejected: "
-                    f"{reload_response.message}{runtime_compatibility.restart_hint(status)}",
+                    runtime_compatibility.with_restart_hint(
+                        f"error: {saved_subject} was saved but reload was rejected: "
+                        f"{reload_response.message}",
+                        status,
+                    ),
                     file=sys.stderr,
                 )
                 return 1

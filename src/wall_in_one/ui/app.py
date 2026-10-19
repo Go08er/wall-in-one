@@ -3149,8 +3149,8 @@ class Application(Adw.Application):
         With a service older than this app (between an update and its
         restart), also what ends it.
         """
-        return f"Runtime rejected the new configuration: {message}" + (
-            runtime_compatibility.restart_hint(self.runtime_status)
+        return runtime_compatibility.with_restart_hint(
+            f"Runtime rejected the new configuration: {message}", self.runtime_status
         )
 
     def _publish_runtime_async(self) -> bool:

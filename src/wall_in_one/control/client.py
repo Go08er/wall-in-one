@@ -548,21 +548,21 @@ def dispatch(verb: str, argument: str | None) -> int:
         # the reason rather than read it.
         message = response.message
         if not response.ok and request_verb == "reload":
-            message += _restart_hint()
+            message = _with_restart_hint(message)
         print(message, file=stream)
     return 0 if response.ok else 1
 
 
-def _restart_hint() -> str:
-    """Why a reload was refused, when the running service is older than this app."""
+def _with_restart_hint(message: str) -> str:
+    """A refused reload's message, and why, when the running service is older."""
     from wall_in_one import runtime_compatibility
 
     try:
         response = send_runtime("status", timeout=TIMEOUT)
         status = json.loads(response.message) if response.ok else None
     except ControlError, ValueError, RecursionError:
-        return ""
-    return runtime_compatibility.restart_hint(status)
+        return message
+    return runtime_compatibility.with_restart_hint(message, status)
 
 
 def dispatch_on(connector: str, verb: str, argument: str | None) -> int:

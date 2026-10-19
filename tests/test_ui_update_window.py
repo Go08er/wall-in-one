@@ -31,3 +31,14 @@ def test_a_refused_save_from_a_current_service_says_only_why() -> None:
     said = Application._rejected_configuration(window, REFUSAL)  # type: ignore[arg-type]
 
     assert said == f"Runtime rejected the new configuration: {REFUSAL}"
+
+
+def test_the_hint_follows_a_multiline_refusal_on_its_last_line() -> None:
+    window = SimpleNamespace(runtime_status={"status_version": 2, "runtime_version": "0.0.1"})
+
+    refusal = "TOML parse error\nmissing field `niri_program`\n"
+
+    said = Application._rejected_configuration(window, refusal)  # type: ignore[arg-type]
+
+    assert said.endswith(f"older than this app ({__version__}).")
+    assert "missing field `niri_program` Restart the wallpaper service" in said

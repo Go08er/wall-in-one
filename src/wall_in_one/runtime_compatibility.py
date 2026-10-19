@@ -45,6 +45,16 @@ def restart_hint(status: object) -> str:
     )
 
 
+def with_restart_hint(message: str, status: object) -> str:
+    """``message``, with the restart hint on the same line when it applies.
+
+    A service's refusal can end in a newline (0.3.2's TOML parse errors do),
+    which would otherwise put the hint on a line of its own.
+    """
+    hint = restart_hint(status)
+    return message.rstrip() + hint if hint else message
+
+
 class RuntimeCompatibilityError(Exception):
     """A live runtime has not demonstrated support for the proposed schema."""
 

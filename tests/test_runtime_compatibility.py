@@ -20,6 +20,11 @@ from wall_in_one.session import Session
 
 #: What a 0.3 service still running after the update says about a 0.4 document.
 OLD_SERVICE_REFUSAL = "config is not valid TOML: missing field `niri_program`"
+#: 0.3.2's own reply to a 0.4 document, verbatim, trailing newline included.
+REAL_REFUSAL = (
+    "config is not valid TOML: TOML parse error at line 11, column 1\n   |\n11 | [renderer]\n"
+    "   | ^^^^^^^^^^\nmissing field `niri_program`\n"
+)
 
 
 def _reply(monkeypatch: pytest.MonkeyPatch, status: object) -> None:
@@ -222,3 +227,44 @@ def test_ctl_reload_refused_by_a_current_service_says_only_why(
 
     assert client.dispatch("reload", None) == 1
     assert "Restart" not in capsys.readouterr().err
+
+
+def test_the_hint_follows_the_real_refusal_on_its_last_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def send(request: Request, **_keywords: object) -> Response:
+        if request.verb == "reload":
+            return Response.failure(REAL_REFUSAL)
+        return Response.success(json.dumps({"status_version": 2, "runtime_version": "0.0.1"}))
+
+    monkeypatch.setattr(client, "send", send)
+
+    assert client.dispatch("reload", None) == 1
+    error = capsys.readouterr().err
+    assert "missing field `niri_program` Restart the wallpaper service" in error
+    assert "\n Restart" not in error
+
+
+def test_a_refusal_without_a_hint_is_left_as_it_came() -> None:
+    status = {"status_version": 2, "runtime_version": __version__}
+    assert runtime_compatibility.with_restart_hint(REAL_REFUSAL, status) == REAL_REFUSAL
+
+
+def test_ctl_reload_says_only_why_when_the_status_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked: list[tuple[str, object]] = []
+
+    def send(request: Request, **keywords: object) -> Response:
+        asked.append((request.verb, keywords.get("timeout")))
+        if request.verb == "reload":
+            return Response.failure(REAL_REFUSAL)
+        raise client.ControlTimeoutError("timed out after 5s")
+
+    monkeypatch.setattr(client, "send", send)
+
+    assert client.dispatch("reload", None) == 1
+    error = capsys.readouterr().err
+    assert "missing field `niri_program`" in error
+    assert "Restart" not in error
+    assert asked == [("reload", None), ("status", client.TIMEOUT)]

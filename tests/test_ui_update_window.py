@@ -8,9 +8,11 @@ until then is refused the same way. The window says what ends it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from wall_in_one import __version__
+from wall_in_one.ui import app
 from wall_in_one.ui.app import Application
 
 REFUSAL = "config is not valid TOML: missing field `niri_program`"
@@ -42,3 +44,12 @@ def test_the_hint_follows_a_multiline_refusal_on_its_last_line() -> None:
 
     assert said.endswith(f"older than this app ({__version__}).")
     assert "missing field `niri_program` Restart the wallpaper service" in said
+
+
+def test_every_refused_save_in_the_window_is_worded_in_one_place() -> None:
+    """The four places the window reports a refused document all go through
+    `_rejected_configuration`, so none can lose the restart hint."""
+    source = Path(app.__file__).read_text(encoding="utf-8")
+
+    assert source.count("Runtime rejected the new configuration") == 1
+    assert source.count("self._rejected_configuration(") == 4

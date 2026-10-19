@@ -424,18 +424,14 @@ pkgs.testers.runNixOSTest {
         settings = "${home}/.config/wall-in-one/settings.toml"
         machine.fail(f"grep -E '^(display_mode|theme_source_connector) ' {settings}")
         machine.succeed(as_user(f"sh -c 'cat ${independentSettings} >> {settings}'"))
-        # Off in the settings, so a route made later starts with it off too;
-        # the session's `cycle off` holds only the routes there are.
-        machine.succeed(as_user(
-            f"sed -i 's/^cycle_enabled = true$/cycle_enabled = false/' {settings}"
-        ))
-        machine.succeed(f"grep -Fx 'cycle_enabled = false' {settings}")
         machine.succeed(as_user("install -m 0644 ${displaysStore} ${stateDir}/displays.json"))
         machine.succeed(as_user("${app} --write-config"))
         machine.succeed("grep -Fx 'display_mode = \"independent\"' ${runtimeDocument}")
         machine.succeed("grep -Fx 'theme_source_connector = \"HEADLESS-1\"' ${runtimeDocument}")
         machine.succeed("grep -Fx 'connector = \"HEADLESS-3\"' ${runtimeDocument}")
-        machine.succeed("grep -Fx 'cycle_enabled = false' ${runtimeDocument}")
+        # Cycling is on in the settings: only the session's `cycle off`, from
+        # before the mode change, keeps every route below from advancing.
+        machine.succeed("grep -Fx 'cycle_enabled = true' ${runtimeDocument}")
         machine.succeed(as_user(
             "sed -i "
             "-e 's|^mpvpaper_program = .*|mpvpaper_program = \"${fakeMpvpaper}\"|' "
@@ -459,7 +455,7 @@ pkgs.testers.runNixOSTest {
         not_rendered = (
             'all(.displays[]; .connector != "HEADLESS-3" '
             "or (.connected == false and .motion_active == false)) "
-            "and all(.displays[]; .cycle_enabled == false) "
+            'and all(.displays[]; .cycle_enabled == false and .cycle_source == "manual") '
             "and " + disabled_outputs(["HEADLESS-3"])
         )
         off = (
@@ -468,19 +464,12 @@ pkgs.testers.runNixOSTest {
             'and .assignment_source == "explicit" and .assigned_playlist_id == "video") '
             "and " + not_rendered
         )
-        # The service makes a display's route when it first sees the display
-        # connected in independent mode. Off since before then, the assignment
-        # may have no row yet, although status documents one with
-        # connected false; either way nothing may be put on it.
-        never_seen = "(" + rows(live) + " or " + rows(detached) + ") and " + not_rendered
-        wait_for_status(never_seen, timeout=20)
-        state = json.loads(ctl("status"))
-        if not any(row["connector"] == "HEADLESS-3" for row in state["displays"]):
-            print("VM_SWAY_NOTE HEADLESS-3's assignment has no displays row while it has "
-                  "not been connected in independent mode")
+        # Off since before independent mode was turned on, the assignment
+        # still has its row, connected false, and nothing is put on it.
+        wait_for_status(off, timeout=20)
         # Two probes later, still nothing was started on it.
         machine.sleep(11)
-        machine.succeed(status_matches(never_seen))
+        machine.succeed(status_matches(off))
         machine.fail("test -e ${mpvpaperLog}")
         assert applications("HEADLESS-3") == [], applications("HEADLESS-3")
 

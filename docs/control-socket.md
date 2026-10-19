@@ -60,7 +60,11 @@ does not stop rotation or schedules. `pause` freezes a resident renderer and
 also holds the playlist cursor; `stop` tears motion down while leaving the
 paired still visible, and `play` resumes either state. A stopped runtime can
 still rotate through static pairings when cycle remains on. `cycle on|off` is a
-session override and `cycle default` returns to the authored setting.
+session override and `cycle default` returns to the authored setting. In
+independent mode it holds for every display, including one that is detached or
+connected later, and it outlasts a reload that changes the display mode;
+`on <connector> cycle on|off|default` sets one display's own override until
+the next session-wide `cycle`.
 
 `status` is JSON describing the active playlist and entry, whether the source
 is `manual`, `schedule`, or (for divergent independent routes) `mixed`, the

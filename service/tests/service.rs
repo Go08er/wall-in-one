@@ -944,6 +944,245 @@ fn a_display_switched_off_is_treated_exactly_like_one_unplugged() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Each display row's connector, whether it is connected, and where its
+/// assignment comes from, by connector.
+fn display_rows<D: WallpaperDriver>(
+    runtime: &mut Runtime<D>,
+    at: chrono::NaiveDateTime,
+) -> Vec<(String, bool, String)> {
+    let mut rows: Vec<(String, bool, String)> = status(runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["connector"].as_str().unwrap().to_string(),
+                row["connected"].as_bool().unwrap(),
+                row["assignment_source"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Each display row's connector, effective Cycle and its source.
+fn cycle_rows<D: WallpaperDriver>(
+    runtime: &mut Runtime<D>,
+    at: chrono::NaiveDateTime,
+) -> Vec<(String, bool, String)> {
+    let mut rows: Vec<(String, bool, String)> = status(runtime, at)["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["connector"].as_str().unwrap().to_string(),
+                row["cycle_enabled"].as_bool().unwrap(),
+                row["cycle_source"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn connected_only(connectors: &[&str]) -> Arc<Mutex<RuntimeDriverState>> {
+    Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(connectors.iter().map(|name| name.to_string()).collect()),
+        ..RuntimeDriverState::default()
+    }))
+}
+
+#[test]
+fn a_reload_into_independent_mode_lists_a_detached_assignment_as_a_start_does() {
+    let root = directory("reload-detached-assignment");
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    // HDMI-A-1 is assigned but not connected (unplugged, or switched off).
+    let started_path = root.join("started.toml");
+    fs::write(&started_path, independent_config()).unwrap();
+    let mut started = Runtime::new(
+        started_path.clone(),
+        Config::load(&started_path).unwrap(),
+        RuntimeDriver(connected_only(&["DP-1"])),
+        at,
+    )
+    .unwrap();
+    started.apply_current().unwrap();
+    let expected = vec![
+        ("DP-1".to_string(), true, "explicit".to_string()),
+        ("HDMI-A-1".to_string(), false, "explicit".to_string()),
+    ];
+    assert_eq!(display_rows(&mut started, at), expected);
+
+    // The same assignments, turned on by a reload of a mirrored service.
+    let reloaded_path = root.join("reloaded.toml");
+    fs::write(
+        &reloaded_path,
+        config(Path::new("/bin/true"), Path::new("/bin/true"), false),
+    )
+    .unwrap();
+    let mut reloaded = Runtime::new(
+        reloaded_path.clone(),
+        Config::load(&reloaded_path).unwrap(),
+        RuntimeDriver(connected_only(&["DP-1"])),
+        at,
+    )
+    .unwrap();
+    reloaded.apply_current().unwrap();
+    fs::write(&reloaded_path, independent_config()).unwrap();
+    let response = runtime_command(&mut reloaded, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(display_rows(&mut reloaded, at), expected);
+    assert_eq!(
+        route_summary(&display_status(&mut reloaded, at, "HDMI-A-1")),
+        route_summary(&display_status(&mut started, at, "HDMI-A-1"))
+    );
+
+    // An assignment added by a reload for a display never connected.
+    fs::write(
+        &reloaded_path,
+        format!(
+            "{}[[displays]]\nconnector = \"DP-2\"\nplaylist = \"night\"\n",
+            independent_config()
+        ),
+    )
+    .unwrap();
+    let response = runtime_command(&mut reloaded, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    let rows = display_rows(&mut reloaded, at);
+    assert!(
+        rows.contains(&("DP-2".to_string(), false, "explicit".to_string())),
+        "{rows:?}"
+    );
+    let added = display_status(&mut reloaded, at, "DP-2");
+    assert_eq!(added["playlist_id"], "night", "{added}");
+    assert_eq!(added["motion_active"], false, "{added}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_session_cycle_override_survives_a_mode_change_and_holds_for_later_routes() {
+    let root = directory("cycle-across-modes");
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let cycling =
+        |document: String| document.replace("cycle_enabled = false", "cycle_enabled = true");
+    let path = root.join("runtime.toml");
+    fs::write(
+        &path,
+        cycling(config(
+            Path::new("/bin/true"),
+            Path::new("/bin/true"),
+            false,
+        )),
+    )
+    .unwrap();
+    let state = connected_only(&["DP-1"]);
+    let mut runtime = Runtime::new(
+        path.clone(),
+        Config::load(&path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let response = runtime_command(&mut runtime, at, "cycle", Some("off"));
+    assert_eq!(response.message, "cycle off (manual)");
+
+    // Into independent mode: `cycle off` holds until the service exits or
+    // `cycle default`, so every route keeps it, the detached HDMI-A-1's too.
+    fs::write(&path, cycling(independent_config())).unwrap();
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    let off = |connector: &str| (connector.to_string(), false, "manual".to_string());
+    assert_eq!(cycle_rows(&mut runtime, at), [off("DP-1"), off("HDMI-A-1")]);
+
+    // HDMI-A-1 connects, and DP-2, never seen before: theirs too.
+    state.lock().unwrap().connected_outputs =
+        Some(vec!["DP-1".into(), "HDMI-A-1".into(), "DP-2".into()]);
+    let base = Instant::now();
+    runtime.tick(at, base + Duration::from_secs(6));
+    assert_eq!(
+        cycle_rows(&mut runtime, at),
+        [off("DP-1"), off("DP-2"), off("HDMI-A-1")]
+    );
+    let before = display_status(&mut runtime, at, "DP-2")["entry_id"].clone();
+    runtime.tick(at, base + Duration::from_secs(400));
+    assert_eq!(display_status(&mut runtime, at, "DP-2")["entry_id"], before);
+
+    // `cycle default` drops it everywhere.
+    assert!(runtime_command(&mut runtime, at, "cycle", Some("default")).ok);
+    let following = |connector: &str| (connector.to_string(), true, "config".to_string());
+    assert_eq!(
+        cycle_rows(&mut runtime, at),
+        [following("DP-1"), following("DP-2"), following("HDMI-A-1")]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_independent_session_cycle_override_covers_detached_and_later_routes() {
+    let root = directory("independent-session-cycle");
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let path = root.join("runtime.toml");
+    fs::write(
+        &path,
+        independent_config().replace("cycle_enabled = false", "cycle_enabled = true"),
+    )
+    .unwrap();
+    let state = connected_only(&["DP-1"]);
+    let mut runtime = Runtime::new(
+        path.clone(),
+        Config::load(&path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    // HDMI-A-1 is detached; one connector's own override is not the session's.
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-1 cycle off")).ok);
+    let on = |connector: &str| (connector.to_string(), true, "config".to_string());
+    let off = |connector: &str| (connector.to_string(), false, "manual".to_string());
+    assert_eq!(cycle_rows(&mut runtime, at), [off("DP-1"), on("HDMI-A-1")]);
+
+    assert!(runtime_command(&mut runtime, at, "cycle", Some("off")).ok);
+    assert_eq!(cycle_rows(&mut runtime, at), [off("DP-1"), off("HDMI-A-1")]);
+
+    state.lock().unwrap().connected_outputs =
+        Some(vec!["DP-1".into(), "HDMI-A-1".into(), "DP-2".into()]);
+    runtime.tick(at, Instant::now() + Duration::from_secs(6));
+    assert_eq!(
+        cycle_rows(&mut runtime, at),
+        [off("DP-1"), off("DP-2"), off("HDMI-A-1")]
+    );
+
+    // One route's own override still applies to that route alone.
+    assert!(runtime_command(&mut runtime, at, "on", Some("DP-2 cycle on")).ok);
+    assert_eq!(
+        cycle_rows(&mut runtime, at),
+        [
+            off("DP-1"),
+            ("DP-2".to_string(), true, "manual".to_string()),
+            off("HDMI-A-1")
+        ]
+    );
+    assert!(runtime_command(&mut runtime, at, "cycle", Some("default")).ok);
+    assert_eq!(
+        cycle_rows(&mut runtime, at),
+        [on("DP-1"), on("DP-2"), on("HDMI-A-1")]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn a_failed_question_keeps_the_last_published_snapshot() {
     let parsed: Config = toml::from_str(&config(

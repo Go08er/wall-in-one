@@ -2248,29 +2248,31 @@ impl<D: WallpaperDriver> Runtime<D> {
             if let Some(route) = self.routes.get_mut(connector) {
                 route.last_seen = self.route_generation;
             } else {
-                let (playlist, source, schedule_rule_id) =
-                    self.route_decision(connector, None, self.current_time)?;
-                let shuffle = self.playlist_shuffle_default(&playlist);
-                let cursor = self.new_route_cursor(&playlist, None, shuffle, true)?;
-                self.routes.insert(
-                    connector.clone(),
-                    DisplayRoute {
-                        manual_playlist: None,
-                        active_playlist: playlist,
-                        schedule_rule_id,
-                        source,
-                        cursor,
-                        playback_state: PlaybackState::Playing,
-                        shuffle_override: None,
-                        cycle_override: None,
-                        renderer_failed: false,
-                        last_error: String::new(),
-                        last_cycle: Instant::now(),
-                        last_seen: self.route_generation,
-                    },
-                );
+                self.insert_independent_route(connector)?;
             }
         }
+        // A configured assignment has a route while its display is detached,
+        // however it got there: a start seeds one from the assignments, and a
+        // reload or a later probe must too, or status loses its row.
+        let unrouted: Vec<String> = self
+            .config
+            .displays
+            .iter()
+            .map(|display| display.connector.clone())
+            .filter(|connector| !connector.is_empty() && !self.routes.contains_key(connector))
+            .collect();
+        for connector in &unrouted {
+            self.route_generation = self.route_generation.wrapping_add(1);
+            self.insert_independent_route(connector)?;
+        }
+        // Never evicted: they number at most MAX_DISPLAYS, which is no more
+        // than MAX_RETAINED_DISPLAY_ROUTES, so the loop always ends.
+        let assigned: HashSet<&str> = self
+            .config
+            .displays
+            .iter()
+            .map(|display| display.connector.as_str())
+            .collect();
         while self
             .routes
             .keys()
@@ -2281,7 +2283,10 @@ impl<D: WallpaperDriver> Runtime<D> {
             let Some(evicted) = self
                 .routes
                 .iter()
-                .filter(|(connector, _)| !connected_set.contains(connector.as_str()))
+                .filter(|(connector, _)| {
+                    !connected_set.contains(connector.as_str())
+                        && !assigned.contains(connector.as_str())
+                })
                 .min_by_key(|(_, route)| route.last_seen)
                 .map(|(connector, _)| connector.clone())
             else {
@@ -2289,6 +2294,33 @@ impl<D: WallpaperDriver> Runtime<D> {
             };
             self.routes.remove(&evicted);
         }
+        Ok(())
+    }
+
+    /// A new route for `connector`, as its rules and assignment decide now.
+    /// The session's Cycle override, when there is one, holds for it too.
+    fn insert_independent_route(&mut self, connector: &str) -> Result<(), String> {
+        let (playlist, source, schedule_rule_id) =
+            self.route_decision(connector, None, self.current_time)?;
+        let shuffle = self.playlist_shuffle_default(&playlist);
+        let cursor = self.new_route_cursor(&playlist, None, shuffle, true)?;
+        self.routes.insert(
+            connector.to_string(),
+            DisplayRoute {
+                manual_playlist: None,
+                active_playlist: playlist,
+                schedule_rule_id,
+                source,
+                cursor,
+                playback_state: PlaybackState::Playing,
+                shuffle_override: None,
+                cycle_override: self.cycle_override,
+                renderer_failed: false,
+                last_error: String::new(),
+                last_cycle: Instant::now(),
+                last_seen: self.route_generation,
+            },
+        );
         Ok(())
     }
 
@@ -3202,7 +3234,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                     "cycle on|off|default",
                 )?;
                 self.cancel_route_retries(&connectors);
-                for connector in &connectors {
+                // Without a connector it is the session's override: every
+                // route takes it, detached ones included, and so does each
+                // route made later (`insert_independent_route`).
+                let selected: Vec<String> = if connector.is_none() {
+                    self.cycle_override = override_value;
+                    self.routes.keys().cloned().collect()
+                } else {
+                    connectors.clone()
+                };
+                for connector in &selected {
                     let before =
                         self.routes[connector].cycle_enabled(self.config.settings.cycle_enabled);
                     let route = self.routes.get_mut(connector).expect("route exists");
@@ -3997,9 +4038,10 @@ impl<D: WallpaperDriver> Runtime<D> {
             config_epoch: self.config_epoch,
         };
         if mode_changed {
+            // The session's Cycle override is kept: it holds until the service
+            // exits or `cycle default`, whichever mode the routes are in.
             self.playback_state = PlaybackState::Playing;
             self.shuffle_override = None;
-            self.cycle_override = None;
             if self.is_independent() {
                 self.routes.clear();
             }

@@ -241,7 +241,8 @@ This file contains configuration only. Cursor, playing/paused/stopped state,
 shuffle order, the manual playlist and cycle overrides, renderer PIDs, and
 current status are runtime state and never get written into it. The configured
 `cycle_enabled` is the session default. `cycle on|off` overrides it until the
-service exits or `cycle default` drops the override.
+service exits or `cycle default` drops the override, in either display mode and
+across a reload that changes it.
 
 The cycle interval is residency time for the wallpaper currently in force, not
 wall-clock debt carried by the one it replaced. A successful manual or scheduled

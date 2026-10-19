@@ -20,6 +20,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+#: What Settings says when the scene engine is not found: where to get it,
+#: now that the package does not bring it (docs/installing.md). The full
+#: missing-component notices are a later step's.
+SCENE_ENGINE_MISSING: Final = (
+    "linux-wallpaperengine was not found. Install it with the programs.wall-in-one "
+    "Nix module (manualWallpaperInstalls left off), with nix profile install "
+    "nixpkgs#linux-wallpaperengine, or from your distribution (the AUR's "
+    "linux-wallpaperengine-git on Arch). See docs/installing.md."
+)
+
 #: The Nix store. A directory inside it names one immutable build, which
 #: nothing keeps alive unless a profile or another root refers to it.
 NIX_STORE: Final = Path("/nix/store")

@@ -51,6 +51,7 @@ gi.require_version("Graphene", "1.0")
 
 from gi.repository import Adw, Gio, GLib, Graphene, Gtk
 
+from wall_in_one.programs import SCENE_ENGINE_MISSING
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
 from wall_in_one.ui.next.page import Page
@@ -1440,8 +1441,7 @@ class SettingsPage(Page):
             if available is None
             else "linux-wallpaperengine is available"
             if available
-            else "linux-wallpaperengine was not found. Install the Nix package or launch "
-            "Wall-in-One from its packaged wrapper."
+            else SCENE_ENGINE_MISSING
         )
         self._renderer_icon.set_from_icon_name(
             "emblem-ok-symbolic" if available is not False else "dialog-warning-symbolic"

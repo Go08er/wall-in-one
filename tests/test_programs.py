@@ -22,6 +22,8 @@ from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
 from wall_in_one.wallpaper.scenes import SceneRenderer
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def _executable(directory: Path, name: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
@@ -93,3 +95,29 @@ def test_a_legacy_video_is_started_by_the_path_runtime_toml_names(
     with pytest.raises(renderer.RendererError):
         renderer.Renderer().start(video)
     assert seen[0][0] == str(profile_only / "mpvpaper")
+
+
+# -- what Settings says when the scene engine is missing --------------------------------
+
+
+def test_the_missing_engine_advice_names_where_to_get_it() -> None:
+    advice = programs.SCENE_ENGINE_MISSING
+    for named in (
+        "programs.wall-in-one",
+        "manualWallpaperInstalls",
+        "nix profile install nixpkgs#linux-wallpaperengine",
+        "linux-wallpaperengine-git",
+        "docs/installing.md",
+    ):
+        assert named in advice, named
+    assert "wrapper" not in advice and "Nix package" not in advice
+    installing = (ROOT / "docs" / "installing.md").read_text(encoding="utf-8")
+    assert "nixpkgs#linux-wallpaperengine" in installing
+    assert "linux-wallpaperengine-git" in installing
+
+
+def test_neither_interface_keeps_the_old_advice() -> None:
+    for relative in ("src/wall_in_one/ui/preferences.py", "src/wall_in_one/ui/next/settings.py"):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert "SCENE_ENGINE_MISSING" in source, relative
+        assert "packaged wrapper" not in source, relative

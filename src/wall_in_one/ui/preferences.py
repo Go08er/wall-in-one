@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config, display_policy
+from wall_in_one import config, display_policy, programs
 from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.theme import source
@@ -362,10 +362,7 @@ class PreferencesPage(Adw.PreferencesPage):
             title="Wallpaper Engine renderer",
             subtitle="linux-wallpaperengine is available"
             if scene_available
-            else (
-                "linux-wallpaperengine was not found. Install the Nix package or launch "
-                "Wall-in-One from its packaged wrapper."
-            ),
+            else programs.SCENE_ENGINE_MISSING,
         )
         scene_status.add_prefix(
             Gtk.Image(

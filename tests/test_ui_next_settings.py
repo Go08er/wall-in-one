@@ -31,8 +31,9 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.started import started_application  # noqa: E402
+from tests.test_ui_codex030_round1b import _descendants  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
-from wall_in_one import config, paths, runtime_compatibility, ui_prefs  # noqa: E402
+from wall_in_one import config, paths, programs, runtime_compatibility, ui_prefs  # noqa: E402
 from wall_in_one.providers import credentials, registry  # noqa: E402
 from wall_in_one.theme import noctalia, palettes, template  # noqa: E402
 from wall_in_one.ui import palette_browser  # noqa: E402
@@ -167,6 +168,31 @@ def test_reads_that_failed_say_so_on_the_page_never_checking(
         assert page._template_row.get_subtitle() == (
             "Couldn't check Noctalia's settings: injected: the read failed"
         )
+    finally:
+        _close(shown)
+
+
+def test_a_missing_scene_engine_says_where_to_get_it_in_both_interfaces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not "install the Nix package or launch its wrapper": neither carries the engine."""
+    from wall_in_one.ui import preferences
+    from wall_in_one.wallpaper import scenes
+
+    monkeypatch.setattr(scenes, "is_available", lambda: False)
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    shown = _open(monkeypatch)
+    try:
+        page = shown.page
+        spin_until(lambda: page._renderer.get_subtitle() != "Checking…", 5)
+        assert page._renderer.get_subtitle() == programs.SCENE_ENGINE_MISSING
+
+        classic = preferences.PreferencesPage(shown.application)
+        subtitles = [
+            row.get_subtitle() for row in _descendants(classic) if isinstance(row, Adw.ActionRow)
+        ]
+        assert programs.SCENE_ENGINE_MISSING in subtitles
     finally:
         _close(shown)
 

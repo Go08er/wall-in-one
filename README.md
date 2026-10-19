@@ -90,6 +90,8 @@ the wallpaper renderers:
 ```nix
 {
   inputs.wall-in-one.url = "github:Go08er/wall-in-one";
+  # with your own home-manager input, also (docs/installing.md says why):
+  # inputs.wall-in-one.inputs.home-manager.follows = "home-manager";
 
   # then, in a NixOS configuration:
   #   imports = [ inputs.wall-in-one.nixosModules.default ];

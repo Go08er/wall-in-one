@@ -114,6 +114,14 @@ again** in its details.
 }
 ```
 
+If your own flake has a `home-manager` input, add
+`inputs.wall-in-one.inputs.home-manager.follows = "home-manager";` beside the
+`wall-in-one` input. Wall-in-One has a `home-manager` input of its own, used
+only by its `modules` check (nothing you install depends on it), and without
+`follows` your lock file gains a second `home-manager` node. Do not point it
+at `""`: the flake's `outputs` expects the input to exist, so evaluation
+fails.
+
 `programs.wall-in-one.enable` installs the app and both renderers into
 `environment.systemPackages`: the launcher entry, the icon and the user units
 come with the app, as with any profile install. It enables no unit; start the

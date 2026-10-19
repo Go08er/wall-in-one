@@ -7,9 +7,12 @@
 # written.
 #
 # `target` only decides where the packages go: environment.systemPackages
-# ("nixos") or home.packages ("home-manager"). `package` has no default here:
-# the flake's wrapper gives it this flake's own package, which a file imported
-# by path cannot name; the VMs set it to the package under test.
+# ("nixos") or home.packages and the user units ("home-manager"). To import a
+# module by path, use nix/nixos-module.nix or nix/home-manager-module.nix,
+# which pass it. `package` has no default here: the flake's wrapper gives it
+# this flake's own package, which a file imported by path cannot name, so
+# import by path means setting programs.wall-in-one.package yourself (the VMs
+# set it to the package under test).
 { target }:
 
 assert builtins.elem target [
@@ -83,8 +86,20 @@ in
 
   config = lib.mkIf cfg.enable (
     if target == "nixos" then
-      { environment.systemPackages = packages; }
+      {
+        # The system profile's share/systemd/user is on the user manager's
+        # unit path already (NixOS builds XDG_DATA_DIRS from every profile).
+        # systemd.packages would be wrong: it reads lib/systemd, not share.
+        environment.systemPackages = packages;
+      }
     else
-      { home.packages = packages; }
+      {
+        home.packages = packages;
+        # home.packages alone leaves the units where only a user manager with
+        # the profile on its XDG_DATA_DIRS finds them; this links them into
+        # $XDG_DATA_HOME/systemd/user, which every user manager reads. It
+        # enables and starts nothing.
+        systemd.user.packages = [ cfg.package ];
+      }
   );
 }

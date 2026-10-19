@@ -208,7 +208,7 @@ in
   # the module puts all three in environment.systemPackages (the renderers
   # from this machine's own pkgs), so the compiler finds them in
   # /run/current-system/sw/bin.
-  imports = [ (import ./module.nix { target = "nixos"; }) ];
+  imports = [ ./nixos-module.nix ];
 
   programs.wall-in-one = {
     enable = true;

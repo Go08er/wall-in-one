@@ -107,13 +107,11 @@ aarch64-linux it is not in the binary cache and builds locally.
 }
 ```
 
-The same options, installing into `home.packages`. On NixOS (home-manager as a
-NixOS module or standalone) the user manager finds the units in the user
-profile by itself. A standalone home-manager on another distribution needs the
-profile's `share` on the user manager's `XDG_DATA_DIRS`: set
-`targets.genericLinux.enable = true`, or link the three units from
-`share/systemd/user` into `~/.config/systemd/user`. If
-`systemctl --user cat wall-in-one.service` finds the unit, it is there.
+The same options, installing into `home.packages`. The module also links the
+app's user units into `~/.local/share/systemd/user` (home-manager's
+`systemd.user.packages`), so the user manager finds them on any distribution;
+it enables and starts nothing. After a switch that changes them, run
+`systemctl --user daemon-reload`, as for any update.
 
 ### Managing the renderers yourself
 

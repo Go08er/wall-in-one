@@ -159,17 +159,28 @@ imports the module, not from this flake's nixpkgs, so no second nixpkgs is
 pulled in for them and the user's overlays apply. The app itself is built
 against this flake's lock, as the package always was.
 
-The NixOS module adds the packages to `environment.systemPackages`, the
-home-manager one to `home.packages`. That is what
-[installing.md](installing.md) already describes: a profile exposes
+The NixOS module adds the packages to `environment.systemPackages`. That is
+what [installing.md](installing.md) already describes: a profile exposes
 `share/applications`, `share/icons` and `share/systemd/user`, and the user
 manager finds the units through its `XDG_DATA_DIRS`, which NixOS's PAM
-environment builds from every profile. Neither module enables or starts a
-unit; `systemctl --user enable --now wall-in-one.service` stays the user's
-step. A standalone home-manager on another distribution needs the profile's
-`share` on the user manager's `XDG_DATA_DIRS` too (home-manager's
-`targets.genericLinux` adds it), or the three units linked into
-`~/.config/systemd/user`.
+environment builds from every profile. (`systemd.packages` would be wrong
+there: it reads a package's `lib/systemd`, not `share`.)
+
+The home-manager module adds them to `home.packages`, and the app to
+`systemd.user.packages` as well. A home-manager on another distribution has
+no PAM environment that puts the profile on the user manager's
+`XDG_DATA_DIRS`, so `home.packages` alone leaves the units unfound there;
+`systemd.user.packages` links them into `$XDG_DATA_HOME/systemd/user`, which
+every user manager reads, on any distribution. It is not
+`~/.config/systemd/user`, which home-manager's own service switching manages,
+so nothing is started or restarted when home-manager switches.
+
+Neither module enables or starts a unit; `systemctl --user enable --now
+wall-in-one.service` stays the user's step.
+
+To import a module without the flake, use `nix/nixos-module.nix` or
+`nix/home-manager-module.nix` by path and set `programs.wall-in-one.package`
+(only the flake's modules can default it to the flake's package).
 
 ### Licences
 
@@ -210,11 +221,14 @@ user's Steam library and are never packaged.
   `--version`, the accepted values).
 - `desktop`: the installed package's two programs report the same kind,
   `nix`. `package-closure`: no renderer in the closure, FFmpeg in it.
-- `modules`: both modules evaluated, with `manualWallpaperInstalls` false
-  (both renderers installed, from the module's `pkgs`, and the app) and true
-  (neither renderer). The home-manager one is evaluated against a stand-in
-  for home-manager's `home.packages`, not home-manager itself, which is not a
-  flake input.
+- `modules`: both modules evaluated, through the flake and by path, with
+  `manualWallpaperInstalls` false (both renderers installed, from the
+  module's `pkgs`, and the app) and true (neither renderer); the
+  home-manager one registers the app's units, the NixOS one leaves them to
+  the profile. The home-manager one is evaluated against stand-ins for
+  `home.packages` and `systemd.user.packages`, not home-manager itself, which
+  is not a flake input; evaluated by hand against home-manager's own source,
+  it installs the same and puts the units in `xdg.dataFile."systemd/user"`.
 - `vm-test` installs the app and the renderers through the NixOS module, as a
   user would; `upgrade` checks that a 0.1.4 document's program paths become
   profile paths on the first start, with nothing else changing.

@@ -42,6 +42,23 @@ def _user_name() -> str:
         return ""
 
 
+def _home() -> Path | None:
+    """The home directory the per-user places are under, or None without a usable one.
+
+    An empty ``HOME`` is not "no home": ``Path.home()`` turns it into ``/``,
+    which would put ``/.nix-profile/bin`` and ``/.local/bin`` on the list. A
+    relative one would make every per-user place depend on the caller's
+    working directory. Either way the per-user places are left out.
+    """
+    if os.environ.get("HOME") == "":
+        return None
+    try:
+        home = Path.home()
+    except RuntimeError:  # HOME unset and no password-database entry
+        return None
+    return home if home.is_absolute() else None
+
+
 def program_directories() -> tuple[Path, ...]:
     """Where ``runtime.toml``'s programs are looked for, in this order.
 
@@ -74,9 +91,12 @@ def program_directories() -> tuple[Path, ...]:
     be installed (in a profile, a system place, or a directory of its own on
     ``PATH``) to be found.
 
+    Every place is absolute: the per-user ones are left out without a usable
+    home (`_home`), and relative ``PATH`` entries are skipped.
+
     A program found nowhere keeps 0.1.4's ``/usr/bin/<name>`` (`find_program`).
     """
-    home = Path.home()
+    home = _home()
     search = [
         Path(entry)
         for entry in os.environ.get("PATH", "").split(os.pathsep)
@@ -84,16 +104,25 @@ def program_directories() -> tuple[Path, ...]:
     ]
     user = _user_name()
     profiles = [
-        home / ".nix-profile" / "bin",
-        home / ".local" / "state" / "nix" / "profile" / "bin",
+        *([home / ".nix-profile" / "bin"] if home is not None else []),
+        *([home / ".local" / "state" / "nix" / "profile" / "bin"] if home is not None else []),
         *([Path("/etc/profiles/per-user") / user / "bin"] if user else []),
         Path("/nix/var/nix/profiles/default/bin"),
         Path("/run/current-system/sw/bin"),
     ]
-    system = [home / ".local" / "bin", Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")]
+    system = [
+        *([home / ".local" / "bin"] if home is not None else []),
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+        Path("/bin"),
+    ]
     ordered: list[Path] = []
     for directory in (*profiles, *system, *search):
-        if directory not in ordered and not directory.is_relative_to(NIX_STORE):
+        if (
+            directory.is_absolute()
+            and directory not in ordered
+            and not directory.is_relative_to(NIX_STORE)
+        ):
             ordered.append(directory)
     return tuple(ordered)
 
@@ -124,6 +153,6 @@ def find_program(name: str) -> Program:
     where the store path it resolves to goes with the next garbage collection.
     """
     found = shutil.which(name, path=os.pathsep.join(str(d) for d in program_directories()))
-    if found is not None:
+    if found is not None and Path(found).is_absolute():
         return Program(name, Path(found), found=True)
     return Program(name, Path("/usr/bin") / name, found=False)

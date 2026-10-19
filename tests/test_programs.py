@@ -97,6 +97,30 @@ def test_a_legacy_video_is_started_by_the_path_runtime_toml_names(
     assert seen[0][0] == str(profile_only / "mpvpaper")
 
 
+# -- every place it looks is absolute ---------------------------------------------------
+
+
+@pytest.mark.parametrize("home", ["", "relative/home"])
+def test_an_empty_or_relative_home_adds_no_per_user_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: str
+) -> None:
+    """An empty HOME is "/" to Path.home(); a relative one depends on the working directory."""
+    monkeypatch.setattr(programs, "NIX_STORE", tmp_path / "store")
+    monkeypatch.chdir(tmp_path)
+    name = "wio-renderer-under-a-relative-home"
+    _executable(tmp_path / "relative" / "home" / ".nix-profile" / "bin", name)
+    _executable(tmp_path / "relative" / "home" / ".local" / "bin", name)
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("PATH", "relative/bin")
+    order = programs.program_directories()
+    assert all(directory.is_absolute() for directory in order), order
+    assert not any(".nix-profile" in directory.parts for directory in order)
+    assert not any(directory.parts[-2:] == (".local", "bin") for directory in order)
+    assert programs.find_program(name) == programs.Program(
+        name, Path("/usr/bin") / name, found=False
+    ), "not the relative path below the working directory"
+
+
 # -- what Settings says when the scene engine is missing --------------------------------
 
 

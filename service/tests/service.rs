@@ -10344,3 +10344,36 @@ fn a_program_recorded_as_unable_to_run_that_then_runs_is_cleared() {
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_loader_failure_noticed_late_is_still_not_a_crashed_scene() {
+    // Re-review probe B2: the window was measured when the exit was polled,
+    // and a loop held past it (two slow Noctalia calls, say) made the scene a
+    // crash again. The loader's own line decides, whenever it is noticed.
+    let root = directory("loader-failure-late");
+    let mpvpaper = root.join("absent-mpvpaper");
+    let engine = root.join("linux-wallpaperengine");
+    script(
+        &engine,
+        "echo 'linux-wallpaperengine: error while loading shared libraries: libboost_filesystem.so.1.83.0: cannot open shared object file: No such file or directory' >&2; exit 127",
+    );
+    let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, false);
+    let started = Instant::now();
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    thread::sleep(
+        wall_in_one_service::renderer::LOADER_FAILURE_WINDOW + Duration::from_millis(300),
+    );
+    runtime.tick(noon(), started + Duration::from_secs(6));
+    let snapshot = status(&mut runtime, noon());
+    assert_no_entry_was_blamed(&snapshot);
+    assert_eq!(
+        snapshot["missing_renderers"],
+        serde_json::json!([
+            missing("mpvpaper", &mpvpaper),
+            missing_because("linux-wallpaperengine", &engine, "cannot-run")
+        ])
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}

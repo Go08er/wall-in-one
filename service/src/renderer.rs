@@ -330,6 +330,10 @@ pub const RENDERER_PROGRAMS: [&str; 2] = ["mpvpaper", "linux-wallpaperengine"];
 /// failing in its own code, and stays a failure.
 pub const LOADER_FAILURE_WINDOW: Duration = Duration::from_secs(5);
 
+/// What the dynamic loader writes when a library is missing. A 127 with it
+/// is a renderer that could not run, however late its exit is noticed.
+const LOADER_LINE: &str = "error while loading shared libraries";
+
 /// Why a renderer program could not run (`missing_renderers`'s `reason`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MissingReason {
@@ -496,7 +500,7 @@ fn program_missing(error: &std::io::Error) -> bool {
 fn loader_failure(diagnostics: &str) -> String {
     diagnostics
         .lines()
-        .find(|line| line.contains("error while loading shared libraries"))
+        .find(|line| line.contains(LOADER_LINE))
         .map(|line| line.trim().to_string())
         .unwrap_or_else(|| "it exited with status 127 as it started".to_string())
 }
@@ -1422,8 +1426,12 @@ impl SystemDriver {
         started: Option<Instant>,
         diagnostics: &str,
     ) -> Option<MissingRenderer> {
+        // The loader's own line says so whenever the exit is noticed (the
+        // service's loop can be held past the window by a slow Noctalia); only
+        // a bare 127 needs the window to tell it from a renderer's own exit.
+        let loader = diagnostics.contains(LOADER_LINE);
         let early = started.is_some_and(|started| started.elapsed() <= LOADER_FAILURE_WINDOW);
-        if status.code() != Some(127) || !early {
+        if status.code() != Some(127) || !(loader || early) {
             return None;
         }
         let path = self.program_path(index).to_path_buf();

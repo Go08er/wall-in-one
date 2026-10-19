@@ -17,8 +17,18 @@ out="${WIO_ARCH_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/wio-arch.XXXXXX")}"
 mkdir -p "$out"
 tarball="wall-in-one-$pkgver-local.tar.gz"
 
+# A fixed WIO_ARCH_OUT keeps the last run's files, and makepkg would reuse
+# both: a source tarball it already has (the same name, so whatever this
+# checkout's last state was) and an extracted src/ tree. Start from neither.
+rm -rf -- "$out/wall-in-one-$pkgver.tar.gz" "$out/$tarball" "$out/src" "$out/pkg"
+
 cd "$repo"
+# Tracked files that were deleted in the working tree are still in the index;
+# tar fails on them, and the build must not see them either.
 git ls-files -z --cached --others --exclude-standard \
+  | while IFS= read -r -d '' file; do
+      if [ -e "$file" ] || [ -L "$file" ]; then printf '%s\0' "$file"; fi
+    done \
   | tar --null -T - --transform "s,^,wall-in-one-$pkgver/," -czf "$out/$tarball"
 
 sed -e "s|^source=.*|source=(\"wall-in-one-$pkgver.tar.gz::file://$out/$tarball\")|" \

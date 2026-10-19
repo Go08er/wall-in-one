@@ -20,7 +20,7 @@ tarball="wall-in-one-$pkgver-local.tar.gz"
 # A fixed WIO_ARCH_OUT keeps the last run's files, and makepkg would reuse
 # both: a source tarball it already has (the same name, so whatever this
 # checkout's last state was) and an extracted src/ tree. Start from neither.
-rm -rf -- "$out/wall-in-one-$pkgver.tar.gz" "$out/$tarball" "$out/src" "$out/pkg"
+rm -rf -- "${out:?}/wall-in-one-$pkgver.tar.gz" "${out:?}/$tarball" "${out:?}/src" "${out:?}/pkg"
 
 cd "$repo"
 # Tracked files that were deleted in the working tree are still in the index;

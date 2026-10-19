@@ -19,13 +19,14 @@ use serde::Serialize;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::{wl_callback, wl_output, wl_registry};
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1, zwlr_output_manager_v1, zwlr_output_mode_v1,
@@ -135,9 +136,54 @@ pub struct WaylandOutputs {
     /// Set when a compositor announced more wlr-output-management heads or
     /// modes than are kept: later connections leave that protocol out, so
     /// switched-off heads are not listed, and nothing else changes. Cleared
-    /// when the connection is lost for any other reason (the compositor
-    /// restarted or went away), and with the service.
+    /// once that compositor is clearly gone (it closed the connection, its
+    /// socket refuses connections or is missing, or another socket is in its
+    /// place), and with the service; not by a timeout, after which it may
+    /// well still be there.
     without_wlr: bool,
+    /// The socket of the compositor that flooded.
+    flooded_socket: Option<SocketIdentity>,
+}
+
+/// Why a connection ended, for what the next one does about
+/// wlr-output-management.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// It announced more heads or modes than are kept.
+    Flooded,
+    /// The compositor is clearly gone: it closed the connection, or its
+    /// socket refuses connections or is missing.
+    Gone,
+    /// Anything else, a timeout included.
+    Other,
+}
+
+/// A socket file's device, inode and change time: a restarted compositor's
+/// new socket differs in one of them, even where it reuses the inode number.
+type SocketIdentity = (u64, u64, i64, i64);
+
+fn socket_identity(socket: &Path) -> Option<SocketIdentity> {
+    std::fs::metadata(socket).ok().map(|metadata| {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    })
+}
+
+/// Whether an I/O error means the compositor closed the connection: the
+/// backend reports end of file as a broken pipe.
+fn closed(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+            | ErrorKind::UnexpectedEof
+    )
 }
 
 impl WaylandOutputs {
@@ -147,6 +193,7 @@ impl WaylandOutputs {
             socket: None,
             session: None,
             without_wlr: false,
+            flooded_socket: None,
         }
     }
 
@@ -156,6 +203,7 @@ impl WaylandOutputs {
             socket: Some(socket),
             session: None,
             without_wlr: false,
+            flooded_socket: None,
         }
     }
 
@@ -189,30 +237,37 @@ impl WaylandOutputs {
 }
 
 impl WaylandOutputs {
-    /// A connection ended, flooded by wlr-output-management or for any other
-    /// reason, and whether the next one leaves that protocol out.
-    fn lost(&mut self, flooded: bool) {
-        if flooded && !self.without_wlr {
-            eprintln!(
-                "wall-in-one-service: the compositor announced more wlr-output-management \
-                 heads or modes than are kept; leaving that protocol out, so switched-off \
-                 displays are not listed, until the compositor or the service restarts"
-            );
+    /// A connection to the compositor on `socket` ended, and why.
+    fn lost(&mut self, ending: Ending, socket: &Path) {
+        match ending {
+            Ending::Flooded => {
+                // Only a connection that used the protocol can flood it, so
+                // it was in use until now: said once per flooding compositor.
+                eprintln!(
+                    "wall-in-one-service: the compositor announced more wlr-output-management \
+                     heads or modes than are kept; leaving that protocol out, so switched-off \
+                     displays are not listed, until the compositor or the service restarts"
+                );
+                self.without_wlr = true;
+                self.flooded_socket = socket_identity(socket);
+            }
+            Ending::Gone => self.without_wlr = false,
+            Ending::Other => {}
         }
-        self.without_wlr = flooded;
     }
 }
 
 impl OutputSource for WaylandOutputs {
     fn outputs(&mut self) -> Result<Vec<Output>, String> {
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+        let socket = self.socket()?;
         if let Some(session) = self.session.as_mut() {
             match session.refresh(deadline) {
                 Ok(()) => return self.snapshot(),
                 Err(error) => {
-                    let flooded = session.state.wlr_overflow;
+                    let ending = session.state.ending();
                     self.session = None;
-                    self.lost(flooded);
+                    self.lost(ending, &socket);
                     // A compositor that did not answer in time is not asked
                     // again in the same question: the deadline is the bound.
                     if Instant::now() >= deadline {
@@ -223,12 +278,16 @@ impl OutputSource for WaylandOutputs {
                 }
             }
         }
-        let socket = self.socket()?;
+        // Another socket in the flooding compositor's place belongs to another
+        // compositor, which gets wlr-output-management back.
+        if self.without_wlr && socket_identity(&socket) != self.flooded_socket {
+            self.without_wlr = false;
+        }
         loop {
             let mut session = match Session::connect(&socket, deadline, !self.without_wlr) {
                 Ok(session) => session,
-                Err(error) => {
-                    self.lost(false);
+                Err((error, gone)) => {
+                    self.lost(if gone { Ending::Gone } else { Ending::Other }, &socket);
                     return Err(error);
                 }
             };
@@ -238,11 +297,11 @@ impl OutputSource for WaylandOutputs {
                     return self.snapshot();
                 }
                 Err(error) => {
-                    let flooded = session.state.wlr_overflow;
-                    self.lost(flooded);
+                    let ending = session.state.ending();
+                    self.lost(ending, &socket);
                     // Too many heads or modes: once more, without that
                     // protocol, which this connection used.
-                    if !flooded || Instant::now() >= deadline {
+                    if ending != Ending::Flooded || Instant::now() >= deadline {
                         return Err(error);
                     }
                 }
@@ -260,17 +319,24 @@ struct Session {
 
 impl Session {
     /// Connected and its registry asked for; `refresh` brings what it says.
-    fn connect(socket: &Path, deadline: Instant, use_wlr: bool) -> Result<Self, String> {
+    ///
+    /// On failure, also whether the compositor is clearly gone: its socket
+    /// is missing or refuses connections.
+    fn connect(socket: &Path, deadline: Instant, use_wlr: bool) -> Result<Self, (String, bool)> {
         // Bounded, and interrupted by shutdown: a compositor that has stopped
         // accepting fills its listen queue, and a blocking connect would then
         // wait for as long as it stays stopped, SIGTERM included.
         let stream = connect_until(socket, deadline, &IPC_ABANDONED).map_err(|error| {
-            match error.kind() {
+            let gone = matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            );
+            let message = match error.kind() {
                 // The question's own deadline, of which a reconnect may
                 // have only the rest: no fixed duration is claimed.
                 ErrorKind::TimedOut => format!(
                     "cannot connect to the Wayland compositor at {}: it did not accept the \
-                         connection in the time the question had left",
+                     connection in the time the question had left",
                     socket.display()
                 ),
                 ErrorKind::Interrupted => "output discovery was abandoned for shutdown".into(),
@@ -278,12 +344,16 @@ impl Session {
                     "cannot connect to the Wayland compositor at {}: {error}",
                     socket.display()
                 ),
-            }
+            };
+            (message, gone)
         })?;
         let connection = Connection::from_socket(stream).map_err(|error| {
-            format!(
-                "cannot use the Wayland connection at {}: {error}",
-                socket.display()
+            (
+                format!(
+                    "cannot use the Wayland connection at {}: {error}",
+                    socket.display()
+                ),
+                false,
             )
         })?;
         let queue: EventQueue<State> = connection.new_event_queue();
@@ -316,9 +386,11 @@ impl Session {
         self.state.synced = false;
         self.connection.display().sync(&self.queue.handle(), ());
         loop {
-            self.queue
-                .dispatch_pending(&mut self.state)
-                .map_err(|error| format!("the Wayland connection failed: {error}"))?;
+            if let Err(error) = self.queue.dispatch_pending(&mut self.state) {
+                self.state.gone |=
+                    matches!(&error, DispatchError::Backend(WaylandError::Io(io)) if closed(io));
+                return Err(format!("the Wayland connection failed: {error}"));
+            }
             // Stopped as soon as it is seen, before reading any more of it.
             if self.state.wlr_overflow {
                 return Err(format!(
@@ -338,7 +410,10 @@ impl Session {
             match self.queue.flush() {
                 Ok(()) => {}
                 Err(WaylandError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
-                Err(error) => return Err(format!("the Wayland connection failed: {error}")),
+                Err(error) => {
+                    self.state.gone |= matches!(&error, WaylandError::Io(io) if closed(io));
+                    return Err(format!("the Wayland connection failed: {error}"));
+                }
             }
             let Some(guard) = self.queue.prepare_read() else {
                 continue;
@@ -347,7 +422,10 @@ impl Session {
             match guard.read() {
                 Ok(_) => {}
                 Err(WaylandError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
-                Err(error) => return Err(format!("the Wayland connection failed: {error}")),
+                Err(error) => {
+                    self.state.gone |= matches!(&error, WaylandError::Io(io) if closed(io));
+                    return Err(format!("the Wayland connection failed: {error}"));
+                }
             }
         }
     }
@@ -478,9 +556,22 @@ struct State {
     announced_modes: usize,
     /// More than `MAX_ANNOUNCED_*`: the connection is replaced.
     churned: bool,
+    /// The compositor closed the connection.
+    gone: bool,
 }
 
 impl State {
+    /// Why this connection's last round trip failed.
+    fn ending(&self) -> Ending {
+        if self.wlr_overflow {
+            Ending::Flooded
+        } else if self.gone {
+            Ending::Gone
+        } else {
+            Ending::Other
+        }
+    }
+
     fn add_output(
         &mut self,
         registry: &wl_registry::WlRegistry,
@@ -945,8 +1036,20 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for State {
             }
             return;
         }
+        // Counted whichever head it is for: one no longer tracked (finished,
+        // or past the ceiling, where its version has no `release`) still
+        // gets a new object for every mode sent to it.
+        if let zwlr_output_head_v1::Event::Mode { .. } = &event {
+            state.announced_modes += 1;
+            state.churned |= state.announced_modes > MAX_ANNOUNCED_MODES;
+        }
         let tracked: usize = state.heads.iter().map(|head| head.modes.len()).sum();
         let Some(head) = state.heads.iter_mut().find(|head| head.head == *proxy) else {
+            if let zwlr_output_head_v1::Event::Mode { mode } = event
+                && mode.version() >= RELEASE_VERSION
+            {
+                mode.release();
+            }
             return;
         };
         match event {
@@ -961,8 +1064,6 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for State {
             zwlr_output_head_v1::Event::Make { make } => head.make = label(make),
             zwlr_output_head_v1::Event::Model { model } => head.model = label(model),
             zwlr_output_head_v1::Event::Mode { mode } => {
-                state.announced_modes += 1;
-                state.churned |= state.announced_modes > MAX_ANNOUNCED_MODES;
                 if tracked < MAX_TRACKED_MODES {
                     head.modes.push(mode);
                 } else {

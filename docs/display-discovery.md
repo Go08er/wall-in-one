@@ -32,9 +32,16 @@ nothing else changes. Nor is a compositor followed that announces more heads
 or modes over it than the service keeps (256 heads, 4096 modes): the service
 drops that connection and goes on without wlr-output-management, listing no
 switched-off heads, until the compositor or the service restarts, and says so
-once in its journal. A compositor that keeps announcing heads anew over one
-connection, finished ones included, gets a fresh connection past twice those
-numbers, with wlr-output-management still in use.
+once in its journal. The compositor counts as restarted once it closes the
+connection, its socket refuses connections or is gone, or another socket is
+in its place; a question it merely leaves unanswered does not bring the
+protocol back. A compositor that keeps announcing heads or modes anew over
+one connection, finished heads and their modes included, gets a fresh
+connection past twice those numbers, with wlr-output-management still in use.
+Events the compositor sends to objects the service has already released are
+dropped by the Wayland library before the service sees them, so they are not
+counted; a compositor can make them cost memory, which the service accepts:
+it takes a hostile compositor, and that one owns the screen anyway.
 
 The service asks once per wallpaper hand-over and every five seconds, as it
 asked niri before: one round trip that also takes in any outputs added or

@@ -91,6 +91,13 @@ pub struct Layout {
     pub wl_output_version: u32,
     /// `None`: no xdg-output global at all.
     pub xdg_output_version: Option<u32>,
+    /// Answer a client's first sync, and later ones only once it has bound
+    /// wlr-output-management: a compositor that floods that protocol and is
+    /// too slow for anything else.
+    pub slow_without_wlr: bool,
+    /// Modes sent to a head right after its `finished`, when the client may
+    /// already have let it go.
+    pub modes_after_finished: usize,
 }
 
 impl Layout {
@@ -102,6 +109,8 @@ impl Layout {
             wlr_version: 4,
             wl_output_version: 4,
             xdg_output_version: Some(3),
+            slow_without_wlr: false,
+            modes_after_finished: 0,
         }
     }
 }
@@ -112,6 +121,7 @@ struct Shared {
     connections: usize,
     silent: bool,
     released_heads: usize,
+    wlr_binds: usize,
 }
 
 pub struct FakeCompositor {
@@ -142,6 +152,7 @@ impl FakeCompositor {
             connections: 0,
             silent,
             released_heads: 0,
+            wlr_binds: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let clients = Arc::new(Mutex::new(Vec::new()));
@@ -193,6 +204,11 @@ impl FakeCompositor {
     /// How many wlr heads clients have released.
     pub fn released_heads(&self) -> usize {
         self.shared.lock().unwrap().released_heads
+    }
+
+    /// How many times clients bound wlr-output-management.
+    pub fn wlr_binds(&self) -> usize {
+        self.shared.lock().unwrap().wlr_binds
     }
 }
 
@@ -284,6 +300,8 @@ struct Client {
     serial: u32,
     generation: u64,
     released_heads: usize,
+    wlr_binds: usize,
+    syncs: usize,
 }
 
 fn serve(mut stream: UnixStream, shared: &Mutex<Shared>, stop: &AtomicBool) {
@@ -326,9 +344,12 @@ fn serve(mut stream: UnixStream, shared: &Mutex<Shared>, stop: &AtomicBool) {
                 client.handle(&message, &layout, &mut out);
             }
         }
-        if client.released_heads > 0 {
-            shared.lock().unwrap().released_heads += client.released_heads;
+        if client.released_heads > 0 || client.wlr_binds > 0 {
+            let mut shared = shared.lock().unwrap();
+            shared.released_heads += client.released_heads;
+            shared.wlr_binds += client.wlr_binds;
             client.released_heads = 0;
+            client.wlr_binds = 0;
         }
         if !out.is_empty() && stream.write_all(&out).is_err() {
             return;
@@ -350,6 +371,10 @@ impl Client {
         if object == DISPLAY {
             match opcode {
                 0 => {
+                    self.syncs += 1;
+                    if layout.slow_without_wlr && self.syncs > 1 && self.wlr_manager.is_none() {
+                        return;
+                    }
                     let callback = word(body, 0);
                     self.serial += 1;
                     event(out, callback, 0, &[Arg::Uint(self.serial)]);
@@ -471,6 +496,7 @@ impl Client {
             WLR_GLOBAL => {
                 self.objects.insert(id, Object::WlrManager);
                 self.wlr_manager = Some(id);
+                self.wlr_binds += 1;
                 for head in layout.heads.clone().unwrap_or_default() {
                     self.announce_head(id, &head, out);
                 }
@@ -594,6 +620,16 @@ impl Client {
         self.heads.push((head.name.clone(), id, head.enabled));
     }
 
+    /// The head `id` is gone, followed by the modes the layout sends after.
+    fn finish_head(&mut self, id: u32, layout: &Layout, out: &mut Vec<u8>) {
+        event(out, id, 9, &[]);
+        for _ in 0..layout.modes_after_finished {
+            let mode = self.server_id();
+            event(out, id, 3, &[Arg::Uint(mode)]);
+        }
+        self.heads.retain(|(_, known, _)| *known != id);
+    }
+
     /// Tell this client what changed since it last looked: outputs plugged
     /// in or out, heads added, removed or switched.
     fn announce_changes(&mut self, layout: &Layout, out: &mut Vec<u8>) {
@@ -639,15 +675,13 @@ impl Client {
         for (name, id, enabled) in self.heads.clone() {
             match wanted.iter().find(|head| head.name == name) {
                 None => {
-                    event(out, id, 9, &[]);
-                    self.heads.retain(|(_, known, _)| *known != id);
+                    self.finish_head(id, layout, out);
                     changed = true;
                 }
                 Some(head) if head.enabled != enabled => {
                     // Simplest faithful change: the old head goes, a new one
                     // with the new state comes.
-                    event(out, id, 9, &[]);
-                    self.heads.retain(|(_, known, _)| *known != id);
+                    self.finish_head(id, layout, out);
                     self.announce_head(manager, head, out);
                     changed = true;
                 }

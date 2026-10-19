@@ -191,3 +191,48 @@ fn heads_re_announced_over_one_connection_stay_bounded() {
          {once} after one"
     );
 }
+
+#[test]
+fn modes_sent_to_a_finished_head_count_toward_a_new_connection() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // wlr-output-management 2 has no `release`: a finished head stays the
+    // client's, and each mode the compositor still sends it is a new object
+    // that only a new connection frees.
+    let layout = |hdmi_enabled: bool| Layout {
+        heads: Some(vec![
+            FakeHead::new("eDP-1", true),
+            FakeHead::new("HDMI-A-1", hdmi_enabled),
+        ]),
+        wlr_version: 2,
+        modes_after_finished: 20_000,
+        ..Layout::of(vec![laptop()])
+    };
+    let after = |changes: usize| -> isize {
+        let path = socket("finished-modes");
+        let compositor = FakeCompositor::start(&path, layout(false));
+        let mut source = WaylandOutputs::at(path.clone());
+        source.outputs().unwrap();
+        for change in 0..changes {
+            compositor.set_layout(layout(change % 2 == 0));
+            let found = source.outputs().unwrap();
+            assert!(found.iter().any(|output| output.name == "eDP-1"));
+        }
+        drop(compositor);
+        let with_session = LIVE.load(Ordering::SeqCst);
+        drop(source);
+        let without = LIVE.load(Ordering::SeqCst);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        with_session - without
+    };
+    let once = after(1);
+
+    let many = after(20);
+
+    assert!(
+        many < once + 2 * 1024 * 1024,
+        "modes sent to finished heads accumulate: {many} bytes after 20 switches, \
+         {once} after one"
+    );
+}

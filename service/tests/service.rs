@@ -7053,12 +7053,18 @@ fn a_compositor_going_away_writes_nothing_unprefixed_to_stderr() {
     assert!(unprefixed.is_empty(), "{unprefixed:?}");
 }
 
-#[test]
-fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
+/// What the service writes to its journal over three probes of a compositor
+/// that floods wlr-output-management, `slow` when it answers nothing else in
+/// time either, and how often wlr-output-management was bound.
+fn journal_of_a_flooding_compositor(slow: bool) -> (String, usize) {
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
 
-    let root = directory("flooding-wlr");
+    let root = directory(if slow {
+        "flooding-slow-wlr"
+    } else {
+        "flooding-wlr"
+    });
     let wayland = root.join("wayland-0");
     let compositor = FakeCompositor::start(
         &wayland,
@@ -7067,6 +7073,7 @@ fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
                 extra_modes: 5_000,
                 ..FakeHead::new("eDP-1", true)
             }]),
+            slow_without_wlr: slow,
             ..Layout::of(vec![FakeOutput::new(
                 "eDP-1",
                 (1920, 1080, 60_000),
@@ -7094,15 +7101,23 @@ fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
         let reply = request(&socket, "status", None);
         let status: serde_json::Value =
             serde_json::from_str(reply["message"].as_str().unwrap()).unwrap();
-        if status["outputs"][0]["name"] == "eDP-1" {
+        // The first question's answer: the output, or, from a compositor
+        // that answers nothing in time, its timeout.
+        let answered = if slow {
+            status["output_discovery_error"] != ""
+        } else {
+            status["outputs"][0]["name"] == "eDP-1"
+        };
+        if answered {
             break;
         }
-        assert!(Instant::now() < deadline, "the output was never published");
+        assert!(Instant::now() < deadline, "the first question never ended");
         thread::sleep(Duration::from_millis(50));
     }
     // Two more five-second probes of the same compositor.
     thread::sleep(Duration::from_secs(11));
     stop(&mut child, &socket);
+    let binds = compositor.wlr_binds();
     drop(compositor);
     let mut written = String::new();
     child
@@ -7112,6 +7127,10 @@ fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
         .read_to_string(&mut written)
         .unwrap();
     fs::remove_dir_all(root).unwrap();
+    (written, binds)
+}
+
+fn said_once_in(written: &str) {
     let said: Vec<&str> = written
         .lines()
         .filter(|line| line.contains("leaving that protocol out"))
@@ -7119,6 +7138,22 @@ fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
     assert_eq!(said.len(), 1, "{written}");
     assert!(said[0].starts_with("wall-in-one-service: "), "{}", said[0]);
     assert!(said[0].contains("until the compositor or the service restarts"));
+}
+
+#[test]
+fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
+    let (written, binds) = journal_of_a_flooding_compositor(false);
+    said_once_in(&written);
+    assert_eq!(binds, 1, "{written}");
+}
+
+#[test]
+fn a_flooding_compositor_that_also_times_out_is_flooded_and_said_once() {
+    // A timeout is no sign that the compositor went away: wlr-output-management
+    // stays left out over the questions it leaves unanswered.
+    let (written, binds) = journal_of_a_flooding_compositor(true);
+    said_once_in(&written);
+    assert_eq!(binds, 1, "{written}");
 }
 
 #[test]

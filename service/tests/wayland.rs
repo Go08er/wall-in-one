@@ -457,3 +457,44 @@ fn wlr_output_management_left_out_after_a_flood_comes_back_with_the_next_composi
     drop(sane);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
+
+#[test]
+fn a_flooding_compositor_that_also_times_out_is_flooded_once() {
+    let path = socket("flood-slow");
+    let mut source = WaylandOutputs::at(path.clone());
+    let flood = FakeCompositor::start(
+        &path,
+        Layout {
+            slow_without_wlr: true,
+            ..flooding(5_000)
+        },
+    );
+    // The first question floods and its second connection times out; the
+    // next ones time out without wlr-output-management. A timeout is no sign
+    // that the compositor went away, so none brings the protocol back.
+    for question in 0..3 {
+        let started = Instant::now();
+        assert!(
+            source.outputs().is_err(),
+            "question {question} was answered"
+        );
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(3_100),
+            "question {question} took {took:?}"
+        );
+    }
+    assert_eq!(flood.wlr_binds(), 1, "flooded by the first question only");
+    drop(flood);
+
+    // Another compositor in its place, found without a question failing in
+    // between: a new socket, so the protocol is back.
+    let sane = FakeCompositor::start(&path, flooding(0));
+    assert_eq!(
+        names(&source.outputs().unwrap()),
+        [("HDMI-A-1", false), ("eDP-1", true)],
+        "the switched-off head is listed again"
+    );
+    drop(sane);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

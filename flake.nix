@@ -677,7 +677,7 @@
                     exit 1
                   fi
                 done
-                if grep -E -- '^/nix/store/[0-9a-z]{32}-(mpvpaper|linux-wallpaperengine)-' "$paths"; then
+                if grep -E -- '^/nix/store/[0-9a-z]{32}-(mpvpaper|linux-wallpaperengine)(-|$)' "$paths"; then
                   echo "the package's closure contains a wallpaper renderer" >&2
                   exit 1
                 fi

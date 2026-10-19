@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 from tests import sync_faults
-from wall_in_one import config, file_io, paths
+from wall_in_one import config, file_io, paths, programs
 from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
@@ -1275,7 +1275,7 @@ def test_the_engine_is_handed_a_png_path_another_process_can_write(
     handed: list[str] = []
 
     def engine(arguments: list[str], *args: Any, **kwargs: Any) -> Any:
-        assert arguments[0] == "linux-wallpaperengine"
+        assert arguments[0] == str(programs.find_program("linux-wallpaperengine").path)
         path = arguments[arguments.index("--screenshot") + 1]
         handed.append(path)
         script = (

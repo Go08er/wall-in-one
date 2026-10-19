@@ -15,7 +15,6 @@ filtering is needed.
 
 from __future__ import annotations
 
-import shutil
 import signal
 import subprocess
 import threading
@@ -24,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+from wall_in_one import programs
 from wall_in_one.theme.palette import Mode, PaletteError, PalettePair
 from wall_in_one.worker_processes import (
     OwnedProcess,
@@ -80,7 +80,7 @@ class NoctaliaError(Exception):
 
 
 class NoctaliaUnavailableError(NoctaliaError):
-    """The ``noctalia`` binary is not on PATH.
+    """The ``noctalia`` binary is not installed where the app looks (`programs`).
 
     Distinct from a failed call: the app runs in a degraded but useful mode
     without Noctalia, so callers can catch this specifically.
@@ -96,10 +96,11 @@ class ColourSchemeSelection:
 
 
 def _executable() -> str:
-    found = shutil.which("noctalia")
-    if found is None:
-        raise NoctaliaUnavailableError("noctalia is not on PATH")
-    return found
+    """The ``noctalia`` that ``runtime.toml`` names too (`programs.find_program`)."""
+    found = programs.find_program("noctalia")
+    if not found.found:
+        raise NoctaliaUnavailableError("noctalia is not installed")
+    return str(found.path)
 
 
 def cancel_pending() -> None:
@@ -182,7 +183,7 @@ def _run(
 
 
 def is_available() -> bool:
-    return shutil.which("noctalia") is not None
+    return programs.find_program("noctalia").found
 
 
 def generate(

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one import cli, config, paths, runtime_config
+from wall_in_one import cli, config, paths, programs, runtime_config
 from wall_in_one.library import playlists
 
 
@@ -149,7 +149,7 @@ def test_a_terminal_and_the_service_compile_the_same_renderer_programs(
     byte.
     """
     store = tmp_path / "store"
-    monkeypatch.setattr(runtime_config, "NIX_STORE", store, raising=False)
+    monkeypatch.setattr(programs, "NIX_STORE", store)
     profile = _profile(_generation(store, 1, *RENDERER_KEYS))
     # A terminal's own extras: a checkout's build, and a `nix shell` with a renderer.
     terminal = tmp_path / "terminal-bin"
@@ -191,7 +191,7 @@ def test_a_profile_switch_compiles_the_same_bytes(
     named a store path the next garbage collection deletes.
     """
     store = tmp_path / "store"
-    monkeypatch.setattr(runtime_config, "NIX_STORE", store, raising=False)
+    monkeypatch.setattr(programs, "NIX_STORE", store)
     monkeypatch.setenv("PATH", "/run/current-system/sw/bin")
     first = _generation(store, 1, *RENDERER_KEYS)
     profile = _profile(first)
@@ -204,7 +204,7 @@ def test_a_profile_switch_compiles_the_same_bytes(
     shutil.rmtree(first.parent / "001-mpvpaper")  # the old generation's renderer, collected
     assert _write_config(capsys) == [f"nothing changed: {target} is already current"]
     assert target.read_bytes() == before
-    mpvpaper = runtime_config.find_program("mpvpaper")
+    mpvpaper = programs.find_program("mpvpaper")
     assert mpvpaper.found and mpvpaper.path == profile / "bin" / "mpvpaper"
     assert mpvpaper.path.resolve().is_relative_to(store / "002-mpvpaper")
 
@@ -214,7 +214,7 @@ def test_a_store_directory_on_path_never_shadows_an_installed_renderer(
 ) -> None:
     """A `nix shell` in front of PATH is that terminal's, and nothing keeps it alive."""
     store = tmp_path / "store"
-    monkeypatch.setattr(runtime_config, "NIX_STORE", store)
+    monkeypatch.setattr(programs, "NIX_STORE", store)
     # A name this machine has nowhere else, so each fallback below is this test's.
     name = "wio-renderer-in-a-nix-shell"
     shell = store / "abc-renderer" / "bin"
@@ -222,20 +222,20 @@ def test_a_store_directory_on_path_never_shadows_an_installed_renderer(
     installed = _executable(Path.home() / ".nix-profile" / "bin", name)
     unusual = _executable(tmp_path / "opt" / "bin", name)
     monkeypatch.setenv("PATH", os.pathsep.join((str(shell), str(unusual.parent))))
-    assert runtime_config.find_program(name) == runtime_config.Program(name, installed, found=True)
+    assert programs.find_program(name) == programs.Program(name, installed, found=True)
     installed.unlink()
-    assert runtime_config.find_program(name).path == unusual, "then the rest of PATH"
+    assert programs.find_program(name).path == unusual, "then the rest of PATH"
     unusual.unlink()
-    assert runtime_config.find_program(name) == runtime_config.Program(
-        name, shell / name, found=True
-    ), "and a store directory only as the last resort"
+    assert programs.find_program(name) == programs.Program(name, shell / name, found=True), (
+        "and a store directory only as the last resort"
+    )
 
 
 def test_the_search_order_is_profiles_system_path_then_store_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = tmp_path / "store"
-    monkeypatch.setattr(runtime_config, "NIX_STORE", store)
+    monkeypatch.setattr(programs, "NIX_STORE", store)
     first, second = store / "a" / "bin", store / "b" / "bin"
     elsewhere, later = tmp_path / "elsewhere", tmp_path / "later"
     monkeypatch.setenv(
@@ -245,7 +245,7 @@ def test_the_search_order_is_profiles_system_path_then_store_directories(
         ),
     )
     home = Path.home()
-    order = runtime_config.program_directories()
+    order = programs.program_directories()
     assert order[:2] == (
         home / ".nix-profile" / "bin",
         home / ".local" / "state" / "nix" / "profile" / "bin",
@@ -272,10 +272,10 @@ def test_a_renderer_only_in_an_unusual_place_on_path_is_still_found(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """An install in /opt, ~/bin or a custom prefix keeps working after the update."""
-    monkeypatch.setattr(runtime_config, "NIX_STORE", tmp_path / "store")
+    monkeypatch.setattr(programs, "NIX_STORE", tmp_path / "store")
     custom = tmp_path / "opt" / "renderers" / "bin"
     monkeypatch.setenv("PATH", os.pathsep.join((str(custom), "/nonexistent/bin")))
-    standard = [d for d in runtime_config.program_directories() if d != custom]
+    standard = [d for d in programs.program_directories() if d != custom]
 
     # The lookup itself, for a name no machine has anywhere standard.
     only_here = _executable(custom, "wio-only-in-a-custom-prefix")
@@ -300,10 +300,10 @@ def test_find_program_says_whether_the_program_is_there(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The placeholder a missing renderer is written as is not how the app knows it is missing."""
-    monkeypatch.setattr(runtime_config, "NIX_STORE", tmp_path / "store")
+    monkeypatch.setattr(programs, "NIX_STORE", tmp_path / "store")
     monkeypatch.setenv("PATH", "/nonexistent/bin")
     name = "wio-renderer-nobody-installed"
-    assert runtime_config.find_program(name) == runtime_config.Program(
+    assert programs.find_program(name) == programs.Program(
         name, Path("/usr/bin") / name, found=False
     )
     assert runtime_config._program(name) == Path("/usr/bin") / name, "0.1.4's placeholder"
@@ -313,8 +313,8 @@ def test_find_program_says_whether_the_program_is_there(
     link = Path.home() / ".local" / "bin" / name
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(target)
-    assert runtime_config.find_program(name) == runtime_config.Program(name, link, found=True)
+    assert programs.find_program(name) == programs.Program(name, link, found=True)
 
     # A dangling link (its target collected) is not a program.
     target.unlink()
-    assert not runtime_config.find_program(name).found
+    assert not programs.find_program(name).found

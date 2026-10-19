@@ -13,8 +13,6 @@ import hashlib
 import json
 import logging
 import os
-import pwd
-import shutil
 import stat
 import tempfile
 import threading
@@ -30,6 +28,7 @@ from wall_in_one import config, file_io, paths, runtime_compatibility
 from wall_in_one.library import pairings, schedules, state_file
 from wall_in_one.library.model import Kind, MediaItem, Unseen, UnseenKind
 from wall_in_one.library.playlists import Entry, Playlist
+from wall_in_one.programs import find_program
 from wall_in_one.session import SAVED_PLAYLISTS, SAVED_USES, Session
 from wall_in_one.wallpaper import scenes
 
@@ -638,107 +637,11 @@ def read_config_generation(path: Path | None = None) -> str:
         raise RuntimeConfigError(f"runtime configuration {target}: {error}") from error
 
 
-#: The Nix store. A directory inside it names one immutable build, which
-#: nothing keeps alive unless a profile or another root refers to it.
-NIX_STORE: Final = Path("/nix/store")
-
-
-def _user_name() -> str:
-    try:
-        return pwd.getpwuid(os.getuid()).pw_name
-    except KeyError:
-        return ""
-
-
-def program_directories() -> tuple[Path, ...]:
-    """Where ``runtime.toml``'s programs are looked for, in this order.
-
-    Not simply the caller's ``PATH``: a terminal, the graphical session and
-    the service's user manager each have their own, and resolving from
-    whichever one compiled made the same authoring state compile to different
-    bytes (0.1.4's ``shutil.which``). So the places every caller shares come
-    first:
-
-    1. The per-user and system Nix profiles, in NixOS's own login order:
-       ``~/.nix-profile``, ``~/.local/state/nix/profile``,
-       ``/etc/profiles/per-user/<user>``, ``/nix/var/nix/profiles/default``,
-       ``/run/current-system/sw``. The NixOS and home-manager modules install
-       the renderers into one of these.
-    2. The FHS places: ``~/.local/bin``, ``/usr/local/bin``, ``/usr/bin``, ``/bin``.
-    3. Every other absolute directory on ``PATH``, in ``PATH`` order, so a
-       renderer installed somewhere unusual (``/opt/...``, ``~/bin``, a
-       custom prefix) is still found. Only such an install can still compile
-       differently from a terminal and from the service, when their ``PATH``
-       differ there. Relative entries are skipped: they would depend on the
-       caller's working directory.
-    4. The Nix store directories on ``PATH``, in ``PATH`` order, last. Until
-       0.4.0 they came first, because the package's wrapper put its bundled
-       renderers there for every caller. Nothing is bundled now (see
-       docs/packaging.md), so one is a caller's own -- a ``nix shell``, a dev
-       shell, a launcher's wrapper -- which the service doesn't see and no
-       garbage-collector root keeps. It is used only for a program found
-       nowhere else.
-
-    A program found nowhere keeps 0.1.4's ``/usr/bin/<name>`` (`find_program`).
-    """
-    home = Path.home()
-    search = [
-        Path(entry)
-        for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry and Path(entry).is_absolute()
-    ]
-    store = [entry for entry in search if entry.is_relative_to(NIX_STORE)]
-    user = _user_name()
-    profiles = [
-        home / ".nix-profile" / "bin",
-        home / ".local" / "state" / "nix" / "profile" / "bin",
-        *([Path("/etc/profiles/per-user") / user / "bin"] if user else []),
-        Path("/nix/var/nix/profiles/default/bin"),
-        Path("/run/current-system/sw/bin"),
-    ]
-    system = [home / ".local" / "bin", Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")]
-    elsewhere = [entry for entry in search if entry not in store]
-    ordered: list[Path] = []
-    for directory in (*profiles, *system, *elsewhere, *store):
-        if directory not in ordered:
-            ordered.append(directory)
-    return tuple(ordered)
-
-
-@dataclass(frozen=True, slots=True)
-class Program:
-    """One of ``runtime.toml``'s programs, as the compiler writes it.
-
-    ``path`` is what the document names; ``found`` says whether an executable
-    is there. A program found nowhere is still written, as ``/usr/bin/<name>``:
-    the service's ``[renderer]`` needs an absolute path for each (0.3.2's
-    strict loader refuses a document without one), and it reports a renderer
-    only when an entry needs it and it cannot start. So ``path`` alone does not
-    say whether the renderer is installed; ``found`` does.
-    """
-
-    name: str
-    path: Path
-    found: bool
-
-
-def find_program(name: str) -> Program:
-    """Where the program ``name`` is, from `program_directories`, as found.
-
-    The path is the one in the listed directory, not resolved: a profile's
-    ``bin`` is re-pointed by every profile switch, so ``~/.nix-profile/bin/x``
-    keeps working (and keeps compiling to the same bytes) across switches,
-    where the store path it resolves to goes with the next garbage collection.
-    """
-    found = shutil.which(name, path=os.pathsep.join(str(d) for d in program_directories()))
-    program = Path(found) if found is not None else Path("/usr/bin") / name
-    _absolute_path(program, label=f"{name} program")
-    return Program(name, program, found is not None)
-
-
 def _program(name: str) -> Path:
-    """The path ``runtime.toml`` names for the program ``name`` (`find_program`)."""
-    return find_program(name).path
+    """The path ``runtime.toml`` names for the program ``name`` (`programs.find_program`)."""
+    program = find_program(name).path
+    _absolute_path(program, label=f"{name} program")
+    return program
 
 
 def entry_id_for_source(source: Path) -> str:

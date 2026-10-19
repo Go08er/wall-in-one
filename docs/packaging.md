@@ -124,14 +124,19 @@ is the same for every caller, so the same-bytes rule holds.
 0.3.2's loader refuses a document without one), and it reports a renderer only
 when an entry needs it and it cannot start. On a distribution that is also
 where a later package install puts it. The placeholder is not how the app
-knows: `runtime_config.find_program(name)` answers found or not found, and the
-path, for any of the three programs; the missing-component notices (a later
-step) read that.
+knows: `wall_in_one.programs.find_program(name)` answers found or not found,
+and the path, for any of the three programs; the missing-component notices (a
+later step) read that.
 
-The window's own scene stills and the legacy Python service (`--service`) still
-start their renderer from their own `PATH`, as before. On NixOS,
-home-manager and a distribution the renderers are on the session's `PATH`, so
-they find the same program.
+**Everything that starts one of them asks the same lookup.** The window's
+scene stills and its scene-engine status (Settings), the legacy Python service
+(`--service`) with its mpvpaper and scene engine, and the app's own `noctalia`
+calls use `find_program` and start the program by the path it answers, not by
+name from their own `PATH`. A window started by a launcher or a user unit whose
+`PATH` lacks the profile (a standalone home-manager on another distribution, a
+`nix profile` install) therefore still sees the renderer `runtime.toml` names:
+it says it is installed, captures scene stills, and keeps those entries in the
+document.
 
 ## The Nix modules
 
@@ -194,7 +199,9 @@ user's Steam library and are never packaged.
   (`tests/test_write_config_reports.py`): a re-pointed profile link compiles
   the same bytes, a store directory on `PATH` never shadows a profile, a
   renderer only in a store directory is still found, and `find_program`
-  reports found and not found.
+  reports found and not found. The window, the legacy service and the
+  Noctalia calls agree with it and start what it finds, with the profile off
+  their `PATH` (`tests/test_programs.py`).
 - The install kind: `tests/test_install_kind.py` (the CLI, the update report,
   the line a package rewrites) and the service's own tests (`status`,
   `--version`, the accepted values).

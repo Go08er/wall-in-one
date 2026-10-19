@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
 import socket
 import subprocess
@@ -23,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from wall_in_one import file_io, paths
+from wall_in_one import file_io, paths, programs
 from wall_in_one.wallpaper import outputs
 
 #: mpvpaper's selector for every connected output.
@@ -189,7 +188,8 @@ class _SocketNamespace:
 
 
 def is_available() -> bool:
-    return shutil.which("mpvpaper") is not None
+    """Whether mpvpaper is installed where ``runtime.toml`` would name it (`programs`)."""
+    return programs.find_program("mpvpaper").found
 
 
 class Renderer:
@@ -328,7 +328,7 @@ class Renderer:
         ipc_namespace = self._allocate_socket_path()
         handed_off = False
         try:
-            command = ["mpvpaper", "--layer", self.layer]
+            command = [str(programs.find_program("mpvpaper").path), "--layer", self.layer]
             if self.when_hidden == "pause":
                 command.append("--auto-pause")
             elif self.when_hidden == "stop":

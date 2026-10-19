@@ -31,7 +31,6 @@ is how a scene gets a representative without anything appearing on screen.
 
 from __future__ import annotations
 
-import shutil
 import stat
 import subprocess
 import time
@@ -39,7 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import worker_processes
+from wall_in_one import programs, worker_processes
 from wall_in_one.wallpaper import outputs
 
 #: The wlr-layer-shell layer the engine draws on, as mpvpaper does. The
@@ -99,6 +98,10 @@ class SceneError(Exception):
     """A scene could not be started or captured."""
 
 
+#: The engine's program name, found by `programs.find_program`.
+ENGINE: Final = "linux-wallpaperengine"
+
+
 class SceneEngineUnavailableError(SceneError):
     """`linux-wallpaperengine` is not installed.
 
@@ -109,7 +112,13 @@ class SceneEngineUnavailableError(SceneError):
 
 
 def is_available() -> bool:
-    return shutil.which("linux-wallpaperengine") is not None
+    """Whether the engine is installed where ``runtime.toml`` would name it.
+
+    The same lookup as the compiler's (`programs.find_program`), not this
+    process's ``PATH``: a window started without the profile on its ``PATH``
+    must not say "not installed" about the engine the service will start.
+    """
+    return programs.find_program(ENGINE).found
 
 
 def running_elsewhere(output: str = "", proc: Path = Path("/proc")) -> tuple[int, ...]:
@@ -209,7 +218,13 @@ class SceneRenderer:
         the following options apply to the preceding screen, so ordering is
         part of the meaning rather than a style choice.
         """
-        arguments = ["linux-wallpaperengine", "--layer", self.layer, "--fps", str(self.fps)]
+        arguments = [
+            str(programs.find_program(ENGINE).path),
+            "--layer",
+            self.layer,
+            "--fps",
+            str(self.fps),
+        ]
         if self.silent:
             arguments.append("--silent")
         else:

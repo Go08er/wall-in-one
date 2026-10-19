@@ -77,9 +77,10 @@ The path is written where it was found, not resolved: `~/.nix-profile/bin/mpvpap
 survives a profile switch and the collection of the old generation, and a
 renderer update leaves the document's bytes alone. A program found nowhere
 is written as `/usr/bin/<name>`, and the service reports it only when an
-entry needs it; `runtime_config.find_program` tells the app whether it was
-found. A renderer in one of the standard places therefore compiles to the same
-path from any caller. One installed only somewhere else (`/opt/...`, `~/bin`, a
+entry needs it; `wall_in_one.programs.find_program` tells the app whether it
+was found, and the window starts its own scene stills by the same path. A
+renderer in one of the standard places therefore compiles to the same path
+from any caller. One installed only somewhere else (`/opt/...`, `~/bin`, a
 custom prefix, a store directory) is still found, but a terminal and the
 service can disagree about it when their `PATH` differ there, and each run then
 rewrites `runtime.toml`; a link in `~/.local/bin` or `/usr/local/bin` avoids

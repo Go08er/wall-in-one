@@ -75,6 +75,11 @@ from wall_in_one.ui.window import MainWindow  # noqa: E402
 from wall_in_one.wallpaper import outputs, scenes  # noqa: E402
 
 
+def _is_the_engine(arguments: list[Any]) -> bool:
+    """A command that starts linux-wallpaperengine, by the absolute path the app names."""
+    return bool(arguments) and Path(str(arguments[0])).name == scenes.ENGINE
+
+
 @pytest.fixture(scope="module", autouse=True)
 def toolkit() -> None:
     try:
@@ -133,7 +138,7 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
         guarded: Callable[..., object] = subprocess.Popen
 
         def capturing_engine(arguments: object, *args: Any, **kwargs: Any) -> object:
-            if isinstance(arguments, list) and arguments[:1] == ["linux-wallpaperengine"]:
+            if isinstance(arguments, list) and _is_the_engine(arguments):
                 engine_started.append(arguments)
                 path = arguments[arguments.index("--screenshot") + 1]
                 command = [sys.executable, "-c", FAKE_ENGINE, path, CAPTURED_FRAME.hex()]
@@ -150,7 +155,7 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
         sealed: Callable[..., object] = subprocess.Popen
 
         def refuse_the_engine(arguments: object, *args: object, **kwargs: object) -> object:
-            if isinstance(arguments, list) and arguments[:1] == ["linux-wallpaperengine"]:
+            if isinstance(arguments, list) and _is_the_engine(arguments):
                 engine_started.append(arguments)
                 raise PermissionError(13, "process start refused")
             return sealed(arguments, *args, **kwargs)

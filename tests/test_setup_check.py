@@ -740,3 +740,31 @@ def test_a_status_row_says_why_and_an_older_one_is_not_found() -> None:
         MissingRenderer("mpvpaper", "/a", "cannot-run"),
         MissingRenderer("linux-wallpaperengine", "/b", "not-found"),
     )
+
+
+def test_only_a_missing_renderers_own_words_count_as_said_already() -> None:
+    status = {
+        "missing_renderers": [
+            {"program": "mpvpaper", "path": "/a", "reason": "cannot-run"},
+            {"program": "linux-wallpaperengine", "path": "/b"},
+        ]
+    }
+    assert setup_check.missing_set(status) == {
+        ("mpvpaper", "/a"),
+        ("linux-wallpaperengine", "/b"),
+    }
+    one = (
+        "mpvpaper is missing: cannot start /usr/bin/mpvpaper: No such file or directory "
+        "(os error 2); paired still is active"
+    )
+    two = (
+        "DP-1: linux-wallpaperengine cannot run here: /usr/bin/linux-wallpaperengine: "
+        "error while loading shared libraries: libboost.so: cannot open shared object file; "
+        "paired still is active"
+    )
+    assert setup_check.only_missing_renderers(one)
+    assert setup_check.only_missing_renderers(f"{one}; {two}")
+    assert not setup_check.only_missing_renderers("")
+    assert not setup_check.only_missing_renderers(
+        f'{one}; HDMI-A-1: video entry "v" stopped because mpvpaper exited (exit status: 1)'
+    )

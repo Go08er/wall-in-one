@@ -13,7 +13,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from wall_in_one import config
+from wall_in_one import config, setup_check
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library import manage, pairings
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem, RepresentativeStillError
@@ -152,6 +152,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._settings_page = PreferencesPage(application)
         self._runtime_summary = ""
         self._runtime_error = ""
+        #: The renderers the service last reported missing when the window
+        #: said a missing-renderer error: said once until they change.
+        self._missing_said: frozenset[tuple[str, str]] | None = None
         self._runtime_controls_loading = False
         self._runtime_available = False
         self._runtime_busy = False
@@ -906,9 +909,15 @@ class MainWindow(Adw.ApplicationWindow):
             )
         cycle_text = "mixed" if cycle_mixed else "on" if cycle is True else "off"
         shuffle_text = "mixed" if shuffle_mixed else "on" if shuffle is True else "off"
+        reported_error = status.get("last_error")
+        missing_only = isinstance(reported_error, str) and setup_check.only_missing_renderers(
+            reported_error
+        )
         state_text = (
             "Playback unavailable"
             if self._renderer_taboo
+            else setup_check.RENDERER_MISSING_STATE
+            if self._renderer_failed and missing_only
             else "Renderer stopped · Retry available"
             if self._renderer_failed
             else state.capitalize()
@@ -924,12 +933,22 @@ class MainWindow(Adw.ApplicationWindow):
             failure_state = (
                 "playback disabled; paired still retained"
                 if self._renderer_taboo
+                else setup_check.RENDERER_MISSING_SUMMARY
+                if missing_only
                 else "renderer stopped; Retry available"
             )
             self._runtime_summary = f"{failure_state} · {_bounded_runtime_error(last_error)}"
             self._subtitle.set_tooltip_text(last_error)
-            if last_error != self._runtime_error:
+            # A renderer that is missing is said once while the service's
+            # list of them stays the same, not again on every rotation back
+            # onto a video (a still in between clears last_error).
+            missing = setup_check.missing_set(status)
+            if last_error != self._runtime_error and not (
+                missing_only and missing == self._missing_said
+            ):
                 self.report(last_error)
+            if missing_only:
+                self._missing_said = missing
             self._runtime_error = last_error
         elif isinstance(output_error, str) and output_error:
             self._runtime_summary = f"{state} {playlist} ({source}) · display discovery degraded"
@@ -982,6 +1001,7 @@ class MainWindow(Adw.ApplicationWindow):
         """Say plainly that authoring works but automation currently does not."""
         self._runtime_media_status = None
         self._runtime_error = ""
+        self._missing_said = None
         self._runtime_summary = "runtime unavailable"
         self._runtime_available = False
         self._runtime_status_delayed = False

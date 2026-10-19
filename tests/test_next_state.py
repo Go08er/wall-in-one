@@ -19,7 +19,7 @@ import pytest
 
 from tests.gtk_helpers import spin_until
 from tests.test_next_status_line import BATTERY, two_display_status
-from wall_in_one import config, paths, runtime_config, ui_prefs
+from wall_in_one import config, paths, runtime_config, setup_check, ui_prefs
 from wall_in_one.library import pairings, playlists, state_file
 from wall_in_one.library.model import Kind, Library, MediaItem, Ownership
 from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME, Session
@@ -1291,3 +1291,26 @@ def test_an_earlier_failed_look_save_never_reverts_a_later_one(
     assert (adapter.window_style, adapter.thumbnail_size) == ("solid", "small")
     assert backend.glass[-1] == SOLID and len(backend.reports) == 1
     assert seen == ["appearance", "appearance"], "the choice, then one reconcile by the latest"
+
+
+def test_play_says_a_missing_renderer_in_the_setup_words(backend: FakeApplication) -> None:
+    items = backend.session.library.items
+    adapter, _keeper = _adapter(backend)
+    status = _status({"DP-1": items[1].path, "HDMI-A-1": items[0].path})
+    displays = status["displays"]
+    assert isinstance(displays, list)
+    displays[1]["renderer_failed"] = True
+    displays[1]["last_error"] = (
+        "mpvpaper is missing: cannot start /usr/bin/mpvpaper: No such file or directory "
+        "(os error 2); paired still is active"
+    )
+    displays[0]["renderer_failed"] = True
+    displays[0]["last_error"] = "mpvpaper exited with status 1"
+    status["renderer_failed"] = True
+    backend.status_model.adopt(status)
+    adapter.set_scope("HDMI-A-1")
+    player = adapter.player()
+    assert player.retry and player.retry_tip == setup_check.RENDERER_MISSING_PLAY
+    adapter.set_scope("DP-1")
+    player = adapter.player()
+    assert player.retry and player.retry_tip == "", "a renderer that stopped keeps Retry"

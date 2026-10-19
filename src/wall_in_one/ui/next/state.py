@@ -248,6 +248,9 @@ class Player:
     controls_off: str = ""
     #: A renderer stopped on a display in scope; Play retries it.
     retry: bool = False
+    #: What Play's tip says while it retries, when the renderer is not one
+    #: that stopped but one that is missing; empty for the usual words.
+    retry_tip: str = ""
     #: Why Play cannot restart what is on screen (playback skips it this
     #: session), or empty. Play then leads to the wallpaper instead.
     play_refused: str = ""

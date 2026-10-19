@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import tomllib
 from collections.abc import Iterable, Mapping
@@ -75,6 +76,13 @@ EXIT_ALL_PRESENT: Final = 0
 EXIT_REQUIRED_MISSING: Final = 1
 EXIT_COULD_NOT_TELL: Final = 2
 
+#: What the classic window's bar says while only a missing renderer stops
+#: motion, and the new window's Play button: the setup wording, not "Retry".
+RENDERER_MISSING_STATE: Final = "Renderer missing · Settings → Setup"
+RENDERER_MISSING_SUMMARY: Final = "renderer missing; paired still shown"
+RENDERER_MISSING_PLAY: Final = (
+    "Its renderer is missing or can't run: Settings → Setup says how to get it. Play tries again."
+)
 
 type ServiceState = Literal["running", "not-running", "not-answering", "unknown"]
 type CompanionState = Literal["installed", "absent", "unknown"]
@@ -421,6 +429,32 @@ def findings(
         *_renderer_findings(local, service, kind, motion),
         *_companion_findings(local),
     )
+
+
+def missing_set(status: object) -> frozenset[tuple[str, str]]:
+    """The renderers a status reports it could not run, as (program, path) pairs."""
+    return frozenset(
+        (missing.program, missing.path) for missing in service_from_status(status).missing
+    )
+
+
+def only_missing_renderers(last_error: str) -> bool:
+    """Whether a display's ``last_error`` says nothing but that renderers are missing.
+
+    The service's own wording (`MissingRenderer.diagnostic` there), with or
+    without a connector in front, any number of times: then the window has
+    said it already when `missing_renderers` is unchanged, and the bar uses
+    the setup wording rather than offering Retry for a broken renderer.
+    """
+    rest = _MISSING_DIAGNOSTIC.sub("", last_error)
+    return bool(last_error.strip()) and not rest.strip(" ;")
+
+
+_MISSING_DIAGNOSTIC: Final = re.compile(
+    r"(?:[^\s;:]+: )?(?:mpvpaper|linux-wallpaperengine) (?:is missing|cannot run here): "
+    r".*?; paired still is active",
+    re.DOTALL,
+)
 
 
 def required(found: Iterable[Finding]) -> tuple[Finding, ...]:

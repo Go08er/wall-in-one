@@ -380,7 +380,7 @@ class PlayerBar(Gtk.Box):
         elif player.play_refused:
             icon, tip = "dialog-warning-symbolic", player.play_refused
         elif player.retry:
-            icon, tip = "", "Retry the animation: its renderer stopped"
+            icon, tip = "", player.retry_tip or "Retry the animation: its renderer stopped"
         elif playing:
             icon, tip = "media-playback-pause-symbolic", "Pause animation"
         else:

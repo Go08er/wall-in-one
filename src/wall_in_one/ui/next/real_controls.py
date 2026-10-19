@@ -40,6 +40,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Final, Protocol
 
+from wall_in_one import setup_check
 from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.next.state import DisplayView, Player, WallpaperView
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView
@@ -119,12 +120,20 @@ class RuntimeControls:
         if connector is None:
             retry = status.get("renderer_failed") is True
             skipped = runtime_truth.current_renderer_failure_is_taboo(status)
+            error = status.get("last_error")
         else:
             display = truth.display(connector)
             retry = display is not None and display.renderer_failed
             skipped = display is not None and playback_verbs.display_is_taboo(status, display)
+            error = display.last_error if display is not None else ""
         refused = self._refusal(self._skipped(view, connector)) if skipped else ""
-        return replace(player, busy=view.busy, retry=retry, play_refused=refused)
+        # A missing renderer is not one that stopped: the setup wording.
+        tip = (
+            setup_check.RENDERER_MISSING_PLAY
+            if retry and isinstance(error, str) and setup_check.only_missing_renderers(error)
+            else ""
+        )
+        return replace(player, busy=view.busy, retry=retry, retry_tip=tip, play_refused=refused)
 
     def off(self, view: RuntimeStatusView | None = None) -> str:
         """Why the controls are off now, or empty when they work."""

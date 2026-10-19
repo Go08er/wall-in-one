@@ -63,7 +63,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from wall_in_one import __version__, config
+from wall_in_one import __version__, config, setup_check
 from wall_in_one.session import Session
 from wall_in_one.theme import source
 from wall_in_one.ui.launch_rows import LaunchRows
@@ -165,6 +165,9 @@ class NextWindow(ShellWindow):
         self._check_grace = 0
         #: What was last said about the runtime, so each is said once (as classic).
         self._runtime_error = ""
+        #: The renderers reported missing when a missing-renderer error was
+        #: last said: said once until they change (as classic).
+        self._missing_said: frozenset[tuple[str, str]] | None = None
         self._protocol_error = ""
         self._thumbnails: LibraryThumbnails | None = LibraryThumbnails()
         thumbs.install(self._thumbnails)
@@ -373,7 +376,9 @@ class NextWindow(ShellWindow):
 
         Once per error, by the classic window's rule: a renderer's
         ``last_error`` first, else ``output_discovery_error``; the same error
-        again says nothing until it clears or the service goes away.
+        again says nothing until it clears or the service goes away. A
+        missing renderer's error is said once while the service's list of
+        missing renderers stays the same, however often it clears between.
         """
         if not isinstance(status.get("playlist"), str) or not isinstance(status.get("source"), str):
             return
@@ -381,8 +386,14 @@ class NextWindow(ShellWindow):
         last_error = status.get("last_error")
         output_error = status.get("output_discovery_error")
         if isinstance(last_error, str) and last_error:
-            if last_error != self._runtime_error:
+            missing_only = setup_check.only_missing_renderers(last_error)
+            missing = setup_check.missing_set(status)
+            if last_error != self._runtime_error and not (
+                missing_only and missing == self._missing_said
+            ):
                 self.report(last_error)
+            if missing_only:
+                self._missing_said = missing
             self._runtime_error = last_error
         elif isinstance(output_error, str) and output_error:
             if output_error != self._runtime_error:
@@ -394,6 +405,7 @@ class NextWindow(ShellWindow):
     def show_runtime_unavailable(self) -> None:
         """Rendered from the status model; an error seen before may be said again later."""
         self._runtime_error = ""
+        self._missing_said = None
         self._protocol_error = ""
 
     def show_runtime_delayed(self) -> None:

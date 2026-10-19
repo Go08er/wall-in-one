@@ -202,13 +202,50 @@ let
 
     wait "$niri_pid"
   '';
+
+  # Which desktop the VM boots (wallInOneVm.compositor below). niri is the
+  # default every existing VM uses; sway is the second compositor, with no
+  # niri installed at all.
+  niri = config.wallInOneVm.compositor == "niri";
+  sway = config.wallInOneVm.compositor == "sway";
+
+  # Sway on its headless backend: no GPU, no input, no cage. It starts with one
+  # output, HEADLESS-1; a test adds more with `swaymsg create_output`.
+  #
+  # niri-session puts the session's WAYLAND_DISPLAY in the systemd user
+  # manager's environment; Sway does not. Without it, a user unit that is a
+  # Wayland client (Noctalia's, and wall-in-one.service, which asks the
+  # compositor for its outputs and runs the renderers) starts with no display.
+  # So this does what docs/installing.md tells a Sway user to do: import it,
+  # then start the session target, in one `exec` (separate execs run
+  # concurrently), so nothing starts the units before the import. The target
+  # is the one NixOS's programs.sway defines, bound to graphical-session.target,
+  # which wants both units.
+  swayConfig = pkgs.writeText "wall-in-one-vm-sway.conf" ''
+    xwayland disable
+    output HEADLESS-1 mode 1280x720
+    exec "systemctl --user import-environment WAYLAND_DISPLAY; systemctl --user start sway-session.target"
+  '';
 in
 {
   # The app and its wallpaper renderers, installed the way a NixOS user does:
   # the module puts all three in environment.systemPackages (the renderers
   # from this machine's own pkgs), so the compiler finds them in
   # /run/current-system/sw/bin.
-  imports = [ ./nixos-module.nix ];
+  imports = [
+    ./nixos-module.nix
+    {
+      options.wallInOneVm.compositor = lib.mkOption {
+        type = lib.types.enum [
+          "niri"
+          "sway"
+        ];
+        default = "niri";
+        internal = true;
+        description = "The compositor the VM's session runs.";
+      };
+    }
+  ];
 
   programs.wall-in-one = {
     enable = true;
@@ -222,9 +259,12 @@ in
     createHome = true;
     extraGroups = [ "wheel" ];
     initialPassword = "wall-in-one";
+    # The headless Sway session has no login of its own: the user manager
+    # starts at boot instead, as a login would start it, before Sway.
+    linger = lib.mkIf sway true;
   };
 
-  programs.niri = {
+  programs.niri = lib.mkIf niri {
     enable = true;
     package = pkgs.niri;
     useNautilus = false;
@@ -237,7 +277,7 @@ in
     recommendedServices.enable = false;
   };
 
-  services.cage = {
+  services.cage = lib.mkIf niri {
     enable = true;
     user = user;
     program = nestedNiriSession;
@@ -260,9 +300,10 @@ in
     pkgs.foot
     pkgs.grim
     pkgs.jq
-    pkgs.niri
-    pkgs.noctalia
   ]
+  ++ lib.optional niri pkgs.niri
+  ++ lib.optional sway pkgs.sway
+  ++ [ pkgs.noctalia ]
   # The compiler looks for its programs in the profiles before any store
   # directory on PATH, so the instrumented Noctalia has to be the system
   # profile's `noctalia`, not only first on the user manager's PATH. The
@@ -310,9 +351,58 @@ in
     '';
   };
 
-  systemd.services.cage-tty1 = {
+  systemd.services.cage-tty1 = lib.mkIf niri {
     requires = [ "wall-in-one-vm-seed.service" ];
     after = [ "wall-in-one-vm-seed.service" ];
+  };
+
+  # Sway runs as the user, against the user manager the linger started, with
+  # the environment a login gives it. Its config imports WAYLAND_DISPLAY and
+  # starts the session (swayConfig above); nothing else starts the units.
+  systemd.services.wall-in-one-vm-sway = lib.mkIf sway {
+    description = "Headless Sway session for the Wall-in-One VM";
+    wantedBy = [ "multi-user.target" ];
+    requires = [
+      "wall-in-one-vm-seed.service"
+      "user@1000.service"
+    ];
+    after = [
+      "wall-in-one-vm-seed.service"
+      "user@1000.service"
+      "systemd-user-sessions.service"
+    ];
+    # Sway runs each `exec` through `sh -c`, found on PATH, as a login's PATH
+    # would have it; systemctl comes with the service's default PATH.
+    path = [ pkgs.bash ];
+    environment = {
+      HOME = home;
+      USER = user;
+      XDG_CONFIG_HOME = "${home}/.config";
+      XDG_STATE_HOME = "${home}/.local/state";
+      XDG_CACHE_HOME = "${home}/.cache";
+      XDG_DATA_HOME = "${home}/.local/share";
+      XDG_RUNTIME_DIR = runtimeDir;
+      DBUS_SESSION_BUS_ADDRESS = "unix:path=${runtimeDir}/bus";
+      WLR_BACKENDS = "headless";
+      WLR_HEADLESS_OUTPUTS = "1";
+      WLR_RENDERER = "pixman";
+      WLR_LIBINPUT_NO_DEVICES = "1";
+    };
+    serviceConfig = {
+      User = user;
+      Group = "users";
+      ExecStart = "${lib.getExe pkgs.sway} --config ${swayConfig}";
+    };
+  };
+
+  # What NixOS's programs.sway defines for its own config's `exec`, without
+  # the rest of that module (portals, polkit, Xwayland).
+  systemd.user.targets.sway-session = lib.mkIf sway {
+    description = "Sway compositor session";
+    documentation = [ "man:systemd.special(7)" ];
+    bindsTo = [ "graphical-session.target" ];
+    wants = [ "graphical-session-pre.target" ];
+    after = [ "graphical-session-pre.target" ];
   };
 
   # A login session creates this, but spelling it here documents the socket

@@ -63,3 +63,20 @@ jobs:
             experimental-features = nix-command flakes
       - name: Build and run the desktop VM check
         run: nix build -L .#checks.x86_64-linux.vm-test
+
+  sway-vm:
+    name: Sway + Noctalia desktop VM
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build and run the Sway desktop VM check
+        run: nix build -L .#checks.x86_64-linux.vm-test-sway

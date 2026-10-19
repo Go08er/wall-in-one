@@ -886,6 +886,16 @@
             sampleMedia = import ./nix/sample-media.nix { inherit pkgs; };
           };
 
+          # The same install on a second compositor, headless Sway, with no
+          # niri: the session's display reaching the user unit, the outputs
+          # Sway publishes, and switched-off heads and hot-plug.
+          vm-test-sway = import ./nix/vm-test-sway.nix {
+            inherit pkgs;
+            wallInOnePackage = wall-in-one;
+            pluginSource = noctalia-plugins;
+            sampleMedia = import ./nix/sample-media.nix { inherit pkgs; };
+          };
+
           # The update on the installed packages, with the golden profile:
           # the shipped v0.1.4 runs, this build is installed over it, starts
           # and idles on what v0.1.4 left, then uses what bumps a store.

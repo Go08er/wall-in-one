@@ -9231,19 +9231,44 @@ fn missing_renderer_runtime(
     engine: &Path,
     independent: bool,
 ) -> (Runtime<SystemDriver>, PathBuf) {
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
+    missing_renderer_runtime_over(
+        root,
+        mpvpaper,
+        engine,
+        independent,
+        |document| document,
+        &source,
+    )
+}
+
+/// `missing_renderer_runtime`, with the document adjusted by `adjust` and the
+/// displays a test switches itself.
+fn missing_renderer_runtime_over(
+    root: &Path,
+    mpvpaper: &Path,
+    engine: &Path,
+    independent: bool,
+    adjust: impl Fn(String) -> String,
+    source: &SwitchableOutputs,
+) -> (Runtime<SystemDriver>, PathBuf) {
     let log = root.join("noctalia.log");
     let noctalia = root.join("noctalia");
     script(&noctalia, &format!("printf '%s\\n' \"$*\" >> {log:?}"));
-    let document = missing_renderer_document(&noctalia, mpvpaper, engine, independent);
+    let document = adjust(missing_renderer_document(
+        &noctalia,
+        mpvpaper,
+        engine,
+        independent,
+    ));
     let config_path = root.join("runtime.toml");
     fs::write(&config_path, &document).unwrap();
     let parsed = loaded(&document, &[]);
-    let source = SwitchableOutputs::default();
-    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
     let driver = SystemDriver::with_output_source(
         parsed.renderer.clone(),
         Path::new("/wall-in-one-runtime.sock"),
-        Box::new(source),
+        Box::new(source.clone()),
     );
     (
         Runtime::new(config_path, parsed, driver, noon()).unwrap(),
@@ -9672,4 +9697,91 @@ fn a_program_that_cannot_be_executed_is_a_failure_not_a_missing_renderer() {
     assert_eq!(quarantined["taboo_entries"][0]["source"], "automatic-apply");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_display_that_leaves_drops_its_missing_renderer_mark() {
+    // Both displays assigned, in either mode: DP-1 to a playlist that starts
+    // with a video, HDMI-A-1 to stills. Independent mode keeps a route for the
+    // detached DP-1; neither mode may re-apply anything for it, or for the
+    // display that never needed the renderer, when the program appears.
+    for independent in [false, true] {
+        let root = directory(&format!("missing-renderer-unplugged-{independent}"));
+        let mpvpaper = root.join("mpvpaper");
+        let engine = root.join("absent-linux-wallpaperengine");
+        let both = vec![live("DP-1", None), live("HDMI-A-1", None)];
+        let source = SwitchableOutputs::default();
+        source.set(both.clone());
+        let (mut runtime, log) = missing_renderer_runtime_over(
+            &root,
+            &mpvpaper,
+            &engine,
+            true,
+            |document| {
+                if independent {
+                    document
+                } else {
+                    document.replace(
+                        "display_mode = \"independent\"",
+                        "display_mode = \"mirrored\"",
+                    )
+                }
+            },
+            &source,
+        );
+        let started = start_up_as_the_service_does(&mut runtime);
+        let shown = display_status(&mut runtime, noon(), "DP-1");
+        assert_eq!(shown["entry_id"], "video-a", "{independent}: {shown}");
+        assert_eq!(shown["motion_active"], false);
+        assert_eq!(
+            status(&mut runtime, noon())["missing_renderers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // DP-1 is unplugged: what it showed, and why, go with it.
+        source.set(vec![live("HDMI-A-1", None)]);
+        runtime.tick(noon(), started + Duration::from_secs(12));
+        let detached = display_status(&mut runtime, noon(), "DP-1");
+        assert_eq!(detached["connected"], false, "{independent}: {detached}");
+        let hdmi = applied_on(&log, "HDMI-A-1");
+
+        script(&mpvpaper, "exec sleep 30");
+        let reloaded = without_text_file_busy(|| {
+            let response = runtime_command(&mut runtime, noon(), "reload", None);
+            if response.ok {
+                Ok(response)
+            } else {
+                Err(response.message)
+            }
+        });
+        assert!(reloaded.is_ok(), "{independent}: {reloaded:?}");
+        assert_eq!(
+            applied_on(&log, "HDMI-A-1"),
+            hdmi,
+            "{independent}: the display on a still never needed it"
+        );
+        assert_eq!(
+            applied_on(&log, "DP-1"),
+            1,
+            "{independent}: nor the detached one"
+        );
+        assert_eq!(
+            status(&mut runtime, noon())["missing_renderers"],
+            serde_json::json!([]),
+            "{independent}"
+        );
+
+        // Plugged back in: applied again, and the program starts.
+        source.set(both);
+        runtime.tick(noon(), started + Duration::from_secs(24));
+        let back = display_status(&mut runtime, noon(), "DP-1");
+        assert_eq!(back["connected"], true, "{independent}: {back}");
+        assert_eq!(back["motion_active"], true, "{independent}: {back}");
+        assert_eq!(back["renderer_failed"], false, "{independent}: {back}");
+        runtime.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
 }

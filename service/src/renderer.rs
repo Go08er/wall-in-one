@@ -1351,6 +1351,10 @@ impl WallpaperDriver for SystemDriver {
 
     fn retain_outputs(&mut self, outputs: &[String]) {
         let wanted: HashSet<String> = outputs.iter().map(|output| Self::key(output)).collect();
+        // A display that is no longer a target shows nothing of ours: it
+        // drops the mark of a missing renderer with its still, so a reload
+        // that finds the program never applies again for it.
+        self.missing_motion.retain(|key, _| wanted.contains(key));
         let stale: HashSet<String> = self
             .videos
             .keys()

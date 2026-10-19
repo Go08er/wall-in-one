@@ -109,8 +109,10 @@ in its details.
 `environment.systemPackages`: the launcher entry, the icon and the user units
 come with the app, as with any profile install. It enables no unit; start the
 service with `systemctl --user enable --now wall-in-one.service` (see the
-README). The renderers come from your configuration's own nixpkgs, so your
-overlays apply; `programs.wall-in-one.mpvpaperPackage` and
+README), once your session gives it its display
+([below](#the-service-needs-your-sessions-display)). The renderers come from
+your configuration's own nixpkgs, so your overlays apply;
+`programs.wall-in-one.mpvpaperPackage` and
 `programs.wall-in-one.linuxWallpaperenginePackage` choose others, and
 `programs.wall-in-one.package` another build of the app.
 
@@ -154,6 +156,64 @@ Outside Nix, install them from your distribution: on Arch, `mpvpaper` and
 `linux-wallpaperengine-git` from the AUR (the Wall-in-One package lists both
 as optional dependencies). Anything that puts the program in `/usr/bin`,
 `/usr/local/bin` or `~/.local/bin` works.
+
+### The service needs your session's display
+
+`wall-in-one.service` is a Wayland client: it asks the compositor for its
+displays, and the renderers it starts draw on them. A user unit takes its
+environment from the systemd user manager, not from your compositor, so the
+compositor's `WAYLAND_DISPLAY` has to be in the user manager's environment
+before the unit starts. Noctalia's own unit, if you run it as one, needs the
+same. See whether it is there:
+
+```console
+$ systemctl --user show-environment | grep '^WAYLAND_DISPLAY='
+```
+
+- **niri**, started with `niri-session`, puts it there. Nothing to add.
+- **Sway** does not. Add to your Sway config:
+
+  ```
+  exec systemctl --user import-environment WAYLAND_DISPLAY
+  ```
+
+  `exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY` does
+  the same and updates D-Bus activation's environment too. On NixOS,
+  `programs.sway` ships both in `/etc/sway/config.d/nixos.conf`, which only
+  counts if your config keeps the default `include /etc/sway/config.d/*`.
+
+  `systemctl --user enable` ties the unit to `graphical-session.target`, which
+  plain Sway never starts. The same `nixos.conf` starts it through
+  `sway-session.target`. Without such a target, start the unit after the
+  import, in the same `exec` line, because Sway runs separate `exec` lines at
+  the same time:
+
+  ```
+  exec "systemctl --user import-environment WAYLAND_DISPLAY; systemctl --user start wall-in-one.service"
+  ```
+
+  The companion also starts the unit when it finds the runtime stopped. Even
+  then, the import has to have happened first. The Sway VM test
+  (`vm-test-sway`) runs the NixOS form:
+  `exec "systemctl --user import-environment WAYLAND_DISPLAY; systemctl --user start sway-session.target"`.
+- **Hyprland**, in its current source, imports it itself when it starts from
+  a login, unless `HYPRLAND_NO_SD_VARS` is set. It does not when it runs as a
+  systemd unit, under uwsm for example, which imports it instead. If the
+  check above finds nothing, add to `hyprland.conf`:
+
+  ```
+  exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY
+  ```
+
+  This one is not tested here: the VM tests run niri and Sway.
+
+A unit that started before the import keeps the environment it started with:
+`wall-in-one ctl status` says `WAYLAND_DISPLAY is not set` in
+`output_discovery_error`. Once the import has run, restart it:
+
+```console
+$ systemctl --user restart wall-in-one.service
+```
 
 ### Updating an existing app installation
 

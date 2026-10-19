@@ -16,6 +16,33 @@ rules are not listed because they have not been verified here; look up "window
 rules" and "blur" in your compositor's documentation and match on the app-id
 below.
 
+## Sway and Hyprland: one line the service needs
+
+This is not a window rule, but it is the one line that Sway, and sometimes
+Hyprland, needs in its config. The wallpaper service runs as a user unit and
+finds the compositor through `WAYLAND_DISPLAY`. The systemd user manager has
+that variable only if the session put it there. `niri-session` does; Sway
+does not; Hyprland normally does it itself. Check with
+`systemctl --user show-environment | grep '^WAYLAND_DISPLAY='`, and if it is
+missing:
+
+- Sway, in its config:
+
+  ```
+  exec systemctl --user import-environment WAYLAND_DISPLAY
+  ```
+
+- Hyprland, in `hyprland.conf`:
+
+  ```
+  exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY
+  ```
+
+The Sway VM test runs this import; the Hyprland line is not tested here.
+[Installing](installing.md#the-service-needs-your-sessions-display) says how
+to start the unit on Sway, which has no session target of its own, and what to
+do if the unit started before the import.
+
 ## The app-id to match on
 
 ```

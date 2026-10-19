@@ -1,17 +1,19 @@
 # Development VM
 
-Wall-in-One ships two NixOS VM fixtures. They are isolated from the host and
+Wall-in-One ships three NixOS VM fixtures. They are isolated from the host and
 answer different questions:
 
 - the development VM is a real desktop a person can explore;
 - the automated VM test exercises the service and captures every workflow
-  page without opening anything in the host session.
+  page without opening anything in the host session;
+- the [Sway desktop test](#the-sway-desktop-test) runs the same install on a
+  second compositor, headless Sway, with no niri installed.
 
-Both use the flake's locked niri and Noctalia packages, the Wall-in-One package
-built from the checkout, installed through the flake's NixOS module together
-with mpvpaper and linux-wallpaperengine (the module's default), and the
-companion plugin fetched by the locked `noctalia-plugins` input. Neither mounts
-the host home directory.
+The first two use the flake's locked niri and Noctalia packages, the
+Wall-in-One package built from the checkout, installed through the flake's
+NixOS module together with mpvpaper and linux-wallpaperengine (the module's
+default), and the companion plugin fetched by the locked `noctalia-plugins`
+input. None of them mounts the host home directory.
 
 ## Launch the desktop
 
@@ -189,6 +191,54 @@ verifies that:
 - the completed desktop session has no matching coredump, GTK/GLib critical,
   Python traceback or Rust thread panic.
 
+## The Sway desktop test
+
+A second automated test boots the same guest on another compositor: Sway on
+its headless backend (pixman, no GPU, no input), with no niri, cage or
+virtual display. The app, its renderers, Noctalia 5.2, the companion and the
+seeded profile are installed exactly as above.
+
+```console
+$ nix build -L .#checks.x86_64-linux.vm-test-sway
+```
+
+Sway runs as the `wallpaper` user against a user manager that the user's
+linger starts at boot, as a login would. Its config does what a Sway user has
+to do ([installing](installing.md#the-service-needs-your-sessions-display)):
+one `exec` imports `WAYLAND_DISPLAY` into the user manager and then starts
+`sway-session.target`, which starts the app's unit and Noctalia's. The test
+verifies that:
+
+- the user manager holds Sway's `WAYLAND_DISPLAY`, and the processes of
+  `wall-in-one.service` and `noctalia.service` started with it; there is no
+  `NIRI_SOCKET` and no `niri` program;
+- the module installed the app and both renderers, and the compiled
+  `runtime.toml` names them in the system profile;
+- Noctalia 5 runs on Sway and loads the companion, and every `wallpaper-set`
+  it receives comes from the unit's service;
+- `status` publishes Sway's output (`HEADLESS-1`, its 1280x720 mode, a logical
+  size, `enabled`) with an empty `output_discovery_error`;
+- two outputs added with `swaymsg create_output` are published within one
+  five-second probe. So is `swaymsg output HEADLESS-3 disable` and `enable`:
+  the switched-off head stays listed with `enabled: false`. The test prints
+  each latency and fails one over ten seconds;
+- in mirrored mode, an all-output scene starts one linux-wallpaperengine with a
+  `--screen-root` for each enabled output and none for the switched-off one,
+  and is started again as the head goes off and on;
+- in independent mode, with a video assigned to `HEADLESS-3`, nothing is
+  started or applied on the head while it is switched off. Switched on, its
+  video starts there, and nothing is applied again on the other two. Switched
+  off again, its display row is `connected: false`, its renderer stops and
+  nothing new starts; and
+- the service stayed the unit's one process, with no coredump, critical or
+  panic.
+
+The renderers are the same kind of stand-in as above, a program that records
+its command line, put in `runtime.toml` in place of the installed one. The
+scene is a playlist added to `runtime.toml` by hand, since authoring one needs
+a Steam Workshop tree. The screenshot `sway-desktop.png` shows Noctalia's bar
+and the still on `HEADLESS-1`.
+
 The guest clock is changed only inside the disposable VM. All guest config,
 state, cache, media, and runtime sockets live under the guest's own home or
 `/run/user/1000`; the test never reads the host's Noctalia configuration,
@@ -207,8 +257,9 @@ decoding or GPU rendering, Wallpaper Engine scene playback, Steam integration,
 or physical multi-monitor behavior. Independent routing, schedules, cursors,
 renderer ownership and transport are supported in software and covered by
 automated unit/process tests, including synthetic connector stress. Neither the
-development machine nor this VM exposes two outputs, so different playlists on
-two physical monitors remain unverified.
+development machine nor this VM exposes two outputs. The Sway test has three
+headless outputs, but with stand-in renderers, so different playlists on two
+physical monitors remain unverified.
 
 Older dated VM runs used companion revisions `a5e23c9` and `a17eb70`; those
 results do not establish the newer startup or battery-display behavior.

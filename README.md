@@ -182,6 +182,13 @@ $ nix run .#vm
 $ nix build -L .#checks.x86_64-linux.vm-test
 ```
 
+A second automated test runs the same install on headless Sway with no niri
+installed, including switched-off displays and hot-plug:
+
+```console
+$ nix build -L .#checks.x86_64-linux.vm-test-sway
+```
+
 The fixtures contain only build-generated sample media and never mount the
 host home, wallpaper library, Noctalia state, or Steam directory. See
 [`docs/virtual-machine.md`](docs/virtual-machine.md) for guest credentials,

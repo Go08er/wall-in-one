@@ -191,8 +191,10 @@ selection dormant.
 That is software support, not a claim of physical multi-monitor validation.
 Automated unit and process tests cover independent routing, schedules, cursors,
 renderer ownership, transport and synthetic connector changes. The development
-machine and desktop VM each expose one output, so different playlists on two
-physical monitors remain unverified.
+machine and the niri desktop VM each expose one output. The Sway VM has three
+headless outputs and gives one its own video in independent mode, with
+stand-in renderers. Different playlists on two physical monitors remain
+unverified.
 
 The renderer section carries `scene_fps`, which linux-wallpaperengine consumes
 through its native `--fps N` option. `scene_scaling` is empty, `stretch`,

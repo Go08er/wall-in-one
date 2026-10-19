@@ -131,5 +131,11 @@ layer-shell, because Noctalia's own surfaces are layer-shell surfaces. niri's
   (`tests/test_ui_monitors.py`), and the Python side's choice of source with
   fakes (`tests/test_outputs.py`, `tests/test_ui_stills.py`).
 - The niri VM test checks that the service published the VM's real output.
-  Nothing here depends on niri, so a second compositor in the VM tests needs
-  no change to the code, only a VM.
+- The Sway VM test (`vm-test-sway`, [virtual-machine.md](virtual-machine.md))
+  checks the same on headless Sway with no niri installed, then adds two
+  outputs with `swaymsg create_output` and switches one off and on again
+  through Sway's wlr-output-management. The switched-off head stays listed
+  with `enabled: false`, its display row is `connected: false`, and no
+  renderer or still is put on it. An all-output scene gets a `--screen-root`
+  for exactly the enabled outputs. Each change shows up within one probe,
+  and switched back on, the head gets its assignment again.

@@ -2370,10 +2370,13 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// A new route for `connector`, as its rules and assignment decide now.
     /// The session's Cycle override, when there is one, holds for it too.
     fn insert_independent_route(&mut self, connector: &str) -> Result<(), String> {
-        let (playlist, source, schedule_rule_id) =
-            self.route_decision(connector, None, self.current_time)?;
+        let (playlist, source, schedule_rule_id) = self
+            .route_decision(connector, None, self.current_time)
+            .map_err(|error| format!("display {connector}: {error}"))?;
         let shuffle = self.playlist_shuffle_default(&playlist);
-        let cursor = self.new_route_cursor(&playlist, None, shuffle, true)?;
+        let cursor = self
+            .new_route_cursor(&playlist, None, shuffle, true)
+            .map_err(|error| format!("display {connector}: {error}"))?;
         self.routes.insert(
             connector.to_string(),
             DisplayRoute {
@@ -2410,14 +2413,17 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .get_mut(&connector)
                 .expect("connector came from route keys")
                 .manual_playlist = manual.clone();
-            let (playlist, source, schedule_rule_id) =
-                self.route_decision(&connector, manual.as_deref(), self.current_time)?;
+            let (playlist, source, schedule_rule_id) = self
+                .route_decision(&connector, manual.as_deref(), self.current_time)
+                .map_err(|error| format!("display {connector}: {error}"))?;
             let current = previous_entries
                 .get(&connector)
                 .and_then(|(previous, entry)| (previous == &playlist).then_some(entry.as_str()));
             let shuffle =
                 self.routes[&connector].shuffle_enabled(self.playlist_shuffle_default(&playlist));
-            let cursor = self.new_route_cursor(&playlist, current, shuffle, false)?;
+            let cursor = self
+                .new_route_cursor(&playlist, current, shuffle, false)
+                .map_err(|error| format!("display {connector}: {error}"))?;
             let route = self
                 .routes
                 .get_mut(&connector)
@@ -4164,15 +4170,20 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.target_outputs.sort();
             self.target_outputs.dedup();
         }
+        // Refused as every other reload refusal reads, with what kept going.
         if let Err(error) = self.rebuild_cursors(&old_entries) {
             self.restore_reload_snapshot(snapshot);
-            return Err(error);
+            return Err(format!(
+                "reload rejected: {error}; previous configuration restored"
+            ));
         }
         if self.is_independent()
             && let Err(error) = self.rebuild_independent_routes(&old_route_entries)
         {
             self.restore_reload_snapshot(snapshot);
-            return Err(error);
+            return Err(format!(
+                "reload rejected: {error}; previous configuration restored"
+            ));
         }
 
         let new_targets = self.current_targets(&self.target_outputs);

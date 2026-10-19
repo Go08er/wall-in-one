@@ -10137,3 +10137,48 @@ fn a_renderer_that_exits_127_after_it_ran_is_still_a_crash() {
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_reload_refused_for_a_display_says_which_and_keeps_the_configuration() {
+    // Review probe A6: a detached display assigned a playlist with nothing
+    // in it. The reload is refused, in the words every reload refusal uses.
+    let root = directory("reload-refused-detached");
+    let mpvpaper = root.join("absent-mpvpaper");
+    let engine = root.join("absent-linux-wallpaperengine");
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None)]);
+    let (mut runtime, _log) = missing_renderer_runtime_over(
+        &root,
+        &mpvpaper,
+        &engine,
+        true,
+        |document| document,
+        &source,
+    );
+    start_up_as_the_service_does(&mut runtime);
+    let config_path = root.join("runtime.toml");
+    let document = fs::read_to_string(&config_path).unwrap().replace(
+        "connector = \"HDMI-A-1\"\nplaylist = \"stills\"",
+        "connector = \"HDMI-A-1\"\nplaylist = \"later\"",
+    ) + "[[playlists]]\nid = \"later\"\nname = \"Later\"\nentries = []\n";
+    fs::write(&config_path, document).unwrap();
+    let response = runtime_command(&mut runtime, noon(), "reload", None);
+    assert!(!response.ok);
+    assert!(
+        response
+            .message
+            .starts_with("reload rejected: display HDMI-A-1: ")
+            && response.message.contains("\"later\" is empty")
+            && response
+                .message
+                .ends_with("; previous configuration restored"),
+        "{}",
+        response.message
+    );
+    assert_eq!(
+        display_status(&mut runtime, noon(), "HDMI-A-1")["playlist_id"],
+        "stills"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}

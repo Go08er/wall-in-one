@@ -153,7 +153,8 @@ pub struct Status<'a> {
     /// The compositor's last successful display snapshot, switched-off heads
     /// included (`enabled: false`). Empty before the first one, and left
     /// empty, before any taboo record is left out, when the whole reply
-    /// would not fit with it; `output_discovery_error` says when it is stale. Not part of the configuration's status budget: the
+    /// would not fit with it; `output_discovery_error` says when it is
+    /// stale. Not part of the configuration's status budget: the
     /// compositor, not the document, decides its size.
     pub outputs: &'a [Output],
 }

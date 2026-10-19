@@ -1,6 +1,6 @@
 [package]
 name = "wall-in-one-service"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 description = "Session-scoped runtime for Wall-in-One"

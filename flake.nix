@@ -94,7 +94,7 @@
 
         wall-in-one-service = pkgs.rustPlatform.buildRustPackage {
           pname = "wall-in-one-service";
-          version = "0.3.2";
+          version = "0.4.0";
           src = pkgs.lib.fileset.toSource {
             root = ./service;
             fileset = pkgs.lib.fileset.unions [
@@ -136,7 +136,7 @@
 
         wall-in-one = python.pkgs.buildPythonApplication {
           pname = "wall-in-one";
-          version = "0.3.2";
+          version = "0.4.0";
           pyproject = true;
           src = ./.;
 

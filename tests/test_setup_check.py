@@ -825,3 +825,15 @@ def test_a_slow_service_does_not_hide_a_definite_required_finding(
         lambda name: programs.Program(name, Path("/usr/bin") / name, found=True),
     )
     assert cli.main(["--setup-status"]) == setup_check.EXIT_COULD_NOT_TELL
+
+
+def test_a_row_without_its_path_reads_sensibly() -> None:
+    """At the reply's limit the service sends rows with an empty path (re-review N2)."""
+    for reason in ("not-found", "cannot-run"):
+        service = setup_check.service_from_status(
+            {"missing_renderers": [{"program": "mpvpaper", "path": "", "reason": reason}]}
+        )
+        (finding,) = setup_check.findings("system", _local(), service)
+        text = f"{finding.title} {finding.detail} {finding.fix}"
+        assert "names ," not in text and " ," not in text, text
+        assert "/usr/bin/mpvpaper" in text, text

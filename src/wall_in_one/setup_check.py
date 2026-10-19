@@ -95,7 +95,8 @@ class MissingRenderer:
     ``reason`` is ``not-found``, ``not-executable``, ``cannot-run`` (an
     executable that can't run here: its interpreter or a library is missing)
     or ``no-access`` (a folder on the way doesn't let the service in); a
-    service without it said nothing more than "not found".
+    service without it said nothing more than "not found". ``path`` is empty
+    when the service left it out at its reply's limit: then it is not known.
     """
 
     program: str
@@ -321,19 +322,22 @@ def _renderer_findings(
             "not-executable",
             "no-access",
         )
-        same_path = record is not None and record.path == str(program.path)
+        # An empty path is one the service left out at its reply's limit:
+        # not known, so taken as the one found here.
+        same_path = record is not None and record.path in ("", str(program.path))
         if cannot_run and (same_path or not program.found):
             # Installed, and the service tried it and it can't run here:
             # Check Again can't fix that, a working install can.
             assert record is not None
+            path = record.path or str(program.path)
             if record.reason == "no-access":
                 found.append(
                     Finding(
                         f"renderer:{name}",
                         False,
                         f"The wallpaper service can't reach {name}",
-                        f"A folder on the way to {record.path} doesn't let it in. Until it "
-                        f"can, {_KIND_OF[name].lower()} show their still.",
+                        f"A folder on the way to {path} doesn't let it in. Until it can, "
+                        f"{_KIND_OF[name].lower()} show their still.",
                         f"Let it into that folder, or install {name} where it can reach "
                         f"it: {_renderer_fix(name, kind)}",
                     )
@@ -345,14 +349,14 @@ def _renderer_findings(
                     False,
                     f"{name} is installed but can't run here",
                     (
-                        f"{record.path} is not an executable file."
+                        f"{path} is not an executable file."
                         if record.reason == "not-executable"
-                        else f"The wallpaper service found {record.path} but it couldn't "
+                        else f"The wallpaper service found {path} but it couldn't "
                         "run: a program or library it needs is missing, or its folder "
                         "doesn't allow running programs."
                     )
                     + f" Until it can, {_KIND_OF[name].lower()} show their still.",
-                    f"Run {record.path} in a terminal to see why. Reinstalling it usually "
+                    f"Run {path} in a terminal to see why. Reinstalling it usually "
                     f"fixes it: {_renderer_fix(name, kind)}",
                 )
             )
@@ -370,6 +374,9 @@ def _renderer_findings(
             detail = (
                 f"Its configuration names {record.path}, and {name} is at {program.path} now."
                 if not same_path
+                else f"It couldn't start {name} when it last tried, and it is at "
+                f"{program.path} now."
+                if not record.path
                 else f"It couldn't start {record.path} when it last tried, and {name} is there now."
             )
             found.append(

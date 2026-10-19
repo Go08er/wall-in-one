@@ -373,15 +373,33 @@ def programs(data: bytes) -> dict[str, Any]:
     return {key: renderer.get(key) for key in PROGRAM_KEYS}
 
 
+#: Where this build may name a program in this VM: the Nix profiles the
+#: compiler looks in (the module installs into the system one). Not
+#: /usr/bin/<name>, the placeholder for a program it did not find.
+PROFILE_BIN_DIRECTORIES = (
+    f"{HOME}/.nix-profile/bin",
+    f"{HOME}/.local/state/nix/profile/bin",
+    "/etc/profiles/per-user/wallpaper/bin",
+    "/nix/var/nix/profiles/default/bin",
+    "/run/current-system/sw/bin",
+)
+
+
 def same_program(change: Any) -> None:
     """A recompile by another release may change the generation, not the meaning.
 
     Nor the programs: only the directory each is named in, as the golden
-    profile's own comparison allows (tests/golden/harness.py).
+    profile's own comparison allows (tests/golden/harness.py), and that
+    directory must be a profile's, so a recompile that fell back to the
+    /usr/bin placeholder does not pass for the same program.
     """
     before = runtime_meaning(change.before.content)
     after = runtime_meaning(change.after.content)
     assert before == after, "runtime.toml changed meaning"
+    for key, program in programs(change.after.content).items():
+        assert isinstance(program, str) and program.rsplit("/", 1)[0] in (
+            PROFILE_BIN_DIRECTORIES
+        ), f"runtime.toml names {key} = {program!r}, not a profile's"
 
 
 def unchanged(before: dict[str, Any], after: dict[str, Any], name: str) -> None:

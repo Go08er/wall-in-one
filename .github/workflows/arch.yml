@@ -84,6 +84,10 @@ jobs:
             wall-in-one-service --check-config \
               --config "$HOME/runtime.toml" --socket "$XDG_RUNTIME_DIR/runtime.sock"
             test ! -e "$XDG_RUNTIME_DIR/runtime.sock"
+            # Both halves were built as a `system` install. package() checks
+            # this on $pkgdir too; this is the installed result.
+            "$0/tools/check-install-kind.sh" system /usr/bin/wall-in-one \
+              /usr/bin/wall-in-one-service
           ' "$GITHUB_WORKSPACE"
           # Files the package must carry, at the paths the Nix package uses.
           for f in /usr/bin/wall-in-one /usr/bin/wall-in-one-service \

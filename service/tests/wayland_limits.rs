@@ -162,10 +162,17 @@ fn heads_re_announced_over_one_connection_stay_bounded() {
             compositor.set_layout(layout(change % 2 == 0));
             let found = source.outputs().unwrap();
             assert!(found.iter().any(|output| output.name == "eDP-1"));
-            assert!(
-                found.iter().any(|output| output.name == "HDMI-A-1"),
-                "{found:?}"
-            );
+            // Switched off, it is only known to wlr-output-management, which
+            // a fresh connection after the churn still uses. (Switched on, the
+            // fake gives it no wl_output, so it is not listed then.)
+            if change % 2 == 1 {
+                assert!(
+                    found
+                        .iter()
+                        .any(|output| output.name == "HDMI-A-1" && !output.enabled),
+                    "{found:?}"
+                );
+            }
         }
         drop(compositor);
         let with_session = LIVE.load(Ordering::SeqCst);

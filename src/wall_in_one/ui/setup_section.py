@@ -150,7 +150,7 @@ class SetupWatch:
 
 
 def _label(text: str, *css: str) -> Gtk.Label:
-    label = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
+    label = Gtk.Label(label=text, xalign=0, wrap=True)
     for name in css:
         label.add_css_class(name)
     return label

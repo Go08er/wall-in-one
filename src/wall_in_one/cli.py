@@ -835,7 +835,8 @@ def _setup_status() -> int:
     nothing required is missing, 1 when something is, as
     ``--legacy-migration-status`` does for a decision it needs, and 2 when it
     couldn't tell: the check itself failed, or the service didn't answer in
-    time.
+    time and nothing else required is missing (a slow service never hides a
+    finding that is certain, such as Noctalia not being installed).
     """
     from wall_in_one import setup_check
     from wall_in_one.control import client
@@ -852,9 +853,12 @@ def _setup_status() -> int:
         print(f"error: the setup check failed: {error}", file=sys.stderr)
         return setup_check.EXIT_COULD_NOT_TELL
     print(setup_check.report(found))
+    required = setup_check.required(found)
+    if any(finding.key != "service" for finding in required):
+        return setup_check.EXIT_REQUIRED_MISSING
     if service.state == "not-answering":
         return setup_check.EXIT_COULD_NOT_TELL
-    if setup_check.required(found):
+    if required:
         return setup_check.EXIT_REQUIRED_MISSING
     return setup_check.EXIT_ALL_PRESENT
 

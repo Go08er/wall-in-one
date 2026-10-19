@@ -699,7 +699,12 @@ def test_setup_status_needs_a_renderer_for_a_library_with_videos(
 def test_setup_status_exits_2_when_it_could_not_tell(
     this_test_machine: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(programs, "program_directories", lambda: (this_test_machine / "bin",))
+    # Everything is installed: only the slow service is left to tell.
+    monkeypatch.setattr(
+        programs,
+        "find_program",
+        lambda name: programs.Program(name, Path("/usr/bin") / name, found=True),
+    )
     monkeypatch.setattr(
         setup_check, "ask_service", lambda _timeout: Service("not-answering", detail="timed out")
     )
@@ -797,3 +802,26 @@ def test_a_renderer_the_service_cannot_reach_says_so() -> None:
     assert "doesn't let it in" in finding.detail
     assert "not an executable" not in finding.detail
     assert "Check Again" not in finding.fix
+
+
+def test_a_slow_service_does_not_hide_a_definite_required_finding(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Noctalia is certainly not installed; the service is merely slow (re-review N1)."""
+
+    def lookup(name: str) -> programs.Program:
+        return programs.Program(name, Path("/usr/bin") / name, found=name != setup_check.NOCTALIA)
+
+    monkeypatch.setattr(programs, "find_program", lookup)
+    monkeypatch.setattr(
+        setup_check, "ask_service", lambda _timeout: Service("not-answering", detail="timed out")
+    )
+    assert cli.main(["--setup-status"]) == setup_check.EXIT_REQUIRED_MISSING
+    assert "Noctalia isn't installed" in capsys.readouterr().out
+    # With nothing else missing, a slow service is still "couldn't tell".
+    monkeypatch.setattr(
+        programs,
+        "find_program",
+        lambda name: programs.Program(name, Path("/usr/bin") / name, found=True),
+    )
+    assert cli.main(["--setup-status"]) == setup_check.EXIT_COULD_NOT_TELL

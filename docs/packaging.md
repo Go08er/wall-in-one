@@ -245,10 +245,11 @@ user's Steam library and are never packaged.
   `manualWallpaperInstalls` false (both renderers installed, from the
   module's `pkgs`, and the app) and true (neither renderer); the
   home-manager one registers the app's units, the NixOS one leaves them to
-  the profile. The home-manager one is evaluated against stand-ins for
-  `home.packages` and `systemd.user.packages`, not home-manager itself, which
-  is not a flake input; evaluated by hand against home-manager's own source,
-  it installs the same and puts the units in `xdg.dataFile."systemd/user"`.
+  the profile. The home-manager one is evaluated by real home-manager
+  (`homeManagerConfiguration`; the `home-manager` flake input exists for this
+  check alone, and no package or module depends on it), so it must install
+  the same and put the units in `xdg.dataFile."systemd/user"`; with
+  `enable = false` it installs and links nothing. Evaluation only, no build.
 - `vm-test` installs the app and the renderers through the NixOS module, as a
   user would; `upgrade` checks that a 0.1.4 document's program paths become
   profile paths on the first start, with nothing else changing.

@@ -264,22 +264,22 @@ impl Session {
         // Bounded, and interrupted by shutdown: a compositor that has stopped
         // accepting fills its listen queue, and a blocking connect would then
         // wait for as long as it stays stopped, SIGTERM included.
-        let stream =
-            connect_until(socket, deadline, &IPC_ABANDONED).map_err(|error| {
-                match error.kind() {
-                    ErrorKind::TimedOut => format!(
-                        "cannot connect to the Wayland compositor at {}: it did not accept the \
-                     connection within {} ms",
-                        socket.display(),
-                        DISCOVERY_TIMEOUT.as_millis()
-                    ),
-                    ErrorKind::Interrupted => "output discovery was abandoned for shutdown".into(),
-                    _ => format!(
-                        "cannot connect to the Wayland compositor at {}: {error}",
-                        socket.display()
-                    ),
-                }
-            })?;
+        let stream = connect_until(socket, deadline, &IPC_ABANDONED).map_err(|error| {
+            match error.kind() {
+                // The question's own deadline, of which a reconnect may
+                // have only the rest: no fixed duration is claimed.
+                ErrorKind::TimedOut => format!(
+                    "cannot connect to the Wayland compositor at {}: it did not accept the \
+                         connection in the time the question had left",
+                    socket.display()
+                ),
+                ErrorKind::Interrupted => "output discovery was abandoned for shutdown".into(),
+                _ => format!(
+                    "cannot connect to the Wayland compositor at {}: {error}",
+                    socket.display()
+                ),
+            }
+        })?;
         let connection = Connection::from_socket(stream).map_err(|error| {
             format!(
                 "cannot use the Wayland connection at {}: {error}",

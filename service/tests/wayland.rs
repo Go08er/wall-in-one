@@ -370,6 +370,14 @@ fn every_question_to_a_compositor_that_stopped_accepting_ends_at_its_deadline() 
             error.contains("did not answer within") || error.contains("did not accept"),
             "question {question}: {error}"
         );
+        if question > 0 {
+            // The queue is full from the first question on: the connect is
+            // what times out, and it claims no duration it may not have had.
+            assert!(
+                error.contains("did not accept the connection in the time the question had left"),
+                "question {question}: {error}"
+            );
+        }
         assert!(
             waited < Duration::from_secs(4),
             "question {question} took {waited:?}"

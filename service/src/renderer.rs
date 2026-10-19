@@ -330,6 +330,12 @@ pub const RENDERER_PROGRAMS: [&str; 2] = ["mpvpaper", "linux-wallpaperengine"];
 /// failing in its own code, and stays a failure.
 pub const LOADER_FAILURE_WINDOW: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+thread_local! {
+    /// How many times `PathIdentity::of` looked at a path, on this thread.
+    static IDENTITY_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What the dynamic loader writes when a library is missing. A 127 with it
 /// is a renderer that could not run, however late its exit is noticed.
 const LOADER_LINE: &str = "error while loading shared libraries";
@@ -380,6 +386,8 @@ impl PathIdentity {
     /// The identity of what `path` names now, symbolic links followed (a
     /// profile switch re-points one, and that is a change).
     pub fn of(path: &Path) -> Self {
+        #[cfg(test)]
+        IDENTITY_LOOKUPS.with(|count| count.set(count.get() + 1));
         match fs::metadata(path) {
             Ok(metadata) => Self::Present {
                 dev: metadata.dev(),
@@ -1822,6 +1830,13 @@ impl WallpaperDriver for SystemDriver {
             // installed, replaced or re-pointed. The same file that could not
             // run would only fail the same way, after setting every still and
             // palette again.
+            let marked = self
+                .missing_motion
+                .values()
+                .any(|(_, record)| record.program == *program);
+            if self.missing[index].is_none() && !marked {
+                continue; // nothing recorded: nothing to look at
+            }
             let now = PathIdentity::of(self.program_path(index));
             if self.missing[index]
                 .as_ref()
@@ -1901,6 +1916,56 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
+
+    struct NoOutputs;
+
+    impl OutputSource for NoOutputs {
+        fn outputs(&mut self) -> Result<Vec<Output>, String> {
+            Err("no compositor in this test".into())
+        }
+    }
+
+    #[test]
+    fn a_reload_with_nothing_recorded_looks_at_no_renderer_path() {
+        let settings: RendererSettings = toml::from_str(
+            r#"noctalia_program = "/bin/true"
+mpvpaper_program = "/nonexistent/mpvpaper"
+linux_wallpaperengine_program = "/nonexistent/linux-wallpaperengine"
+own_scene_renderer = true
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 0
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+"#,
+        )
+        .unwrap();
+        let mut driver = SystemDriver::with_output_source(
+            settings,
+            Path::new("/wall-in-one-runtime.sock"),
+            Box::new(NoOutputs),
+        );
+        let lookups = || IDENTITY_LOOKUPS.with(std::cell::Cell::get);
+        let before = lookups();
+        assert!(driver.recheck_missing_renderers().is_empty());
+        assert_eq!(lookups(), before, "nothing recorded, nothing looked at");
+        driver.missing[0] = Some(MissingRenderer {
+            program: "mpvpaper",
+            path: "/nonexistent/mpvpaper".into(),
+            error: "No such file or directory (os error 2)".into(),
+            reason: MissingReason::NotFound,
+            identity: PathIdentity::Absent,
+        });
+        assert!(driver.recheck_missing_renderers().is_empty());
+        assert_eq!(lookups(), before + 1, "only the recorded program's path");
+    }
 
     #[test]
     fn stopping_a_leader_also_releases_term_resistant_descendant_pipes() {

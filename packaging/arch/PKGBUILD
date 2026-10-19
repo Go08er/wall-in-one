@@ -32,17 +32,28 @@ checkdepends=(
   'python-pytest'
 )
 # Both renderers are external and managed by the user; the app finds them on
-# PATH (/usr/bin included) and controls them. Neither is in the official repos.
+# PATH (/usr/bin included) and controls them, so neither is a dependency, and
+# neither is in the official repos. The AUR's linux-wallpaperengine-git
+# provides linux-wallpaperengine, so naming the plain package here is met by
+# either of them.
 optdepends=(
   'mpvpaper: video wallpapers (AUR)'
   'linux-wallpaperengine: Wallpaper Engine scenes (AUR: linux-wallpaperengine-git)'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Replace with the real sum once v0.4.0 is tagged: updpkgsums
+# TODO(release): 'SKIP' only until v0.4.0 is tagged and GitHub serves its
+# tarball. Right after tagging, run `updpkgsums` in this directory, regenerate
+# .SRCINFO (`makepkg --printsrcinfo > .SRCINFO`) and commit both. A published
+# package must never keep 'SKIP'.
 sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
+  # The Python half's install kind is a line of source, so it is set before
+  # the wheel is built. The service's half comes from the environment in
+  # build() and check(); tools/check-install-kind.sh, at the end of
+  # package(), checks that the two agree. See docs/packaging.md.
+  tools/set-install-kind.sh system
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --manifest-path service/Cargo.toml \
     --target "$(rustc -vV | sed -n 's/host: //p')"
@@ -50,6 +61,8 @@ prepare() {
 
 build() {
   cd "$pkgname-$pkgver"
+  # Cargo tracks this through option_env!, so it must be the same in check().
+  export WALL_IN_ONE_INSTALL_KIND=system
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release --manifest-path service/Cargo.toml
@@ -58,14 +71,21 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
+  # Not optional: without it `cargo test --release` rebuilds
+  # target/release/wall-in-one-service as a `source` build in the same target
+  # directory, and package() would install that one. The Python suite also
+  # asserts that the module (set in prepare()) matches this variable.
+  export WALL_IN_ONE_INSTALL_KIND=system
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   # The service's integration tests exec scripts they have just written; run
   # in parallel that races ("Text file busy"), so keep them serial.
   RUST_TEST_THREADS=1 cargo test --frozen --release --manifest-path service/Cargo.toml
   # The non-GUI suite only: no compositor in a build chroot, and no Noctalia
-  # binary is driven. tests/conftest.py sandboxes HOME, XDG_* and the buses
-  # itself; ffmpeg (a runtime dependency) is what the thumbnail tests use.
+  # binary is driven. Neither renderer is needed: the tests stand in for them.
+  # tests/conftest.py sandboxes HOME, XDG_* and the buses itself, and the
+  # tests use no network; ffmpeg (a runtime dependency) is what the thumbnail
+  # tests use, and dbus (a checkdepend) the service's integration tests.
   PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider \
     -m 'not gui and not noctalia'
 }
@@ -90,4 +110,10 @@ package() {
     "$data/systemd/wall-in-one-health-sync.timer"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  # Last: both installed halves must say they are a `system` install, and the
+  # same release. The Python half is run from $pkgdir's site-packages.
+  PYTHONPATH="$pkgdir$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    tools/check-install-kind.sh system \
+    "$pkgdir/usr/bin/wall-in-one" "$pkgdir/usr/bin/wall-in-one-service"
 }

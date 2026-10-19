@@ -10,6 +10,7 @@ one file show up in an ordinary test run. docs/packaging.md.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections import defaultdict
@@ -21,20 +22,43 @@ ARCH = Path(__file__).resolve().parents[1] / "packaging" / "arch"
 PKGBUILD = ARCH / "PKGBUILD"
 SRCINFO = ARCH / ".SRCINFO"
 
-#: The PKGBUILD variables a single-package .SRCINFO repeats, as makepkg names them.
-FIELDS = (
-    "pkgdesc",
-    "pkgver",
-    "pkgrel",
-    "url",
+#: Every makepkg variable a single-package .SRCINFO can repeat (man PKGBUILD).
+SCALARS = ("pkgdesc", "pkgver", "pkgrel", "epoch", "url", "install", "changelog")
+ARRAYS = (
     "arch",
+    "groups",
     "license",
+    "noextract",
+    "options",
+    "backup",
+    "validpgpkeys",
+)
+#: Arrays makepkg also reads as ``<name>_<arch>``.
+ARCH_ARRAYS = (
     "checkdepends",
     "makedepends",
     "depends",
     "optdepends",
+    "provides",
+    "conflicts",
+    "replaces",
     "source",
+    "md5sums",
+    "sha1sums",
+    "sha224sums",
     "sha256sums",
+    "sha384sums",
+    "sha512sums",
+    "b2sums",
+)
+#: The script's own variables, which are not the PKGBUILD's.
+HELPERS = frozenset({"before", "v", "vals", "x"})
+ARCHES = ("x86_64", "aarch64")
+FIELDS = (
+    *SCALARS,
+    *ARRAYS,
+    *ARCH_ARRAYS,
+    *(f"{name}_{arch}" for name in ARCH_ARRAYS for arch in ARCHES),
 )
 
 pytestmark = pytest.mark.skipif(
@@ -43,24 +67,35 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _pkgbuild() -> dict[str, list[str]]:
+def _pkgbuild() -> tuple[dict[str, list[str]], list[str]]:
+    """The fields the PKGBUILD sets, and the lowercase variables it sets that are not fields."""
     script = (
+        'before=" $(compgen -v | tr "\\n" " ") "\n'
         'source "$1"; shift\n'
         'for v in "$@"; do eval "vals=(\\"\\${$v[@]}\\")"; '
-        'for x in "${vals[@]}"; do printf "%s\\t%s\\n" "$v" "$x"; done; done\n'
-        'printf "pkgname\\t%s\\n" "${pkgname[@]}"\n'
+        'for x in "${vals[@]}"; do printf "F\\t%s\\t%s\\n" "$v" "$x"; done; done\n'
+        'for v in $(compgen -v); do case "$before" in *" $v "*) ;; '
+        '*) printf "V\\t%s\\n" "$v" ;; esac; done\n'
+        'printf "F\\tpkgname\\t%s\\n" "${pkgname[@]}"\n'
     )
     out = subprocess.run(
-        ["bash", "-c", script, "bash", str(PKGBUILD), *FIELDS],
+        ["env", "-i", "bash", "-c", script, "bash", str(PKGBUILD), *FIELDS],
         check=True,
         capture_output=True,
         text=True,
     ).stdout
     found: dict[str, list[str]] = defaultdict(list)
+    variables: list[str] = []
     for line in out.splitlines():
-        key, _, value = line.partition("\t")
+        kind, _, rest = line.partition("\t")
+        if kind == "V":
+            # Bash's own variables are uppercase; the loop's are ours.
+            if re.fullmatch(r"[a-z][a-z0-9_]*", rest) and rest not in HELPERS:
+                variables.append(rest)
+            continue
+        key, _, value = rest.partition("\t")
         found[key].append(value)
-    return found
+    return found, variables
 
 
 def _srcinfo() -> dict[str, list[str]]:
@@ -77,9 +112,19 @@ def _srcinfo() -> dict[str, list[str]]:
 
 
 def test_srcinfo_repeats_every_field_of_the_pkgbuild() -> None:
-    build, info = _pkgbuild(), _srcinfo()
+    build, _ = _pkgbuild()
+    info = _srcinfo()
     assert info.pop("pkgbase") == build["pkgname"]
     assert info.pop("pkgname") == build["pkgname"]
     for field in FIELDS:
         assert info.pop(field, []) == build.get(field, []), field
     assert not info, f".SRCINFO has fields this test does not know: {sorted(info)}"
+
+
+def test_the_pkgbuild_sets_no_variable_this_test_does_not_compare() -> None:
+    """A makepkg variable added to the PKGBUILD must be compared too, not ignored."""
+    _, variables = _pkgbuild()
+    unknown = sorted(v for v in variables if v not in {*FIELDS, "pkgname", "pkgbase"})
+    assert not unknown, (
+        f"the PKGBUILD sets {unknown}, which test_arch_srcinfo.py does not compare with .SRCINFO"
+    )

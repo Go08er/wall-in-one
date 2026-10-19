@@ -75,8 +75,10 @@
         # for true Wallpaper Engine scenes and their stills. Never bundled
         # (docs/packaging.md): the app finds and controls what the system has
         # installed, and the NixOS and home-manager modules install these by
-        # default. Only the package's test run, the dev shell and the checks
-        # see this list; the VMs get the renderers through the module.
+        # default. The dev shell has them for running by hand; the app itself
+        # never looks in a store directory on PATH, so it finds only installed
+        # ones. The VMs get them through the module, and package-closure
+        # checks that none is in the package.
         wallpaperRenderers = [
           pkgs.mpvpaper
           pkgs.linux-wallpaperengine
@@ -165,9 +167,10 @@
           # for the wrong reason -- `test_a_missing_file_is_reported` was
           # getting "ffmpeg is not installed" and matching nothing it meant to.
           # Twenty-nine tests were silently sitting out the packaged build.
-          # The renderers are here for the test run only, as on a machine
-          # that has them installed; they are not in the package.
-          nativeCheckInputs = [ python.pkgs.pytest ] ++ bundledTools ++ wallpaperRenderers;
+          # The renderers are not here: on the test run's PATH they would be
+          # store directories, which the app never looks in, and every test
+          # that needs one stands in for it.
+          nativeCheckInputs = [ python.pkgs.pytest ] ++ bundledTools;
           checkPhase = ''
             runHook preCheck
             PYTHONPATH=$PWD/src:$PYTHONPATH pytest tests -q -m "not gui"

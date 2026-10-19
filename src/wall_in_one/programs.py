@@ -53,13 +53,16 @@ def program_directories() -> tuple[Path, ...]:
        differently from a terminal and from the service, when their ``PATH``
        differ there. Relative entries are skipped: they would depend on the
        caller's working directory.
-    4. The Nix store directories on ``PATH``, in ``PATH`` order, last. Until
-       0.4.0 they came first, because the package's wrapper put its bundled
-       renderers there for every caller. Nothing is bundled now (see
-       docs/packaging.md), so one is a caller's own -- a ``nix shell``, a dev
-       shell, a launcher's wrapper -- which the service doesn't see and no
-       garbage-collector root keeps. It is used only for a program found
-       nowhere else.
+
+    Never a Nix store directory on ``PATH``. Until 0.4.0 those came first,
+    because the package's wrapper put its bundled renderers there for every
+    caller. Nothing is bundled now (see docs/packaging.md), so one is a
+    caller's own -- a ``nix shell``, a dev shell, a launcher's wrapper --
+    which the service never sees and no garbage-collector root keeps: a
+    document naming it would differ from the one the service compiles from
+    the same state, and stop working at the next collection. A program has to
+    be installed (in a profile, a system place, or a directory of its own on
+    ``PATH``) to be found.
 
     A program found nowhere keeps 0.1.4's ``/usr/bin/<name>`` (`find_program`).
     """
@@ -69,7 +72,6 @@ def program_directories() -> tuple[Path, ...]:
         for entry in os.environ.get("PATH", "").split(os.pathsep)
         if entry and Path(entry).is_absolute()
     ]
-    store = [entry for entry in search if entry.is_relative_to(NIX_STORE)]
     user = _user_name()
     profiles = [
         home / ".nix-profile" / "bin",
@@ -79,10 +81,9 @@ def program_directories() -> tuple[Path, ...]:
         Path("/run/current-system/sw/bin"),
     ]
     system = [home / ".local" / "bin", Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")]
-    elsewhere = [entry for entry in search if entry not in store]
     ordered: list[Path] = []
-    for directory in (*profiles, *system, *elsewhere, *store):
-        if directory not in ordered:
+    for directory in (*profiles, *system, *search):
+        if directory not in ordered and not directory.is_relative_to(NIX_STORE):
             ordered.append(directory)
     return tuple(ordered)
 

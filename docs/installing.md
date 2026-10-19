@@ -58,8 +58,9 @@ $ nix profile install nixpkgs#mpvpaper nixpkgs#linux-wallpaperengine
 The app looks in the Nix profiles (`~/.nix-profile/bin`,
 `~/.local/state/nix/profile/bin`, `/etc/profiles/per-user/$USER/bin`,
 `/nix/var/nix/profiles/default/bin`, `/run/current-system/sw/bin`), then in
-`~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, then on `PATH`
-([why this order](packaging.md#finding-a-renderer)). It names a renderer by the
+`~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, then on `PATH`, but
+never in a store directory on `PATH`: a renderer only in a `nix shell` is not
+installed ([why](packaging.md#finding-a-renderer)). It names a renderer by the
 path it found it at, so a profile update needs nothing from you. After
 installing a renderer that was missing, run `wall-in-one --write-config` and
 `wall-in-one ctl reload` (or restart `wall-in-one.service`), so the service

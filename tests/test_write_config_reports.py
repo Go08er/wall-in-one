@@ -145,8 +145,8 @@ def test_a_terminal_and_the_service_compile_the_same_renderer_programs(
     The renderers are installed in the person's profile (the home-manager
     module's ``home.packages``, say). The profiles and the fixed system places
     come before the rest of PATH, and a store directory on PATH (a ``nix
-    shell``) comes last, so the terminal's extra directories cannot change a
-    byte.
+    shell``) is never looked in, so the terminal's extra directories cannot
+    change a byte.
     """
     store = tmp_path / "store"
     monkeypatch.setattr(programs, "NIX_STORE", store)
@@ -209,7 +209,7 @@ def test_a_profile_switch_compiles_the_same_bytes(
     assert mpvpaper.path.resolve().is_relative_to(store / "002-mpvpaper")
 
 
-def test_a_store_directory_on_path_never_shadows_an_installed_renderer(
+def test_a_store_directory_on_path_is_never_an_installed_renderer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A `nix shell` in front of PATH is that terminal's, and nothing keeps it alive."""
@@ -226,12 +226,47 @@ def test_a_store_directory_on_path_never_shadows_an_installed_renderer(
     installed.unlink()
     assert programs.find_program(name).path == unusual, "then the rest of PATH"
     unusual.unlink()
-    assert programs.find_program(name) == programs.Program(name, shell / name, found=True), (
-        "and a store directory only as the last resort"
-    )
+    assert programs.find_program(name) == programs.Program(
+        name, Path("/usr/bin") / name, found=False
+    ), "and a store directory never: it is not an install"
 
 
-def test_the_search_order_is_profiles_system_path_then_store_directories(
+def test_a_nix_shell_does_not_change_what_a_terminal_compiles(
+    tmp_path: Path,
+    library: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nothing installed, a renderer in a `nix shell` or dev shell: the same bytes as the service.
+
+    The service's start-up compile never sees a terminal's store directories,
+    so a document naming one would be rewritten by the next service start,
+    and would name a program the next garbage collection deletes.
+    """
+    store = tmp_path / "store"
+    monkeypatch.setattr(programs, "NIX_STORE", store)
+    shell = store / "abc-renderers" / "bin"
+    for name in RENDERER_KEYS:
+        _executable(shell, name)
+    config.save(config.Settings(roots=(library,), scan_workshop=False))
+    target = paths.runtime_config_path()
+
+    monkeypatch.setenv("PATH", f"{shell}{os.pathsep}/nonexistent/bin")
+    assert _write_config(capsys) == [f"wrote: {target}"], "inside the nix shell"
+    terminal = target.read_bytes()
+    assert str(store) not in terminal.decode()
+
+    monkeypatch.setenv("PATH", "/nonexistent/bin")
+    assert _write_config(capsys) == [f"nothing changed: {target} is already current"]
+    assert target.read_bytes() == terminal, "the service's run"
+    # Where this machine has none installed (a build sandbox: all three), none is found.
+    standard = programs.program_directories()
+    for name in RENDERER_KEYS:
+        if not any((directory / name).exists() for directory in standard):
+            assert not programs.find_program(name).found
+
+
+def test_the_search_order_is_profiles_system_then_path_without_store_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = tmp_path / "store"
@@ -251,16 +286,15 @@ def test_the_search_order_is_profiles_system_path_then_store_directories(
         home / ".local" / "state" / "nix" / "profile" / "bin",
     )
     assert Path("/run/current-system/sw/bin") in order
-    assert order[-8:] == (
+    assert order[-6:] == (
         home / ".local" / "bin",
         Path("/usr/local/bin"),
         Path("/usr/bin"),
         Path("/bin"),
         elsewhere,
         later,
-        first,
-        second,
-    ), "then the rest of PATH, then its store directories, in PATH order, each place once"
+    ), "then the rest of PATH, in PATH order, each place once"
+    assert first not in order and second not in order, "never a store directory"
     assert order.index(Path("/run/current-system/sw/bin")) < order.index(home / ".local" / "bin")
     assert Path("relative/bin") not in order, "a relative entry would depend on the caller's cwd"
 

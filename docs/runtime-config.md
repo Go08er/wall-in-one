@@ -71,8 +71,9 @@ Nix profiles, in NixOS's login order (`~/.nix-profile/bin`,
 `/nix/var/nix/profiles/default/bin`, `/run/current-system/sw/bin`), where the
 NixOS and home-manager modules install the renderers, then `~/.local/bin`,
 `/usr/local/bin`, `/usr/bin` and `/bin`, then every other directory on `PATH`,
-in `PATH` order, and last the Nix store directories on `PATH` (a `nix shell`,
-say), which only that caller sees and nothing keeps from garbage collection.
+in `PATH` order. A Nix store directory on `PATH` (a `nix shell`, a dev shell) is
+never looked in: only that caller sees it, and nothing keeps it from garbage
+collection.
 The path is written where it was found, not resolved: `~/.nix-profile/bin/mpvpaper`
 survives a profile switch and the collection of the old generation, and a
 renderer update leaves the document's bytes alone. A program found nowhere
@@ -81,7 +82,7 @@ entry needs it; `wall_in_one.programs.find_program` tells the app whether it
 was found, and the window starts its own scene stills by the same path. A
 renderer in one of the standard places therefore compiles to the same path
 from any caller. One installed only somewhere else (`/opt/...`, `~/bin`, a
-custom prefix, a store directory) is still found, but a terminal and the
+custom prefix) is still found, but a terminal and the
 service can disagree about it when their `PATH` differ there, and each run then
 rewrites `runtime.toml`; a link in `~/.local/bin` or `/usr/local/bin` avoids
 that.

@@ -96,19 +96,22 @@ state, whatever its own `PATH`. The places every caller shares come first:
    `~/.local/state/nix/profile/bin`, `/etc/profiles/per-user/$USER/bin`,
    `/nix/var/nix/profiles/default/bin`, `/run/current-system/sw/bin`.
 2. `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`.
-3. Every other absolute directory on `PATH`, in `PATH` order.
-4. The Nix store directories on `PATH`, in `PATH` order.
+3. Every other absolute directory on `PATH`, in `PATH` order, except the
+   Nix store directories.
 
-**The store directories moved from first to last.** They came first because
-the package's wrapper put its bundled renderers there, at the front of every
-caller's `PATH`, so a store directory there was one build every caller
-shared. With nothing bundled, a store directory on `PATH` is someone's own: a
-`nix shell` or `nix develop`, or a program that launched this one with its own
-wrapper's `PATH` in front. Only that caller sees it, so first
-place made a terminal compile a path the service would not, and nothing keeps
-it alive: the next garbage collection deletes the renderer the document names.
-Last place keeps a renderer that exists only there usable (a developer's
-shell still works), and never lets it shadow an installed one.
+**Store directories on `PATH` are not looked in at all.** Until 0.4 they came
+first, because the package's wrapper put its bundled renderers there, at the
+front of every caller's `PATH`, so a store directory there was one build every
+caller shared. With nothing bundled, a store directory on `PATH` is someone's
+own: a `nix shell` or `nix develop`, or a program that launched this one with
+its own wrapper's `PATH` in front. Only that caller sees it, so a terminal in a
+`nix shell` would compile a path the service's start-up compile never does
+(the same state, other bytes), and nothing keeps it alive: the next garbage
+collection deletes the renderer the document names. Nothing legitimate needs
+them: the package's tests stand in for the renderers, the golden profile
+compares programs by name, the VMs install them through the module, and a
+developer installs them as a user does (the dev shell still has them, to run
+by hand). A renderer has to be installed to be found.
 
 **The path found is written as found, not resolved.** A profile's `bin` is a
 symbolic link that every profile switch re-points;
@@ -197,8 +200,8 @@ user's Steam library and are never packaged.
 
 - The lookup, with fake profiles, store directories and `PATH`s
   (`tests/test_write_config_reports.py`): a re-pointed profile link compiles
-  the same bytes, a store directory on `PATH` never shadows a profile, a
-  renderer only in a store directory is still found, and `find_program`
+  the same bytes, a store directory on `PATH` is never looked in (a terminal
+  inside a `nix shell` compiles what the service does), and `find_program`
   reports found and not found. The window, the legacy service and the
   Noctalia calls agree with it and start what it finds, with the profile off
   their `PATH` (`tests/test_programs.py`).

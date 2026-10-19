@@ -1,6 +1,6 @@
 """Command line entry point.
 
-Six modes:
+The modes:
 
 * no arguments -- launch the GUI
 * ``--service`` -- legacy Python compatibility service for installations that
@@ -14,6 +14,8 @@ Six modes:
   compiler preflight, with last-known-good fallback left to Rust validation
 * ``--sync-runtime-health`` -- persist Rust's bounded failure inventory through
   the app-owned authoring/config path, also without GTK
+* ``--setup-status`` -- say what Wall-in-One needs that is missing (renderers,
+  Noctalia, the service, the companion plugin) and how to get it, read-only
 * maintenance flags such as ``--install-theme-template`` and the explicit
   no-overwrite legacy importer
 
@@ -199,6 +201,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sync-runtime-health-on-stop",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--setup-status",
+        action="store_true",
+        help=(
+            "say what Wall-in-One needs that is missing and how to get it; "
+            "exits 1 when something required is missing"
+        ),
     )
 
     migration = parser.add_argument_group("Legacy Noctalia plugin migration")
@@ -816,6 +826,26 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
     return 0
 
 
+def _setup_status() -> int:
+    """``--setup-status``: the window's setup findings as text (docs/missing-components.md).
+
+    Read-only, with no GTK: the programs, the service's unit and the
+    companion are looked for, and the service is asked once. Exits 1 when
+    something required is missing, as ``--legacy-migration-status`` does for
+    a decision it needs, so a script can act on it.
+    """
+    from wall_in_one import setup_check
+    from wall_in_one.control import client
+
+    found = setup_check.findings(
+        install_kind.INSTALL_KIND,
+        setup_check.local(),
+        setup_check.ask_service(client.TIMEOUT),
+    )
+    print(setup_check.report(found))
+    return 1 if setup_check.required(found) else 0
+
+
 def _choose_window_renderer(environ: MutableMapping[str, str] | None = None) -> None:
     """Before GTK loads: with GPU acceleration turned off, windows render in software.
 
@@ -856,6 +886,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print(json.dumps(update_status.report(), indent=2))
         return 0
+
+    if options.setup_status:
+        return _setup_status()
 
     migration = _run_legacy_migration(options)
     if migration is not None:

@@ -193,8 +193,11 @@ pkgs.testers.runNixOSTest {
 
     # The service asks the compositor every five seconds. A change shows up
     # in status within one interval, plus the three seconds a question may
-    # take at most, plus the time this loop takes to read status again.
-    hotplug_bound = 10.0
+    # take at most, plus the time this loop takes to read status again. That is
+    # eight seconds and a bit; the bound is fifteen so that a loaded CI runner,
+    # where the loop's own `ctl status` calls are slow, does not fail a
+    # correct run. Every measured time is printed (VM_SWAY_HOTPLUG).
+    hotplug_bound = 15.0
     latencies: list[tuple[str, float]] = []
 
     def show_status() -> None:

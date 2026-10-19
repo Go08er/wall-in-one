@@ -19,6 +19,13 @@
     # `follows`: its own flake.lock is part of what shipped, so the VM
     # installs exactly that build before this one is installed over it.
     wio-v0-1-4.url = "github:Go08er/wall-in-one/v0.1.4";
+    # Only the `modules` check uses it, to evaluate the home-manager module
+    # against home-manager's own option set. No package or module output
+    # refers to it.
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -28,6 +35,7 @@
       flake-utils,
       noctalia-plugins,
       noctalia,
+      home-manager,
       ...
     }:
     (flake-utils.lib.eachSystem [
@@ -689,10 +697,11 @@
           # module they install both, from the configuration's own pkgs (an
           # overlay's renderer is the one installed, not this flake's), and
           # the app; with manualWallpaperInstalls they install the app only.
-          # The home-manager module is evaluated against a stand-in for the
-          # one home-manager option it sets: home-manager is not an input of
-          # this flake. A mismatch fails at evaluation, so `nix flake check
-          # --no-build` catches it too.
+          # The home-manager module is evaluated by the real home-manager (an
+          # input used by this check alone), so an option it renames or
+          # retypes fails here, and the unit packages are followed to the
+          # link home-manager derives from them. A mismatch fails at
+          # evaluation, so `nix flake check --no-build` catches it too.
           modules =
             let
               inherit (pkgs) lib;
@@ -738,22 +747,14 @@
                 modulePkgs: settings:
                 let
                   inherit
-                    (lib.evalModules {
+                    (home-manager.lib.homeManagerConfiguration {
+                      pkgs = modulePkgs;
                       modules = [
                         module
-                        # Stand-ins for the two home-manager options the module sets.
                         {
-                          options.home.packages = lib.mkOption {
-                            type = lib.types.listOf lib.types.package;
-                            default = [ ];
-                          };
-                          options.systemd.user.packages = lib.mkOption {
-                            type = lib.types.listOf lib.types.package;
-                            default = [ ];
-                          };
-                        }
-                        {
-                          _module.args.pkgs = modulePkgs;
+                          home.username = "probe";
+                          home.homeDirectory = "/home/probe";
+                          home.stateVersion = "26.05";
                           programs.wall-in-one = { enable = true; } // settings;
                         }
                       ];
@@ -764,6 +765,8 @@
                 {
                   packages = config.home.packages;
                   units = config.systemd.user.packages;
+                  # What home-manager derives from the unit packages.
+                  linked = config.xdg.dataFile ? "systemd/user";
                 };
               # What a configuration installs: the app (this flake's), each
               # renderer, said with where it came from, and which of them
@@ -790,6 +793,8 @@
                   units =
                     map app (named result.units "wall-in-one")
                     ++ lib.concatMap (name: map lib.getName (named result.units name)) renderers;
+                  # home-manager's link for the unit packages; NixOS has none.
+                  linked = result.linked or null;
                 };
               # NixOS finds the units in the system profile; home-manager
               # links them into $XDG_DATA_HOME/systemd/user.
@@ -799,6 +804,14 @@
                 app = [ "wall-in-one" ];
                 renderers = if withRenderers then renderers else [ ];
                 inherit units;
+                linked = if units == homeUnits then true else null;
+              };
+              # enable = false: nothing installed, nothing linked.
+              nothing = {
+                app = [ ];
+                renderers = [ ];
+                units = [ ];
+                linked = false;
               };
               manual.manualWallpaperInstalls = true;
               cases = {
@@ -838,6 +851,10 @@
                     }
                   ))
                   (expect homeUnits true)
+                ];
+                "home-manager, disabled" = [
+                  (installed pkgs (home { } pkgs { enable = false; }))
+                  nothing
                 ];
                 "home-manager, imported by path" = [
                   (installed pkgs (home { module = ./nix/home-manager-module.nix; } pkgs (byPath manual)))

@@ -10,6 +10,7 @@ one file show up in an ordinary test run. docs/packaging.md.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -79,7 +80,8 @@ def _pkgbuild() -> tuple[dict[str, list[str]], list[str]]:
         'printf "F\\tpkgname\\t%s\\n" "${pkgname[@]}"\n'
     )
     out = subprocess.run(
-        ["env", "-i", "bash", "-c", script, "bash", str(PKGBUILD), *FIELDS],
+        ["bash", "-c", script, "bash", str(PKGBUILD), *FIELDS],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
         check=True,
         capture_output=True,
         text=True,

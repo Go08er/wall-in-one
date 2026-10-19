@@ -150,3 +150,66 @@ def test_the_new_window_says_a_missing_renderer_once(monkeypatch: pytest.MonkeyP
         destroy_window(window)
         application._stills.shutdown()
         application.session.shutdown()
+
+
+# -- the sequence the service gives for Play onto a renderer that cannot run -------------
+
+_MPV = (
+    "DP-1: mpvpaper cannot run here: /usr/bin/mpvpaper: mpvpaper: error while loading shared "
+    "libraries: libmpv.so.2: cannot open shared object file: No such file or directory; "
+    "paired still is active"
+)
+_LWE = (
+    "HDMI-A-1: linux-wallpaperengine is missing: cannot start /usr/bin/linux-wallpaperengine: "
+    "No such file or directory (os error 2); paired still is active"
+)
+
+
+def _independent(last_error: str) -> dict[str, object]:
+    status = _status("video-a", error=last_error, missing=("mpvpaper", "linux-wallpaperengine"))
+    status["missing_renderers"] = [
+        {"program": "mpvpaper", "path": "/usr/bin/mpvpaper", "reason": "cannot-run"},
+        {
+            "program": "linux-wallpaperengine",
+            "path": "/usr/bin/linux-wallpaperengine",
+            "reason": "not-found",
+        },
+    ]
+    return status
+
+
+def _play_twice() -> list[dict[str, object]]:
+    """Before Play on DP-1, right after it (the window's own refresh), and a tick later, twice.
+
+    As the service gives it now (re-review B1): DP-1's own error is gone until
+    its renderer exits 127 again, and the list of missing renderers stays.
+    """
+    return [_independent(f"{_MPV}; {_LWE}")] + [
+        _independent(error) for _ in range(2) for error in (_LWE, f"{_MPV}; {_LWE}")
+    ]
+
+
+def test_play_onto_a_renderer_that_cannot_run_says_nothing_new_in_either_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one.ui.next.window import NextWindow
+    from wall_in_one.ui.window import MainWindow
+
+    classic_application = _classic(tmp_path, monkeypatch)
+    classic = MainWindow(classic_application, classic_application.settings)  # type: ignore[arg-type, attr-defined]
+    application = started_application(ui="next")
+    new = NextWindow(application, application.settings)
+    said: dict[str, list[str]] = {"classic": [], "new": []}
+    monkeypatch.setattr(classic, "report", said["classic"].append)
+    monkeypatch.setattr(new, "report", said["new"].append)
+    try:
+        for status in _play_twice():
+            classic.show_runtime_status(status)
+            new.show_runtime_status(status)
+        assert said == {"classic": [f"{_MPV}; {_LWE}"], "new": [f"{_MPV}; {_LWE}"]}
+    finally:
+        destroy_window(classic)
+        destroy_window(new)
+        classic_application.session.shutdown()  # type: ignore[attr-defined]
+        application._stills.shutdown()
+        application.session.shutdown()

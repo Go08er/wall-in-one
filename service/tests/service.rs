@@ -10216,3 +10216,131 @@ fn a_reload_refused_for_a_display_says_which_and_keeps_the_configuration() {
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The missing list, by program, as a status reports it.
+fn missing_programs(snapshot: &serde_json::Value) -> Vec<String> {
+    snapshot["missing_renderers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["program"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_command_onto_a_renderer_that_cannot_run_keeps_it_listed() {
+    // Re-review probe B1. A spawn that succeeds used to clear the record
+    // before the 127 that follows was polled, so the status the window asks
+    // for right after a command said the program could run, and the next tick
+    // said it could not: the list flickered, and the windows said it again.
+    let root = directory("loader-failure-listed");
+    let mpvpaper = root.join("mpvpaper");
+    script(
+        &mpvpaper,
+        "echo 'mpvpaper: error while loading shared libraries: libmpv.so.2: cannot open shared object file: No such file or directory' >&2; exit 127",
+    );
+    let engine = root.join("absent-linux-wallpaperengine");
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
+    let (mut runtime, _log) = missing_renderer_runtime_over(
+        &root,
+        &mpvpaper,
+        &engine,
+        true,
+        |document| {
+            document.replace(
+                "connector = \"HDMI-A-1\"\nplaylist = \"stills\"",
+                "connector = \"HDMI-A-1\"\nplaylist = \"scenes\"",
+            ) + "[[playlists]]\nid = \"scenes\"\nname = \"Scenes\"\n\
+                 [[playlists.entries]]\nid = \"scene-x\"\nkind = \"scene\"\n\
+                 still = \"/tmp/x.png\"\nscene_id = \"777\"\n\
+                 palette = { kind = \"keep\", mode = \"keep\" }\n"
+        },
+        &source,
+    );
+    let started = Instant::now();
+    without_text_file_busy(|| runtime.apply_current()).unwrap();
+    let settle = |runtime: &mut Runtime<SystemDriver>| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            runtime.tick(noon(), started);
+            let snapshot = status(runtime, noon());
+            if missing_programs(&snapshot).len() == 2 || Instant::now() > deadline {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let both = ["mpvpaper", "linux-wallpaperengine"];
+    assert_eq!(missing_programs(&settle(&mut runtime)), both);
+    for _ in 0..2 {
+        let played = without_text_file_busy(|| {
+            let response = runtime_command(&mut runtime, noon(), "on", Some("DP-1 play"));
+            if response.ok {
+                Ok(response)
+            } else {
+                Err(response.message)
+            }
+        });
+        assert!(played.is_ok(), "{played:?}");
+        let right_after = status(&mut runtime, noon());
+        assert_eq!(missing_programs(&right_after), both, "the list flickered");
+        let after = settle(&mut runtime);
+        assert_eq!(missing_programs(&after), both);
+        assert_eq!(
+            after["missing_renderers"][0]["reason"], "cannot-run",
+            "{after}"
+        );
+    }
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_program_recorded_as_unable_to_run_that_then_runs_is_cleared() {
+    // The record kept across a spawn goes once a child outlives the window.
+    let root = directory("loader-failure-then-runs");
+    let mpvpaper = root.join("mpvpaper");
+    let flag = root.join("broken");
+    fs::write(&flag, "").unwrap();
+    script(
+        &mpvpaper,
+        &format!(
+            "if [ -e {flag:?} ]; then echo 'mpvpaper: error while loading shared libraries: libmpv.so.2: cannot open shared object file' >&2; exit 127; fi; exec sleep 30"
+        ),
+    );
+    let engine = root.join("absent-linux-wallpaperengine");
+    let (mut runtime, _log) = missing_renderer_runtime(&root, &mpvpaper, &engine, false);
+    let started = Instant::now();
+    without_text_file_busy(|| runtime.apply_current()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while missing_programs(&status(&mut runtime, noon())).is_empty() && Instant::now() < deadline {
+        runtime.tick(noon(), started);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        missing_programs(&status(&mut runtime, noon())),
+        ["mpvpaper"]
+    );
+    // The library arrives (the same binary); Play starts it, and it runs.
+    fs::remove_file(&flag).unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "play", None).ok);
+    assert_eq!(
+        missing_programs(&status(&mut runtime, noon())),
+        ["mpvpaper"],
+        "kept while it might still exit 127"
+    );
+    thread::sleep(
+        wall_in_one_service::renderer::LOADER_FAILURE_WINDOW + Duration::from_millis(300),
+    );
+    runtime.tick(noon(), started);
+    let running = status(&mut runtime, noon());
+    assert_eq!(
+        running["missing_renderers"],
+        serde_json::json!([]),
+        "{running}"
+    );
+    assert_eq!(running["motion_active"], true, "{running}");
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}

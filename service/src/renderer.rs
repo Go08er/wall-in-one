@@ -1374,8 +1374,18 @@ impl SystemDriver {
         };
         match started {
             Ok(()) => {
-                // The program is there: whatever an earlier spawn said.
-                self.missing[index] = None;
+                // The program is there: whatever an earlier spawn said. One
+                // recorded as unable to run (a library its loader could not
+                // find) starts just as well and exits 127 a moment later, so
+                // its record stays until a child of it has outlived
+                // LOADER_FAILURE_WINDOW (`poll_failures`): a status in
+                // between must not say it can run now.
+                if self.missing[index]
+                    .as_ref()
+                    .is_none_or(|record| record.reason != MissingReason::CannotRun)
+                {
+                    self.missing[index] = None;
+                }
                 Ok(())
             }
             Err(StartError::Missing(error)) => {
@@ -1747,6 +1757,28 @@ impl WallpaperDriver for SystemDriver {
                     message,
                     permanent_for_session,
                 });
+            }
+        }
+        // A program recorded as unable to run whose child has now outlived
+        // the loader's window runs after all: the record goes.
+        let outlived = |started: Option<Instant>| {
+            started.is_some_and(|started| started.elapsed() > LOADER_FAILURE_WINDOW)
+        };
+        let ran = [
+            self.videos
+                .values()
+                .any(|active| outlived(active.renderer.started)),
+            self.scenes
+                .values()
+                .any(|active| outlived(Some(active.started))),
+        ];
+        for (index, ran) in ran.into_iter().enumerate() {
+            if ran
+                && self.missing[index]
+                    .as_ref()
+                    .is_some_and(|record| record.reason == MissingReason::CannotRun)
+            {
+                self.missing[index] = None;
             }
         }
         failures

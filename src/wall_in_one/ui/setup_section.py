@@ -2,9 +2,11 @@
 
 What is missing, and every word said about it, comes from
 `wall_in_one.setup_check` (docs/missing-components.md); this module only
-shows it. The programs, the service's unit and the companion are looked for on
-one ordered worker (`TidyLane`: the application's ``setup_lane``), whose
-results reach GTK at ``GLib.PRIORITY_DEFAULT``. The service's state is the
+shows it. The programs, the service's unit and the companion are looked for
+off GTK (`SetupLane`: the application's ``setup_lane``), whose results reach
+GTK at ``GLib.PRIORITY_DEFAULT``. A look only reads, and one that hangs (a
+dead mount) must never hold the app's exit, so each runs on a daemon thread
+and the lane is closed without waiting. The service's state is the
 status the application already polls (`RuntimeStatusModel`), so nothing is
 said about the service before its first answer, and a service the companion
 starts a moment later takes the finding away by itself.
@@ -18,21 +20,21 @@ and nothing is written. A finding that changes shows again.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, GLib, Gtk
 
 from wall_in_one import install_kind, setup_check
 from wall_in_one.setup_check import Finding, Local, Service
 from wall_in_one.ui.plain_text import plain
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange
-from wall_in_one.ui.tidy_section import TidyLane
 
 if TYPE_CHECKING:
     from wall_in_one.ui.app import Application
@@ -43,6 +45,64 @@ COMPANION_LINK_LABEL = "Get the Companion Plugin"
 #: Called with the findings (None until the first look landed, or after a
 #: look that failed) and why a look failed.
 Shown = Callable[[tuple[Finding, ...] | None, str], None]
+
+_Result = TypeVar("_Result")
+
+
+class SetupLane:
+    """Where Setup's looks run: each on a daemon thread, delivered on GTK.
+
+    A look only reads files, but one can hang (a FIFO, a mount that stopped
+    answering), and a pool's worker is joined at interpreter exit, so it
+    would hold the app's quit. A daemon thread is not; `shutdown` only stops
+    deliveries.
+    """
+
+    def __init__(self) -> None:
+        self._closed = False
+        self._lock = threading.Lock()
+        self._pending = 0
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._pending > 0
+
+    def submit(
+        self,
+        work: Callable[[], _Result],
+        done: Callable[[_Result | None, str], None],
+    ) -> bool:
+        """Run ``work`` off GTK; ``done(result, error)`` runs on GTK unless shut down."""
+        if self._closed:
+            return False
+
+        def deliver(result: _Result | None, error: str) -> bool:
+            with self._lock:
+                self._pending -= 1
+            if not self._closed:
+                done(result, error)
+            return GLib.SOURCE_REMOVE
+
+        def run() -> None:
+            result: _Result | None = None
+            error = ""
+            try:
+                result = work()
+            except Exception as failure:  # a look that failed says so
+                error = f"Couldn't check: {failure}"
+            GLib.idle_add(  # type: ignore[call-arg]
+                deliver, result, error, priority=GLib.PRIORITY_DEFAULT
+            )
+
+        with self._lock:
+            self._pending += 1
+        threading.Thread(target=run, name="setup-look", daemon=True).start()
+        return True
+
+    def shutdown(self) -> None:
+        """Deliver nothing more; a look still running ends on its own."""
+        self._closed = True
 
 
 def service_from(view: RuntimeStatusView | None) -> Service:
@@ -68,7 +128,7 @@ class SetupWatch:
     def __init__(self, application: Application, shown: Shown) -> None:
         self._app = application
         self._shown = shown
-        self._lane: TidyLane | None = None
+        self._lane: SetupLane | None = None
         self._local: Local | None = None
         self._service = Service("unknown")
         self._unsubscribe: Callable[[], None] | None = None
@@ -114,10 +174,10 @@ class SetupWatch:
         self._lane = None
         self._looking = False
 
-    def _lane_now(self) -> TidyLane:
+    def _lane_now(self) -> SetupLane:
         if self._lane is None:
             lane = getattr(self._app, "setup_lane", None)
-            self._lane = lane if isinstance(lane, TidyLane) else TidyLane(stopped="Couldn't check")
+            self._lane = lane if isinstance(lane, SetupLane) else SetupLane()
         return self._lane
 
     def _landed(self, local: Local | None, error: str) -> None:

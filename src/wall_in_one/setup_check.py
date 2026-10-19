@@ -66,6 +66,10 @@ AFTER_INSTALLING: Final = (
 #: How much of a ``plugin.toml`` is read, and how many are read at most.
 MAX_MANIFEST_BYTES: Final = 64 * 1024
 MAX_MANIFESTS: Final = 4096
+#: How many entries all of Noctalia's plugin folders are listed for, at most:
+#: a folder far past it is no plugin folder, and listing it would stall.
+MAX_LISTED: Final = 16384
+
 
 type ServiceState = Literal["running", "not-running", "not-answering", "unknown"]
 type CompanionState = Literal["installed", "absent", "unknown"]
@@ -467,52 +471,87 @@ class _UnreadableError(Exception):
     """A place that is there but could not be looked into."""
 
 
-def _subdirectories(directory: Path) -> list[Path]:
-    """The folders in ``directory``, symbolic links followed as Noctalia does.
+class _Listing:
+    """What one look through Noctalia's plugin folders has listed, within `MAX_LISTED`.
 
-    [] when it is not there; `_UnreadableError` when it, or an entry in it, is
-    there but cannot be looked at.
+    Each entry that cannot be looked at is noted, and the look carries on:
+    one broken link must not hide the companion beside it.
     """
-    try:
-        names = sorted(os.listdir(directory))
-    except FileNotFoundError, NotADirectoryError:
-        return []
-    except OSError as error:
-        raise _UnreadableError(str(directory)) from error
-    found: list[Path] = []
-    for name in names:
-        path = directory / name
+
+    def __init__(self) -> None:
+        self.listed = 0
+        self.unreadable: list[str] = []
+        self.too_many = False
+
+    def subdirectories(self, directory: Path) -> list[Path]:
+        """The folders in ``directory``, symbolic links followed as Noctalia does.
+
+        [] when it is not there, or cannot be listed (noted), or past the
+        listing's bound (noted).
+        """
+        found: list[Path] = []
         try:
-            info = os.stat(path)
-        except FileNotFoundError:
-            continue  # a dangling link, or gone since the listing
-        except OSError as error:
-            raise _UnreadableError(str(path)) from error
-        if stat.S_ISDIR(info.st_mode):
-            found.append(path)
-    return found
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    self.listed += 1
+                    if self.listed > MAX_LISTED:
+                        self.too_many = True
+                        break
+                    path = Path(entry.path)
+                    try:
+                        info = os.stat(path)
+                    except FileNotFoundError:
+                        continue  # a dangling link, or gone since the listing
+                    except OSError:
+                        self.unreadable.append(str(path))
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        found.append(path)
+        except FileNotFoundError, NotADirectoryError:
+            return []
+        except OSError:
+            self.unreadable.append(str(directory))
+        return sorted(found)
 
 
 def _manifest_id(folder: Path) -> object:
     """The ``id`` in ``folder/plugin.toml``, read in full or not at all.
 
-    None for a folder without a readable manifest of a sane size (not a
-    plugin Noctalia loads); `_UnreadableError` when one is there but cannot be
-    read.
+    None for a folder without a manifest Noctalia could load: none, not a
+    regular file (a FIFO there would block an ordinary open for ever), past
+    `MAX_MANIFEST_BYTES`, or not TOML Python can read (an integer past
+    Python's digit limit raises a plain ValueError). `_UnreadableError` when
+    one is there but cannot be read.
     """
     manifest_path = folder / "plugin.toml"
     try:
-        with manifest_path.open("rb") as manifest:
-            data = manifest.read(MAX_MANIFEST_BYTES + 1)
+        descriptor = os.open(
+            manifest_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+        )
     except FileNotFoundError, NotADirectoryError, IsADirectoryError:
         return None
     except OSError as error:
         raise _UnreadableError(str(manifest_path)) from error
-    if len(data) > MAX_MANIFEST_BYTES:
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= MAX_MANIFEST_BYTES:
+            chunk = os.read(descriptor, MAX_MANIFEST_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    except OSError as error:
+        raise _UnreadableError(str(manifest_path)) from error
+    finally:
+        os.close(descriptor)
+    if size > MAX_MANIFEST_BYTES:
         return None
     try:
-        parsed = tomllib.loads(data.decode("utf-8"))
-    except UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
+        parsed = tomllib.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError, RecursionError:  # UnicodeDecodeError and TOMLDecodeError are ValueErrors
         return None
     return parsed.get("id")
 
@@ -530,39 +569,46 @@ def companion(environ: Mapping[str, str]) -> Companion:
     state = _noctalia_dir(environ, "NOCTALIA_STATE_HOME", "XDG_STATE_HOME", (".local", "state"))
     if data is None or state is None:
         return Companion("unknown", "no usable home folder for Noctalia's")
-    candidates: list[Path] = []
-    unreadable: list[str] = []
-
-    def look(directory: Path) -> list[Path]:
-        try:
-            return _subdirectories(directory)
-        except _UnreadableError as error:
-            unreadable.append(str(error))
-            return []
-
-    candidates.extend(look(data / "plugins"))
-    for source in look(state / "plugins" / "materialized"):
-        candidates.extend(look(source))
+    listing = _Listing()
+    candidates = listing.subdirectories(data / "plugins")
+    for source in listing.subdirectories(state / "plugins" / "materialized"):
+        candidates.extend(listing.subdirectories(source))
     for read, folder in enumerate(candidates):
         if read >= MAX_MANIFESTS:
-            return Companion("unknown", f"more than {MAX_MANIFESTS} plugins")
+            listing.too_many = True
+            break
         try:
             if _manifest_id(folder) == COMPANION_ID:
                 return Companion("installed", str(folder))
         except _UnreadableError as error:
-            unreadable.append(str(error))
-    if unreadable:
-        return Companion("unknown", ", ".join(unreadable))
+            listing.unreadable.append(str(error))
+    if listing.too_many:
+        return Companion("unknown", f"more than {MAX_LISTED} entries or {MAX_MANIFESTS} plugins")
+    if listing.unreadable:
+        return Companion("unknown", ", ".join(listing.unreadable))
     return Companion("absent")
 
 
 def local(environ: Mapping[str, str] | None = None) -> Local:
-    """What this machine has: the programs, the service's unit, the companion."""
+    """What this machine has: the programs, the service's unit, the companion.
+
+    The unit and the companion are optional checks: one that fails for any
+    reason is "couldn't tell", never an error that would hide what is
+    required (the programs and the service).
+    """
     environ = os.environ if environ is None else environ
+    try:
+        unit = unit_installed(environ)
+    except Exception:  # an optional check never hides a required one
+        unit = None
+    try:
+        found = companion(environ)
+    except Exception as error:  # likewise
+        found = Companion("unknown", f"the check failed: {error}")
     return Local(
         programs=tuple(programs.find_program(name) for name in PROGRAMS),
-        unit=unit_installed(environ),
-        companion=companion(environ),
+        unit=unit,
+        companion=found,
     )
 
 

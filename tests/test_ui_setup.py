@@ -10,8 +10,10 @@ are ``tests/test_golden_setup_card.py``.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TypeVar
 
 import pytest
@@ -27,12 +29,16 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.gtk_helpers import FIRST_FRAME_S, REAL_IO_S, first_frame, spin_until  # noqa: E402
 from tests.shown_text import shown_texts  # noqa: E402
 from wall_in_one import programs, setup_check  # noqa: E402
+from wall_in_one.library.model import Kind  # noqa: E402
 from wall_in_one.setup_check import Companion, Local  # noqa: E402
-from wall_in_one.ui.setup_section import SetupCard, SetupSection  # noqa: E402
+from wall_in_one.ui.setup_section import SetupCard, SetupLane, SetupSection  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusModel  # noqa: E402
-from wall_in_one.ui.tidy_section import TidyLane  # noqa: E402
 
 _Result = TypeVar("_Result")
+
+#: A library with a video in it, and one of stills only.
+_VIDEO_LIBRARY = (SimpleNamespace(kind=Kind.STILL), SimpleNamespace(kind=Kind.VIDEO))
+_STILLS_LIBRARY = (SimpleNamespace(kind=Kind.STILL),)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -62,11 +68,11 @@ def _machine(
     )
 
 
-class _ObservedLane(TidyLane):
+class _ObservedLane(SetupLane):
     """The application's lane, unchanged, with its worker's progress observable."""
 
     def __init__(self) -> None:
-        super().__init__(stopped="Couldn't check")
+        super().__init__()
         self._lock = threading.Lock()
         self._unfinished = 0
         self.submitted = 0
@@ -104,6 +110,8 @@ class _Application:
         self.setup_lane = _ObservedLane()
         self.setup_dismissed: set[str] = set()
         self.checks_again = 0
+        #: The library the application holds: kinds only matter here.
+        self.session = SimpleNamespace(library=SimpleNamespace(items=_VIDEO_LIBRARY))
 
     def check_setup_again(self) -> bool:
         self.checks_again += 1
@@ -310,3 +318,18 @@ def test_not_now_holds_for_the_session_until_a_finding_changes(
         assert [finding.key for finding in card.shown] == ["service"]
     finally:
         window.destroy()
+
+
+def test_the_setup_lane_never_waits_for_a_look_that_hangs() -> None:
+    """A look stuck on a dead mount must not hold the app's quit."""
+    lane = SetupLane()
+    release = threading.Event()
+    delivered: list[object] = []
+    assert lane.submit(lambda: release.wait(30), lambda result, error: delivered.append(result))
+    started = time.monotonic()
+    lane.shutdown()
+    assert time.monotonic() - started < 1
+    assert not lane.submit(lambda: None, lambda result, error: delivered.append(result))
+    release.set()
+    spin_until(lambda: not lane.busy, what="the released look ending")
+    assert delivered == [], "nothing is delivered once shut down"

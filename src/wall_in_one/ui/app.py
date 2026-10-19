@@ -69,6 +69,7 @@ from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.real_schedule import ColorsForgotten
 from wall_in_one.ui.next.window import NextWindow
+from wall_in_one.ui.setup_section import SetupLane
 from wall_in_one.ui.status_model import RuntimeStatusModel, RuntimeStatusView, StatusChange
 from wall_in_one.ui.stills import StillMaker
 from wall_in_one.ui.tidy_section import TidyLane
@@ -849,7 +850,7 @@ class Application(Adw.Application):
         self.tidy_lane = TidyLane()
         #: Settings → Setup and the window's setup card look on this lane; they
         #: only read (`wall_in_one.ui.setup_section`).
-        self.setup_lane = TidyLane(stopped="Couldn't check")
+        self.setup_lane = SetupLane()
         #: The setup findings the card's Not Now hid, by fingerprint: for this
         #: process only, and never written (docs/missing-components.md).
         self.setup_dismissed: set[str] = set()
@@ -2080,7 +2081,7 @@ class Application(Adw.Application):
         for browser in browse_transports:
             browser.shutdown()
         self.tidy_lane.shutdown()
-        self.setup_lane.shutdown()
+        self.setup_lane.shutdown()  # never waits: a look that hangs must not hold quit
         if self._browse_jobs is not None:
             # Active transports were closed above, waking their socket reads;
             # queued futures are invalidated here. Downloads stage under a

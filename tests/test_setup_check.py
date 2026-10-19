@@ -9,6 +9,9 @@ same findings and exits 1 while something required is missing.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -476,3 +479,152 @@ def test_setup_status_succeeds_with_only_optional_findings(
 
 def test_setup_status_is_in_help() -> None:
     assert "--setup-status" in cli._build_parser().format_help()
+
+
+# -- review of r9-integration (probes-a): what a machine can throw at the check -----------
+
+
+COMPANION_MANIFEST = f'id = "{setup_check.COMPANION_ID}"\nname = "Wall-in-One"\n'
+
+
+def _plugin(root: Path, folder: str, manifest: str) -> Path:
+    directory = root / folder
+    directory.mkdir(parents=True)
+    (directory / "plugin.toml").write_text(manifest, encoding="utf-8")
+    return directory
+
+
+def _local_plugins(home: Path) -> Path:
+    return home / ".local" / "share" / "noctalia" / "plugins"
+
+
+def test_a_hostile_manifest_never_stops_the_companion_check(tmp_path: Path) -> None:
+    """Another plugin's plugin.toml with a 5000-digit integer (valid TOML).
+
+    tomllib raises a plain ValueError (Python's limit on an int's digits).
+    """
+    home = tmp_path / "home"
+    _plugin(_local_plugins(home), "aaa-other", 'id = "someone/other"\nseed = ' + "7" * 5000 + "\n")
+    companion = _plugin(_local_plugins(home), "wall-in-one", COMPANION_MANIFEST)
+    assert setup_check.companion(_environment(home)) == Companion("installed", str(companion))
+
+
+def test_an_optional_check_that_fails_never_hides_a_required_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_environ: object) -> Companion:
+        raise ValueError("Exceeds the limit (4300 digits) for integer string conversion")
+
+    monkeypatch.setattr(setup_check, "companion", broken)
+    monkeypatch.setattr(setup_check, "unit_installed", broken)
+    monkeypatch.setattr(programs, "program_directories", lambda: (tmp_path / "bin",))
+    found = setup_check.local(_environment(tmp_path / "home"))
+    assert found.companion.state == "unknown"
+    assert "4300 digits" in found.companion.where
+    assert found.unit is None
+    required = setup_check.required(setup_check.findings("nix", found, Service("not-running")))
+    assert {"service", "noctalia"} <= {finding.key for finding in required}
+
+
+def test_setup_status_survives_a_hostile_manifest(
+    this_test_machine: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = this_test_machine / "home"
+    _plugin(_local_plugins(home), "aaa-other", 'id = "someone/other"\nseed = ' + "7" * 5000 + "\n")
+    for name in ("XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(setup_check, "ask_service", lambda _timeout: RUNNING)
+    code = cli.main(["--setup-status"])
+    out = capsys.readouterr().out
+    assert code in (0, 1)
+    assert out.strip(), "no report printed"
+
+
+def test_a_fifo_named_plugin_toml_does_not_hang_the_check(tmp_path: Path) -> None:
+    """A FIFO where a manifest would be: an ordinary open blocks until a writer comes."""
+    home = tmp_path / "home"
+    folder = _local_plugins(home) / "aaa-fifo"
+    folder.mkdir(parents=True)
+    fifo = folder / "plugin.toml"
+    os.mkfifo(fifo)
+    companion = _plugin(_local_plugins(home), "wall-in-one", COMPANION_MANIFEST)
+    result: list[Companion] = []
+    worker = threading.Thread(
+        target=lambda: result.append(setup_check.companion(_environment(home)))
+    )
+    worker.daemon = True
+    worker.start()
+    worker.join(timeout=3)
+    hung = worker.is_alive()
+    if hung:
+        # Release the reader so the thread ends: a writer that closes at once.
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=3)
+    assert not hung, "companion() blocked on a FIFO named plugin.toml"
+    assert result == [Companion("installed", str(companion))]
+
+
+def test_one_entry_that_cannot_be_looked_at_does_not_hide_the_companion(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    plugins = _local_plugins(home)
+    plugins.mkdir(parents=True)
+    os.symlink("aaa-loop", plugins / "aaa-loop")  # ELOOP on stat
+    companion = _plugin(plugins, "wall-in-one", COMPANION_MANIFEST)
+    assert setup_check.companion(_environment(home)) == Companion("installed", str(companion))
+    # Without the companion, the folder it could not see makes it "unknown".
+    (companion / "plugin.toml").unlink()
+    companion.rmdir()
+    assert setup_check.companion(_environment(home)) == Companion(
+        "unknown", str(plugins / "aaa-loop")
+    )
+
+
+def test_a_huge_plugin_folder_is_listed_only_so_far(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(setup_check, "MAX_LISTED", 20)
+    home = tmp_path / "home"
+    plugins = _local_plugins(home)
+    for index in range(30):
+        (plugins / f"folder-{index:02}").mkdir(parents=True)
+    found = setup_check.companion(_environment(home))
+    assert found.state == "unknown", found
+    assert "more than 20 entries" in found.where
+
+
+def test_setup_status_imports_no_gtk_and_writes_nothing(tmp_path: Path) -> None:
+    """--setup-status in a fresh interpreter over an empty, isolated tree."""
+    root = tmp_path / "iso"
+    for name in ("home", "config", "state", "cache", "data", "run"):
+        (root / name).mkdir(parents=True)
+    (root / "run").chmod(0o700)
+    before = sorted(str(path) for path in root.rglob("*"))
+    source = Path(setup_check.__file__).resolve().parents[1]
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(root / "home"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_STATE_HOME": str(root / "state"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_DATA_HOME": str(root / "data"),
+        "XDG_RUNTIME_DIR": str(root / "run"),
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={root / 'run' / 'no-bus'}",
+        "PYTHONPATH": str(source),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    code = (
+        "import sys\n"
+        "from wall_in_one import cli\n"
+        "rc = cli.main(['--setup-status'])\n"
+        "gi = any(m == 'gi' or m.startswith('gi.') for m in sys.modules)\n"
+        "print('GI-LOADED' if gi else 'NO-GI')\n"
+        "sys.exit(rc)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], env=environment, capture_output=True, text=True, timeout=60
+    )
+    after = sorted(str(path) for path in root.rglob("*"))
+    assert "NO-GI" in done.stdout, done.stdout + done.stderr
+    assert after == before, set(after) - set(before)
+    assert done.returncode == 1, done  # no service answers

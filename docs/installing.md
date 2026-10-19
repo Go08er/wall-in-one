@@ -235,7 +235,7 @@ checkout):
 |---|---|---|
 | the wallpaper service, `wall-in-one-service` | yes, running | nothing changes on the desktop |
 | Noctalia 5 or later | yes | no wallpaper or palette can be set |
-| mpvpaper and linux-wallpaperengine | at least one | videos, or Wallpaper Engine scenes, show their still |
+| mpvpaper and linux-wallpaperengine | at least one, for a library with videos or scenes | videos, or Wallpaper Engine scenes, show their still |
 | the [companion plugin](https://github.com/Go08er/goober-noctalia-plugins-v5) for Noctalia | no | nothing keeps the service running unless its user unit does, and Noctalia's bar has no controls |
 
 - **In the window**, both interfaces: while something needed is missing, a
@@ -246,7 +246,8 @@ checkout):
 - **In Settings → Setup**: everything above that is missing, needed or not,
   with the same **Check Again**.
 - **From a terminal**: `wall-in-one --setup-status` prints the same, and exits
-  1 while something needed is missing, 0 otherwise.
+  1 while something needed is missing, 2 when it couldn't tell (the check
+  failed, or the service didn't answer in time), 0 otherwise.
 
 The app looks for the programs where it looks for the renderers
 ([above](#the-wallpaper-renderers)); for the service, it asks it, and otherwise

@@ -64,7 +64,8 @@ session override and `cycle default` returns to the authored setting. In
 independent mode it holds for every display, including one that is detached or
 connected later, and it outlasts a reload that changes the display mode;
 `on <connector> cycle on|off|default` sets one display's own override until
-the next session-wide `cycle`.
+the next session-wide `cycle`, or a reload that changes the display mode, which
+starts every display afresh (the session-wide override stays).
 
 `status` is JSON describing the active playlist and entry, whether the source
 is `manual`, `schedule`, or (for divergent independent routes) `mixed`, the
@@ -150,13 +151,19 @@ From 0.4.0, `status` also carries `missing_renderers`: the renderer programs
 the service could not start at all, because nothing is at the path
 `runtime.toml` names or it is not executable there. It is a top-level array,
 mpvpaper first, of at most two rows, each `{"program": "mpvpaper", "path":
-"/usr/bin/mpvpaper"}` (the path cut in the middle past 1024 bytes); empty
-means none. A display whose entry needs such a program shows that entry's
+"/usr/bin/mpvpaper", "reason": "not-found"}` (the path cut in the middle past
+1024 bytes; `reason` is `not-found`, `not-executable` or `cannot-run`); empty
+means none. A renderer whose child exits with status 127 within five seconds of
+its spawn (a missing library) is one that cannot run, too. Like `outputs`, it
+never takes a taboo record's place: at the reply's limit a row's path is left
+empty, then the rows are left out. A display whose entry needs such a program shows that entry's
 still, with `renderer_failed: true` and the program, path and error in its
 `last_error`, so Play retries; the entry is never made taboo, retried as a
 failure or listed in `taboo_entries`. A record goes when that program next
-starts, when a reload changes the renderer settings, and on a reload once the
-path holds an executable file (the reload then starts it on those displays).
+starts, when a reload changes the renderer settings, and on a reload once what
+is at the path has changed (installed, replaced, re-pointed: the reload then
+starts it on every display that showed its still for it). A reload that
+changes nothing leaves a program that cannot run alone.
 A renderer that started and then exited is still an ordinary renderer failure.
 See [missing components](missing-components.md#the-service-without-a-renderer).
 

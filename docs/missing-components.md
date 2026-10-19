@@ -11,22 +11,25 @@ desktop sensible until it is there. Two halves:
   reports which program it could not start.
 - **The app** checks for each component itself, says what is missing and how to
   get it for this kind of install, in the window, in Settings and from a
-  terminal, and offers **Check again**.
+  terminal, and offers **Check Again**.
 
 ## What can be missing
 
 | Component | Required? | How the app knows |
 |---|---|---|
-| mpvpaper, linux-wallpaperengine | one of the two is required; each alone is optional | `programs.find_program(name).found`, and the service's `missing_renderers` |
+| mpvpaper, linux-wallpaperengine | one of the two is required when the library has a video or a scene; each alone is optional | `programs.find_program(name).found`, and the service's `missing_renderers` |
 | Noctalia | required | `programs.find_program("noctalia").found` |
 | The wallpaper service | required: running, or at least installed | a `status` reply; else whether `wall-in-one-service` and its user unit are installed |
 | The companion plugin | optional | a read-only look in Noctalia's plugin folders |
 
 Required means the wallpaper cannot be managed at all without it: no service
-running, no renderer of either kind, or no Noctalia (which sets every still and
-palette). The window shows a notice for those. One renderer missing (its kind
-shows stills) and the companion missing while the service runs anyway are
-optional: Settings lists them, the window does not interrupt for them.
+running, no Noctalia (which sets every still and palette), or no renderer of
+either kind while the library has a video or a scene to play. The window shows
+a notice for those. One renderer missing (its kind shows stills), no renderer
+for a library of stills only, and the companion missing while the service runs
+anyway are optional: Settings lists them, the window does not interrupt for
+them. (A library of stills is the owner's call: someone who never plays motion
+must not meet a card every session.)
 
 ## The service without a renderer
 
@@ -38,8 +41,18 @@ Starting a renderer can fail in two ways that look alike in a log:
   `runtime.toml` names fails with `NotFound` (nothing there, or a script whose
   interpreter is missing) or `PermissionDenied` (a file that is not
   executable, or a mount that forbids it). No child ever existed.
-- **A child started and then failed.** mpvpaper or linux-wallpaperengine ran
-  and exited: a codec it lacks, a scene it cannot render, a crash.
+- **The program started but could not run.** The child exits with status 127
+  within five seconds of its spawn (`LOADER_FAILURE_WINDOW`): the dynamic
+  loader could not find a library ("error while loading shared libraries", the
+  commonest way an Arch `linux-wallpaperengine-git` breaks after a soname
+  bump), or a wrapper script could not find what it runs. Both happen before
+  the renderer's own code runs, within milliseconds, and the service looks at
+  its children every few tens of milliseconds, so five seconds is room for a
+  loaded machine and a slow disk without reaching anything a renderer that drew
+  a frame would do.
+- **A child ran and then failed.** mpvpaper or linux-wallpaperengine ran and
+  exited: a codec it lacks, a scene it cannot render, a crash, or a 127 after
+  the window.
 
 Until now both were the same `Err` from the driver. An automatic apply (start-up,
 rotation, a schedule change, a display plugged in) retried it twice, then marked
@@ -48,11 +61,13 @@ wallpaper. A missing renderer therefore skipped every video or scene in turn,
 and the skip outlived the install. That was the default outcome of an update
 from 0.3 without the renderers.
 
-Now only the second is a failure. The first is recorded on the driver as a
-missing renderer, and the apply that met it succeeds. Nothing else changes for a
-child that exits: `poll_failures` reports it as before (a video stays retryable,
-a scene is taboo for the session), and any other spawn error (out of memory, too
-many processes) is still a failure.
+Now only the last is a failure. The first two are recorded on the driver as a
+renderer that could not run, and the apply that met it succeeds (the loader's
+exit is reported as a display's error, never as a crash, so a scene is not
+quarantined). Nothing else changes for a child that ran and exited:
+`poll_failures` reports it as before (a video stays retryable, a scene is taboo
+for the session), and any other spawn error (out of memory, too many processes,
+"Exec format error") is still a failure.
 
 ### What the display shows meanwhile
 
@@ -74,12 +89,18 @@ closer one:
 
 A missing renderer is a problem, and one the user can fix, so it is reported
 like the second: the display's `renderer_failed` is true and its `last_error`
-names the program, the path and the error. That is what every consumer of
+names the program, the path and the error ("mpvpaper is missing: cannot start
+…", or "… cannot run here: …" with the loader's line). That is what every consumer of
 `renderer_failed` already reads as "Play retries": the classic and new player
 bars offer Retry, and `play` (mirrored) and `independent_play` re-apply a failed
 route from any state. After installing the program, Play starts it. The
 companion already shows `last_error` and a renderer-failed banner, so the bar
-says what is missing with no change to the companion.
+says what is missing with no change to the companion. The app's own bars use
+the setup wording instead of "Renderer stopped · Retry available"
+("Renderer missing · Settings → Setup"; Play's tip says the same and that it
+tries again), and a window says a missing renderer's error once while the
+service's list of missing renderers stays the same, not again on every
+rotation back onto a video.
 
 Skipping to the next entry the renderer can play was the alternative. It changes
 what the user chose, it cannot help a playlist of videos only (there is nothing
@@ -98,29 +119,45 @@ picked, minus its motion.
   missing.
 - **A new top-level `missing_renderers`**, an array in a fixed order (mpvpaper,
   then linux-wallpaperengine), each `{"program": "mpvpaper", "path":
-  "/usr/bin/mpvpaper"}`. Empty means none. It is additive: `status_version`
-  stays 2, and a client that does not know it is unaffected. `path` is the path
-  the document names, cut in the middle with the usual `[truncated]` marker
-  past 1024 bytes, so the key is at most about 8 KiB of the reply whatever the
-  document holds: a fixed part of the status, inside the 256 KiB both status
-  budgets reserve for structure (`STATUS_STRUCTURAL_RESERVE`), as for
-  `install_kind`, and neither budget changes. The configured program paths are
-  not counted by either budget, so counting them there would refuse a document
-  near the limit that loads today.
+  "/usr/bin/mpvpaper", "reason": "not-found"}`. `reason` is `not-found`
+  (nothing at the path), `not-executable` (something there that cannot be
+  executed) or `cannot-run` (an executable that cannot run here: its
+  interpreter or a library is missing, or its file system forbids it). Empty
+  means none. It is additive: `status_version` stays 2, and a client that does
+  not know it is unaffected. `path` is the path the document names, cut in the
+  middle with the usual `[truncated]` marker past 1024 bytes. Neither status
+  budget counts the configured program paths (counting them would refuse a
+  document near the limit that loads today), so the key follows the rule
+  `outputs` follows: never at a taboo record's expense. When a reply would not
+  fit, `outputs` is left out first; then as many taboo records are kept as fit
+  with `missing_renderers` left out, and only then does `missing_renderers`
+  get what room is left: whole, without its paths, or not at all. Only a
+  document at the schema's ceilings comes near it.
 
 ### When it clears
 
+Each record keeps the identity of what was at the path when it failed: its
+device, inode, size, modification time and mode, or that nothing was there.
+
 - **A spawn of that program succeeds**, on any display: the program is there.
+  (The other displays it left on a still keep their own marks, below.)
 - **A reload whose renderer settings changed** (a new path for a program, as
   when a Nix profile now has it): the driver is reconfigured, which forgets
   every record, and every display is applied again.
-- **A reload whose renderer settings did not change**, when a recorded
-  program's path is now an executable file: that record is forgotten and every
-  display it left on a still is applied again. This is the Arch case: the
+- **A reload whose renderer settings did not change**, once what is at a
+  recorded program's path has a different identity (installed, replaced, or a
+  profile link re-pointed): that record is forgotten and every display still
+  showing a still for that program is applied again, whether or not the program
+  has meanwhile started on another display. This is the Arch case: the
   document named the placeholder `/usr/bin/mpvpaper`, the package now put the
-  program there, and the recompiled document has the same bytes. A program that
-  is still missing stays reported; forgetting it would say "nothing missing"
-  about a renderer that is not there.
+  program there, and the recompiled document has the same bytes. The same file
+  that could not run would only fail the same way after setting every still and
+  palette again (and, in mirrored mode, restarting a healthy scene on another
+  display), so a reload leaves it be: it stays reported, and installing a
+  working program, which changes the file, is what brings it back. A library
+  installed beside a binary that could not load it is the exception the file
+  does not show: then Play on the display, or the next time the rotation
+  reaches a video or scene, starts it.
 - **Play** on a display that shows a still for it, which starts the renderer
   again (above).
 
@@ -132,15 +169,23 @@ program is still not there.
 
 `wall_in_one.setup_check` has a pure half and an observing half:
 
-- `findings(install_kind, local, service)` turns what was observed into
-  findings, with no I/O. Each finding says what is missing, whether it is
+- `findings(install_kind, local, service, motion=...)` turns what was observed
+  into findings, with no I/O. ``motion`` is whether the library has a video or
+  a scene: the window reads it from the library the application already holds
+  (no scan), `--setup-status` from the compiled `runtime.toml` (none compiled
+  is "no"; unreadable is "not known", which counts as no). Each finding says what is missing, whether it is
   required, what that means, and how to fix it for this install kind. All the
   text the window, Settings and the terminal show comes from here, so the
   classic and the new interface say the same thing (as
   `programs.SCENE_ENGINE_MISSING` does for the scene-engine row).
 - `local()` looks at this machine: the four programs through `find_program`,
   the user unit, the companion. `service_from_status(...)` reads a status reply.
-  Neither starts a program, talks to systemd or D-Bus, or writes anything.
+  Neither starts a program, talks to systemd or D-Bus, or writes anything. The
+  unit and the companion are optional checks: one that fails for any reason is
+  "couldn't tell", never an error that would hide a required finding.
+- A renderer the service reports with reason `cannot-run` or `not-executable`
+  is "installed but can't run here", with how to see why and reinstall, not
+  Check Again, which cannot fix it.
 
 ### The service
 
@@ -154,6 +199,8 @@ process's environment, which on NixOS is built from the same profiles as the
 user manager's. It never asks `systemctl`. A unit that is there gets "enable
 it, or let the companion start it"; no unit but the program gets "the companion
 starts it directly"; neither is "not installed", with that install kind's fix.
+When the companion is installed, the advice is to check that it is enabled and
+that Noctalia runs, rather than to install it.
 The window reads the service's state from the status it already polls, so it
 says nothing until the first answer and follows a service the companion starts
 later.
@@ -171,9 +218,13 @@ XDG default, each followed by `noctalia`):
   `noctalia msg plugins source add <name> git <url>`, then
   `noctalia msg plugins enable goober/wall-in-one`, as its VM tests do.
 
-The check reads each `plugin.toml` there (at most 64 KiB, at most 4096 of
-them) and matches its `id`, `goober/wall-in-one`, not the directory name. It
-only reads. It answers:
+The check reads each `plugin.toml` there (a regular file only, opened without
+blocking, so a FIFO in its place is skipped; at most 64 KiB, at most 4096 of
+them, and the folders are listed for at most 16384 entries) and matches its
+`id`, `goober/wall-in-one`, not the directory name. Another plugin's manifest
+it cannot read (bad TOML, an integer past Python's digit limit) is not a
+plugin; an entry it cannot look at is noted and the look carries on. It only
+reads. It answers:
 
 - **installed**: a manifest with that id is in one of those places. Whether it
   is enabled is not claimed: that is in Noctalia's merged configuration (every
@@ -183,8 +234,9 @@ only reads. It answers:
   source, a path source, is a folder only Noctalia's configuration names, so
   the finding says "not found where Noctalia installs plugins" rather than "not
   installed".
-- **unknown**: no usable home or override, a place that exists but could not be
-  listed, or more manifests than the bound. Said as such, never as missing.
+- **unknown**: no usable home or override, a place or entry that exists but
+  could not be looked at (when the companion was not found elsewhere), or past
+  the bounds. Said as such, never as missing.
 
 The link is one constant, `setup_check.COMPANION_URL`
 (`https://github.com/Go08er/goober-noctalia-plugins-v5`, the plugin is its
@@ -202,24 +254,31 @@ The link is one constant, `setup_check.COMPANION_URL`
 
 - **The window**, both interfaces: a card above every page, the same widget in
   both (as the Tidy up card is), shown only while something required is
-  missing. It has **Check again**, **Details** (Settings at this section) and
-  **Not now**. Not now hides the findings it showed for the rest of the
+  missing. It has **Check Again**, **Details** (Settings at this section) and
+  **Not Now**. Not Now hides the findings it showed for the rest of the
   session; a finding that changes (the service goes from not running to not
   installed, another renderer goes missing) shows again. Nothing is written:
   the dismissal lives in the running app.
 - **Settings → Setup**, both interfaces, one shared group: every finding,
-  required and optional, with **Check again**.
+  required and optional, with **Check Again**.
 - **`wall-in-one --setup-status`**: the same findings as text, for a terminal
-  or a headless check. It exits 1 when something required is missing, else 0,
-  as `--legacy-migration-status` does, and imports no GTK. Unlike the window it
-  asks the service once, so a service that does not answer in time is a
-  required finding there.
+  or a headless check. It exits 0 when nothing required is missing, 1 when
+  something is (as `--legacy-migration-status` does for a decision it needs),
+  and 2 when it couldn't tell: the check itself failed (said on stderr, never
+  a traceback) or the service didn't answer in time. It imports no GTK. Unlike
+  the window it asks the service once, so a service that does not answer in
+  time is a finding there, and exit 2.
+- The window looks on the application's setup lane, each look on a daemon
+  thread: a look only reads, and one that hangs (a mount that stopped
+  answering) must never hold the app's quit, so the lane is closed without
+  waiting. A rescan of the library looks again, since what it holds decides
+  whether no renderer at all is required.
 
-## Check again
+## Check Again
 
 On Nix, installing a renderer changes the path the compiler writes (a profile's
 `bin`); on Arch, the placeholder `/usr/bin/<name>` becomes the program. Either
-way the service has to load a document and try again. So Check again:
+way the service has to load a document and try again. So Check Again:
 
 1. compiles `runtime.toml` on the window's own publication path, the one every
    save uses (the same compile `--write-config` runs), when authoring is ready;
@@ -246,15 +305,22 @@ document changes nothing else.
 
 ## How it is tested
 
-- The service (`service/tests/service.rs`), with the real driver and a missing
-  or non-executable program path, in both modes: the apply succeeds, the still
-  is set, no retry, no taboo, `missing_renderers` names it; the same programs
-  failed and were quarantined before. Recovery by Play and by reload once the
-  program is there; a child that exits is still reported and a crashed scene
-  still quarantined. The status-shape fixture ignores the new key, and the
-  ceiling document's status still fits with both renderers missing at the
-  longest paths.
+- The service (`service/tests/service.rs`), with the real driver and a missing,
+  non-executable or unrunnable program path, in both modes: the apply
+  succeeds, the still is set, no retry, no taboo, `missing_renderers` names it
+  with its reason; the same programs failed and were quarantined before.
+  Recovery by Play and by reload once the program is there, also on a display
+  whose sibling started it first; a reload that changes nothing applies
+  nothing for an unrunnable program and restarts no healthy scene; a renderer
+  missing a library is not a crashed scene, and one that exits 127 after the
+  window still is; a child that exits is still reported and a crashed scene
+  still quarantined. The status-shape fixture ignores the new key, and at the
+  schema's ceilings the taboo records and `outputs` are the same with both
+  renderers missing at the longest paths as without them.
 - The checker's pure half with built observations (`tests/test_setup_check.py`);
   `local()` with a fake home, fake Noctalia folders, overrides and units.
-- `--setup-status`'s output and exit status.
-- The card and the section in both interfaces, through the GUI runner.
+- `--setup-status`'s output and its three exit statuses, a hostile manifest, a
+  FIFO, a broken link and a huge folder in Noctalia's plugin folders, and no
+  GTK or write in a fresh interpreter.
+- The card and the section in both interfaces, through the GUI runner,
+  including a library of stills; a missing renderer said once per window.

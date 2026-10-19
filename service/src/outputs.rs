@@ -55,6 +55,13 @@ const MAX_TRACKED: usize = 4 * MAX_OUTPUTS;
 /// compositor announcing more heads or modes than this is not followed: the
 /// connection is dropped, and the next one leaves wlr-output-management out.
 const MAX_TRACKED_MODES: usize = 4096;
+/// Heads and modes one connection may be announced over its life, the
+/// finished ones included: those stay in wayland-backend's map until the
+/// compositor reuses their ids, which some compositors never do. Past this,
+/// the connection is replaced by a fresh one, which frees them all;
+/// wlr-output-management stays in use.
+const MAX_ANNOUNCED_HEADS: usize = 2 * MAX_TRACKED;
+const MAX_ANNOUNCED_MODES: usize = 2 * MAX_TRACKED_MODES;
 
 const WL_OUTPUT_VERSION: u32 = 4;
 const XDG_OUTPUT_MANAGER_VERSION: u32 = 3;
@@ -298,6 +305,12 @@ impl Session {
                      {MAX_TRACKED_MODES} output modes"
                 ));
             }
+            if self.state.churned {
+                return Err(format!(
+                    "the compositor announced more than {MAX_ANNOUNCED_HEADS} output heads or \
+                     {MAX_ANNOUNCED_MODES} output modes over one connection"
+                ));
+            }
             if self.state.synced {
                 return Ok(());
             }
@@ -439,6 +452,11 @@ struct State {
     /// It announced more heads or modes than are kept: the connection is not
     /// used further.
     wlr_overflow: bool,
+    /// Heads and modes announced over this connection's life.
+    announced_heads: usize,
+    announced_modes: usize,
+    /// More than `MAX_ANNOUNCED_*`: the connection is replaced.
+    churned: bool,
 }
 
 impl State {
@@ -846,6 +864,8 @@ impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for State {
     ) {
         match event {
             zwlr_output_manager_v1::Event::Head { head } => {
+                state.announced_heads += 1;
+                state.churned |= state.announced_heads > MAX_ANNOUNCED_HEADS;
                 if state.heads.len() >= MAX_TRACKED {
                     // Past the ceiling: let it go where the version allows,
                     // and stop following this manager (`wlr_overflow`).
@@ -920,6 +940,8 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for State {
             zwlr_output_head_v1::Event::Make { make } => head.make = label(make),
             zwlr_output_head_v1::Event::Model { model } => head.model = label(model),
             zwlr_output_head_v1::Event::Mode { mode } => {
+                state.announced_modes += 1;
+                state.churned |= state.announced_modes > MAX_ANNOUNCED_MODES;
                 if tracked < MAX_TRACKED_MODES {
                     head.modes.push(mode);
                 } else {

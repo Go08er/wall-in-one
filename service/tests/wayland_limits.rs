@@ -133,3 +133,54 @@ fn a_flood_of_heads_from_a_manager_without_release_is_bounded() {
     );
     assert_eq!(names(&flooded), [("eDP-1", true)]);
 }
+
+#[test]
+fn heads_re_announced_over_one_connection_stay_bounded() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Every switch re-announces HDMI-A-1 and its 1001 modes with fresh ids,
+    // as a compositor that never reuses ids does. Each finished object stays
+    // in the client's map until its id is reused, so only a new connection
+    // frees them, and the live ceilings are never reached.
+    let layout = |hdmi_enabled: bool| Layout {
+        heads: Some(vec![
+            FakeHead::new("eDP-1", true),
+            FakeHead {
+                extra_modes: 1000,
+                ..FakeHead::new("HDMI-A-1", hdmi_enabled)
+            },
+        ]),
+        ..Layout::of(vec![laptop()])
+    };
+    let after = |changes: usize| -> isize {
+        let path = socket("churn");
+        let compositor = FakeCompositor::start(&path, layout(false));
+        let mut source = WaylandOutputs::at(path.clone());
+        source.outputs().unwrap();
+        for change in 0..changes {
+            compositor.set_layout(layout(change % 2 == 0));
+            let found = source.outputs().unwrap();
+            assert!(found.iter().any(|output| output.name == "eDP-1"));
+            assert!(
+                found.iter().any(|output| output.name == "HDMI-A-1"),
+                "{found:?}"
+            );
+        }
+        drop(compositor);
+        let with_session = LIVE.load(Ordering::SeqCst);
+        drop(source);
+        let without = LIVE.load(Ordering::SeqCst);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        with_session - without
+    };
+    let once = after(1);
+
+    let churned = after(80);
+
+    assert!(
+        churned < once + 2 * 1024 * 1024,
+        "re-announced heads and modes accumulate: {churned} bytes after 80 switches, \
+         {once} after one"
+    );
+}

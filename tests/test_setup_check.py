@@ -425,9 +425,20 @@ def test_local_looks_through_the_program_lookup(
 # -- --setup-status ----------------------------------------------------------------------
 
 
+@pytest.fixture
+def this_test_machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Only this test's folders: no Noctalia override, no system data or config dirs."""
+    for variable in ("NOCTALIA_STATE_HOME", "NOCTALIA_DATA_HOME", "NOCTALIA_CONFIG_HOME"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "data-dirs"))
+    monkeypatch.setenv("XDG_CONFIG_DIRS", str(tmp_path / "config-dirs"))
+    return tmp_path
+
+
 def test_setup_status_prints_the_findings_and_fails_while_something_required_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    this_test_machine: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    tmp_path = this_test_machine
     """No service runs in a test's own runtime folder, and nothing is installed."""
     monkeypatch.setattr(programs, "program_directories", lambda: (tmp_path / "bin",))
     assert cli.main(["--setup-status"]) == 1
@@ -439,8 +450,9 @@ def test_setup_status_prints_the_findings_and_fails_while_something_required_is_
 
 
 def test_setup_status_succeeds_with_only_optional_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    this_test_machine: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    tmp_path = this_test_machine
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir()
     for name in ("mpvpaper", "noctalia", "wall-in-one-service"):

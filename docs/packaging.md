@@ -127,19 +127,23 @@ The trade-off: a resolved store path kept working until the next garbage
 collection after the renderer left the profile; the profile's path stops
 working at once, when a renderer is removed or moves to another profile
 (switching `manualWallpaperInstalls`, moving from the NixOS module to
-home-manager). Nothing recompiles on a profile change, so the recovery is
-`wall-in-one --write-config` and a service restart, which
+home-manager). Nothing recompiles on a profile change, so the recovery is the
+app's **Check Again** (or `wall-in-one --write-config` and `wall-in-one ctl
+reload`), which
 [installing.md](installing.md#after-installing-removing-or-moving-a-renderer)
-says next to the steps for installing one.
+says next to the steps for installing one. Meanwhile those wallpapers show
+their still and nothing is held against them
+([missing components](missing-components.md#the-service-without-a-renderer)).
 
 **A renderer found nowhere** is still written as `/usr/bin/<name>`, as since
 0.1.4: the service's `[renderer]` needs an absolute path for each program (and
 0.3.2's loader refuses a document without one), and it reports a renderer only
-when an entry needs it and it cannot start. On a distribution that is also
-where a later package install puts it. The placeholder is not how the app
-knows: `wall_in_one.programs.find_program(name)` answers found or not found,
-and the path, for any of the three programs; the missing-component notices (a
-later step) read that.
+when an entry needs it and it cannot start (`missing_renderers` in `status`).
+On a distribution that is also where a later package install puts it, and a
+reload then starts it. The placeholder is not how the app knows:
+`wall_in_one.programs.find_program(name)` answers found or not found, and the
+path, for any of the three programs; the app's setup notices
+([missing components](missing-components.md)) read that.
 
 **Everything that starts one of them asks the same lookup.** The window's
 scene stills and its scene-engine status (Settings), the legacy Python service
@@ -210,15 +214,15 @@ user's Steam library and are never packaged.
   store paths of that release's bundled copies. The first 0.4 start recompiles
   it in the unit's start-up preparation, before the service starts, so the
   paths become profile paths, or the placeholder for a renderer that is not
-  installed. With the placeholder, every video or scene fails to start, is
-  skipped after three attempts, and the skip is saved: updating without the
-  module or an installed renderer stops them playing. docs/updating.md says to
-  install the renderers before the restart, and how to recover. (The service
-  telling "renderer missing" from a failing entry is the missing-component
-  step's.) If that compile fails, the last good document stays, and with it
-  the old paths: they work for as long as the old package's generation is
-  kept, and after that the service reports the renderer it cannot start until
-  a compile succeeds.
+  installed. With the placeholder, every video or scene shows its still: the
+  service reports the renderer as missing rather than the wallpaper as broken,
+  so nothing is skipped or saved, and the app's notice says which renderer to
+  install ([missing components](missing-components.md)). docs/updating.md says
+  to install the renderers before the restart, and how to have them found
+  after. If that compile fails, the last good document stays, and with it the
+  old paths: they work for as long as the old package's generation is kept,
+  and after that the service reports the renderer it cannot start until a
+  compile succeeds.
 - **A profile that still holds 0.3.x** has its bundled renderers only inside
   that package's wrapper, never in a profile's `bin`, so the lookup never
   finds them.

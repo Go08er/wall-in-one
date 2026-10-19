@@ -122,6 +122,14 @@ The NixOS and home-manager modules install both unless you set
 the app looks, and [`docs/packaging.md`](docs/packaging.md) why. The scene
 renderer's status is under **Settings → Advanced → Scenes**.
 
+Whatever is missing beside the app (a renderer, Noctalia, the wallpaper
+service or the [companion plugin](https://github.com/Go08er/goober-noctalia-plugins-v5)),
+the window says so, with how to get it for your kind of install and a **Check
+Again** button, and Settings → Setup lists it; `wall-in-one --setup-status`
+says the same from a terminal. A video or scene whose renderer is not installed
+shows its still meanwhile. See [what Wall-in-One checks for
+you](docs/installing.md#what-wall-in-one-checks-for-you).
+
 Noctalia is the wallpaper-and-colour application endpoint. The library and
 authoring screens still open without it, but applying a resolved entry requires
 a running Noctalia shell; renderer failures remain visible in runtime status.
@@ -225,8 +233,8 @@ Wall-in-One opens on your Library. The sidebar lists the pages, and `Alt+1` to
   display the desktop colours follow.
 - **Settings** manages library folders, playback defaults, displays, colours
   and palettes, the window's look, the Wallhaven key, the video and scene
-  renderers, Tidy up, and the interface to start, and keeps a log of this
-  session.
+  renderers, Tidy up, what is missing beside the app (Setup), and the
+  interface to start, and keeps a log of this session.
 
 The player bar along the bottom says what is on screen and why. It has
 shuffle, previous, play/pause, next and "Change wallpaper automatically"; its ⋯

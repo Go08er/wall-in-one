@@ -70,22 +70,31 @@ from you.
 starts, not when a profile changes. So after you install a renderer that was
 missing, remove one, or move one to another place (switching
 `manualWallpaperInstalls`, moving from the NixOS module to home-manager or the
-other way, a `nix profile remove`), the document still names where the
-renderer was, which may no longer exist at once. Compile it again and let the
-service load it:
+other way, a `nix profile remove`), the document may still name where the
+renderer was, or the placeholder `/usr/bin/<name>` it names for one that was
+not found. Choose **Check Again** in the app's setup notice or in Settings →
+Setup, which compiles the document again and has the service try again. From a
+terminal, the same:
 
 ```console
 $ wall-in-one --write-config
-$ systemctl --user restart wall-in-one.service
+$ wall-in-one ctl reload
 ```
 
-Until then, a video or scene whose renderer the document names wrongly cannot
-start. The service tries it three times, then skips it for the rest of its
-session, saying `cannot start mpvpaper` (or linux-wallpaperengine) in
-`wall-in-one ctl status`, and the app saves that skip on the wallpaper. The
-restart above forgets the skips of the session. A skip the app has already
-saved stays until you open that wallpaper in the app and choose **Try again**
-in its details.
+A restart of the service (`systemctl --user restart wall-in-one.service`) does
+it too.
+
+Meanwhile a video or scene whose renderer is not there shows its still: the
+service says `mpvpaper is missing` (or linux-wallpaperengine) for that display
+in `wall-in-one ctl status`, lists the program under `missing_renderers`, and
+carries on with the rest of the playlist. Nothing is skipped or saved against
+the wallpaper, so nothing needs undoing: once the renderer is at the path the
+document names, Play on that display or the next rotation starts it, and the
+reload above starts it on every display that showed its still
+([how](missing-components.md#the-service-without-a-renderer)). A skip saved by
+an earlier version, when a missing renderer still counted as a broken
+wallpaper, stays until you open that wallpaper in the app and choose **Try
+again** in its details.
 
 ### On NixOS: the module
 
@@ -147,10 +156,10 @@ programs.wall-in-one = {
 
 installs the app only. Install mpvpaper and linux-wallpaperengine however you
 like, in any of the places above, before the service next starts. A renderer
-that is not there can't play its kind of wallpaper: each video or scene the
-service tries to play is skipped and the skip saved, as
+that is not there can't play its kind of wallpaper: those wallpapers show their
+still, and the app says which renderer is missing, as
 [above](#after-installing-removing-or-moving-a-renderer), which also says how
-to recover.
+to have it found.
 
 Outside Nix, install them from your distribution: on Arch, `mpvpaper` and
 `linux-wallpaperengine-git` from the AUR (the Wall-in-One package lists both
@@ -214,6 +223,38 @@ A unit that started before the import keeps the environment it started with:
 ```console
 $ systemctl --user restart wall-in-one.service
 ```
+
+### What Wall-in-One checks for you
+
+Wall-in-One installs nothing beside itself, so it checks for what it works
+with and says what is missing, with how to get it for your kind of install (a
+Nix install, a distribution package such as the Arch one, or a source
+checkout):
+
+| What | Needed? | Without it |
+|---|---|---|
+| the wallpaper service, `wall-in-one-service` | yes, running | nothing changes on the desktop |
+| Noctalia 5 or later | yes | no wallpaper or palette can be set |
+| mpvpaper and linux-wallpaperengine | at least one | videos, or Wallpaper Engine scenes, show their still |
+| the [companion plugin](https://github.com/Go08er/goober-noctalia-plugins-v5) for Noctalia | no | nothing keeps the service running unless its user unit does, and Noctalia's bar has no controls |
+
+- **In the window**, both interfaces: while something needed is missing, a
+  notice above every page says what and how to get it. **Check Again** looks
+  again after you have installed it (and has the service try a renderer
+  again), **Details** opens Settings → Setup, and **Not Now** hides it until
+  the app is restarted or what it says changes. It writes nothing.
+- **In Settings → Setup**: everything above that is missing, needed or not,
+  with the same **Check Again**.
+- **From a terminal**: `wall-in-one --setup-status` prints the same, and exits
+  1 while something needed is missing, 0 otherwise.
+
+The app looks for the programs where it looks for the renderers
+([above](#the-wallpaper-renderers)); for the service, it asks it, and otherwise
+looks for `wall-in-one.service` where the user manager looks for units. The
+companion is looked for, read-only, where Noctalia keeps the plugins it
+installs (a plugin added as a path source can't be seen from there). The
+details, and what the service does without a renderer, are in
+[missing components](missing-components.md).
 
 ### Updating an existing app installation
 

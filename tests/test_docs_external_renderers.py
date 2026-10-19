@@ -3,8 +3,9 @@
 From 0.4 the renderers are installed beside the app (docs/packaging.md). An
 update from 0.3 without them, or a renderer removed or moved to another
 profile, leaves runtime.toml naming a renderer that is not there: every video
-and scene is skipped and the skip saved. The update and install guides must
-say so before it happens, and how to recover after.
+and scene shows its still, the service reports the renderer as missing, and
+the app says so (docs/missing-components.md). The update and install guides
+must say so before it happens, and how to have the renderer found after.
 """
 
 from __future__ import annotations
@@ -16,6 +17,15 @@ ROOT: Final = Path(__file__).resolve().parents[1]
 #: The recovery, in both guides: compile again, then restart the service.
 RECOMPILE: Final = "wall-in-one --write-config"
 RESTART: Final = "systemctl --user restart wall-in-one.service"
+#: Or, without a restart: the reload the app's Check Again sends.
+RELOAD: Final = "wall-in-one ctl reload"
+#: What 0.4 before the missing-component step said, no longer true.
+SKIPPED: Final = (
+    "tries each three times, skips it",
+    "tries it three times, then skips it",
+    "is skipped and the skip saved",
+    "is skipped after three attempts",
+)
 
 
 def _text(name: str) -> str:
@@ -63,3 +73,34 @@ def test_the_design_note_describes_the_companion_contract_not_its_behaviour() ->
     packaging = _text("docs/packaging.md")
     assert "so this is the value it reads" not in packaging
     assert "the value the companion is meant to prefer" in packaging
+
+
+def test_the_guides_say_a_missing_renderer_shows_the_still_and_how_to_check_again() -> None:
+    updating = _section(
+        _text("docs/updating.md"), "## From 0.3 to 0.4: install the renderers first"
+    )
+    installing = _section(
+        _text("docs/installing.md"), "#### After installing, removing or moving a renderer"
+    )
+    for section in (updating, installing):
+        assert "**Check Again**" in section
+        assert RECOMPILE in section and RELOAD in section
+        assert "**Try again**" in section, "for a skip an earlier version saved"
+    assert "--setup-status" in updating
+    assert "shows its still" in updating and "shows its still" in installing
+    for name in ("docs/updating.md", "docs/installing.md", "docs/packaging.md"):
+        text = _text(name)
+        for claim in SKIPPED:
+            assert claim not in text, (name, claim)
+
+
+def test_the_install_guide_says_what_the_app_checks() -> None:
+    from wall_in_one import setup_check
+
+    section = _section(_text("docs/installing.md"), "### What Wall-in-One checks for you")
+    assert setup_check.COMPANION_URL in section
+    assert "wall-in-one --setup-status" in section
+    for named in ("wall-in-one-service", "Noctalia 5", "mpvpaper", "linux-wallpaperengine"):
+        assert named in section, named
+    assert "**Not Now**" in section and "**Details**" in section
+    assert "Settings → Setup" in section

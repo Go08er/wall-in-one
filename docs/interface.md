@@ -58,6 +58,11 @@ Classic's one-time Tidy up card is above every page; Review opens Settings →
 Tidy up. Nothing there runs until you press its button, including the fix for
 Noctalia's old palette template name.
 
+While something Wall-in-One needs is missing (the wallpaper service, Noctalia,
+or both renderers), a setup card, the same as classic's, is above every page
+too, saying what and how to get it; Details opens Settings → Setup, Check Again
+looks again, and Not Now hides it for this run of the app.
+
 ## The player bar
 
 - **What it says:** what the runtime reports and why ("Evening · from
@@ -259,6 +264,8 @@ the same way, in searchable groups:
 - the Wallhaven key;
 - video and Wallpaper Engine renderer settings;
 - Tidy up;
+- Setup: what Wall-in-One needs that is missing, and how to get it, with
+  **Check Again** (the same section as classic's);
 - a log of what Wall-in-One and the wallpaper service reported since the app
   started, kept in memory only, with **Copy** and **Hide file paths** (on at
   every start, never saved). Classic has no log. Hide file paths replaces your

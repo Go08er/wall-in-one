@@ -17,9 +17,11 @@ linux-wallpaperengine (Wallpaper Engine scenes). 0.3's `runtime.toml` names
 the copies inside the 0.3 package. On its first start, 0.4's service compiles
 the document again and names the renderers that are installed; one that is
 not installed is written as `/usr/bin/mpvpaper` (or
-`/usr/bin/linux-wallpaperengine`), and every video or scene then fails to
-start. The service tries each three times, skips it, and the app saves the
-skip on that wallpaper, so stills are all that play.
+`/usr/bin/linux-wallpaperengine`), and every video or scene then shows its
+still instead. Nothing is skipped or saved against the wallpaper: the service
+reports the renderer as missing, and the app's window shows a notice saying
+which one, and how to install it for your kind of install
+([what the app checks](installing.md#what-wall-in-one-checks-for-you)).
 
 So before you restart the service in step 5 below, make sure the renderers are
 installed:
@@ -34,18 +36,24 @@ installed:
 - **`manualWallpaperInstalls = true` or another distribution:** install them
   yourself ([installing](installing.md#managing-the-renderers-yourself)).
 
-**If videos and scenes stopped playing after the update:** install the
-renderers as above, then compile the document again and restart the service,
-which forgets the skips it made in its session:
+**If videos and scenes show only their stills after the update:** install the
+renderers as above, then choose **Check Again** in the app's notice (or in
+Settings → Setup). It compiles the document again, so it names where the
+renderers are now, and has the service try them again. From a terminal,
+`wall-in-one --setup-status` says what is still missing, and the same steps
+are:
 
 ```sh
 wall-in-one --write-config
-systemctl --user restart wall-in-one.service
+wall-in-one ctl reload
 ```
 
-A skip the app had already saved stays until you open that wallpaper in the
-app and choose **Try again** in its details. The same applies after installing,
-removing or moving a renderer later
+or `systemctl --user restart wall-in-one.service` in place of the reload.
+
+A skip saved by an earlier version, when a missing renderer still counted as a
+broken wallpaper, stays until you open that wallpaper in the app and choose
+**Try again** in its details. The same applies after installing, removing or
+moving a renderer later
 ([installing](installing.md#after-installing-removing-or-moving-a-renderer)).
 
 ## Update and restart

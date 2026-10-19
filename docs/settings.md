@@ -5,8 +5,8 @@ Settings (the last page in the sidebar, or `Ctrl+,`) writes
 `$XDG_CONFIG_HOME/wall-in-one/settings.toml` when that variable is set). You can
 also edit it by hand. Its groups are Library, Playback, Displays, Colours,
 Appearance, Classic interface (the classic window's opacity), Online sources,
-Advanced (the video and Wallpaper Engine renderer settings), Tidy up, Log and
-About, and the search box in its header shows the rows
+Advanced (the video and Wallpaper Engine renderer settings), Tidy up, Setup,
+Log and About, and the search box in its header shows the rows
 whose title, description or keywords contain every word you type. The classic
 interface's Settings has the same settings in its own layout.
 
@@ -215,6 +215,18 @@ in either interface, when there is something to tidy; Review opens Settings →
 Tidy up. Showing it writes nothing; choosing Review or Not Now records the
 dismissal in `ui.toml` (creating it, and its `.ui.toml.mutation.lock`, if they
 don't exist yet). Settings → Tidy up is always there.
+
+## Setup
+
+Settings → Setup lists what Wall-in-One works with that is missing: the
+wallpaper service, Noctalia, mpvpaper and linux-wallpaperengine, and the
+companion plugin, each with how to get it for this kind of install. **Check
+Again** looks again, after compiling the runtime configuration as a save does
+and having the wallpaper service try a renderer it could not start again. While
+something it needs is missing (the service, Noctalia, or both renderers), a
+notice above every page says so too; **Not Now** hides it for this run of the
+app, and it writes nothing. `wall-in-one --setup-status` prints the same list.
+See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-you).
 
 ## Settings reference
 

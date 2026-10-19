@@ -169,7 +169,9 @@ pub struct Status<'a> {
     /// the path, not executable, or unable to run here), mpvpaper first.
     /// Empty when none. Added in 0.4.0. Such a program is never a taboo or a
     /// failure report: the displays that needed it show their still, with
-    /// `renderer_failed` and `last_error` saying why. See
+    /// `renderer_failed` and `last_error` saying why. Like `outputs`, never
+    /// at a taboo record's expense: at the reply's limit a row's `path` is
+    /// left empty, then the rows are left out. See
     /// docs/missing-components.md.
     pub missing_renderers: Vec<MissingRendererStatus>,
 }
@@ -182,11 +184,23 @@ pub struct MissingRendererStatus {
     pub reason: &'static str,
 }
 
+/// How much of `missing_renderers` a status reply carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MissingDetail {
+    Full,
+    WithoutPaths,
+    Left,
+}
+
 impl MissingRendererStatus {
-    fn of(record: &MissingRenderer) -> Self {
+    fn of(record: &MissingRenderer, detail: MissingDetail) -> Self {
         Self {
             program: record.program,
-            path: truncate_middle(&record.path, MAX_MISSING_RENDERER_PATH_BYTES),
+            path: if detail == MissingDetail::Full {
+                truncate_middle(&record.path, MAX_MISSING_RENDERER_PATH_BYTES)
+            } else {
+                String::new()
+            },
             reason: record.reason.as_str(),
         }
     }
@@ -4815,28 +4829,50 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// as the 64-record cap already does -- instead of the reply failing. The
     /// shape of the status never changes, and `entry_taboo` stays exact.
     ///
-    /// The compositor's display snapshot (`outputs`) is outside the
-    /// document's budget and goes first: it is left out before any taboo
-    /// record is, never at a record's expense.
+    /// The compositor's display snapshot (`outputs`) and the renderers the
+    /// service could not run (`missing_renderers`) are outside the
+    /// document's budget and go first: `outputs` is left out, then as many
+    /// taboo records fit as would without `missing_renderers`, and only then
+    /// is `missing_renderers` given what room is left: whole, without its
+    /// paths, or not at all. Neither is ever kept at a record's expense.
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
-        let everything = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, true)?;
+        use MissingDetail::{Full, WithoutPaths};
+        let everything = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, true, Full)?;
         if success_fits(&everything) {
             return Ok(everything);
         }
-        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, false)?;
+        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, false, Full)?;
         if success_fits(&full) {
             return Ok(full);
         }
-        let mut best = self.status_json(at, 0, false)?;
+        let (records, mut best) = self.fitting_taboo_records(at)?;
+        for detail in [Full, WithoutPaths] {
+            let candidate = self.status_json(at, records, false, detail)?;
+            if success_fits(&candidate) {
+                best = candidate;
+                break;
+            }
+        }
+        Ok(best)
+    }
+
+    /// The most taboo records a reply without `outputs` and
+    /// `missing_renderers` has room for, and that reply.
+    fn fitting_taboo_records(&self, at: NaiveDateTime) -> Result<(usize, String), String> {
+        let all = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, false, MissingDetail::Left)?;
+        if success_fits(&all) {
+            return Ok((MAX_TABOO_STATUS_ENTRIES, all));
+        }
+        let mut best = self.status_json(at, 0, false, MissingDetail::Left)?;
         if !success_fits(&best) {
             // Not reachable from a validated document; the writer refuses it.
-            return Ok(best);
+            return Ok((0, best));
         }
         // The most records that fit: `fits` fits, `over` does not.
         let (mut fits, mut over) = (0, MAX_TABOO_STATUS_ENTRIES);
         while over - fits > 1 {
             let middle = fits + (over - fits) / 2;
-            let candidate = self.status_json(at, middle, false)?;
+            let candidate = self.status_json(at, middle, false, MissingDetail::Left)?;
             if success_fits(&candidate) {
                 fits = middle;
                 best = candidate;
@@ -4844,7 +4880,19 @@ impl<D: WallpaperDriver> Runtime<D> {
                 over = middle;
             }
         }
-        Ok(best)
+        Ok((fits, best))
+    }
+
+    /// `missing_renderers` as a reply of shape `detail` carries it.
+    fn missing_rows(&self, detail: MissingDetail) -> Vec<MissingRendererStatus> {
+        if detail == MissingDetail::Left {
+            return Vec::new();
+        }
+        self.driver
+            .missing_renderers()
+            .iter()
+            .map(|record| MissingRendererStatus::of(record, detail))
+            .collect()
     }
 
     fn status_json(
@@ -4852,9 +4900,10 @@ impl<D: WallpaperDriver> Runtime<D> {
         at: NaiveDateTime,
         taboo_limit: usize,
         outputs: bool,
+        missing: MissingDetail,
     ) -> Result<String, String> {
         if self.is_independent() {
-            return self.status_json_independent(at, taboo_limit, outputs);
+            return self.status_json_independent(at, taboo_limit, outputs, missing);
         }
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -5191,12 +5240,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 &[]
             },
-            missing_renderers: self
-                .driver
-                .missing_renderers()
-                .iter()
-                .map(MissingRendererStatus::of)
-                .collect(),
+            missing_renderers: self.missing_rows(missing),
         })
         .map_err(|error| error.to_string())
     }
@@ -5206,6 +5250,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         at: NaiveDateTime,
         taboo_limit: usize,
         outputs: bool,
+        missing: MissingDetail,
     ) -> Result<String, String> {
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -5582,12 +5627,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 &[]
             },
-            missing_renderers: self
-                .driver
-                .missing_renderers()
-                .iter()
-                .map(MissingRendererStatus::of)
-                .collect(),
+            missing_renderers: self.missing_rows(missing),
         })
         .map_err(|error| error.to_string())
     }

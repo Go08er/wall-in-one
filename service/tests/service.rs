@@ -9617,28 +9617,87 @@ fn a_renderer_that_starts_and_then_exits_is_still_a_failure() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Two records at the longest path a document can name, every byte escaped
+/// twice.
+fn longest_missing_renderers() -> Vec<MissingRenderer> {
+    let longest = format!("/{}", "\"".repeat(4095));
+    ["mpvpaper", "linux-wallpaperengine"]
+        .into_iter()
+        .map(|program| MissingRenderer {
+            program,
+            path: longest.clone(),
+            error: "No such file or directory (os error 2)".into(),
+            reason: MissingReason::NotFound,
+            identity: PathIdentity::Absent,
+        })
+        .collect()
+}
+
 #[test]
-fn missing_renderers_fit_the_status_at_the_ceiling_whatever_their_paths() {
+fn a_missing_renderers_path_is_cut_at_1024_bytes() {
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        missing_renderers: longest_missing_renderers(),
+        ..RuntimeDriverState::default()
+    }));
+    let parsed: Config = toml::from_str(&config(
+        Path::new("/bin/true"),
+        Path::new("/bin/true"),
+        false,
+    ))
+    .unwrap();
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        noon(),
+    )
+    .unwrap();
+    let snapshot = status(&mut runtime, noon());
+    let reported = snapshot["missing_renderers"].as_array().unwrap();
+    assert_eq!(reported.len(), 2);
+    assert_eq!(reported[0]["program"], "mpvpaper");
+    assert_eq!(reported[1]["program"], "linux-wallpaperengine");
+    for record in reported {
+        let path = record["path"].as_str().unwrap();
+        assert!(path.len() <= 1024, "{} bytes", path.len());
+        assert!(path.contains("[truncated]"));
+        assert_eq!(record["reason"], "not-found");
+    }
+}
+
+/// The status at the schema's ceilings, with 64 published monitors and
+/// `missing`: its taboo records kept and left out, its `outputs`, and its
+/// `missing_renderers`.
+fn ceiling_status_with_missing(
+    missing: Vec<MissingRenderer>,
+) -> (usize, usize, usize, serde_json::Value) {
+    let monitors: Vec<Output> = (0..64)
+        .map(|index| Output {
+            name: format!("DP-{index}"),
+            enabled: true,
+            make: "Dell Inc.".into(),
+            model: "DELL U2720Q".into(),
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+            mode_width: 3840,
+            mode_height: 2160,
+            refresh_millihz: Some(59_997),
+            physical_width_mm: 597,
+            physical_height_mm: 336,
+            ..Output::default()
+        })
+        .collect();
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(Box::leak(monitors.into_boxed_slice())));
     let at = noon();
     let parsed = Config::from_bytes(status_ceiling_document().into_bytes()).unwrap();
-    // The longest paths a document can name, every byte escaped twice.
-    let longest = format!("/{}", "\"".repeat(4095));
     let state = Arc::new(Mutex::new(RuntimeDriverState {
         connected_outputs: Some(
             (0..64)
                 .map(|index| format!("{}L{index:02}", "\"".repeat(253)))
                 .collect(),
         ),
-        missing_renderers: ["mpvpaper", "linux-wallpaperengine"]
-            .into_iter()
-            .map(|program| MissingRenderer {
-                program,
-                path: longest.clone(),
-                error: "No such file or directory (os error 2)".into(),
-                reason: MissingReason::NotFound,
-                identity: PathIdentity::Absent,
-            })
-            .collect(),
+        missing_renderers: missing,
         ..RuntimeDriverState::default()
     }));
     let mut runtime = Runtime::new(
@@ -9651,6 +9710,7 @@ fn missing_renderers_fit_the_status_at_the_ceiling_whatever_their_paths() {
     runtime.apply_current().unwrap();
     runtime.tick(at, Instant::now());
     let response = runtime_command(&mut runtime, at, "status", None);
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(&[]));
     assert!(response.ok, "{}", response.message);
     let mut encoded = Vec::new();
     write_response(&mut encoded, &response).unwrap();
@@ -9660,18 +9720,36 @@ fn missing_renderers_fit_the_status_at_the_ceiling_whatever_their_paths() {
         encoded.len()
     );
     let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
-    let reported = snapshot["missing_renderers"].as_array().unwrap();
-    assert_eq!(reported.len(), 2, "never left out");
-    assert_eq!(reported[0]["program"], "mpvpaper");
-    assert_eq!(reported[1]["program"], "linux-wallpaperengine");
-    for record in reported {
-        let path = record["path"].as_str().unwrap();
-        assert!(path.len() <= 1024, "{} bytes", path.len());
-        assert!(path.contains("[truncated]"));
-    }
-    // Every other part whole, as at the ceiling without them.
     assert_eq!(snapshot["displays"].as_array().unwrap().len(), 128);
     assert_eq!(snapshot["playlists"].as_array().unwrap().len(), 65);
+    (
+        snapshot["taboo_entries"].as_array().unwrap().len(),
+        snapshot["taboo_entries_omitted"].as_u64().unwrap() as usize,
+        snapshot["outputs"].as_array().unwrap().len(),
+        snapshot["missing_renderers"].clone(),
+    )
+}
+
+#[test]
+fn missing_renderers_never_displace_taboo_records_at_the_ceiling() {
+    let (kept, omitted, outputs, none) = ceiling_status_with_missing(Vec::new());
+    assert!(omitted > 0, "the ceiling leaves records out");
+    assert_eq!(none, serde_json::json!([]));
+    let (kept_with, omitted_with, outputs_with, rows) =
+        ceiling_status_with_missing(longest_missing_renderers());
+    assert_eq!(
+        (kept_with, omitted_with, outputs_with),
+        (kept, omitted, outputs),
+        "missing_renderers pushed taboo records or outputs out"
+    );
+    // What room is left: the rows without their paths, or none, in order.
+    let rows = rows.as_array().unwrap();
+    assert!(rows.len() == 2 || rows.is_empty(), "{rows:?}");
+    for (row, program) in rows.iter().zip(["mpvpaper", "linux-wallpaperengine"]) {
+        assert_eq!(row["program"], program);
+        assert_eq!(row["reason"], "not-found");
+        assert!(row["path"].as_str().unwrap().len() <= 1024);
+    }
 }
 
 #[test]

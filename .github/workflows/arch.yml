@@ -33,10 +33,11 @@ jobs:
       # need. So there is no AUR helper and no --nodeps: the dependency names
       # and versions in the PKGBUILD are checked by pacman itself. The lists
       # come from the PKGBUILD, so the job cannot drift from it.
-      # weston, ttf-dejavu: the GUI suite below. namcap: lint.
+      # weston, ttf-dejavu, adwaita-icon-theme: the GUI suite below (the Nix
+      # gui-tests check has the same icon theme). namcap: lint.
       - name: Install the package's dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel namcap weston ttf-dejavu
+          pacman -Syu --noconfirm --needed base-devel namcap weston ttf-dejavu adwaita-icon-theme
           bash -c 'source packaging/arch/PKGBUILD &&
             pacman -S --noconfirm --needed \
               "${depends[@]}" "${makedepends[@]}" "${checkdepends[@]}"'
@@ -115,4 +116,16 @@ jobs:
             export HOME=\$(mktemp -d) XDG_RUNTIME_DIR=\$(mktemp -d) &&
             export GSK_RENDERER=cairo GSETTINGS_BACKEND=memory GDK_DEBUG=no-portals GTK_USE_PORTAL=0 &&
             PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
-              tools/headless-wayland.sh python -m pytest tests -q -p no:cacheprovider -m gui"
+              tools/headless-wayland.sh python -m pytest tests -q -ra -p no:cacheprovider -m gui \
+                --junitxml=/tmp/gui-results.xml"
+
+      # The same guards as the flake's gui-tests check: a suite that collected
+      # nothing, or skipped tests for want of a display, is not a pass.
+      - name: GUI tests ran, and none was skipped
+        run: |
+          grep -Eq 'tests="[1-9][0-9]*"' /tmp/gui-results.xml
+          if grep -Eq 'skipped="[1-9][0-9]*"' /tmp/gui-results.xml; then
+            echo "the display-backed GUI suite skipped tests" >&2
+            cat /tmp/gui-results.xml >&2
+            exit 1
+          fi

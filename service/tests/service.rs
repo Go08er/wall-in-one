@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use support::compositor::{FakeCompositor, FakeOutput, Layout, WedgedCompositor};
+use support::compositor::{FakeCompositor, FakeHead, FakeOutput, Layout, WedgedCompositor};
 use wall_in_one_service::config::{Config, Overrides, RendererSettings};
 use wall_in_one_service::outputs::{Output, OutputSource};
 use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
@@ -7051,6 +7051,74 @@ fn a_compositor_going_away_writes_nothing_unprefixed_to_stderr() {
         .filter(|line| !line.trim().is_empty() && !line.starts_with("wall-in-one-service: "))
         .collect();
     assert!(unprefixed.is_empty(), "{unprefixed:?}");
+}
+
+#[test]
+fn leaving_out_a_flooding_wlr_output_management_is_said_once() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = directory("flooding-wlr");
+    let wayland = root.join("wayland-0");
+    let compositor = FakeCompositor::start(
+        &wayland,
+        Layout {
+            heads: Some(vec![FakeHead {
+                extra_modes: 5_000,
+                ..FakeHead::new("eDP-1", true)
+            }]),
+            ..Layout::of(vec![FakeOutput::new(
+                "eDP-1",
+                (1920, 1080, 60_000),
+                (0, 0, 1920, 1080),
+            )])
+        },
+    );
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, config(&noctalia, &noctalia, false)).unwrap();
+    let socket = root.join("runtime.sock");
+    let mut child = service_command()
+        .env("WAYLAND_DISPLAY", &wayland)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let reply = request(&socket, "status", None);
+        let status: serde_json::Value =
+            serde_json::from_str(reply["message"].as_str().unwrap()).unwrap();
+        if status["outputs"][0]["name"] == "eDP-1" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the output was never published");
+        thread::sleep(Duration::from_millis(50));
+    }
+    // Two more five-second probes of the same compositor.
+    thread::sleep(Duration::from_secs(11));
+    stop(&mut child, &socket);
+    drop(compositor);
+    let mut written = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut written)
+        .unwrap();
+    fs::remove_dir_all(root).unwrap();
+    let said: Vec<&str> = written
+        .lines()
+        .filter(|line| line.contains("leaving that protocol out"))
+        .collect();
+    assert_eq!(said.len(), 1, "{written}");
+    assert!(said[0].starts_with("wall-in-one-service: "), "{}", said[0]);
+    assert!(said[0].contains("until the compositor or the service restarts"));
 }
 
 #[test]

@@ -31,7 +31,10 @@ A compositor without wlr-output-management has no disabled heads to list, and
 nothing else changes. Nor is a compositor followed that announces more heads
 or modes over it than the service keeps (256 heads, 4096 modes): the service
 drops that connection and goes on without wlr-output-management, listing no
-switched-off heads.
+switched-off heads, until the compositor or the service restarts, and says so
+once in its journal. A compositor that keeps announcing heads anew over one
+connection, finished ones included, gets a fresh connection past twice those
+numbers, with wlr-output-management still in use.
 
 The service asks once per wallpaper hand-over and every five seconds, as it
 asked niri before: one round trip that also takes in any outputs added or

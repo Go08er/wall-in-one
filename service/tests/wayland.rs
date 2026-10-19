@@ -406,3 +406,46 @@ fn a_finished_manager_lets_its_heads_go() {
     assert_eq!(compositor.released_heads(), 2, "both heads released");
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
+
+/// eDP-1 on, HDMI-A-1 off and only known to wlr-output-management; eDP-1
+/// announcing `extra_modes` more modes than it has.
+fn flooding(extra_modes: usize) -> Layout {
+    Layout {
+        heads: Some(vec![
+            FakeHead {
+                extra_modes,
+                ..FakeHead::new("eDP-1", true)
+            },
+            FakeHead::new("HDMI-A-1", false),
+        ]),
+        ..Layout::of(vec![laptop()])
+    }
+}
+
+#[test]
+fn wlr_output_management_left_out_after_a_flood_comes_back_with_the_next_compositor() {
+    let path = socket("flood-then-sane");
+    let mut source = WaylandOutputs::at(path.clone());
+
+    let flood = FakeCompositor::start(&path, flooding(5_000));
+    assert_eq!(names(&source.outputs().unwrap()), [("eDP-1", true)]);
+    // Left out for as long as that compositor runs: no reconnecting per question.
+    assert_eq!(names(&source.outputs().unwrap()), [("eDP-1", true)]);
+    assert_eq!(
+        flood.connections(),
+        2,
+        "the flooded connection and its replacement"
+    );
+    drop(flood);
+    assert!(source.outputs().is_err(), "that compositor is gone");
+
+    // The compositor restarted, or another one took the socket.
+    let sane = FakeCompositor::start(&path, flooding(0));
+    assert_eq!(
+        names(&source.outputs().unwrap()),
+        [("HDMI-A-1", false), ("eDP-1", true)],
+        "the switched-off head is listed again"
+    );
+    drop(sane);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

@@ -132,9 +132,11 @@ pub fn environment_socket(
 pub struct WaylandOutputs {
     socket: Option<PathBuf>,
     session: Option<Session>,
-    /// Set once a compositor announced more wlr-output-management heads or
+    /// Set when a compositor announced more wlr-output-management heads or
     /// modes than are kept: later connections leave that protocol out, so
-    /// switched-off heads are no longer listed, and nothing else changes.
+    /// switched-off heads are not listed, and nothing else changes. Cleared
+    /// when the connection is lost for any other reason (the compositor
+    /// restarted or went away), and with the service.
     without_wlr: bool,
 }
 
@@ -186,6 +188,21 @@ impl WaylandOutputs {
     }
 }
 
+impl WaylandOutputs {
+    /// A connection ended, flooded by wlr-output-management or for any other
+    /// reason, and whether the next one leaves that protocol out.
+    fn lost(&mut self, flooded: bool) {
+        if flooded && !self.without_wlr {
+            eprintln!(
+                "wall-in-one-service: the compositor announced more wlr-output-management \
+                 heads or modes than are kept; leaving that protocol out, so switched-off \
+                 displays are not listed, until the compositor or the service restarts"
+            );
+        }
+        self.without_wlr = flooded;
+    }
+}
+
 impl OutputSource for WaylandOutputs {
     fn outputs(&mut self) -> Result<Vec<Output>, String> {
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
@@ -193,37 +210,41 @@ impl OutputSource for WaylandOutputs {
             match session.refresh(deadline) {
                 Ok(()) => return self.snapshot(),
                 Err(error) => {
-                    self.without_wlr |= session.state.wlr_overflow;
+                    let flooded = session.state.wlr_overflow;
                     self.session = None;
+                    self.lost(flooded);
                     // A compositor that did not answer in time is not asked
                     // again in the same question: the deadline is the bound.
                     if Instant::now() >= deadline {
                         return Err(error);
                     }
-                    // It went away, restarted, or flooded wlr-output-management:
+                    // It went away, restarted, flooded or kept re-announcing:
                     // one new connection, within what is left of the deadline.
                 }
             }
         }
         let socket = self.socket()?;
         loop {
-            let mut session = Session::connect(&socket, deadline, !self.without_wlr)?;
+            let mut session = match Session::connect(&socket, deadline, !self.without_wlr) {
+                Ok(session) => session,
+                Err(error) => {
+                    self.lost(false);
+                    return Err(error);
+                }
+            };
             match session.refresh(deadline) {
                 Ok(()) => {
                     self.session = Some(session);
                     return self.snapshot();
                 }
-                // Too many heads or modes: once more, without that protocol.
-                Err(_)
-                    if session.state.wlr_overflow
-                        && !self.without_wlr
-                        && Instant::now() < deadline =>
-                {
-                    self.without_wlr = true;
-                }
                 Err(error) => {
-                    self.without_wlr |= session.state.wlr_overflow;
-                    return Err(error);
+                    let flooded = session.state.wlr_overflow;
+                    self.lost(flooded);
+                    // Too many heads or modes: once more, without that
+                    // protocol, which this connection used.
+                    if !flooded || Instant::now() >= deadline {
+                        return Err(error);
+                    }
                 }
             }
         }

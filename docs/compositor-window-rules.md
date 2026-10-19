@@ -18,11 +18,11 @@ below.
 
 ## Sway and Hyprland: one line the service needs
 
-This is not a window rule, but it is the one line that Sway, and sometimes
+This is not a window rule, but it is the one line that Sway, and possibly
 Hyprland, needs in its config. The wallpaper service runs as a user unit and
 finds the compositor through `WAYLAND_DISPLAY`. The systemd user manager has
 that variable only if the session put it there. `niri-session` does; Sway
-does not; Hyprland normally does it itself. Check with
+does not; Hyprland normally exports it. Check with
 `systemctl --user show-environment | grep '^WAYLAND_DISPLAY='`, and if it is
 missing:
 
@@ -38,7 +38,8 @@ missing:
   exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY
   ```
 
-The Sway VM test runs this import; the Hyprland line is not tested here.
+The Sway VM test runs this import; the Hyprland line is not tested here, and
+we have not verified how Hyprland exports the variable.
 [Installing](installing.md#the-service-needs-your-sessions-display) says how
 to start the unit on Sway, which has no session target of its own, and what to
 do if the unit started before the import.

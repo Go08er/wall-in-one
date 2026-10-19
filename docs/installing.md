@@ -205,10 +205,9 @@ $ systemctl --user show-environment | grep '^WAYLAND_DISPLAY='
   then, the import has to have happened first. The Sway VM test
   (`vm-test-sway`) runs the NixOS form:
   `exec "systemctl --user import-environment WAYLAND_DISPLAY; systemctl --user start sway-session.target"`.
-- **Hyprland**, in its current source, imports it itself when it starts from
-  a login, unless `HYPRLAND_NO_SD_VARS` is set. It does not when it runs as a
-  systemd unit, under uwsm for example, which imports it instead. If the
-  check above finds nothing, add to `hyprland.conf`:
+- **Hyprland** normally exports it. Check with
+  `systemctl --user show-environment | grep WAYLAND_DISPLAY`; if it is
+  missing, add to `hyprland.conf`:
 
   ```
   exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY

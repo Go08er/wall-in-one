@@ -79,6 +79,7 @@ from wall_in_one.ui.next.shell import ShellWindow
 from wall_in_one.ui.next.state import AppState, Banner
 from wall_in_one.ui.next.welcome import Welcome, is_progress
 from wall_in_one.ui.plain_text import plain_toast
+from wall_in_one.ui.setup_section import SetupCard, SetupSection
 from wall_in_one.ui.tidy_section import TidyCard, TidySection
 
 if TYPE_CHECKING:
@@ -147,6 +148,7 @@ def settings_page(state: AppState, keeper: UiPrefsKeeper, application: Applicati
         state,
         launch=LaunchRows(keeper, application.window_report),
         tidy=TidySection(application),
+        setup=SetupSection(application),
         log=LogSection(application.activity_log, state.toast),
     )
 
@@ -188,6 +190,11 @@ class NextWindow(ShellWindow):
         self.tidy_card = TidyCard(application, self.open_tidy)
         self.content_view.add_top_bar(self.tidy_card)
         self.connect("map", lambda _window: self.tidy_card.start())
+        # While something it needs is missing, the same card as the classic
+        # window's (docs/missing-components.md). Details opens Settings at Setup.
+        self.setup_card = SetupCard(application, self.open_setup)
+        self.content_view.add_top_bar(self.setup_card)
+        self.connect("map", lambda _window: self.setup_card.start())
         self._state.connect("changed", self._on_state_changed)
         self._show_status()
         self.connect("realize", lambda _window: self._resume())
@@ -241,7 +248,10 @@ class NextWindow(ShellWindow):
                 GLib.source_remove(source_id)
         self._first_run_idle = self._check_grace = 0
         self._state.close()
+        self.setup_card.stop()
         settings = self.pages.get("settings")
+        if isinstance(settings, SettingsPage) and isinstance(settings.setup, SetupSection):
+            settings.setup.stop()
         if isinstance(settings, SettingsPage) and settings.launch is not None:
             settings.launch.close()  # as classic Settings does
         self._prefs.close()
@@ -317,6 +327,13 @@ class NextWindow(ShellWindow):
         page = self.pages.get("settings")
         if isinstance(page, SettingsPage) and isinstance(page.tidy, TidySection):
             page.tidy.reveal()
+
+    def open_setup(self) -> None:
+        """Settings, at Setup (the setup card's Details)."""
+        self.navigate("settings:setup")
+        page = self.pages.get("settings")
+        if isinstance(page, SettingsPage) and isinstance(page.setup, SetupSection):
+            page.setup.reveal()
 
     def open_palette_browser(self) -> None:
         """Settings, with the palette manager open over it."""

@@ -29,6 +29,7 @@ from wall_in_one.ui.plain_text import plain_toast
 from wall_in_one.ui.playlists_page import PlaylistsPage
 from wall_in_one.ui.preferences import PreferencesPage
 from wall_in_one.ui.schedules_page import SchedulesPage
+from wall_in_one.ui.setup_section import SetupCard
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 from wall_in_one.ui.tidy_section import TidyCard
 
@@ -266,6 +267,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._tidy_card = TidyCard(self._app, self.open_tidy)
         toolbar.add_top_bar(self._tidy_card)
         self.connect("map", lambda _window: self._tidy_card.start())
+        # While something it needs is missing (docs/missing-components.md),
+        # the same card as the new window's; it only reads.
+        self._setup_card = SetupCard(self._app, self.open_setup)
+        toolbar.add_top_bar(self._setup_card)
+        self.connect("map", lambda _window: self._setup_card.start())
         media = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         media.append(self._build_library_bar())
         media.append(self._grid)
@@ -536,6 +542,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.show_page("settings")
         self._settings_page.tidy.reveal()
 
+    def open_setup(self) -> None:
+        """Settings, at Setup (the setup card's Details)."""
+        self.show_page("settings")
+        self._settings_page.setup.reveal()
+
     def open_palette_browser(self) -> None:
         dialog = PaletteBrowserDialog(self._app, palette_catalog=self._palette_catalog)
         self._palettes = dialog
@@ -567,6 +578,9 @@ class MainWindow(Adw.ApplicationWindow):
         if self._torn_down:
             return
         self._torn_down = True
+        # The setup card and section follow the application's status model.
+        self._setup_card.stop()
+        self._settings_page.setup.stop()
         if self._palettes is not None:
             self._palettes.close()
         self._loader.shutdown()

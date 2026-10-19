@@ -847,6 +847,12 @@ class Application(Adw.Application):
         self._browse_lock = threading.Lock()
         #: Settings → Tidy up and its card: one ordered lane, read-only until a click.
         self.tidy_lane = TidyLane()
+        #: Settings → Setup and the window's setup card look on this lane; they
+        #: only read (`wall_in_one.ui.setup_section`).
+        self.setup_lane = TidyLane(stopped="Couldn't check")
+        #: The setup findings the card's Not Now hid, by fingerprint: for this
+        #: process only, and never written (docs/missing-components.md).
+        self.setup_dismissed: set[str] = set()
         self._browse_shutdown = False
         self._browse_transports: set[Browser] = set()
         # Library walking is filesystem I/O, not the measured pure-Python
@@ -2074,6 +2080,7 @@ class Application(Adw.Application):
         for browser in browse_transports:
             browser.shutdown()
         self.tidy_lane.shutdown()
+        self.setup_lane.shutdown()
         if self._browse_jobs is not None:
             # Active transports were closed above, waking their socket reads;
             # queued futures are invalidated here. Downloads stage under a
@@ -4667,6 +4674,54 @@ class Application(Adw.Application):
         future.add_done_callback(
             lambda done: self._post_runtime_completion(done, self._finish_runtime_reload)
         )
+
+    def check_setup_again(self) -> bool:
+        """Setup's Check Again: compile ``runtime.toml`` as a save does, then reload the service.
+
+        A renderer installed since the last compile is a new path in the
+        document on Nix (a profile's ``bin``), and on Arch the very path the
+        document already named, so the compile may change no byte. The reload
+        therefore goes whether or not it did: it is what makes the service try
+        a renderer it found missing again (docs/missing-components.md). The
+        compile is the window's own publication path, when authoring is
+        ready; the reload follows it on the same ordered lane. Its answer
+        reaches the window through the next status, as any reload's does.
+        """
+        if self._runtime_shutdown:
+            return False
+        if self.authoring_ready:
+            self._publish_runtime_async()
+        try:
+            future = self._runtime_pool().submit(self._reload_for_setup_check)
+        except RuntimeError:
+            return False
+        future.add_done_callback(
+            lambda done: self._post_runtime_completion(done, self._finish_setup_reload)
+        )
+        return True
+
+    def _reload_for_setup_check(self) -> Response | None:
+        """One unconditional ``reload``; None when no service listens."""
+        try:
+            return self._send_gui_runtime("reload")
+        except client.NotRunningError:
+            return None
+
+    def _finish_setup_reload(self, future: Future[Response | None]) -> bool:
+        if self._runtime_shutdown:
+            return GLib.SOURCE_REMOVE
+        try:
+            response = future.result()
+        except Exception as error:  # a socket error, or anything else on the lane
+            self.window_report(f"Runtime reload failed: {error}")
+            return GLib.SOURCE_REMOVE
+        if response is None:
+            self._status_model.mark_unavailable(forget=False)
+        elif not response.ok:
+            self.window_report(self._rejected_configuration(response.message))
+        if self._window is not None:
+            self.refresh_runtime_status_async()
+        return GLib.SOURCE_REMOVE
 
     def _finish_runtime_reload(self, future: Future[Response]) -> bool:
         """Finish a coalesced authoring reload on GTK's thread."""

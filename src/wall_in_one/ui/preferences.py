@@ -28,6 +28,7 @@ from wall_in_one.ui.launch_rows import LaunchRows
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.ui.plain_text import plain
+from wall_in_one.ui.setup_section import SetupSection
 from wall_in_one.ui.tidy_section import TidySection
 from wall_in_one.wallpaper import renderer, scenes
 
@@ -103,6 +104,10 @@ class PreferencesPage(Adw.PreferencesPage):
         # writes settings.toml, so read-only settings don't disable it.
         self.tidy = TidySection(application)
         self.add(self.tidy)
+        # What Wall-in-One needs that is missing, as the new interface says it
+        # (docs/missing-components.md). It writes nothing either.
+        self.setup = SetupSection(application)
+        self.add(self.setup)
 
         # Every control here that writes settings.toml. The Wallhaven key
         # rows and the palette actions are deliberately absent: they write

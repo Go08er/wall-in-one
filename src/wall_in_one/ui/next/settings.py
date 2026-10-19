@@ -115,6 +115,8 @@ ALIASES: Final = {
     "look": "appearance",
     "interface": "appearance.interface",
     "tidy-up": "tidy",
+    "missing": "setup",
+    "companion": "setup",
     "logs": "log",
     "diagnostics": "log",
 }
@@ -190,6 +192,7 @@ class SettingsPage(Page):
         *,
         launch: LaunchRows | None = None,
         tidy: Gtk.Widget | None = None,
+        setup: Gtk.Widget | None = None,
         log: Gtk.Widget | None = None,
     ) -> None:
         super().__init__(state)
@@ -201,6 +204,7 @@ class SettingsPage(Page):
         self.interface_row = launch.interface if launch is not None else None
         self.gpu_row = launch.gpu if launch is not None else None
         self.tidy = tidy
+        self.setup = setup
         self.log = log
         self._dialogs: list[Adw.Dialog] = []
         self._sections: dict[str, _Section] = {}
@@ -249,6 +253,7 @@ class SettingsPage(Page):
         self._build_online(access)
         self._build_advanced(access)
         self._build_tidy()
+        self._build_setup()
         self._build_log()
         self._build_about()
 
@@ -1244,6 +1249,25 @@ class SettingsPage(Page):
         holder.entries.append(_Entry(tidy, "tidy up clean leftovers archive cache"))
         section.groups.append(holder)
         section.box.append(tidy)
+
+    def _build_setup(self) -> None:
+        """What Wall-in-One needs that is missing: the shared section (`SetupSection`)."""
+        setup = self.setup
+        if not isinstance(setup, Adw.PreferencesGroup):
+            return
+        section = _Section("setup", Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18))
+        section.box.add_css_class("st-section")
+        self._sections["setup"] = section
+        self._content.append(section.box)
+        # One entry: its rows come and go with what is missing.
+        keywords = (
+            "setup missing install renderer mpvpaper wallpaperengine noctalia service "
+            "companion plugin"
+        )
+        holder = _Group(setup, "Setup", keywords)
+        holder.entries.append(_Entry(setup, keywords))
+        section.groups.append(holder)
+        section.box.append(setup)
 
     def _build_log(self) -> None:
         log = self.log

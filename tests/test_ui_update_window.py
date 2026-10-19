@@ -47,9 +47,10 @@ def test_the_hint_follows_a_multiline_refusal_on_its_last_line() -> None:
 
 
 def test_every_refused_save_in_the_window_is_worded_in_one_place() -> None:
-    """The four places the window reports a refused document all go through
-    `_rejected_configuration`, so none can lose the restart hint."""
+    """The five places the window reports a refused document all go through
+    `_rejected_configuration`, so none can lose the restart hint. The fifth is
+    Setup's Check Again, whose reload goes whatever the compile changed."""
     source = Path(app.__file__).read_text(encoding="utf-8")
 
     assert source.count("Runtime rejected the new configuration") == 1
-    assert source.count("self._rejected_configuration(") == 4
+    assert source.count("self._rejected_configuration(") == 5

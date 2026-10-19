@@ -41,12 +41,17 @@ _MAX_GROUPS = 12
 
 
 class TidyLane:
-    """One ordered worker for Tidy up; each result is delivered on GTK."""
+    """One ordered worker for Tidy up; each result is delivered on GTK.
 
-    def __init__(self) -> None:
+    Settings → Setup uses one too (`wall_in_one.ui.setup_section`), with its
+    own word for a step that raised (``stopped``).
+    """
+
+    def __init__(self, *, stopped: str = "Tidy up stopped") -> None:
         self._jobs: ThreadPoolExecutor | None = None
         self._closed = False
         self._pending = 0
+        self._stopped = stopped
 
     @property
     def busy(self) -> bool:
@@ -85,7 +90,7 @@ class TidyLane:
         except tidy.TidyError as error:
             done(None, str(error))
         except Exception as error:  # A worker failure must never escape the main loop.
-            done(None, f"Tidy up stopped: {error}")
+            done(None, f"{self._stopped}: {error}")
         else:
             done(result, "")
         return GLib.SOURCE_REMOVE

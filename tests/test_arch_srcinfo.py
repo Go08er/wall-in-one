@@ -83,4 +83,3 @@ def test_srcinfo_repeats_every_field_of_the_pkgbuild() -> None:
     for field in FIELDS:
         assert info.pop(field, []) == build.get(field, []), field
     assert not info, f".SRCINFO has fields this test does not know: {sorted(info)}"
-

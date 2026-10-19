@@ -7,6 +7,10 @@ on:
   push:
     branches: ["release/**"]
   workflow_dispatch:
+  # Arch is rolling: build the package weekly against whatever it has become,
+  # as ci.yml does for its VM jobs.
+  schedule:
+    - cron: "41 8 * * 1"
 
 permissions:
   contents: read
@@ -37,7 +41,10 @@ jobs:
       # gui-tests check has the same icon theme). namcap: lint.
       - name: Install the package's dependencies
         run: |
-          pacman -Syu --noconfirm --needed base-devel namcap weston ttf-dejavu adwaita-icon-theme
+          # rust first: `cargo` has more than one provider (rust, rustup), and
+          # --noconfirm would otherwise choose for us.
+          pacman -Syu --noconfirm --needed rust
+          pacman -S --noconfirm --needed base-devel namcap weston ttf-dejavu adwaita-icon-theme
           bash -c 'source packaging/arch/PKGBUILD &&
             pacman -S --noconfirm --needed \
               "${depends[@]}" "${makedepends[@]}" "${checkdepends[@]}"'
@@ -57,8 +64,12 @@ jobs:
       - name: Lint
         run: |
           cd /home/builder/out
-          namcap PKGBUILD
-          namcap -- wall-in-one-*.pkg.tar.zst
+          # Warnings are advisory; an error ( E: ) fails the job.
+          { namcap PKGBUILD; namcap -- wall-in-one-*.pkg.tar.zst; } | tee /tmp/namcap.txt
+          if grep -q ' E: ' /tmp/namcap.txt; then
+            echo "namcap reported errors" >&2
+            exit 1
+          fi
 
       - name: .SRCINFO is current
         run: |

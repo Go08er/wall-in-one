@@ -10,6 +10,44 @@ For the retired full Noctalia plugin or the older empty-root/schema-2 app, see
 the [migration guide](migrating.md). Never delete settings or migration journals
 to make an existing installation look like a fresh install.
 
+## From 0.3 to 0.4: install the renderers first
+
+From 0.4 the package no longer brings mpvpaper (video wallpapers) or
+linux-wallpaperengine (Wallpaper Engine scenes). 0.3's `runtime.toml` names
+the copies inside the 0.3 package. On its first start, 0.4's service compiles
+the document again and names the renderers that are installed; one that is
+not installed is written as `/usr/bin/mpvpaper` (or
+`/usr/bin/linux-wallpaperengine`), and every video or scene then fails to
+start. The service tries each three times, skips it, and the app saves the
+skip on that wallpaper, so stills are all that play.
+
+So before you restart the service in step 5 below, make sure the renderers are
+installed:
+
+- **NixOS:** replace the package in `environment.systemPackages` with the
+  flake's module, `programs.wall-in-one.enable = true`, which installs both
+  ([installing](installing.md#on-nixos-the-module)).
+- **home-manager:** the same with `homeManagerModules.default`
+  ([installing](installing.md#with-home-manager)).
+- **`nix profile`:** install them beside the app:
+  `nix profile install nixpkgs#mpvpaper nixpkgs#linux-wallpaperengine`.
+- **`manualWallpaperInstalls = true` or another distribution:** install them
+  yourself ([installing](installing.md#managing-the-renderers-yourself)).
+
+**If videos and scenes stopped playing after the update:** install the
+renderers as above, then compile the document again and restart the service,
+which forgets the skips it made in its session:
+
+```sh
+wall-in-one --write-config
+systemctl --user restart wall-in-one.service
+```
+
+A skip the app had already saved stays until you open that wallpaper in the
+app and choose **Try again** in its details. The same applies after installing,
+removing or moving a renderer later
+([installing](installing.md#after-installing-removing-or-moving-a-renderer)).
+
 ## Update and restart
 
 1. Finish downloads and pending saves, then close the app normally. A new

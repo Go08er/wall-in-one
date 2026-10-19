@@ -53,17 +53,18 @@ installed into `$pkgdir`.
 - `wall-in-one --version` and `wall-in-one-service --version` print a second
   line, `install kind: <kind>`. The first line is unchanged, so anything that
   matches it still does.
-- The service's `status` has a new top-level `install_kind`. The companion
-  polls the service's socket, not the Python CLI, so this is the value it
-  reads. `ctl status` prints the service's reply as it is, so it reports the
-  kind of the *service* that answered.
+- The service's `status` has a new top-level `install_kind`. It is the value
+  the companion is meant to prefer: the companion polls the service's socket,
+  not the Python CLI, and falls back to telling the kinds apart by where the
+  programs are for a 0.3 service, which has no `install_kind`. (The companion
+  reading it is the companion's own change.) `ctl status` prints the service's
+  reply as it is, so it reports the kind of the *service* that answered.
 - `wall-in-one --update-status` reports the app's own kind under
   `installed.install_kind`, next to the running service's whole status.
 
 The status addition is additive. `status_version` stays 2: a new key with a
 fixed value says nothing a client has to understand, and 0.3 clients and the
-companion read only the keys they know. A 0.3 service has no `install_kind`;
-the companion falls back to telling the kinds apart by where the programs are.
+companion read only the keys they know.
 The key and its value (at most six bytes) are a fixed part of the status, the
 part both the service's and the compiler's status budgets reserve 256 KiB
 for (`STATUS_STRUCTURAL_RESERVE`), so neither budget changes.
@@ -121,6 +122,15 @@ also keeps the document's bytes the same across an update of the renderer,
 so an update elsewhere in the profile no longer rewrites `runtime.toml`. The
 written path depends only on which listed directory holds the program, which
 is the same for every caller, so the same-bytes rule holds.
+
+The trade-off: a resolved store path kept working until the next garbage
+collection after the renderer left the profile; the profile's path stops
+working at once, when a renderer is removed or moves to another profile
+(switching `manualWallpaperInstalls`, moving from the NixOS module to
+home-manager). Nothing recompiles on a profile change, so the recovery is
+`wall-in-one --write-config` and a service restart, which
+[installing.md](installing.md#after-installing-removing-or-moving-a-renderer)
+says next to the steps for installing one.
 
 **A renderer found nowhere** is still written as `/usr/bin/<name>`, as since
 0.1.4: the service's `[renderer]` needs an absolute path for each program (and
@@ -199,10 +209,16 @@ user's Steam library and are never packaged.
 - **`runtime.toml` from 0.1.4 to 0.3.x** names the renderers by the resolved
   store paths of that release's bundled copies. The first 0.4 start recompiles
   it in the unit's start-up preparation, before the service starts, so the
-  paths become profile paths (or the placeholder). If that compile fails, the
-  last good document stays, and with it the old paths: they work for as long
-  as the old package's generation is kept, and after that the service reports
-  the renderer it cannot start until a compile succeeds.
+  paths become profile paths, or the placeholder for a renderer that is not
+  installed. With the placeholder, every video or scene fails to start, is
+  skipped after three attempts, and the skip is saved: updating without the
+  module or an installed renderer stops them playing. docs/updating.md says to
+  install the renderers before the restart, and how to recover. (The service
+  telling "renderer missing" from a failing entry is the missing-component
+  step's.) If that compile fails, the last good document stays, and with it
+  the old paths: they work for as long as the old package's generation is
+  kept, and after that the service reports the renderer it cannot start until
+  a compile succeeds.
 - **A profile that still holds 0.3.x** has its bundled renderers only inside
   that package's wrapper, never in a profile's `bin`, so the lookup never
   finds them.

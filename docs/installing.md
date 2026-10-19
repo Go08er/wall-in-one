@@ -61,10 +61,31 @@ The app looks in the Nix profiles (`~/.nix-profile/bin`,
 `~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, then on `PATH`, but
 never in a store directory on `PATH`: a renderer only in a `nix shell` is not
 installed ([why](packaging.md#finding-a-renderer)). It names a renderer by the
-path it found it at, so a profile update needs nothing from you. After
-installing a renderer that was missing, run `wall-in-one --write-config` and
-`wall-in-one ctl reload` (or restart `wall-in-one.service`), so the service
-learns where it is.
+path it found it at, so updating a renderer in the same profile needs nothing
+from you.
+
+#### After installing, removing or moving a renderer
+
+`runtime.toml` is compiled when the app saves a change and when the service
+starts, not when a profile changes. So after you install a renderer that was
+missing, remove one, or move one to another place (switching
+`manualWallpaperInstalls`, moving from the NixOS module to home-manager or the
+other way, a `nix profile remove`), the document still names where the
+renderer was, which may no longer exist at once. Compile it again and let the
+service load it:
+
+```console
+$ wall-in-one --write-config
+$ systemctl --user restart wall-in-one.service
+```
+
+Until then, a video or scene whose renderer the document names wrongly cannot
+start. The service tries it three times, then skips it for the rest of its
+session, saying `cannot start mpvpaper` (or linux-wallpaperengine) in
+`wall-in-one ctl status`, and the app saves that skip on the wallpaper. The
+restart above forgets the skips of the session. A skip the app has already
+saved stays until you open that wallpaper in the app and choose **Try again**
+in its details.
 
 ### On NixOS: the module
 
@@ -123,8 +144,11 @@ programs.wall-in-one = {
 ```
 
 installs the app only. Install mpvpaper and linux-wallpaperengine however you
-like, in any of the places above; a renderer that is not there just can't play
-its kind of wallpaper, and the service says so when one is needed.
+like, in any of the places above, before the service next starts. A renderer
+that is not there can't play its kind of wallpaper: each video or scene the
+service tries to play is skipped and the skip saved, as
+[above](#after-installing-removing-or-moving-a-renderer), which also says how
+to recover.
 
 Outside Nix, install them from your distribution: on Arch, `mpvpaper` and
 `linux-wallpaperengine-git` from the AUR (the Wall-in-One package lists both

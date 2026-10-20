@@ -45,7 +45,7 @@ def test_same_path_requests_all_settle(
         assert started.wait(2)
         provider.request(second, 320, 180, lambda _texture: delivered.append("second"))
         release.set()
-        spin_until(lambda: bool(delivered), 2, what="the completed thumbnail delivery")
+        spin_until(lambda: len(delivered) == 2, 2, what="both thumbnail deliveries")
         assert provider.pending() == 0, (delivered, tuple(provider._waiting))
         assert delivered == ["first", "second"]
     finally:

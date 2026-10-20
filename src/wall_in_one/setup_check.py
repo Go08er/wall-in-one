@@ -470,10 +470,18 @@ def only_missing_renderers(last_error: str) -> bool:
     without a connector in front, any number of times: then the window has
     said it already when `missing_renderers` is unchanged, and the bar uses
     the setup wording rather than offering Retry for a broken renderer.
+    A still that could not be put back is never only that: its message has
+    no "paired still is active" to end on, so the pattern would otherwise run
+    on into the next display's message and hide it.
     """
+    if _STILL_NOT_RESTORED in last_error:
+        return False
     rest = _MISSING_DIAGNOSTIC.sub("", last_error)
     return bool(last_error.strip()) and not rest.strip(" ;")
 
+
+#: How the service ends a missing-renderer message whose still failed too.
+_STILL_NOT_RESTORED: Final = "; could not reapply the still: "
 
 _MISSING_DIAGNOSTIC: Final = re.compile(
     r"(?:[^\s;:]+: )?(?:mpvpaper|linux-wallpaperengine) (?:is missing|cannot run here): "

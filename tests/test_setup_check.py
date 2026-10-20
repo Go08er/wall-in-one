@@ -977,3 +977,11 @@ def test_a_renderer_whose_still_could_not_be_put_back_is_not_only_missing() -> N
     assert setup_check.only_missing_renderers(missing)
     assert not setup_check.only_missing_renderers(still_failed)
     assert not setup_check.only_missing_renderers(f"{missing}; {still_failed}")
+    # Independent mode joins displays in connector order, so the failed still
+    # can come first; it must not swallow the message after it.
+    assert not setup_check.only_missing_renderers(f"{still_failed}; {missing}")
+    crash = (
+        'DP-2: scene 123 (entry "abc") stopped because linux-wallpaperengine exited on '
+        "DP-2 (signal: 11 (SIGSEGV)); paired still is active"
+    )
+    assert not setup_check.only_missing_renderers(f"{still_failed}; {crash}")

@@ -203,3 +203,25 @@ def test_an_output_directory_with_a_file_of_that_name_is_refused(
     assert result.returncode == 1
     assert "already exists" in result.stderr
     assert _snapshot(release) == before
+
+
+@pytest.mark.parametrize("kind", ["packaging", "repo", "symlink"])
+def test_local_build_refuses_to_use_the_checkout_as_its_output(tmp_path: Path, kind: str) -> None:
+    repo = tmp_path / "repo"
+    arch = repo / "packaging" / "arch"
+    arch.mkdir(parents=True)
+    for name in ("local-build.sh", "PKGBUILD", ".SRCINFO"):
+        shutil.copy(ARCH / name, arch / name)
+    (repo / "keep").write_text("x")
+    (tmp_path / "link").symlink_to(arch, target_is_directory=True)
+    target = {"packaging": arch, "repo": repo, "symlink": tmp_path / "link"}[kind]
+    before = {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    result = subprocess.run(
+        ["bash", str(arch / "local-build.sh")],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "WIO_ARCH_OUT": str(target), "TMPDIR": str(tmp_path)},
+    )
+    assert result.returncode == 1
+    assert "part of the checkout" in result.stderr
+    assert {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before

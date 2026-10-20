@@ -15,6 +15,16 @@ repo="$(cd "$here/../.." && pwd)"
 pkgver="$(sed -n 's/^pkgver=//p' "$here/PKGBUILD")"
 out="${WIO_ARCH_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/wio-arch.XXXXXX")}"
 mkdir -p "$out"
+# The output directory is cleaned and written to below: it must be neither
+# this packaging directory nor the repository, under any name (compare the
+# real paths).
+out_real="$(cd "$out" && pwd -P)"
+for protected in "$here" "$repo"; do
+  if [ "$out_real" = "$(cd "$protected" && pwd -P)" ]; then
+    echo "local-build.sh: WIO_ARCH_OUT is $out_real, which is part of the checkout; choose another" >&2
+    exit 1
+  fi
+done
 tarball="wall-in-one-$pkgver-local.tar.gz"
 
 # A fixed WIO_ARCH_OUT keeps the last run's files, and makepkg would reuse

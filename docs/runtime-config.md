@@ -296,7 +296,10 @@ after a real hot-plug change. A transient discovery failure retains the last
 successful snapshot, falling back to the explicit assignment list before the
 first success. `status.output_discovery_error` reports that degraded state.
 Only enabled outputs are connectors here; a head the compositor reports switched
-off is listed in `status.outputs` and is never a target.
+off is listed in `status.outputs` and is never a target, as long as another head
+is on. With every head switched off the snapshot is a discovery failure like the
+ones above: the last successful snapshot is kept, and
+`status.output_discovery_error` says the compositor reported no enabled outputs.
 
 `status_version = 2` retains top-level compatibility fields for compact bar
 clients and also returns a `displays` array with the effective playlist and

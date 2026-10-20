@@ -355,3 +355,26 @@ def test_a_headless_path_with_no_service_running_gets_nothing() -> None:
     assert not Path(paths.runtime_socket_path()).exists()
     assert outputs.ask_service() is None
     assert outputs.discover() == ()
+
+
+def test_the_docs_say_every_head_switched_off_keeps_the_last_snapshot() -> None:
+    """A switched-off head is like an unplugged one only while another head is on (R40-5).
+
+    With every head switched off the service keeps its last successful snapshot
+    and reports a discovery error, as control-socket.md's
+    ``output_discovery_error`` already said; each place that describes a
+    switched-off head says so too.
+    """
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    for name, claim in (
+        ("display-discovery.md", "never become a renderer target"),
+        ("display-discovery.md", "is treated exactly like an unplugged one"),
+        ("runtime-config.md", "is never a target"),
+        ("control-socket.md", "is treated exactly like an unplugged one"),
+    ):
+        text = " ".join((docs / name).read_text(encoding="utf-8").split())
+        assert text.count(claim) == 1, (name, claim)
+        after = text.split(claim, 1)[1][:600]
+        assert "every head switched off" in after, (name, claim)
+        if claim != "never become a renderer target":
+            assert "output_discovery_error" in after, (name, claim)

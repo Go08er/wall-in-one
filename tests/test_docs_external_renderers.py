@@ -104,3 +104,13 @@ def test_the_install_guide_says_what_the_app_checks() -> None:
         assert named in section, named
     assert "**Not Now**" in section and "**Details**" in section
     assert "Settings → Setup" in section
+
+
+def test_the_same_bytes_promise_is_kept_to_the_shared_places() -> None:
+    """A directory only on one caller's ``PATH`` can compile differently (R40-5)."""
+    section = _section(_text("docs/packaging.md"), "## Finding a renderer")
+    assert "whatever its own `PATH`" not in section
+    assert "for a program in one of them (steps 1 and 2) the bytes are the same" in section
+    assert "the user manager's included" in section
+    assert "a link in `~/.local/bin` is enough" in section
+    assert "is the same for every caller, so the same-bytes rule holds." not in section

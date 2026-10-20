@@ -175,7 +175,10 @@ Apart from `outputs` and `missing_renderers`, `status` keeps its shape, so a
 client that does not know them is unaffected. One meaning changed in 0.4.0: a display switched off
 in the compositor is `connected: false` in `displays` and is treated exactly
 like an unplugged one (its renderer stops; switched back on, its assignment is
-applied again). With niri, 0.3.x reported it as connected. The app's window
+applied again), as long as another head is on. With every head switched off,
+the service keeps its last known connectors and says why in
+`output_discovery_error`, as described above. With niri, 0.3.x reported it as
+connected. The app's window
 and `ctl displays` use this snapshot, and GTK's own monitors when no service
 answers.
 

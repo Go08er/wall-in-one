@@ -91,7 +91,9 @@ Who installs them:
 `runtime.toml` names each program by absolute path, and every compiler (the
 window, `--write-config` from a terminal, the service's start-up preparation
 under the user manager) must compile the same bytes from the same authoring
-state, whatever its own `PATH`. The places every caller shares come first:
+state. Each has its own `PATH`, so the places every caller shares come first,
+and for a program in one of them (steps 1 and 2) the bytes are the same
+whatever each caller's `PATH`:
 
 1. The Nix profiles, in NixOS's login order: `~/.nix-profile/bin`,
    `~/.local/state/nix/profile/bin`, `/etc/profiles/per-user/$USER/bin`,
@@ -99,6 +101,15 @@ state, whatever its own `PATH`. The places every caller shares come first:
 2. `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`.
 3. Every other absolute directory on `PATH`, in `PATH` order, except the
    Nix store directories.
+
+Step 3 finds an install somewhere unusual (`/opt/...`, `~/bin`, a custom
+prefix), but only for a caller whose `PATH` has that directory. The user
+manager's `PATH` is often shorter than a terminal's, so a renderer found only
+there can compile to one path from a terminal and to another, or to none, at
+the service's start-up. Such an install has to be on the `PATH` of every
+compiler, the user manager's included (`~/.config/environment.d/`, see
+environment.d(5)), or be linked into a directory of step 1 or 2 (a link in
+`~/.local/bin` is enough; the link's path is the one written).
 
 **Store directories on `PATH` are not looked in at all.** Until 0.4 they came
 first, because the package's wrapper put its bundled renderers there, at the
@@ -119,9 +130,11 @@ symbolic link that every profile switch re-points;
 `~/.nix-profile/bin/mpvpaper` keeps working across switches, while the store
 path it resolved to stops existing once the old generation is collected. It
 also keeps the document's bytes the same across an update of the renderer,
-so an update elsewhere in the profile no longer rewrites `runtime.toml`. The
-written path depends only on which listed directory holds the program, which
-is the same for every caller, so the same-bytes rule holds.
+so an update elsewhere in the profile no longer rewrites `runtime.toml`. For
+the shared places the written path depends only on which of them holds the
+program, which is the same for every caller, so the same-bytes rule holds;
+for a directory only on `PATH` it holds when every caller has that directory
+(above).
 
 The trade-off: a resolved store path kept working until the next garbage
 collection after the renderer left the profile; the profile's path stops

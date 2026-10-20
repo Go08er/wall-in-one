@@ -26,7 +26,9 @@ The displays a wallpaper can be put on are the enabled outputs: the
 `wl_output` globals with a usable connector name. A compositor advertises no
 `wl_output` for a disabled head, so disabled heads come only from
 wlr-output-management (niri 26.04, Sway, Hyprland and the wlroots compositors
-offer it). They are listed with `enabled: false` and never become a renderer target.
+offer it). They are listed with `enabled: false` and never become a renderer
+target, as long as one head is still on; with every head switched off nothing
+new is published (see below).
 A compositor without wlr-output-management has no disabled heads to list, and
 nothing else changes. Nor is a compositor followed that announces more heads
 or modes over it than the service keeps (256 heads, 4096 modes): the service
@@ -61,7 +63,13 @@ fields the companion reads (`displays`, `displays[].connected`,
 error changes. One meaning changes: a display switched off in the compositor
 is `connected: false` and is treated exactly like an unplugged one (its
 renderer stops; switched back on, its assignment is applied again), where
-niri's answer, and so 0.3.x, counted it as connected.
+niri's answer, and so 0.3.x, counted it as connected. That holds while
+another head is still on. With every head switched off there is nothing to
+put a wallpaper on, and the service treats the answer as a failed discovery
+instead: it keeps the last successful snapshot, and the displays and routes
+that went with it, as for any other failure, and says "the compositor
+reported no enabled outputs" in `output_discovery_error` until a head is
+switched on again.
 
 ## The window (GTK)
 

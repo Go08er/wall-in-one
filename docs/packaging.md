@@ -260,7 +260,11 @@ is published is made from it after the tag exists, in this order:
    GitHub's tarball for the tag, refuses unless its only top-level directory
    is `wall-in-one-<pkgver>`, computes the sha256, and writes the release
    `PKGBUILD` (real checksum, no `TODO`) and a matching `.SRCINFO` into the
-   directory, changing nothing in the repository. It refuses if the tag is not
+   directory, changing nothing in the repository. The output directory must be
+   new (or empty): it refuses one that is the packaging directory under any
+   name, or that already has a `PKGBUILD` or `.SRCINFO`, and it publishes the
+   files with `link(2)` so nothing is ever overwritten or written through a
+   symlink. It refuses if the tag is not
    `v<pkgver>` or any `SKIP` would remain. Commit nothing from this directory
    to the main repository, and do not hand-edit its files.
 4. **Check the result on Arch** if you have a machine or container: in that
@@ -274,7 +278,8 @@ is published is made from it after the tag exists, in this order:
    the AUR repository `wall-in-one`, commit, and push.
 
 If a later fix needs another package build of the same release, raise `pkgrel`
-in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 5.
+in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 5, with a
+new output directory for step 3 (the script does not reuse one).
 
 ## How it is tested
 

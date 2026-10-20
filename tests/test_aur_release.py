@@ -264,3 +264,38 @@ def test_local_build_refuses_an_output_in_or_around_the_checkout_and_deletes_not
     assert result.returncode == 1, result.stderr
     assert said in result.stderr
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_a_release_output_that_a_symlink_appears_in_after_the_check_is_not_written_through(
+    release: Path, tmp_path: Path
+) -> None:
+    """The check-then-write window (aur-release.sh made a work dir between the two)."""
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}")
+    out = tmp_path / "out"
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    real = shutil.which("mktemp")
+    assert real
+    (shim / "mktemp").write_text(
+        "#!/bin/sh\n"
+        f'[ -e "{tmp_path}/planted" ] || {{ ln -s "{release}/PKGBUILD" "{out}/PKGBUILD"; '
+        f': > "{tmp_path}/planted"; }}\n'
+        f'exec "{real}" "$@"\n'
+    )
+    (shim / "mktemp").chmod(0o755)
+    before = _snapshot(release)
+    result = subprocess.run(
+        ["bash", str(release / "aur-release.sh"), f"v{_pkgver()}", str(out)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{shim}:{os.environ['PATH']}",
+            "TMPDIR": str(tmp_path),
+            "WIO_AUR_TARBALL": str(tarball),
+        },
+    )
+    assert (tmp_path / "planted").exists(), "the shim never ran"
+    assert result.returncode == 1
+    assert _snapshot(release) == before

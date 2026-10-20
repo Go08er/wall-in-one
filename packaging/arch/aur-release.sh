@@ -9,8 +9,14 @@
 # checks it is what the PKGBUILD expects, computes its sha256, and writes a
 # PKGBUILD with that sum and a .SRCINFO to match into the output directory
 # (default: a new directory below ${TMPDIR:-/tmp}), which is printed. It
-# changes nothing in the repository. It refuses if
+# changes nothing in the repository. The output directory must be new (or
+# empty): the files are built in a work directory inside it and then published
+# with link(2), which never follows a symlink and never replaces a file. It
+# refuses if
 #   - the tag is not v<pkgver>,
+#   - the output directory is the packaging directory, under any name (symlink,
+#     ".", "../arch"), or already has a PKGBUILD or .SRCINFO (even a dangling
+#     symlink),
 #   - the tarball's top-level directory is not wall-in-one-<pkgver>,
 #   - the PKGBUILD or .SRCINFO is not in the shape it rewrites, or a SKIP
 #     would remain in the result.
@@ -51,7 +57,8 @@ for name in PKGBUILD .SRCINFO; do
     die "$out/$name already exists; remove it or choose another output directory"
   fi
 done
-work="$(mktemp -d "${TMPDIR:-/tmp}/wio-aur-work.XXXXXX")"
+# Inside the output directory, so the files can be published with link(2) below.
+work="$(mktemp -d "$out/.wio-aur-work.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 
 tarball="$work/tarball.tar.gz"
@@ -82,13 +89,18 @@ sum="$(sha256sum "$tarball" | cut -d' ' -f1)"
 # The TODO about SKIP is for the checked-in file; the published one has a sum.
 sed -e "s/^sha256sums=('SKIP')$/sha256sums=('$sum')/" \
     -e '/^# TODO(release)/,/^# package must never keep/d' \
-    "$pkgbuild" > "$out/PKGBUILD"
-sed -e "s/^	sha256sums = SKIP$/	sha256sums = $sum/" "$srcinfo" > "$out/.SRCINFO"
+    "$pkgbuild" > "$work/PKGBUILD"
+sed -e "s/^	sha256sums = SKIP$/	sha256sums = $sum/" "$srcinfo" > "$work/.SRCINFO"
 
-grep -q "^sha256sums=('$sum')$" "$out/PKGBUILD" || die "the PKGBUILD did not take the sum"
-grep -q "^	sha256sums = $sum$" "$out/.SRCINFO" || die ".SRCINFO did not take the sum"
-if grep -q 'SKIP' "$out/PKGBUILD" "$out/.SRCINFO"; then
-  rm -f -- "$out/PKGBUILD" "$out/.SRCINFO"
+grep -q "^sha256sums=('$sum')$" "$work/PKGBUILD" || die "the PKGBUILD did not take the sum"
+grep -q "^	sha256sums = $sum$" "$work/.SRCINFO" || die ".SRCINFO did not take the sum"
+if grep -q 'SKIP' "$work/PKGBUILD" "$work/.SRCINFO"; then
   die "a SKIP would remain in the release files; nothing written"
 fi
+# Publish with link(2): it never follows a symlink and fails if the name
+# exists, so a link planted at the output name since the check above cannot
+# make this write through to a file elsewhere.
+for name in PKGBUILD .SRCINFO; do
+  ln -- "$work/$name" "$out/$name" || die "cannot create $out/$name (it appeared since the check?)"
+done
 echo "release PKGBUILD and .SRCINFO for $tag (sha256 $sum) in $out"

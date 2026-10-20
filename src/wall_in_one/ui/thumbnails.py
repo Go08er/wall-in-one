@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
 from threading import Lock
 from typing import Final
 
@@ -54,8 +53,8 @@ class ThumbnailLoader:
 
     def __init__(self, max_workers: int = MAX_WORKERS) -> None:
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb")
-        self._pending: dict[Path, Future[Gdk.Texture | None]] = {}
-        self._waiters: dict[Path, list[Callback]] = {}
+        self._pending: dict[MediaItem, Future[Gdk.Texture | None]] = {}
+        self._waiters: dict[MediaItem, list[Callback]] = {}
         self._lock = Lock()
         self._closed = False
         self._processes = worker_processes.Cancellation()
@@ -84,16 +83,19 @@ class ThumbnailLoader:
         with self._lock:
             if self._closed:
                 return
-            callbacks = self._waiters.get(item.path)
+            callbacks = self._waiters.get(item)
             if callbacks is not None:
                 # The same pairing can be visible in the source drawer and in
                 # the playlist order. Coalesce the expensive decode, not the
-                # consumers: every visible card still needs the result.
+                # consumers: every visible card still needs the result. The
+                # identity is the whole frozen item (path, size, mtime, paired
+                # still), so a changed source gets a job of its own instead of
+                # inheriting, or being settled by, the old item's result.
                 callbacks.append(callback)
                 return
             future = self._pool.submit(self._texture_for, item, self._processes)
-            self._pending[item.path] = future
-            self._waiters[item.path] = [callback]
+            self._pending[item] = future
+            self._waiters[item] = [callback]
         future.add_done_callback(lambda done: self._finish(item, done))
 
     @staticmethod
@@ -134,8 +136,8 @@ class ThumbnailLoader:
             LOGGER.warning("thumbnail worker failed for %s: %s", item.path, error)
             result = None
         with self._lock:
-            self._pending.pop(item.path, None)
-            callbacks = self._waiters.pop(item.path, [])
+            self._pending.pop(item, None)
+            callbacks = self._waiters.pop(item, [])
             if self._closed:
                 return
 

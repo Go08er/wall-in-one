@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from wall_in_one import programs
+from wall_in_one import file_io, programs
 from wall_in_one.install_kind import InstallKind
 from wall_in_one.programs import Program
 
@@ -749,23 +749,35 @@ def motion_in_document(path: Path) -> bool | None:
 
     What a terminal knows of the library without scanning it. False when
     there is no document (nothing was ever compiled, so nothing plays);
-    None when it can't be read.
+    None when it can't be read or is not shaped as the compiler writes it
+    (playlists and their entries are lists, each entry's ``kind`` a string).
+    It is read as the service reads it, a regular file of at most a runtime
+    document's size, so a FIFO or a huge file there is "can't be read", never
+    a wait. A hint: it never raises.
     """
+    from wall_in_one.runtime_config import MAX_RUNTIME_CONFIG_BYTES
+
     try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return False
+        text = file_io.read_regular_text(path, MAX_RUNTIME_CONFIG_BYTES)
+        if text is None:
+            return False
+        document = tomllib.loads(text)
     except OSError, ValueError, RecursionError:
         return None
     playlists = document.get("playlists")
     if not isinstance(playlists, list):
         return None
-    return any(
-        isinstance(entry, Mapping) and entry.get("kind") in _MOTION
-        for playlist in playlists
-        if isinstance(playlist, Mapping)
-        for entry in (playlist.get("entries") or [])
-    )
+    motion = False
+    for playlist in playlists:
+        entries = playlist.get("entries", []) if isinstance(playlist, Mapping) else None
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            kind = entry.get("kind") if isinstance(entry, Mapping) else None
+            if not isinstance(kind, str):
+                return None
+            motion = motion or kind in _MOTION
+    return motion
 
 
 def service_from_status(status: object) -> Service:
@@ -787,7 +799,7 @@ def service_from_status(status: object) -> Service:
                     MissingRenderer(
                         program,
                         path,
-                        reason if reason in _REASONS and isinstance(reason, str) else "not-found",
+                        reason if isinstance(reason, str) and reason in _REASONS else "not-found",
                     )
                 )
     return Service("running", tuple(missing))

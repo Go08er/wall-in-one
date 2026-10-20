@@ -179,7 +179,10 @@ program is still not there.
   into findings, with no I/O. ``motion`` is whether the library has a video or
   a scene: the window reads it from the library the application already holds
   (no scan), `--setup-status` from the compiled `runtime.toml` (none compiled
-  is "no"; unreadable is "not known", which counts as no). Each finding says what is missing, whether it is
+  is "no"; unreadable or malformed is "not known", which counts as no and
+  never hides another finding). It reads the document as the service does, a
+  regular file no larger than a runtime document may be, so a FIFO there is
+  "not known" rather than a wait. Each finding says what is missing, whether it is
   required, what that means, and how to fix it for this install kind. All the
   text the window, Settings and the terminal show comes from here, so the
   classic and the new interface say the same thing (as
@@ -330,6 +333,9 @@ document changes nothing else.
   `local()` with a fake home, fake Noctalia folders, overrides and units.
 - `--setup-status`'s output and its three exit statuses, a hostile manifest, a
   FIFO, a broken link and a huge folder in Noctalia's plugin folders, and no
-  GTK or write in a fresh interpreter.
+  GTK or write in a fresh interpreter. A malformed `runtime.toml` (entries or
+  a kind of the wrong type), one too large and a FIFO in its place are "not
+  known", and Noctalia missing is still exit 1 beside each; a status row whose
+  `reason` is not a string is `not-found`.
 - The card and the section in both interfaces, through the GUI runner,
   including a library of stills; a missing renderer said once per window.

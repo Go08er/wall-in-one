@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -837,3 +838,126 @@ def test_a_row_without_its_path_reads_sensibly() -> None:
         text = f"{finding.title} {finding.detail} {finding.fix}"
         assert "names ," not in text and " ," not in text, text
         assert "/usr/bin/mpvpaper" in text, text
+
+
+# -- Codex review of 0.4.0 (R40-3) --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "not valid TOML!!!",
+        "[[playlists]]\nentries = 1\n",
+        "[[playlists]]\n[[playlists.entries]]\nkind = []\n",
+        "[[playlists]]\n[[playlists.entries]]\nkind = { video = true }\n",
+        '[[playlists]]\n[[playlists.entries]]\nid = "no-kind"\n',
+        "[[playlists]]\nentries = [1]\n",
+        "playlists = [1]\n",
+        "playlists = 1\n",
+    ],
+    ids=[
+        "invalid-syntax",
+        "scalar-entries",
+        "list-kind",
+        "table-kind",
+        "no-kind",
+        "scalar-entry",
+        "scalar-playlist",
+        "scalar-playlists",
+    ],
+)
+def test_a_malformed_runtime_document_is_not_known(tmp_path: Path, document: str) -> None:
+    """A hand-edited or damaged document is "not known", never an exception."""
+    target = tmp_path / "runtime.toml"
+    target.write_text(document)
+    assert setup_check.motion_in_document(target) is None
+
+
+def test_a_video_beside_a_malformed_entry_is_still_not_known(tmp_path: Path) -> None:
+    target = tmp_path / "runtime.toml"
+    target.write_text(
+        '[[playlists]]\n[[playlists.entries]]\nkind = "video"\n[[playlists.entries]]\nkind = 7\n'
+    )
+    assert setup_check.motion_in_document(target) is None
+
+
+def _without_hanging(work: Callable[[], object], fifo: Path) -> list[object]:
+    """``work()`` on a daemon thread; a FIFO it blocks on is released and the hang reported."""
+    result: list[object] = []
+    worker = threading.Thread(target=lambda: result.append(work()), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    hung = worker.is_alive()
+    if hung:
+        # Release the reader so the thread ends: a writer that closes at once.
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=5)
+    assert not hung, f"blocked on a FIFO at {fifo.name}"
+    return result
+
+
+def test_a_fifo_at_the_runtime_document_is_not_known_and_does_not_hang(tmp_path: Path) -> None:
+    target = tmp_path / "runtime.toml"
+    os.mkfifo(target)
+    assert _without_hanging(lambda: setup_check.motion_in_document(target), target) == [None]
+
+
+def test_a_runtime_document_larger_than_one_may_be_is_not_known(tmp_path: Path) -> None:
+    from wall_in_one.runtime_config import MAX_RUNTIME_CONFIG_BYTES
+
+    target = tmp_path / "runtime.toml"
+    # Valid TOML naming a video, made too large by a comment: not read at all.
+    document = b'[[playlists]]\n[[playlists.entries]]\nkind = "video"\n'
+    target.write_bytes(document + b"#" + b"x" * MAX_RUNTIME_CONFIG_BYTES + b"\n")
+    assert setup_check.motion_in_document(target) is None
+    target.write_bytes(document)
+    assert setup_check.motion_in_document(target) is True
+
+
+@pytest.mark.parametrize("document", ["scalar-entries", "list-kind", "fifo", "raises"])
+def test_a_bad_motion_hint_does_not_hide_a_definite_missing_program(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    document: str,
+) -> None:
+    """Noctalia is certainly missing whatever the runtime document says (R40-3)."""
+    from wall_in_one import paths
+
+    target = tmp_path / "runtime.toml"
+    if document == "scalar-entries":
+        target.write_text("[[playlists]]\nentries = 1\n")
+    elif document == "list-kind":
+        target.write_text("[[playlists]]\n[[playlists.entries]]\nkind = []\n")
+    elif document == "fifo":
+        os.mkfifo(target)
+    else:
+
+        def broken(_path: Path) -> bool | None:
+            raise RuntimeError("a hint that broke")
+
+        target.write_text('[[playlists]]\n[[playlists.entries]]\nkind = "video"\n')
+        monkeypatch.setattr(setup_check, "motion_in_document", broken)
+    monkeypatch.setattr(paths, "runtime_config_path", lambda: target)
+    monkeypatch.setattr(setup_check, "ask_service", lambda _timeout: RUNNING)
+    machine = Local((), False, Companion("absent"))
+    monkeypatch.setattr(setup_check, "local", lambda _environ=None: machine)
+    (code,) = _without_hanging(lambda: cli.main(["--setup-status"]), target)
+    captured = capsys.readouterr()
+    assert code == setup_check.EXIT_REQUIRED_MISSING, captured
+    assert "required: Noctalia isn't installed." in captured.out
+    # Not known counts as no: no renderer is required for it.
+    assert "optional: No wallpaper renderer is installed." in captured.out
+    assert "the setup check failed" not in captured.err
+
+
+def test_a_status_row_with_an_unhashable_reason_is_not_found() -> None:
+    """A malformed row is tolerated as documented, whatever its ``reason`` is."""
+    reasons: tuple[object, ...] = ([], {}, ["cannot-run"], 3, None)
+    for reason in reasons:
+        status = {"missing_renderers": [{"program": "mpvpaper", "path": "/x", "reason": reason}]}
+        assert setup_check.service_from_status(status) == Service(
+            "running", (MissingRenderer("mpvpaper", "/x", "not-found"),)
+        ), reason
+    unhashable_program = {"missing_renderers": [{"program": [], "path": "/x"}]}
+    assert setup_check.service_from_status(unhashable_program) == RUNNING

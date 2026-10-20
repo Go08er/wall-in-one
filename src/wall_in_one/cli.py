@@ -836,18 +836,21 @@ def _setup_status() -> int:
     ``--legacy-migration-status`` does for a decision it needs, and 2 when it
     couldn't tell: the check itself failed, or the service didn't answer in
     time and nothing else required is missing (a slow service never hides a
-    finding that is certain, such as Noctalia not being installed).
+    finding that is certain, such as Noctalia not being installed). The
+    runtime document is only a hint: one that can't be read or is malformed
+    is "not known", and every other finding is reported as ever.
     """
     from wall_in_one import setup_check
     from wall_in_one.control import client
 
     try:
+        motion = setup_check.motion_in_document(paths.runtime_config_path())
+    except Exception:  # a hint never hides a finding
+        motion = None
+    try:
         service = setup_check.ask_service(client.TIMEOUT)
         found = setup_check.findings(
-            install_kind.INSTALL_KIND,
-            setup_check.local(),
-            service,
-            motion=setup_check.motion_in_document(paths.runtime_config_path()),
+            install_kind.INSTALL_KIND, setup_check.local(), service, motion=motion
         )
     except Exception as error:  # say it, never a traceback
         print(f"error: the setup check failed: {error}", file=sys.stderr)

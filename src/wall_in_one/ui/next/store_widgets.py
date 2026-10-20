@@ -700,7 +700,7 @@ class StorePreview(Adw.Dialog):
 
     def _qualities(self, variants: Sequence[str]) -> Gtk.Widget:
         group = Adw.ToggleGroup(halign=Gtk.Align.START)
-        group.add(Adw.Toggle(name="best", label="Best available"))
+        group.add(Adw.Toggle(name="best", label="Automatic (as listed)"))
         for variant in variants:
             group.add(Adw.Toggle(name=variant, label=variant.upper()))
         group.set_active_name(self._quality if self._quality in variants else "best")

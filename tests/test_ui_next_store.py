@@ -1036,3 +1036,11 @@ def test_a_refused_download_leaves_the_bar_counting_what_is_still_picked(
     assert raised == ["Add a library folder first"] and list(page.picked) == [second.id]
     # Before: still "2 selected", with one picked.
     assert page._selection_label.get_label() == "1 selected"
+
+
+def test_automatic_quality_is_labelled_as_following_the_listing() -> None:
+    """The blank choice follows the card's badge, so it must not promise the best file (R32-2)."""
+    from wall_in_one.ui.next.store_state import QUALITIES
+
+    assert QUALITIES[0] == ("", "Automatic (as listed)")
+    assert all("best" not in label.lower() for _variant, label in QUALITIES)

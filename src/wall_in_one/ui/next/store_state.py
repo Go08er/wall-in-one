@@ -124,10 +124,10 @@ MODES: Final = (
     ("hd", "HD"),
     ("genre", "By genre"),
 )
-#: Which file a MotionBGS download takes: (variant, label). "" is the best
-#: the wallpaper offers (4K where there is one).
+#: Which file a MotionBGS download takes: (variant, label). "" follows the
+#: listing card's HD/4K badge; with no badge the detail page's 4K, then HD.
 QUALITIES: Final = (
-    ("", "Best available"),
+    ("", "Automatic (as listed)"),
     ("4k", "4K"),
     ("hd", "HD"),
 )

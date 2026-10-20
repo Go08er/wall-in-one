@@ -102,8 +102,10 @@ wall-in-one ctl download <provider> <identifier> [hd|4k]
 The query is everything after the provider name, spaces and all, so quoting it
 is optional: `ctl search wallhaven aurora over the fjord` is one query, not four
 arguments. The variant on `download` is MotionBGS's quality; left off, the
-provider takes the best it is offered, which is what the Store's Download does
-too while its **Download quality** is **Best available**.
+provider follows the listing's HD or 4K badge, and without one takes the detail
+page's best (4K, then HD). The Store's Download does the same while its
+**Download quality** is **Automatic (as listed)**. Choose 4K to ask for 4K
+whatever the card says.
 
 Output is **one row per line with tab-separated fields**, and everything that is
 not a row is a `#` comment. That is the format both readers of it already
@@ -359,8 +361,8 @@ reported as `site-markup`, meaning the public markup has probably changed. An
 anti-bot challenge is reported as `challenge`, and no bypass is attempted.
 
 Each card carries the quality badge from the listing, `HD` or `4K`, and that is
-the file downloaded while **Download quality** is **Best available**. Where the
-listing did not say, the detail page's best option is taken: 4K first, then HD —
+the file downloaded while **Download quality** is **Automatic (as listed)**, even
+when the wallpaper also offers 4K. Where the listing did not say, the detail page's best option is taken: 4K first, then HD —
 a video wallpaper is worth the bytes. Choosing 4K or HD there, or in a
 preview's Quality toggle, asks for that file, and a wallpaper that doesn't
 offer it fails with a `validation` error.

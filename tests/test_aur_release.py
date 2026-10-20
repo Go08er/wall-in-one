@@ -205,23 +205,62 @@ def test_an_output_directory_with_a_file_of_that_name_is_refused(
     assert _snapshot(release) == before
 
 
-@pytest.mark.parametrize("kind", ["packaging", "repo", "symlink"])
-def test_local_build_refuses_to_use_the_checkout_as_its_output(tmp_path: Path, kind: str) -> None:
+def _checkout(tmp_path: Path) -> Path:
+    """A fake checkout: the script, a PKGBUILD, and files a build must never delete."""
     repo = tmp_path / "repo"
     arch = repo / "packaging" / "arch"
     arch.mkdir(parents=True)
     for name in ("local-build.sh", "PKGBUILD", ".SRCINFO"):
         shutil.copy(ARCH / name, arch / name)
     (repo / "keep").write_text("x")
+    (repo / "service" / "src").mkdir(parents=True)
+    (repo / "service" / "src" / "main.rs").write_text("fn main() {}\n")
     (tmp_path / "link").symlink_to(arch, target_is_directory=True)
-    target = {"packaging": arch, "repo": repo, "symlink": tmp_path / "link"}[kind]
-    before = {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    return repo
+
+
+@pytest.mark.parametrize(
+    ("target", "cwd", "said"),
+    [
+        ("packaging/arch", None, "inside the checkout"),
+        (".", None, "inside the checkout"),
+        ("service", None, "inside the checkout"),
+        ("service/src", None, "inside the checkout"),
+        ("../link", "service", "inside the checkout"),
+        # A relative path is the caller's, not the repository's.
+        ("packaging/arch", "packaging", "inside the checkout"),
+        ("../packaging/arch", "service", "inside the checkout"),
+        # Above the checkout, and a directory that is not this script's own.
+        ("..", None, "contains the checkout"),
+        ("../../other", "service", "not empty"),
+    ],
+    ids=[
+        "packaging",
+        "repo",
+        "service",
+        "service-src",
+        "symlink",
+        "relative-from-repo",
+        "relative-from-service",
+        "parent",
+        "unrelated-non-empty",
+    ],
+)
+def test_local_build_refuses_an_output_in_or_around_the_checkout_and_deletes_nothing(
+    tmp_path: Path, target: str, cwd: str | None, said: str
+) -> None:
+    repo = _checkout(tmp_path)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "precious").write_text("p")
+    start = repo / cwd if cwd else repo
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     result = subprocess.run(
-        ["bash", str(arch / "local-build.sh")],
+        ["bash", str(repo / "packaging" / "arch" / "local-build.sh")],
         capture_output=True,
         text=True,
-        env={**os.environ, "WIO_ARCH_OUT": str(target), "TMPDIR": str(tmp_path)},
+        cwd=start,
+        env={**os.environ, "WIO_ARCH_OUT": target, "TMPDIR": str(tmp_path)},
     )
-    assert result.returncode == 1
-    assert "part of the checkout" in result.stderr
-    assert {p: p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before
+    assert result.returncode == 1, result.stderr
+    assert said in result.stderr
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before

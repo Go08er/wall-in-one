@@ -8,23 +8,41 @@
 # It derives a PKGBUILD from the release one, swapping only `source` and
 # `sha256sums`, so the two cannot drift apart. The package lands in
 # $WIO_ARCH_OUT (default: a new directory below ${TMPDIR:-/tmp}), which is
-# printed at the end.
+# printed at the end. It must be empty, or one this script made before (it leaves
+# a marker file), and outside the checkout; anything else is refused before it
+# is touched.
 set -euo pipefail
+
+refuse() {
+  echo "local-build.sh: $*; choose another" >&2
+  exit 1
+}
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 pkgver="$(sed -n 's/^pkgver=//p' "$here/PKGBUILD")"
-out="${WIO_ARCH_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/wio-arch.XXXXXX")}"
-mkdir -p "$out"
-# The output directory is cleaned and written to below: it must be neither
-# this packaging directory nor the repository, under any name (compare the
-# real paths).
-out_real="$(cd "$out" && pwd -P)"
-for protected in "$here" "$repo"; do
-  if [ "$out_real" = "$(cd "$protected" && pwd -P)" ]; then
-    echo "local-build.sh: WIO_ARCH_OUT is $out_real, which is part of the checkout; choose another" >&2
-    exit 1
-  fi
-done
+# Resolve the output directory once, to an absolute physical path, and use
+# only that from here on: a relative WIO_ARCH_OUT means the caller's cwd, not
+# the repository the script cd's into below.
+out_arg="${WIO_ARCH_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/wio-arch.XXXXXX")}"
+out="$(mkdir -p -- "$out_arg" && cd -- "$out_arg" && pwd -P)"
+repo_real="$(cd "$repo" && pwd -P)"
+# The output directory is cleaned and written to below, so it must be neither
+# inside the checkout (this packaging directory, service/, ...) nor above it.
+case "$out/" in
+  "$repo_real/"*) refuse "WIO_ARCH_OUT is $out, which is inside the checkout" ;;
+esac
+case "$repo_real/" in
+  "$out/"*) refuse "WIO_ARCH_OUT is $out, which contains the checkout" ;;
+esac
+# ... and it must be empty or one this script made (it leaves a marker), so a
+# mistyped WIO_ARCH_OUT such as ~ is not cleaned or built into.
+marker="$out/.wio-local-build"
+if [ -z "$(ls -A -- "$out")" ] || [ -e "$marker" ]; then
+  : > "$marker"
+else
+  refuse "WIO_ARCH_OUT is $out, which is not empty and was not made by this script"
+fi
 tarball="wall-in-one-$pkgver-local.tar.gz"
 
 # A fixed WIO_ARCH_OUT keeps the last run's files, and makepkg would reuse

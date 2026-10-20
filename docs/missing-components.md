@@ -103,6 +103,13 @@ tries again), and a window says a missing renderer's error once while the
 service's list of missing renderers stays the same, not again on every
 rotation back onto a video.
 
+A child that could not run has exited by the time the service notices, and
+the service puts the entry's still back then. If Noctalia refuses that too,
+`last_error` keeps its error ("… cannot run here: …; could not reapply the
+still: …", as an ordinary renderer exit keeps it) and does not say the still
+is showing. More than a missing program is wrong then, so the app's bars show
+that error with Retry rather than the setup wording.
+
 Skipping to the next entry the renderer can play was the alternative. It changes
 what the user chose, it cannot help a playlist of videos only (there is nothing
 to skip to), and in independent mode it would move one display's cursor because
@@ -325,7 +332,8 @@ document changes nothing else.
   whose sibling started it first; a reload that changes nothing applies
   nothing for an unrunnable program and restarts no healthy scene; a renderer
   missing a library is not a crashed scene, and one that exits 127 after the
-  window still is; a child that exits is still reported and a crashed scene
+  window still is; a still that cannot be put back after a loader failure is
+  said, for a video and a scene; a child that exits is still reported and a crashed scene
   still quarantined. The status-shape fixture ignores the new key, and at the
   schema's ceilings the taboo records and `outputs` are the same with both
   renderers missing at the longest paths as without them.

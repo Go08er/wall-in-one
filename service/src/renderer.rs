@@ -469,21 +469,27 @@ impl MissingRenderer {
 
     /// What a display showing its still because of it says (`last_error`).
     pub fn diagnostic(&self) -> String {
-        match self.reason {
+        self.diagnostic_after(Ok(()))
+    }
+
+    /// [`Self::diagnostic`] once the still was put back (`fallback`), after
+    /// a child that could not run exited. When that failed too, it says so
+    /// and does not claim the still is showing.
+    pub fn diagnostic_after(&self, fallback: Result<(), String>) -> String {
+        let cause = match self.reason {
             MissingReason::NotFound => format!(
-                "{}: cannot start {}: {}; paired still is active",
+                "{}: cannot start {}: {}",
                 self.short(),
                 self.path,
                 self.error
             ),
             MissingReason::NotExecutable | MissingReason::CannotRun | MissingReason::NoAccess => {
-                format!(
-                    "{}: {}: {}; paired still is active",
-                    self.short(),
-                    self.path,
-                    self.error
-                )
+                format!("{}: {}: {}", self.short(), self.path, self.error)
             }
+        };
+        match fallback {
+            Ok(()) => format!("{cause}; paired still is active"),
+            Err(error) => format!("{cause}; could not reapply the still: {error}"),
         }
     }
 }
@@ -1699,7 +1705,7 @@ impl WallpaperDriver for SystemDriver {
                     self.loader_failed(0, &active.output, exit, started, &diagnostics)
                 });
                 let message = match missing {
-                    Some(record) => record.diagnostic(),
+                    Some(record) => record.diagnostic_after(fallback),
                     None => Self::failure_message(
                         "mpvpaper",
                         &active.entry,
@@ -1763,7 +1769,7 @@ impl WallpaperDriver for SystemDriver {
                 // crashed it: no quarantine (docs/missing-components.md).
                 let permanent_for_session = missing.is_none();
                 let message = match missing {
-                    Some(record) => record.diagnostic(),
+                    Some(record) => record.diagnostic_after(fallback),
                     None => Self::failure_message(
                         "linux-wallpaperengine",
                         &active.entry,

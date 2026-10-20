@@ -10378,6 +10378,144 @@ fn a_loader_failure_noticed_late_is_still_not_a_crashed_scene() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// `program` (`mpvpaper` or `linux-wallpaperengine`) fails in the loader in
+/// mirrored mode, with a Noctalia that refuses to put the still back once it
+/// has started when `still_fails`. The status once the exit was polled.
+fn a_loader_failure_and_the_still_put_back(program: &str, still_fails: bool) -> serde_json::Value {
+    let root = directory(&format!("loader-failure-still-{program}-{still_fails}"));
+    let loader = format!(
+        "echo '{program}: error while loading shared libraries: libx.so.1: cannot open shared object file: No such file or directory' >&2; exit 127"
+    );
+    let (mpvpaper, engine) = if program == "mpvpaper" {
+        let mpvpaper = root.join("mpvpaper");
+        script(&mpvpaper, &loader);
+        (mpvpaper, root.join("absent-linux-wallpaperengine"))
+    } else {
+        let engine = root.join("linux-wallpaperengine");
+        script(&engine, &loader);
+        (root.join("absent-mpvpaper"), engine)
+    };
+    // Every call is logged; `wallpaper-set` fails while `refuse` exists.
+    let log = root.join("noctalia.log");
+    let refuse = root.join("refuse");
+    let picky = root.join("picky-noctalia");
+    script(
+        &picky,
+        &format!(
+            "printf '%s\\n' \"$*\" >> {log:?}\nif [ -e {refuse:?} ] && [ \"$2\" = wallpaper-set ]; then echo 'the still was refused' >&2; exit 1; fi"
+        ),
+    );
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
+    let ordinary = format!("noctalia_program = {:?}", root.join("noctalia"));
+    let (mut runtime, _) = missing_renderer_runtime_over(
+        &root,
+        &mpvpaper,
+        &engine,
+        false,
+        |document| {
+            assert!(document.contains(&ordinary));
+            document.replace(&ordinary, &format!("noctalia_program = {picky:?}"))
+        },
+        &source,
+    );
+    let started = Instant::now();
+    without_text_file_busy(|| runtime.apply_current()).unwrap();
+    if program != "mpvpaper" {
+        // Off the video (its program is absent) onto the scene.
+        let next = without_text_file_busy(|| {
+            let response = runtime_command(&mut runtime, noon(), "next", None);
+            if response.ok {
+                Ok(response)
+            } else {
+                Err(response.message)
+            }
+        });
+        assert!(next.is_ok(), "{next:?}");
+    }
+    if still_fails {
+        fs::write(&refuse, "").unwrap();
+    }
+    let calls = wallpapers_set(&log).len();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut snapshot = status(&mut runtime, noon());
+    while !missing_programs(&snapshot)
+        .iter()
+        .any(|name| name == program)
+        && Instant::now() < deadline
+    {
+        runtime.tick(noon(), started);
+        snapshot = status(&mut runtime, noon());
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        wallpapers_set(&log).len() > calls,
+        "the still was not put back: {snapshot}"
+    );
+    assert_no_entry_was_blamed(&snapshot);
+    let path = if program == "mpvpaper" {
+        &mpvpaper
+    } else {
+        &engine
+    };
+    assert!(
+        snapshot["missing_renderers"]
+            .as_array()
+            .unwrap()
+            .contains(&missing_because(program, path, "cannot-run")),
+        "{snapshot}"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    snapshot
+}
+
+/// Codex review R40-6: the loader's 127 was reported with the record's own
+/// words alone, which say the still is showing, and the still's own failure
+/// was dropped. An ordinary crash already kept it.
+fn the_still_that_could_not_be_put_back_is_said(program: &str) {
+    let snapshot = a_loader_failure_and_the_still_put_back(program, true);
+    let error = snapshot["last_error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!("{program} cannot run here: ")),
+        "{error}"
+    );
+    assert!(
+        error.contains("error while loading shared libraries: libx.so.1"),
+        "{error}"
+    );
+    assert!(
+        error.contains("could not reapply the still: ") && error.contains("the still was refused"),
+        "{error}"
+    );
+    assert!(!error.contains("paired still is active"), "{error}");
+}
+
+#[test]
+fn a_video_renderer_that_cannot_run_says_when_its_still_could_not_be_put_back() {
+    the_still_that_could_not_be_put_back_is_said("mpvpaper");
+}
+
+#[test]
+fn a_scene_renderer_that_cannot_run_says_when_its_still_could_not_be_put_back() {
+    the_still_that_could_not_be_put_back_is_said("linux-wallpaperengine");
+}
+
+#[test]
+fn a_renderer_that_cannot_run_over_its_still_says_the_still_is_showing() {
+    // The control for R40-6: the still was put back, and that is all it adds.
+    for program in ["mpvpaper", "linux-wallpaperengine"] {
+        let snapshot = a_loader_failure_and_the_still_put_back(program, false);
+        let error = snapshot["last_error"].as_str().unwrap();
+        assert!(
+            error.contains(&format!("{program} cannot run here: ")),
+            "{error}"
+        );
+        assert!(error.ends_with("; paired still is active"), "{error}");
+        assert!(!error.contains("could not reapply"), "{error}");
+    }
+}
+
 #[test]
 fn a_renderer_behind_a_folder_the_service_cannot_enter_is_no_access() {
     // Re-review nit N3: a parent folder that cannot be searched used to read

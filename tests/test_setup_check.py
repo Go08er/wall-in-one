@@ -961,3 +961,19 @@ def test_a_status_row_with_an_unhashable_reason_is_not_found() -> None:
         ), reason
     unhashable_program = {"missing_renderers": [{"program": [], "path": "/x"}]}
     assert setup_check.service_from_status(unhashable_program) == RUNNING
+
+
+def test_a_renderer_whose_still_could_not_be_put_back_is_not_only_missing() -> None:
+    """R40-6: the service says the still failed too; that is shown, not the setup words."""
+    missing = (
+        "mpvpaper cannot run here: /usr/bin/mpvpaper: error while loading shared libraries: "
+        "libmpv.so.2: cannot open shared object file; paired still is active"
+    )
+    still_failed = (
+        "DP-1: mpvpaper cannot run here: /usr/bin/mpvpaper: error while loading shared "
+        "libraries: libmpv.so.2: cannot open shared object file; could not reapply the "
+        "still: noctalia exited with exit status: 1"
+    )
+    assert setup_check.only_missing_renderers(missing)
+    assert not setup_check.only_missing_renderers(still_failed)
+    assert not setup_check.only_missing_renderers(f"{missing}; {still_failed}")

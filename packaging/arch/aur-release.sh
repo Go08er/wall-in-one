@@ -99,8 +99,10 @@ if grep -q 'SKIP' "$work/PKGBUILD" "$work/.SRCINFO"; then
 fi
 # Publish with link(2): it never follows a symlink and fails if the name
 # exists, so a link planted at the output name since the check above cannot
-# make this write through to a file elsewhere.
+# make this write through to a file elsewhere. -T keeps ln from taking an
+# existing directory (or a link to one) at that name as a place to put the
+# file in: that is refused too.
 for name in PKGBUILD .SRCINFO; do
-  ln -- "$work/$name" "$out/$name" || die "cannot create $out/$name (it appeared since the check?)"
+  ln -T -- "$work/$name" "$out/$name" || die "cannot create $out/$name (it appeared since the check?)"
 done
 echo "release PKGBUILD and .SRCINFO for $tag (sha256 $sum) in $out"

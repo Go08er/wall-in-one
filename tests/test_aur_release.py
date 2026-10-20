@@ -266,10 +266,16 @@ def test_local_build_refuses_an_output_in_or_around_the_checkout_and_deletes_not
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
+@pytest.mark.parametrize("planted", ("file-link", "directory", "directory-link"))
 def test_a_release_output_that_a_symlink_appears_in_after_the_check_is_not_written_through(
-    release: Path, tmp_path: Path
+    release: Path, tmp_path: Path, planted: str
 ) -> None:
-    """The check-then-write window (aur-release.sh made a work dir between the two)."""
+    """The check-then-write window (aur-release.sh made a work dir between the two).
+
+    Whatever appears at the output name meanwhile -- a link to the checked-in
+    PKGBUILD, a directory, or a link to a directory elsewhere -- publication
+    refuses, and writes nothing through it or into it.
+    """
     tarball = tmp_path / "t.tar.gz"
     _tarball(tarball, f"wall-in-one-{_pkgver()}")
     out = tmp_path / "out"
@@ -277,9 +283,16 @@ def test_a_release_output_that_a_symlink_appears_in_after_the_check_is_not_writt
     shim.mkdir()
     real = shutil.which("mktemp")
     assert real
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    plant = {
+        "file-link": f'ln -s "{release}/PKGBUILD" "{out}/PKGBUILD"',
+        "directory": f'mkdir "{out}/PKGBUILD"',
+        "directory-link": f'ln -s "{elsewhere}" "{out}/PKGBUILD"',
+    }[planted]
     (shim / "mktemp").write_text(
         "#!/bin/sh\n"
-        f'[ -e "{tmp_path}/planted" ] || {{ ln -s "{release}/PKGBUILD" "{out}/PKGBUILD"; '
+        f'[ -e "{tmp_path}/planted" ] || {{ {plant}; '
         f': > "{tmp_path}/planted"; }}\n'
         f'exec "{real}" "$@"\n'
     )
@@ -297,5 +310,7 @@ def test_a_release_output_that_a_symlink_appears_in_after_the_check_is_not_writt
         },
     )
     assert (tmp_path / "planted").exists(), "the shim never ran"
-    assert result.returncode == 1
+    assert result.returncode == 1, result.stdout + result.stderr
     assert _snapshot(release) == before
+    assert not any(elsewhere.iterdir())
+    assert not (out / "PKGBUILD" / "PKGBUILD").exists()

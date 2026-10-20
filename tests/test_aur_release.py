@@ -150,3 +150,56 @@ def test_a_skip_elsewhere_in_the_pkgbuild_stops_the_release(release: Path, tmp_p
     assert result.returncode == 1
     assert "SKIP would remain" in result.stderr
     assert not (tmp_path / "out" / "PKGBUILD").exists()
+
+
+def _snapshot(directory: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+
+
+def _alias(kind: str, source: Path, tmp_path: Path) -> str:
+    if kind == "same":
+        return str(source)
+    if kind == "dot":
+        return "."
+    if kind == "dotdot":
+        return "../arch"
+    link = tmp_path / "alias"
+    link.symlink_to(source, target_is_directory=True)
+    return str(link)
+
+
+@pytest.mark.parametrize("kind", ["same", "dot", "dotdot", "symlink"])
+def test_an_output_directory_that_is_the_packaging_directory_is_refused_and_nothing_is_lost(
+    release: Path, tmp_path: Path, kind: str
+) -> None:
+    """Redirecting into a file being read empties it: R40-4 found both originals at 0 bytes."""
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}")
+    before = _snapshot(release)
+    result = subprocess.run(
+        ["bash", str(release / "aur-release.sh"), f"v{_pkgver()}", _alias(kind, release, tmp_path)],
+        capture_output=True,
+        text=True,
+        cwd=release,
+        env={**os.environ, "TMPDIR": str(tmp_path), "WIO_AUR_TARBALL": str(tarball)},
+    )
+    assert result.returncode == 1
+    assert "packaging directory" in result.stderr
+    assert _snapshot(release) == before
+
+
+@pytest.mark.parametrize("name", ["PKGBUILD", ".SRCINFO"])
+def test_an_output_directory_with_a_file_of_that_name_is_refused(
+    release: Path, tmp_path: Path, name: str
+) -> None:
+    """Including a symlink at that name, which would write through to the original."""
+    tarball = tmp_path / "t.tar.gz"
+    _tarball(tarball, f"wall-in-one-{_pkgver()}")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / name).symlink_to(release / name)
+    before = _snapshot(release)
+    result = _run(release, tmp_path, f"v{_pkgver()}", tarball)
+    assert result.returncode == 1
+    assert "already exists" in result.stderr
+    assert _snapshot(release) == before

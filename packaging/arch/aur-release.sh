@@ -38,6 +38,19 @@ url="$(sed -n "s/^url='\\(.*\\)'$/\\1/p" "$pkgbuild")"
 
 out="${2:-$(mktemp -d "${TMPDIR:-/tmp}/wio-aur.XXXXXX")}"
 mkdir -p "$out"
+# Redirecting into a file that is also being read empties it first, so the
+# output directory must not be this one under any name (a symlink, ".",
+# "../arch"): compare the real paths, before anything is written. Existing
+# files are refused too, which also covers a symlink planted at their names.
+out_real="$(cd "$out" && pwd -P)"
+here_real="$(cd "$here" && pwd -P)"
+[ "$out_real" != "$here_real" ] \
+  || die "the output directory is the packaging directory itself ($here_real); choose another"
+for name in PKGBUILD .SRCINFO; do
+  if [ -e "$out/$name" ] || [ -L "$out/$name" ]; then
+    die "$out/$name already exists; remove it or choose another output directory"
+  fi
+done
 work="$(mktemp -d "${TMPDIR:-/tmp}/wio-aur-work.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 

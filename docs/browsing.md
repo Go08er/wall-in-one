@@ -101,10 +101,11 @@ wall-in-one ctl download <provider> <identifier> [hd|4k]
 
 The query is everything after the provider name, spaces and all, so quoting it
 is optional: `ctl search wallhaven aurora over the fjord` is one query, not four
-arguments. The variant on `download` is MotionBGS's quality; left off, the
-provider follows the listing's HD or 4K badge, and without one takes the detail
-page's best (4K, then HD). The Store's Download does the same while its
-**Download quality** is **Automatic (as listed)**. Choose 4K to ask for 4K
+arguments. The variant on `download` is MotionBGS's quality; left off,
+`ctl download` takes the detail page's best (4K, then HD), since it has no
+listing card. The Store's Download with **Download quality** set to
+**Automatic (as listed)** follows the card's HD or 4K badge first, and takes
+the detail page's best only when the card has none. Choose 4K to ask for 4K
 whatever the card says.
 
 Output is **one row per line with tab-separated fields**, and everything that is

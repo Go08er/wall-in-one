@@ -118,13 +118,17 @@ else
   url="$repo/releases/latest/download/PKGBUILD"
 fi
 say "downloading $url"
-curl -fsSL --proto '=https' -o "$work/PKGBUILD" "$url" ||
+curl -fsSL --proto '=https' --proto-redir '=https' -o "$work/PKGBUILD" "$url" ||
   die "could not download the PKGBUILD from $url"
 grep -q '^pkgname=wall-in-one$' "$work/PKGBUILD" || die "$url is not Wall-in-One's PKGBUILD"
 grep -qE "^sha256sums=\('[0-9a-f]{64}'\)$" "$work/PKGBUILD" ||
   die "$url has no checksum for its source; use a release's PKGBUILD"
-pkgver=$(sed -n 's/^pkgver=//p' "$work/PKGBUILD")
-pkgrel=$(sed -n 's/^pkgrel=//p' "$work/PKGBUILD")
+# The values may be quoted, and an epoch makes pacman print epoch:pkgver-pkgrel.
+pkgfield() { sed -n "s/^$1=//p" "$work/PKGBUILD" | head -n 1 | tr -d "\"'"; }
+pkgver=$(pkgfield pkgver)
+pkgrel=$(pkgfield pkgrel)
+epoch=$(pkgfield epoch)
+full=${epoch:+$epoch:}$pkgver-$pkgrel
 if [ -n "$version" ] && [ "$pkgver" != "$version" ]; then
   die "the PKGBUILD of release v$version says it is $pkgver; not installing it"
 fi
@@ -132,16 +136,17 @@ fi
 # --- paru ----------------------------------------------------------------
 # paru (2.0 and later) reads PKGBUILDs from a git repository named in a
 # [section] of paru.conf, refreshes it on `paru -Sy`, and installs and updates
-# its packages like AUR ones. paru reads ONE config file: $PARU_CONF, else
-# $XDG_CONFIG_HOME/paru/paru.conf, else ~/.config/paru/paru.conf, else
-# /etc/paru.conf. A user file therefore replaces the system one unless it pulls
+# its packages like AUR ones. paru reads ONE config file: $PARU_CONF (even an
+# empty one: then it fails, the file does not exist), else
+# $XDG_CONFIG_HOME/paru/paru.conf when that variable is an absolute path (else
+# ~/.config/paru/paru.conf), else /etc/paru.conf. A user file therefore replaces the system one unless it pulls
 # it in with `Include = /etc/paru.conf`, which paru accepts anywhere in the file
 # (before any section too). (WIO_SETUP_PARU_SYSTEM_CONF replaces the system
 # path in tests.)
 paru_system_conf=${WIO_SETUP_PARU_SYSTEM_CONF-/etc/paru.conf}
 
 paru_conf_path() {
-  if [ -n "${PARU_CONF:-}" ]; then
+  if [ -n "${PARU_CONF+set}" ]; then
     printf '%s\n' "$PARU_CONF"
   else
     case ${XDG_CONFIG_HOME:-} in
@@ -151,24 +156,85 @@ paru_conf_path() {
   fi
 }
 
-has_section() { grep -qE '^[[:space:]]*\[wall-in-one\][[:space:]]*$' "$1" 2>/dev/null; }
+# paru takes repository names literally, so a [Wall-in-One] section is another
+# repository. Find any spelling, in the file or in the files it Includes (one
+# level, read-only; Include takes an absolute path).
+found_file="" found_header=""
+find_section() {
+  local file=$1 included
+  local pattern='^[[:space:]]*(\[[wW][aA][lL][lL]-[iI][nN]-[oO][nN][eE]\])[[:space:]]*$'
+  local candidates=("$file")
+  while IFS= read -r included; do
+    [ -f "$included" ] && candidates+=("$included")
+  done < <(sed -n 's/^[[:space:]]*Include[[:space:]]*=[[:space:]]*//p' "$file" 2>/dev/null)
+  for candidate in "${candidates[@]}"; do
+    found_header=$(sed -nE "s/$pattern/\1/p" "$candidate" 2>/dev/null | head -n 1)
+    if [ -n "$found_header" ]; then
+      found_file=$candidate
+      return 0
+    fi
+  done
+  return 1
+}
+
+# section_value FILE KEY: the value of KEY in the file's wall-in-one section.
+section_value() {
+  local in=0 line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line#"${line%%[![:space:]]*}"}
+    case $line in
+      \[*)
+        key=${line%%]*}
+        key=${key#[}
+        [ "${key,,}" = wall-in-one ] && in=1 || in=0
+        ;;
+      *=*)
+        if [ "$in" = 1 ]; then
+          key=${line%%=*}
+          key=${key%"${key##*[![:space:]]}"}
+          if [ "$key" = "$2" ]; then
+            value=${line#*=}
+            value=${value#"${value%%[![:space:]]*}"}
+            printf '%s\n' "${value%"${value##*[![:space:]]}"}"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  done <"$1"
+}
+
+# Say what an existing section points at, and warn when it is not the release
+# directory of this repository.
+report_section() {
+  local url path
+  url=$(section_value "$found_file" Url)
+  path=$(section_value "$found_file" Path)
+  say "$found_file has a $found_header section already, left as it is: Url = ${url:-(none)}, Path = ${path:-(none)}"
+  if [ "$found_header" != "[wall-in-one]" ]; then
+    say "WARNING: it is spelled $found_header, and paru takes repository names literally: rename it to [wall-in-one]"
+  fi
+  if [ "${url%.git}" != "$paru_url" ] || [ "${path%/}" != "$paru_path" ]; then
+    say "WARNING: expected Url = $paru_url and Path = $paru_path. Other values may install a fork or the development PKGBUILD, which has no checksum: edit $found_file, or remove the section and run this again"
+  fi
+}
 
 register_with_paru() {
   local conf
   conf=$(paru_conf_path)
   if [ -f "$conf" ]; then
-    if has_section "$conf"; then
-      say "$conf has a [wall-in-one] section already; left as it is"
+    if find_section "$conf"; then
+      report_section
       return 0
     fi
     # Append only: the rest of the file stays as it is.
     printf '\n[wall-in-one]\nUrl = %s\nPath = %s\n' "$paru_url" "$paru_path" >>"$conf" ||
       die "could not add the [wall-in-one] section to $conf"
     say "added a [wall-in-one] section to $conf (Url = $paru_url, Path = $paru_path)"
-  elif [ -n "${PARU_CONF:-}" ]; then
-    die "PARU_CONF points to $PARU_CONF, which does not exist; paru would refuse it too"
-  elif [ -f "$paru_system_conf" ] && has_section "$paru_system_conf"; then
-    say "$paru_system_conf has a [wall-in-one] section already; no user config is needed"
+  elif [ -n "${PARU_CONF+set}" ]; then
+    die "PARU_CONF is set to '$PARU_CONF', and that file does not exist; paru would refuse it too"
+  elif [ -f "$paru_system_conf" ] && find_section "$paru_system_conf"; then
+    report_section
   else
     mkdir -p -- "${conf%/*}" || die "could not create ${conf%/*}"
     {
@@ -200,24 +266,25 @@ fi
 installed_new=0
 current=$(pacman -Q wall-in-one 2>/dev/null | sed -n 's/^wall-in-one //p') || current=""
 order=-1
-[ -z "$current" ] || order=$(vercmp "$current" "$pkgver-$pkgrel")
+[ -z "$current" ] || order=$(vercmp "$current" "$full")
 if [ "$order" -eq 0 ]; then
   say "Wall-in-One $current is installed already, which is this release"
   # Registering is still useful: from now on paru -Syu updates it.
   if [ "$use_paru" = yes ]; then register_with_paru; fi
 elif [ "$order" -gt 0 ]; then
-  die "Wall-in-One $current is installed, newer than $pkgver-$pkgrel; to go back, uninstall it first (pacman -R wall-in-one)"
+  die "Wall-in-One $current is installed, newer than $full; to go back, uninstall it first (pacman -R wall-in-one)"
 else
   if [ "$use_paru" = yes ]; then
     register_with_paru
     say "paru shows the PKGBUILD for review, builds it (the app, the service and their tests: a few minutes) and installs it"
     # Only the PKGBUILD repositories are refreshed: no pacman database sync.
     paru -Sy --pkgbuilds || die "paru could not fetch the PKGBUILD repository; re-run with --no-paru to build with makepkg"
-    paru -S wall-in-one || die "paru could not install Wall-in-One; re-run with --no-paru to build with makepkg"
-    installed_new=1
+    paru -S wall-in-one/wall-in-one || die "paru could not install Wall-in-One; re-run with --no-paru to build with makepkg"
     now=$(pacman -Q wall-in-one 2>/dev/null | sed -n 's/^wall-in-one //p') || now=""
-    if [ "$now" != "$pkgver-$pkgrel" ]; then
-      say "paru installed ${now:-nothing}, GitHub's latest release is $pkgver-$pkgrel: the repository follows a release when its files are committed there; run paru -Syu again later"
+    # A paru run that had nothing to do must not restart the running service.
+    if [ "$now" != "$current" ]; then installed_new=1; else say "paru had nothing to install"; fi
+    if [ "$now" != "$full" ]; then
+      say "paru installed ${now:-nothing}, GitHub's latest release is $full: the repository follows a release when its files are committed there; run paru -Syu again later"
     fi
   else
     say "building Wall-in-One $pkgver: this builds the app and the service and runs their tests, so it takes a few minutes"

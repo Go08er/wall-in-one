@@ -86,13 +86,21 @@ class Setup:
             (self.bin / tool).symlink_to(found)
         self.installed(None)
         _stub(self.bin, "sudo", "")
-        # vercmp prints -1, 0 or 1 like pacman's; sort -V stands in for its ordering.
+        # vercmp prints -1, 0 or 1 like pacman's. It models what the tests need and no
+        # more: an epoch (default 0) decides first, as a number, then sort -V orders
+        # the rest. pacman's own ordering has more rules (alpha/beta, pkgrel).
         _stub(
             self.bin,
             "vercmp",
             'if [ "$1" = "$2" ]; then echo 0; exit 0; fi\n'
-            'first=$(printf "%s\\n%s\\n" "$1" "$2" | sort -V | head -n 1)\n'
-            'if [ "$first" = "$1" ]; then echo -1; else echo 1; fi',
+            "e1=0; e2=0; r1=$1; r2=$2\n"
+            'case "$1" in *:*) e1=${1%%:*}; r1=${1#*:} ;; esac\n'
+            'case "$2" in *:*) e2=${2%%:*}; r2=${2#*:} ;; esac\n'
+            '[ "$e1" -lt "$e2" ] && { echo -1; exit 0; }\n'
+            '[ "$e1" -gt "$e2" ] && { echo 1; exit 0; }\n'
+            'first=$(printf "%s\\n%s\\n" "$r1" "$r2" | sort -V | head -n 1)\n'
+            'if [ "$r1" = "$r2" ]; then echo 0\n'
+            'elif [ "$first" = "$r1" ]; then echo -1; else echo 1; fi',
         )
         # curl -fsSL --proto '=https' -o FILE URL: serve the release PKGBUILD.
         _stub(
@@ -462,7 +470,7 @@ def test_paru_installs_it_and_the_new_config_keeps_the_system_one(setup: Setup) 
     assert conf.read_text(encoding="utf-8") == f"Include = {setup.system_conf}\n\n{SECTION}"
     assert f"created {conf}" in result.stdout
     calls = setup.calls()
-    assert calls.index("paru -Sy --pkgbuilds") < calls.index("paru -S wall-in-one")
+    assert calls.index("paru -Sy --pkgbuilds") < calls.index("paru -S wall-in-one/wall-in-one")
     assert not setup.made("makepkg ")
     assert "systemctl --user enable --now wall-in-one.service" in calls
 
@@ -497,7 +505,7 @@ def test_an_existing_wall_in_one_section_is_left_alone(setup: Setup) -> None:
     assert result.returncode == 0, result.stderr
     assert conf.read_text(encoding="utf-8") == mine
     assert "has a [wall-in-one] section already" in result.stdout
-    assert "paru -S wall-in-one" in setup.calls()
+    assert setup.made("paru -S wall-in-one/wall-in-one")
 
 
 def test_a_system_section_means_no_user_config_is_made(setup: Setup) -> None:
@@ -570,3 +578,133 @@ def test_an_up_to_date_install_is_still_registered_with_paru(setup: Setup) -> No
     assert conf.read_text(encoding="utf-8").endswith(SECTION)
     assert not setup.made("paru -S")
     assert not setup.made("makepkg ")
+
+
+def test_the_download_only_follows_https_redirects(setup: Setup) -> None:
+    setup.run("--no-renderers")
+    curl = next(call for call in setup.calls() if call.startswith("curl "))
+    assert "--proto =https --proto-redir =https" in curl
+
+
+def test_an_empty_paru_conf_is_set_and_missing(setup: Setup) -> None:
+    _paru(setup)
+    result = setup.run("--paru", "--no-renderers", PARU_CONF="")
+    assert result.returncode == 1
+    assert "does not exist" in result.stderr
+    assert not setup.made("paru -S")
+    assert not setup.config.exists()
+
+
+def _user_conf(setup: Setup, text: str) -> Path:
+    conf = _paru(setup)
+    conf.parent.mkdir(parents=True)
+    conf.write_text(text, encoding="utf-8")
+    return conf
+
+
+def test_an_existing_section_is_shown_and_a_good_one_has_no_warning(setup: Setup) -> None:
+    _user_conf(setup, SECTION)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert "Url = https://github.com/Go08er/wall-in-one, Path = packaging/arch/release" in (
+        result.stdout
+    )
+    assert "WARNING" not in result.stdout
+
+
+def test_a_stale_or_forked_section_is_warned_about(setup: Setup) -> None:
+    stale = "[wall-in-one]\nUrl=https://github.com/someone/fork\nPath = packaging/arch\n"
+    conf = _user_conf(setup, stale)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert "Url = https://github.com/someone/fork, Path = packaging/arch" in result.stdout
+    assert "WARNING: expected Url = https://github.com/Go08er/wall-in-one" in result.stdout
+    assert conf.read_text(encoding="utf-8") == stale
+
+
+def test_a_section_in_another_case_is_reported_and_not_duplicated(setup: Setup) -> None:
+    mine = "[Wall-In-One]\nUrl = https://github.com/Go08er/wall-in-one\n"
+    conf = _user_conf(setup, mine)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert conf.read_text(encoding="utf-8") == mine
+    assert "spelled [Wall-In-One]" in result.stdout
+
+
+def test_a_section_in_an_included_file_is_seen(setup: Setup) -> None:
+    extra = setup.tmp / "extra.conf"
+    extra.write_text(SECTION, encoding="utf-8")
+    mine = f"Include = {extra}\n"
+    conf = _user_conf(setup, mine)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert conf.read_text(encoding="utf-8") == mine
+    assert f"{extra} has a [wall-in-one] section" in result.stdout
+
+
+def _serve(setup: Setup, *edits: tuple[str, str]) -> None:
+    text = setup.served.read_text(encoding="utf-8")
+    for old, new in edits:
+        assert old in text, old
+        text = text.replace(old, new, 1)
+    setup.served.write_text(text, encoding="utf-8")
+
+
+def test_quoted_versions_are_compared_unquoted(setup: Setup) -> None:
+    ver, rel = setup.pkgver_rel.split("-")
+    _serve(setup, (f"pkgver={ver}", f'pkgver="{ver}"'), (f"pkgrel={rel}", f"pkgrel='{rel}'"))
+    setup.installed(setup.pkgver_rel)
+    result = setup.run("--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert "which is this release" in result.stdout
+    assert not setup.made("makepkg ")
+
+
+def test_an_epoch_is_part_of_the_version(setup: Setup) -> None:
+    ver, _rel = setup.pkgver_rel.split("-")
+    _serve(setup, (f"pkgver={ver}", f"epoch=1\npkgver={ver}"))
+    # Installed 1:ver-rel is this release; 0:99-1 is older than any epoch 1.
+    setup.installed(f"1:{setup.pkgver_rel}")
+    assert "which is this release" in setup.run("--no-renderers").stdout
+    setup.installed("99.0.0-1")
+    result = setup.run("--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert setup.made("makepkg ")
+
+
+def test_an_epoch_installed_beats_a_release_without_one(setup: Setup) -> None:
+    setup.installed(f"1:{setup.pkgver_rel}")
+    result = setup.run("--no-renderers")
+    assert result.returncode == 1
+    assert "newer than" in result.stderr
+
+
+def _paru_that_installs(setup: Setup, installs: bool) -> None:
+    pacman = setup.bin / "pacman"
+    change = (
+        f'sed -i "s/wall-in-one 0.3.0-1/wall-in-one {setup.pkgver_rel}/" {pacman}'
+        if installs
+        else ""
+    )
+    _stub(setup.bin, "paru", f'case "$1" in -S) {change or ":"} ;; esac')
+
+
+def test_paru_that_installs_restarts_the_running_service(setup: Setup) -> None:
+    _paru(setup)
+    _paru_that_installs(setup, installs=True)
+    setup.installed("0.3.0-1")
+    setup.systemctl(env="WAYLAND_DISPLAY=wayland-0", active=True)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert "systemctl --user restart wall-in-one.service" in setup.calls()
+
+
+def test_paru_with_nothing_to_do_does_not_restart_the_service(setup: Setup) -> None:
+    _paru(setup)
+    _paru_that_installs(setup, installs=False)
+    setup.installed("0.3.0-1")
+    setup.systemctl(env="WAYLAND_DISPLAY=wayland-0", active=True)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert "paru had nothing to install" in result.stdout
+    assert not setup.made("systemctl --user restart")

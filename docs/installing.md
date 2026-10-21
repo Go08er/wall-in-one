@@ -43,9 +43,47 @@ and no menu entry appears -- which is the right behaviour for trying it out.
 
 ### On Arch Linux, from a release
 
-Wall-in-One is not on the AUR. Each release from 0.4.0 on carries the PKGBUILD
-it was checked with, which builds that release from source, and a setup
-script that does the whole install. Download it, then run it from a terminal
+Wall-in-One is not on the AUR. Its git repository is a source paru can read
+directly, and each release also carries the PKGBUILD it was checked with and
+a setup script. Three ways; all of them build the release from source.
+
+<!-- Not verified on Arch: the paru way below is written from paru 2.1.0's
+source (config.rs, pkgbuild.rs, install.rs) and tested only against stand-ins
+for paru, pacman and makepkg (tests/test_arch_setup.py). The first real run on
+Arch should be watched. -->
+
+**With paru, straight from GitHub.** paru (2.0 or later) can treat a git
+repository as a PKGBUILD repository: it fetches it on `paru -Sy`, and installs
+and updates its packages like AUR ones. Give it the directory of this
+repository that holds only the last release's PKGBUILD (never the development
+one) by adding a section to your paru.conf:
+
+```ini
+[wall-in-one]
+Url = https://github.com/Go08er/wall-in-one
+Path = packaging/arch/release
+```
+
+then:
+
+```console
+$ paru -Sy --pkgbuilds     # fetch the repository (only PKGBUILD repositories)
+$ paru -S wall-in-one      # review the PKGBUILD, build, install
+```
+
+and from then on `paru -Syu` updates Wall-in-One with the rest of your system,
+when a new release's files are committed to `packaging/arch/release/` (a
+release reaches you when that commit lands, a little after the tag). paru reads
+a single config file: `$PARU_CONF`, else `~/.config/paru/paru.conf`, else
+`/etc/paru.conf`. If you have no file in `~/.config/paru/`, creating one hides
+`/etc/paru.conf`; start it with `Include = /etc/paru.conf` to keep those
+settings. paru has no branch setting in its config, so it takes the repository's default
+branch (`main`), and shows the PKGBUILD for review at the first install and at each update (`SkipReview` in the section
+turns that off for this repository). After an update, restart the running
+service: `systemctl --user restart wall-in-one.service`.
+
+**With the setup script.** It does the above for you, and the rest of the
+set-up, and works without paru too. Download it, then run it from a terminal
 as your normal user (not as root, and not piped into `bash`: `sudo` and
 `makepkg` ask questions of you):
 
@@ -59,23 +97,31 @@ The script:
 - refuses to run as root, from a pipe, or beside a Nix install;
 - installs `base-devel` if it is missing, and downloads the release's PKGBUILD,
   which it refuses unless the source has a SHA-256 checksum;
-- builds and installs it with `makepkg -si`, in `~/.cache` (or
+- otherwise builds and installs it with `makepkg -si`, in `~/.cache` (or
   `$XDG_CACHE_HOME`), not in `/tmp`, which is memory on Arch and too small for
   a Rust build; it removes the build directory when the build succeeds and
   keeps it, saying where, when it fails;
 - asks for your password through `sudo` when pacman installs packages, so
   `sudo` has to be set up for your user;
+- when `paru` is installed, asks whether to install through it (`--paru` and
+  `--no-paru` answer for you): it then adds the section above to the paru.conf
+  paru reads (appending only; nothing else in the file changes, and a file
+  that has a `[wall-in-one]` section is left alone), or creates
+  `~/.config/paru/paru.conf` with `Include = /etc/paru.conf` and the section,
+  tells you which file it changed, and runs `paru -Sy --pkgbuilds` and
+  `paru -S wall-in-one` instead of `makepkg`; paru shows the PKGBUILD first;
 - offers the renderers from the AUR when you have `paru` or `yay`;
 - gives your user manager the session's `WAYLAND_DISPLAY` if it lacks it, and
   enables the user unit (starting it only when the manager has a display), then
   ends with `wall-in-one --setup-status`.
 
-To update, run the script again (download the newest copy first): it builds the
-latest release if you are on an older one, restarts the running service on the
-new version, does nothing to the package if you are up to date, and refuses to
-replace a newer package with an older release. `bash arch-setup.sh --help`
-lists its options (another release, renderers or not, no service). By hand,
-the same is:
+To update, run the script again (download the newest copy first; if you
+installed through paru, `paru -Syu` does it too). It builds the latest release
+if you are on an older one, restarts the running service on the new version,
+does nothing to the package if you are up to date, and refuses to replace a
+newer package with an older release. `bash arch-setup.sh --help`
+lists its options (another release, paru or not, renderers or not, no
+service). **By hand,** with makepkg, the same is:
 
 ```console
 $ mkdir wall-in-one && cd wall-in-one

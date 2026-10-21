@@ -113,6 +113,10 @@ $ curl -fLO https://github.com/Go08er/wall-in-one/releases/latest/download/arch-
 $ bash arch-setup.sh
 ```
 
+With paru, the script can register this repository as a PKGBUILD repository,
+so that `paru -Syu` keeps it updated from GitHub
+([how](docs/installing.md#on-arch-linux-from-a-release)).
+
 Flakes must be enabled. If `nix run` complains about an experimental feature,
 add `experimental-features = nix-command flakes` to `/etc/nix/nix.conf` or pass
 `--extra-experimental-features 'nix-command flakes'`.

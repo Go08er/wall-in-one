@@ -68,7 +68,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _pkgbuild() -> tuple[dict[str, list[str]], list[str]]:
+def _pkgbuild(path: Path = PKGBUILD) -> tuple[dict[str, list[str]], list[str]]:
     """The fields the PKGBUILD sets, and the lowercase variables it sets that are not fields."""
     script = (
         'before=" $(compgen -v | tr "\\n" " ") "\n'
@@ -80,7 +80,7 @@ def _pkgbuild() -> tuple[dict[str, list[str]], list[str]]:
         'printf "F\\tpkgname\\t%s\\n" "${pkgname[@]}"\n'
     )
     out = subprocess.run(
-        ["bash", "-c", script, "bash", str(PKGBUILD), *FIELDS],
+        ["bash", "-c", script, "bash", str(path), *FIELDS],
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
         check=True,
         capture_output=True,
@@ -100,9 +100,9 @@ def _pkgbuild() -> tuple[dict[str, list[str]], list[str]]:
     return found, variables
 
 
-def _srcinfo() -> dict[str, list[str]]:
+def _srcinfo(path: Path = SRCINFO) -> dict[str, list[str]]:
     found: dict[str, list[str]] = defaultdict(list)
-    for number, line in enumerate(SRCINFO.read_text(encoding="utf-8").splitlines(), 1):
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         key, separator, value = line.strip().partition(" = ")
@@ -113,14 +113,19 @@ def _srcinfo() -> dict[str, list[str]]:
     return found
 
 
-def test_srcinfo_repeats_every_field_of_the_pkgbuild() -> None:
-    build, _ = _pkgbuild()
-    info = _srcinfo()
+def check_srcinfo_repeats_the_pkgbuild(pkgbuild: Path, srcinfo: Path) -> None:
+    """Every field of ``pkgbuild``, in order, is in ``srcinfo`` and nothing else is."""
+    build, _ = _pkgbuild(pkgbuild)
+    info = _srcinfo(srcinfo)
     assert info.pop("pkgbase") == build["pkgname"]
     assert info.pop("pkgname") == build["pkgname"]
     for field in FIELDS:
         assert info.pop(field, []) == build.get(field, []), field
     assert not info, f".SRCINFO has fields this test does not know: {sorted(info)}"
+
+
+def test_srcinfo_repeats_every_field_of_the_pkgbuild() -> None:
+    check_srcinfo_repeats_the_pkgbuild(PKGBUILD, SRCINFO)
 
 
 def test_the_pkgbuild_sets_no_variable_this_test_does_not_compare() -> None:

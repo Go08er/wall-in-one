@@ -265,8 +265,8 @@ is published is made from it after the tag exists, in this order:
    name, or that already has a `PKGBUILD` or `.SRCINFO`, and it publishes the
    files with `link(2)` so nothing is ever overwritten or written through a
    symlink. It refuses if the tag is not
-   `v<pkgver>` or any `SKIP` would remain. Commit nothing from this directory
-   to the main repository, and do not hand-edit its files.
+   `v<pkgver>` or any `SKIP` would remain. Do not hand-edit its files, and
+   do not commit them anywhere but `packaging/arch/release/` (step 6).
 4. **Check the result on Arch** if you have a machine or container: in that
    directory, `makepkg --verifysource` downloads the source again and checks
    it against the sum; `makepkg --printsrcinfo | diff - .SRCINFO` shows the
@@ -279,13 +279,25 @@ is published is made from it after the tag exists, in this order:
    ([installing on Arch](installing.md#on-arch-linux-from-a-release)): the
    script downloads the latest release's `PKGBUILD` by that name. (Leave
    `.SRCINFO` off: GitHub renames a file whose name starts with a dot.)
-6. **Publish to the AUR**, if it is published there. This pushes to the
+6. **Commit the two files, unchanged, into `packaging/arch/release/`** on
+   `main`, as a post-tag commit (`cp -p <directory>/PKGBUILD <directory>/.SRCINFO
+   packaging/arch/release/`). That directory is what paru users update from
+   ([installing on Arch](installing.md#on-arch-linux-from-a-release)): the
+   `[wall-in-one]` section in their paru.conf points at it with `Path =
+   packaging/arch/release`, and `paru -Sy` fetches `main`, so a release
+   reaches them when this commit does, not when the tag does. Never put the
+   development `packaging/arch/PKGBUILD` there (`SKIP`, and between a bump and
+   its tag an untagged version).
+   `tests/test_arch_release_dir.py` checks the directory: a real 64-hex sum
+   and no `SKIP`, `.SRCINFO` matching, and a `pkgver` that is not ahead of
+   the app's `__version__` (it trails the version bump until this commit).
+7. **Publish to the AUR**, if it is published there. This pushes to the
    owner's AUR account, so it needs the owner's approval and is never done by
    an agent: copy the two files into the AUR repository `wall-in-one`, commit,
    and push.
 
 If a later fix needs another package build of the same release, raise `pkgrel`
-in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 6, with a
+in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 7, with a
 new output directory for step 3 (the script does not reuse one).
 
 ## How it is tested

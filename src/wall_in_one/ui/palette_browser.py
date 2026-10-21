@@ -875,8 +875,8 @@ class PaletteBrowserDialog(Adw.Dialog):
 
 _ORIGIN_DESCRIPTIONS: Final[dict[palettes.Origin, str]] = {
     palettes.Origin.BUILTIN: (
-        "Compiled into Noctalia. No CLI surface exposes their colours, so they "
-        "have no swatches here until one is applied."
+        "Compiled into Noctalia. The swatches are a copy of Noctalia's own table, "
+        "kept with the version this app is built against."
     ),
     palettes.Origin.COMMUNITY: "Downloaded by Noctalia and cached on disk.",
     palettes.Origin.CUSTOM: "Yours. The only palettes this app will write to.",

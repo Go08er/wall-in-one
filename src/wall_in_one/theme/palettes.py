@@ -2,9 +2,10 @@
 
 Four sources, and they are not symmetrical:
 
-* **built-in** palettes are compiled into the Noctalia binary. Confirmed by
-  reading it: the ten names are in there as plain strings, their colours are
-  not. So they can be listed and selected but never previewed from disk.
+* **built-in** palettes are compiled into the Noctalia binary, so there is no
+  file to read their colours from. The ten names are listed here and their
+  colours come from `builtin_schemes`, a copy of Noctalia's own table
+  (regenerated from its source by `tools/gen_builtin_schemes.py`).
 * **community** palettes are cached one file per palette, named after the
   palette with the name percent-encoded (`Osaka%20jade.json`), next to a
   `.catalog` directory the daemon owns. The id Noctalia wants back -- the one
@@ -43,6 +44,7 @@ from urllib.parse import unquote
 
 from wall_in_one import file_io, paths
 from wall_in_one.library import state_file
+from wall_in_one.theme import builtin_schemes
 from wall_in_one.theme.palette import (
     MAX_PALETTE_BYTES,
     Colour,
@@ -122,8 +124,8 @@ class Origin(Enum):
 
 
 #: The palettes compiled into Noctalia, from `src/theme/builtin_palettes.cpp`
-#: and confirmed against the 5.0.0-beta.7 binary. Names only: the colours are
-#: not exposed by any CLI surface, so these entries carry no `colours`.
+#: and confirmed against the 5.0.0-beta.7 binary. The colours are not exposed by
+#: any CLI surface; `builtin_colours` supplies them from `builtin_schemes`.
 BUILTIN_NAMES: Final[tuple[str, ...]] = (
     "Ayu",
     "Catppuccin",
@@ -354,8 +356,10 @@ class PaletteEntry:
         return self.colours.for_mode(mode) if self.colours is not None else None
 
     def describe(self) -> str:
+        if self.origin is Origin.BUILTIN:
+            return "compiled into Noctalia"
         if self.colours is None:
-            return "compiled into Noctalia -- colours appear once it is applied"
+            return "no colours to show"
         return f"{len(self.colours.dark.colours)} tokens"
 
 
@@ -560,6 +564,60 @@ def _scan_legacy(
     return loaded
 
 
+def _variant_document(variant: builtin_schemes.BuiltinVariant) -> dict[str, object]:
+    """One built-in variant in the palette-file shape, for the ordinary parser."""
+    terminal = variant.terminal
+    document: dict[str, object] = {
+        key: getattr(variant, field) for key, field in _BUILTIN_FIELDS.items()
+    }
+    document["terminal"] = {
+        "normal": dict(zip(_ANSI_NAMES, terminal.normal, strict=True)),
+        "bright": dict(zip(_ANSI_NAMES, terminal.bright, strict=True)),
+        "foreground": terminal.foreground,
+        "background": terminal.background,
+        "cursor": terminal.cursor,
+        "cursorText": terminal.cursor_text,
+        "selectionFg": terminal.selection_fg,
+        "selectionBg": terminal.selection_bg,
+    }
+    return document
+
+
+_ANSI_NAMES: Final = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
+_BUILTIN_FIELDS: Final[Mapping[str, str]] = {
+    "mPrimary": "primary",
+    "mOnPrimary": "on_primary",
+    "mSecondary": "secondary",
+    "mOnSecondary": "on_secondary",
+    "mTertiary": "tertiary",
+    "mOnTertiary": "on_tertiary",
+    "mError": "error",
+    "mOnError": "on_error",
+    "mSurface": "surface",
+    "mOnSurface": "on_surface",
+    "mSurfaceVariant": "surface_variant",
+    "mOnSurfaceVariant": "on_surface_variant",
+    "mOutline": "outline",
+    "mShadow": "shadow",
+}
+
+
+def builtin_colours(name: str) -> PalettePair | None:
+    """The preview colours of built-in palette ``name``, or None for a name we don't carry.
+
+    Parsed through the same mapping a palette file goes through, so a built-in
+    reads exactly like a custom copy of it would. Colours Noctalia derives at
+    apply time stay missing here, as they do for file palettes.
+    """
+    for scheme in builtin_schemes.BUILTIN_SCHEMES:
+        if scheme.name == name:
+            return PalettePair(
+                dark=variant_from_mapping("dark", _variant_document(scheme.dark)),
+                light=variant_from_mapping("light", _variant_document(scheme.light)),
+            )
+    return None
+
+
 def discover(
     *,
     custom: Path | None = None,
@@ -578,7 +636,7 @@ def discover(
         return Discovery(())
     skipped: list[str] = []
     entries: list[PaletteEntry] = [
-        PaletteEntry(name=name, origin=Origin.BUILTIN, path=None, colours=None)
+        PaletteEntry(name=name, origin=Origin.BUILTIN, path=None, colours=builtin_colours(name))
         for name in (BUILTIN_NAMES if builtins is None else builtins)
     ]
     entries += _scan_directory(

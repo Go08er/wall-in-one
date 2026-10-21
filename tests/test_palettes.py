@@ -193,14 +193,15 @@ def test_missing_directories_are_an_empty_source_not_an_error(tmp_path: Path) ->
     assert len(found.of_origin(Origin.BUILTIN)) == len(palettes.BUILTIN_NAMES)
 
 
-def test_builtins_are_listed_without_colours() -> None:
-    """Their colours are compiled into the Noctalia binary and never on disk."""
+def test_builtins_are_listed_with_colours_but_without_a_file() -> None:
+    """They are compiled into the Noctalia binary, so the colours are a copy (`builtin_schemes`)."""
     found = palettes.discover(custom=Path("/nonexistent"), community=Path("/nonexistent"))
     builtin = found.find(Origin.BUILTIN, "Nord")
     assert builtin is not None
-    assert builtin.colours is None
+    assert builtin.colours is not None
     assert builtin.path is None
-    assert builtin.for_mode("dark") is None
+    dark = builtin.for_mode("dark")
+    assert dark is not None and dark.colours["primary"].hex == "#8fbcbb"
     assert not builtin.is_editable
 
 

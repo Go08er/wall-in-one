@@ -435,7 +435,7 @@ class PalettesDialog(Adw.Dialog):
         swatches.set_tooltip_text(
             "Surface, primary, secondary, tertiary, error"
             if colors
-            else "Noctalia shows these colours once the palette is applied"
+            else "No colours to show for this palette"
         )
         row.add_prefix(swatches)
         apply = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)

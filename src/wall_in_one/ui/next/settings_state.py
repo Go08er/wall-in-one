@@ -123,7 +123,7 @@ PALETTE_ROLES: Final[tuple[tuple[str, str], ...]] = (
 #: Where a palette comes from, in the order the manager lists them.
 PALETTE_ORIGINS: Final[tuple[tuple[str, str, str], ...]] = (
     ("custom", "Yours", "The only palettes this app writes to."),
-    ("builtin", "Built-in", "Compiled into Noctalia; their colours show once one is applied."),
+    ("builtin", "Built-in", "Compiled into Noctalia; the swatches are a copy of its own table."),
     ("community", "Community", "Downloaded by Noctalia and cached on disk."),
     (
         "legacy",

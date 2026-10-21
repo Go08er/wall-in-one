@@ -64,8 +64,14 @@ jobs:
       - name: Lint
         run: |
           cd /home/builder/out
-          # Warnings are advisory; an error ( E: ) fails the job.
-          { namcap PKGBUILD; namcap -- wall-in-one-*.pkg.tar.zst; } | tee /tmp/namcap.txt
+          # Warnings are advisory; an error ( E: ) in the PKGBUILD or the package
+          # fails the job. makepkg also writes a -debug package; its build-id links
+          # point into the main package, which namcap reports as dangling, so that
+          # package is linted for the log only.
+          { namcap PKGBUILD; namcap -- wall-in-one-[0-9]*.pkg.tar.zst; } | tee /tmp/namcap.txt
+          for debug in wall-in-one-debug-*.pkg.tar.zst; do
+            [ -e "$debug" ] && namcap -- "$debug" || true
+          done
           if grep -q ' E: ' /tmp/namcap.txt; then
             echo "namcap reported errors" >&2
             exit 1

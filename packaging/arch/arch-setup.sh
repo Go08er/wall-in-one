@@ -10,9 +10,19 @@
 # user service. Run it again to update to a newer release. Run it as your
 # normal user, from a terminal, not as root and not piped into bash.
 #
-#   arch-setup.sh [--version X.Y.Z] [--renderers | --no-renderers] [--no-enable]
+# With paru installed it offers to register this repository as a paru
+# "PKGBUILD repository" and to install through paru instead, so that
+# `paru -Syu` updates Wall-in-One from GitHub from then on. It says which
+# paru.conf it changed, adds a [wall-in-one] section only when none is there,
+# and never rewrites the rest of the file.
 #
-#   --version X.Y.Z  install that release instead of the latest one
+#   arch-setup.sh [--version X.Y.Z] [--paru | --no-paru]
+#                 [--renderers | --no-renderers] [--no-enable]
+#
+#   --version X.Y.Z  install that release instead of the latest one (by makepkg:
+#                    paru follows the latest release)
+#   --paru           install through paru, and register the repository for it
+#   --no-paru        build with makepkg, and leave paru's config alone
 #   --renderers      install mpvpaper and linux-wallpaperengine-git without asking
 #   --no-renderers   leave them out (videos and scenes then show their stills)
 #   --no-enable      neither enable nor start the user service
@@ -21,7 +31,10 @@ set -euo pipefail
 repo=https://github.com/Go08er/wall-in-one
 companion=https://github.com/Go08er/goober-noctalia-plugins-v5
 display_help="$repo/blob/main/docs/installing.md#the-service-needs-your-sessions-display"
+paru_url=$repo
+paru_path=packaging/arch/release
 version=""
+use_paru=ask
 renderers=ask
 enable=1
 
@@ -38,6 +51,8 @@ while [ $# -gt 0 ]; do
       version=${2#v}
       shift 2
       ;;
+    --paru) use_paru=yes; shift ;;
+    --no-paru) use_paru=no; shift ;;
     --renderers) renderers=yes; shift ;;
     --no-renderers) renderers=no; shift ;;
     --no-enable) enable=0; shift ;;
@@ -71,6 +86,11 @@ for dir in "${nix_list[@]}"; do
     die "Wall-in-One is already installed with Nix ($dir/wall-in-one). Keep one install: remove that one first, or keep using it."
   fi
 done
+
+if [ "$use_paru" = yes ]; then
+  command -v paru >/dev/null 2>&1 || die "--paru needs paru, which is not installed"
+  [ -z "$version" ] || die "--paru follows the latest release; leave out --version, or use --no-paru"
+fi
 
 if ! pacman -Q base-devel >/dev/null 2>&1; then
   say "installing base-devel, which makepkg needs to build"
@@ -109,21 +129,104 @@ if [ -n "$version" ] && [ "$pkgver" != "$version" ]; then
   die "the PKGBUILD of release v$version says it is $pkgver; not installing it"
 fi
 
+# --- paru ----------------------------------------------------------------
+# paru (2.0 and later) reads PKGBUILDs from a git repository named in a
+# [section] of paru.conf, refreshes it on `paru -Sy`, and installs and updates
+# its packages like AUR ones. paru reads ONE config file: $PARU_CONF, else
+# $XDG_CONFIG_HOME/paru/paru.conf, else ~/.config/paru/paru.conf, else
+# /etc/paru.conf. A user file therefore replaces the system one unless it pulls
+# it in with `Include = /etc/paru.conf`, which paru accepts anywhere in the file
+# (before any section too). (WIO_SETUP_PARU_SYSTEM_CONF replaces the system
+# path in tests.)
+paru_system_conf=${WIO_SETUP_PARU_SYSTEM_CONF-/etc/paru.conf}
+
+paru_conf_path() {
+  if [ -n "${PARU_CONF:-}" ]; then
+    printf '%s\n' "$PARU_CONF"
+  else
+    case ${XDG_CONFIG_HOME:-} in
+      /*) printf '%s\n' "$XDG_CONFIG_HOME/paru/paru.conf" ;;
+      *) printf '%s\n' "${HOME:-}/.config/paru/paru.conf" ;;
+    esac
+  fi
+}
+
+has_section() { grep -qE '^[[:space:]]*\[wall-in-one\][[:space:]]*$' "$1" 2>/dev/null; }
+
+register_with_paru() {
+  local conf
+  conf=$(paru_conf_path)
+  if [ -f "$conf" ]; then
+    if has_section "$conf"; then
+      say "$conf has a [wall-in-one] section already; left as it is"
+      return 0
+    fi
+    # Append only: the rest of the file stays as it is.
+    printf '\n[wall-in-one]\nUrl = %s\nPath = %s\n' "$paru_url" "$paru_path" >>"$conf" ||
+      die "could not add the [wall-in-one] section to $conf"
+    say "added a [wall-in-one] section to $conf (Url = $paru_url, Path = $paru_path)"
+  elif [ -n "${PARU_CONF:-}" ]; then
+    die "PARU_CONF points to $PARU_CONF, which does not exist; paru would refuse it too"
+  elif [ -f "$paru_system_conf" ] && has_section "$paru_system_conf"; then
+    say "$paru_system_conf has a [wall-in-one] section already; no user config is needed"
+  else
+    mkdir -p -- "${conf%/*}" || die "could not create ${conf%/*}"
+    {
+      # A user config replaces the system one, so pull the system one in.
+      if [ -f "$paru_system_conf" ]; then
+        printf 'Include = %s\n\n' "$paru_system_conf"
+      fi
+      printf '[wall-in-one]\nUrl = %s\nPath = %s\n' "$paru_url" "$paru_path"
+    } >"$conf" || die "could not write $conf"
+    if [ -f "$paru_system_conf" ]; then
+      say "created $conf: it includes $paru_system_conf, so your paru settings stay, and adds the [wall-in-one] section"
+    else
+      say "created $conf with a [wall-in-one] section (no $paru_system_conf to include)"
+    fi
+  fi
+}
+
+if [ "$use_paru" = ask ]; then
+  use_paru=no
+  if [ -z "$version" ] && [ -t 0 ] && command -v paru >/dev/null 2>&1; then
+    read -r -p "Install through paru from GitHub, so that paru -Syu keeps Wall-in-One updated? [Y/n] " answer || answer=n
+    case $answer in
+      [nN]*) ;;
+      *) use_paru=yes ;;
+    esac
+  fi
+fi
+
 installed_new=0
 current=$(pacman -Q wall-in-one 2>/dev/null | sed -n 's/^wall-in-one //p') || current=""
 order=-1
 [ -z "$current" ] || order=$(vercmp "$current" "$pkgver-$pkgrel")
 if [ "$order" -eq 0 ]; then
   say "Wall-in-One $current is installed already, which is this release"
+  # Registering is still useful: from now on paru -Syu updates it.
+  if [ "$use_paru" = yes ]; then register_with_paru; fi
 elif [ "$order" -gt 0 ]; then
   die "Wall-in-One $current is installed, newer than $pkgver-$pkgrel; to go back, uninstall it first (pacman -R wall-in-one)"
 else
-  say "building Wall-in-One $pkgver: this builds the app and the service and runs their tests, so it takes a few minutes"
-  say "makepkg runs the downloaded PKGBUILD as shell code; it is $url"
-  building=1
-  (cd "$work" && makepkg -si)
-  building=0
-  installed_new=1
+  if [ "$use_paru" = yes ]; then
+    register_with_paru
+    say "paru shows the PKGBUILD for review, builds it (the app, the service and their tests: a few minutes) and installs it"
+    # Only the PKGBUILD repositories are refreshed: no pacman database sync.
+    paru -Sy --pkgbuilds || die "paru could not fetch the PKGBUILD repository; re-run with --no-paru to build with makepkg"
+    paru -S wall-in-one || die "paru could not install Wall-in-One; re-run with --no-paru to build with makepkg"
+    installed_new=1
+    now=$(pacman -Q wall-in-one 2>/dev/null | sed -n 's/^wall-in-one //p') || now=""
+    if [ "$now" != "$pkgver-$pkgrel" ]; then
+      say "paru installed ${now:-nothing}, GitHub's latest release is $pkgver-$pkgrel: the repository follows a release when its files are committed there; run paru -Syu again later"
+    fi
+  else
+    say "building Wall-in-One $pkgver: this builds the app and the service and runs their tests, so it takes a few minutes"
+    say "makepkg runs the downloaded PKGBUILD as shell code; it is $url"
+    building=1
+    (cd "$work" && makepkg -si)
+    building=0
+    installed_new=1
+  fi
   say "installed: $(wall-in-one --version 2>/dev/null | sed -n 1p || true)"
 fi
 

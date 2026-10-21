@@ -74,6 +74,8 @@ class Setup:
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         self.cache = tmp_path / "cache"
+        self.config = tmp_path / "config"
+        self.system_conf = tmp_path / "etc-paru.conf"
         self.log = tmp_path / "calls.log"
         self.log.touch()
         self.served = _released_pkgbuild(tmp_path)
@@ -134,6 +136,8 @@ class Setup:
             "HOME": str(self.tmp / "home"),
             "TMPDIR": str(self.tmp),
             "XDG_CACHE_HOME": str(self.cache),
+            "XDG_CONFIG_HOME": str(self.config),
+            "WIO_SETUP_PARU_SYSTEM_CONF": str(self.system_conf),
             "SETUP_LOG": str(self.log),
             "SERVED": str(self.served),
             "WIO_SETUP_NIX_DIRS": "",
@@ -185,8 +189,10 @@ def test_it_builds_the_latest_release_and_enables_the_service(setup: Setup) -> N
     assert "makepkg -si" in calls
     assert "systemctl --user enable --now wall-in-one.service" in calls
     assert "wall-in-one --setup-status" in calls
-    # Without a terminal to ask on, no AUR helper is run, though two are there.
+    # Without a terminal to ask on, no AUR helper is run, though two are there,
+    # and paru's config is not touched.
     assert not any(call.startswith(("paru ", "yay ")) for call in calls)
+    assert not setup.config.exists()
     assert "videos and scenes show their stills" in result.stdout
     # Its build directory is gone afterwards.
     assert not list(setup.cache.glob("wall-in-one-setup.*"))
@@ -433,3 +439,134 @@ def test_the_default_nix_directories_are_checked(setup: Setup) -> None:
     assert result.returncode == 1
     assert "already installed with Nix" in result.stderr
     assert not setup.made("curl ")
+
+
+SECTION = (
+    "[wall-in-one]\nUrl = https://github.com/Go08er/wall-in-one\nPath = packaging/arch/release\n"
+)
+
+
+def _paru(setup: Setup, system: str | None = "[options]\nBottomUp\n") -> Path:
+    """paru is installed, its system config says `system`; returns the user config's path."""
+    _stub(setup.bin, "paru", "")
+    if system is not None:
+        setup.system_conf.write_text(system, encoding="utf-8")
+    return setup.config / "paru" / "paru.conf"
+
+
+def test_paru_installs_it_and_the_new_config_keeps_the_system_one(setup: Setup) -> None:
+    conf = _paru(setup)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    # The user config replaces /etc/paru.conf, so it includes it, then adds the section.
+    assert conf.read_text(encoding="utf-8") == f"Include = {setup.system_conf}\n\n{SECTION}"
+    assert f"created {conf}" in result.stdout
+    calls = setup.calls()
+    assert calls.index("paru -Sy --pkgbuilds") < calls.index("paru -S wall-in-one")
+    assert not setup.made("makepkg ")
+    assert "systemctl --user enable --now wall-in-one.service" in calls
+
+
+def test_a_new_paru_config_without_a_system_one_is_just_the_section(setup: Setup) -> None:
+    conf = _paru(setup, system=None)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert conf.read_text(encoding="utf-8") == SECTION
+
+
+def test_an_existing_paru_config_only_gets_the_section_appended(setup: Setup) -> None:
+    conf = _paru(setup)
+    conf.parent.mkdir(parents=True)
+    mine = "[options]\nSudoLoop\n\n[bin]\nFileManager = vifm"  # no final newline
+    conf.write_text(mine, encoding="utf-8")
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    text = conf.read_text(encoding="utf-8")
+    assert text.startswith(mine)
+    assert text[len(mine) :].strip() == SECTION.strip()
+    assert "Include" not in text
+    assert f"added a [wall-in-one] section to {conf}" in result.stdout
+
+
+def test_an_existing_wall_in_one_section_is_left_alone(setup: Setup) -> None:
+    conf = _paru(setup)
+    conf.parent.mkdir(parents=True)
+    mine = "[wall-in-one]\nUrl = file:///home/me/wall-in-one\n"
+    conf.write_text(mine, encoding="utf-8")
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert conf.read_text(encoding="utf-8") == mine
+    assert "has a [wall-in-one] section already" in result.stdout
+    assert "paru -S wall-in-one" in setup.calls()
+
+
+def test_a_system_section_means_no_user_config_is_made(setup: Setup) -> None:
+    conf = _paru(setup, system="[options]\n\n" + SECTION)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert not conf.exists()
+
+
+def test_paru_conf_names_the_file_to_change(setup: Setup) -> None:
+    _paru(setup)
+    mine = setup.tmp / "mine.conf"
+    mine.write_text("[options]\n", encoding="utf-8")
+    result = setup.run("--paru", "--no-renderers", PARU_CONF=str(mine))
+    assert result.returncode == 0, result.stderr
+    assert mine.read_text(encoding="utf-8").endswith(SECTION)
+    assert not setup.config.exists()
+
+
+def test_a_missing_paru_conf_file_is_refused(setup: Setup) -> None:
+    _paru(setup)
+    result = setup.run("--paru", "--no-renderers", PARU_CONF=str(setup.tmp / "nope.conf"))
+    assert result.returncode == 1
+    assert "does not exist" in result.stderr
+    assert not setup.made("paru -S ")
+
+
+def test_a_relative_config_home_is_ignored_like_paru_does(setup: Setup) -> None:
+    conf = _paru(setup)
+    result = setup.run("--paru", "--no-renderers", XDG_CONFIG_HOME="relative")
+    assert result.returncode == 0, result.stderr
+    assert (setup.tmp / "home" / ".config" / "paru" / "paru.conf").is_file()
+    assert not conf.exists()
+
+
+def test_no_paru_leaves_paru_alone(setup: Setup) -> None:
+    _paru(setup)
+    result = setup.run("--no-paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert not setup.made("paru ")
+    assert setup.made("makepkg ")
+    assert not setup.config.exists()
+
+
+def test_paru_needs_paru_and_the_latest_release(setup: Setup) -> None:
+    result = setup.run("--paru")
+    assert result.returncode == 1
+    assert "needs paru" in result.stderr
+    _paru(setup)
+    result = setup.run("--paru", "--version", "0.4.0")
+    assert result.returncode == 1
+    assert "follows the latest release" in result.stderr
+    assert not setup.made("curl ")
+
+
+def test_a_paru_failure_stops_before_the_service(setup: Setup) -> None:
+    _paru(setup)
+    _stub(setup.bin, "paru", 'case "$1" in -S) exit 1 ;; esac')
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 1
+    assert "--no-paru" in result.stderr
+    assert not setup.made("systemctl --user enable")
+
+
+def test_an_up_to_date_install_is_still_registered_with_paru(setup: Setup) -> None:
+    conf = _paru(setup)
+    setup.installed(setup.pkgver_rel)
+    result = setup.run("--paru", "--no-renderers")
+    assert result.returncode == 0, result.stderr
+    assert conf.read_text(encoding="utf-8").endswith(SECTION)
+    assert not setup.made("paru -S")
+    assert not setup.made("makepkg ")

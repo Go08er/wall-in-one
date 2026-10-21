@@ -47,10 +47,9 @@ Wall-in-One is not on the AUR. Its git repository is a source paru can read
 directly, and each release also carries the PKGBUILD it was checked with and
 a setup script. Three ways; all of them build the release from source.
 
-<!-- Not verified on Arch: the paru way below is written from paru 2.1.0's
-source (config.rs, pkgbuild.rs, install.rs) and tested only against stand-ins
-for paru, pacman and makepkg (tests/test_arch_setup.py). The first real run on
-Arch should be watched. -->
+> **Not yet run on Arch.** The paru route has been checked against paru's
+> source but not yet run on Arch (the stand-in tests in
+> `tests/test_arch_setup.py` cover the script only). Watch the first run.
 
 **With paru, straight from GitHub.** paru (2.0 or later) can treat a git
 repository as a PKGBUILD repository: it fetches it on `paru -Sy`, and installs
@@ -68,19 +67,26 @@ then:
 
 ```console
 $ paru -Sy --pkgbuilds     # fetch the repository (only PKGBUILD repositories)
-$ paru -S wall-in-one      # review the PKGBUILD, build, install
+$ paru -S wall-in-one/wall-in-one   # review the PKGBUILD, build, install
 ```
 
 and from then on `paru -Syu` updates Wall-in-One with the rest of your system,
 when a new release's files are committed to `packaging/arch/release/` (a
 release reaches you when that commit lands, a little after the tag). paru reads
-a single config file: `$PARU_CONF`, else `~/.config/paru/paru.conf`, else
-`/etc/paru.conf`. If you have no file in `~/.config/paru/`, creating one hides
-`/etc/paru.conf`; start it with `Include = /etc/paru.conf` to keep those
-settings. paru has no branch setting in its config, so it takes the repository's default
-branch (`main`), and shows the PKGBUILD for review at the first install and at each update (`SkipReview` in the section
-turns that off for this repository). After an update, restart the running
-service: `systemctl --user restart wall-in-one.service`.
+a single config file: `$PARU_CONF` if that variable is set, else
+`$XDG_CONFIG_HOME/paru/paru.conf` when `$XDG_CONFIG_HOME` is an absolute path
+(otherwise `~/.config/paru/paru.conf`), else `/etc/paru.conf`. If you have no
+file at the user location, creating one hides `/etc/paru.conf`; start it with
+`Include = /etc/paru.conf` to keep those settings. The repository-qualified
+name `wall-in-one/wall-in-one` always means this repository's package, even
+if an AUR or sync package of the same name ever appears. The script follows an
+`Include` one level when it looks for an existing section, and warns when one
+points anywhere but this repository's `packaging/arch/release`. paru has no
+branch setting in its config, so it takes the repository's default branch
+(`main`), and shows the PKGBUILD for review at the first install and at each
+update (`SkipReview` in the section turns that off for this repository). After
+an update, restart the running service:
+`systemctl --user restart wall-in-one.service`.
 
 **With the setup script.** It does the above for you, and the rest of the
 set-up, and works without paru too. Download it, then run it from a terminal
@@ -109,7 +115,7 @@ The script:
   that has a `[wall-in-one]` section is left alone), or creates
   `~/.config/paru/paru.conf` with `Include = /etc/paru.conf` and the section,
   tells you which file it changed, and runs `paru -Sy --pkgbuilds` and
-  `paru -S wall-in-one` instead of `makepkg`; paru shows the PKGBUILD first;
+  `paru -S wall-in-one/wall-in-one` instead of `makepkg`; paru shows the PKGBUILD first;
 - offers the renderers from the AUR when you have `paru` or `yay`;
 - gives your user manager the session's `WAYLAND_DISPLAY` if it lacks it, and
   enables the user unit (starting it only when the manager has a display), then

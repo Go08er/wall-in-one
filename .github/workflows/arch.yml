@@ -106,7 +106,7 @@ jobs:
             # this on $pkgdir too; this is the installed result.
             "$0/tools/check-install-kind.sh" system /usr/bin/wall-in-one \
               /usr/bin/wall-in-one-service
-            # ... and both are this package's release. The kind check above
+            # ... and both are the release this PKGBUILD builds. The kind check above
             # only makes the halves agree with each other.
             pkgver=$(sed -n "s/^pkgver=//p" "$0/packaging/arch/PKGBUILD")
             for program in wall-in-one wall-in-one-service; do

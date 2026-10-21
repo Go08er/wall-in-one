@@ -23,6 +23,9 @@ from typing import Final
 
 TARGET: Final = Path(__file__).resolve().parent.parent / "src/wall_in_one/theme/builtin_schemes.py"
 SOURCE_FILE: Final = "src/theme/builtin_palettes.cpp"
+#: How many built-in palettes Noctalia has compiled in. A different count is a
+#: change to read, not to pass through: raise it here once the new table is checked.
+EXPECTED_PALETTES: Final = 10
 
 #: C++ designated-initialiser name -> data module field, in the order they are emitted.
 ROLES: Final[tuple[tuple[str, str], ...]] = (
@@ -77,10 +80,14 @@ def parse(source: str) -> list[tuple[str, dict[str, Variant]]]:
         if found:
             if name is not None:
                 palettes.append((name, variants))
+            if any(known == found.group(1) for known, _ in palettes):
+                raise GenerationError(f"palette {found.group(1)!r} appears twice")
             name, variants, variant, group = found.group(1), {}, None, None
             continue
         found = _MODE.search(line)
         if found and name is not None:
+            if found.group(1) in variants:
+                raise GenerationError(f"{name}: {found.group(1)} variant appears twice")
             variant = {"normal": {}, "bright": {}}
             variants[found.group(1)] = variant
             group = None
@@ -95,8 +102,12 @@ def parse(source: str) -> list[tuple[str, dict[str, Variant]]]:
             if key in ANSI:
                 if group is None:
                     raise GenerationError(f"{name}: ansi colour {key} outside normal/bright")
+                if key in group:
+                    raise GenerationError(f"{name}: ansi colour {key} is given twice")
                 group[key] = value
             else:
+                if key in variant:
+                    raise GenerationError(f"{name}: {key} is given twice in one variant")
                 variant[key] = value
     if name is not None:
         palettes.append((name, variants))
@@ -110,8 +121,10 @@ def parse(source: str) -> list[tuple[str, dict[str, Variant]]]:
                 missing += [f"{kind}.{c}" for c in ANSI if c not in parsed[kind]]  # type: ignore[operator]
             if missing:
                 raise GenerationError(f"{palette} {mode}: missing {', '.join(missing)}")
-    if not palettes:
-        raise GenerationError("no built-in palettes found")
+    if len(palettes) != EXPECTED_PALETTES:
+        raise GenerationError(
+            f"found {len(palettes)} built-in palettes, expected {EXPECTED_PALETTES}"
+        )
     return palettes
 
 
@@ -129,9 +142,15 @@ def _terminal(variant: Variant, indent: str) -> list[str]:
     return lines
 
 
-def render(source: str, version: str) -> str:
-    """The text of the data module for the palettes in ``source``."""
-    out = [_HEADER.format(version=version, source=SOURCE_FILE).rstrip("\n")]
+def render(source: str, version: str, licence: str) -> str:
+    """The text of the data module for the palettes in ``source``.
+
+    ``licence`` is Noctalia's LICENSE file, embedded verbatim.
+    """
+    if '"""' in licence or "\\" in licence:
+        raise GenerationError("the licence text cannot be embedded in a docstring")
+    header = _HEADER.format(version=version, source=SOURCE_FILE, licence=licence.strip("\n"))
+    out = [header.rstrip("\n")]
     for name, modes in parse(source):
         out.append(f'    BuiltinScheme(\n        name="{name}",')
         for mode in ("dark", "light"):
@@ -154,12 +173,17 @@ it from Noctalia's source whenever the pinned version (``flake.nix``) changes.
 Source: Noctalia v{version}, ``{source}`` (the ``kPalettes`` table). Those
 palettes are compiled into the binary and no CLI surface prints their colours,
 so the app carries them. Colours are copied verbatim (lower-cased); nothing here
-is derived or invented. Noctalia 5.3.0's table is identical to 5.2.0's.
+is derived or invented. Noctalia 5.3.0 (rev a33122c4) was compared once, at review
+time, and its table is identical to 5.2.0's; only the pinned release is checked
+by the test suite.
 
-Noctalia is MIT licensed, Copyright (c) 2026 noctalia-dev. The palettes named
-here are Noctalia's selections of those colour themes; this notice and the
-licence at https://github.com/noctalia-dev/noctalia/blob/v{version}/LICENSE
-apply to the copied table.
+The table is a substantial copy of Noctalia's source, so Noctalia's licence
+(its LICENSE file, verbatim) travels with it:
+
+{licence}
+
+The colour themes themselves (Catppuccin, Nord, Dracula and so on) come from
+their own projects, as Noctalia packages them.
 
 Only a *preview*: Noctalia's live files are never overridden by this table
 (see ``palettes.builtin_colours``).
@@ -230,7 +254,11 @@ def main(argv: list[str]) -> int:
         return 2
     root = Path(positional[0])
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
-    text = render((root / SOURCE_FILE).read_text(encoding="utf-8"), version)
+    text = render(
+        (root / SOURCE_FILE).read_text(encoding="utf-8"),
+        version,
+        (root / "LICENSE").read_text(encoding="utf-8"),
+    )
     if "--check" in flags:
         if TARGET.read_text(encoding="utf-8") != text:
             print(f"{TARGET} is out of date; run with --write", file=sys.stderr)

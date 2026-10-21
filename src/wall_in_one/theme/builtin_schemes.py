@@ -6,12 +6,37 @@ it from Noctalia's source whenever the pinned version (``flake.nix``) changes.
 Source: Noctalia v5.2.0, ``src/theme/builtin_palettes.cpp`` (the ``kPalettes`` table). Those
 palettes are compiled into the binary and no CLI surface prints their colours,
 so the app carries them. Colours are copied verbatim (lower-cased); nothing here
-is derived or invented. Noctalia 5.3.0's table is identical to 5.2.0's.
+is derived or invented. Noctalia 5.3.0 (rev a33122c4) was compared once, at review
+time, and its table is identical to 5.2.0's; only the pinned release is checked
+by the test suite.
 
-Noctalia is MIT licensed, Copyright (c) 2026 noctalia-dev. The palettes named
-here are Noctalia's selections of those colour themes; this notice and the
-licence at https://github.com/noctalia-dev/noctalia/blob/v5.2.0/LICENSE
-apply to the copied table.
+The table is a substantial copy of Noctalia's source, so Noctalia's licence
+(its LICENSE file, verbatim) travels with it:
+
+MIT License
+
+Copyright (c) 2026 noctalia-dev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The colour themes themselves (Catppuccin, Nord, Dracula and so on) come from
+their own projects, as Noctalia packages them.
 
 Only a *preview*: Noctalia's live files are never overridden by this table
 (see ``palettes.builtin_colours``).

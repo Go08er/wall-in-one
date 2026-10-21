@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from pathlib import Path
 from types import ModuleType
 
@@ -108,8 +109,81 @@ def test_the_checked_in_table_matches_the_pinned_noctalia_source() -> None:
     tool = _tool()
     version = (source / "VERSION").read_text(encoding="utf-8").strip()
     assert version == builtin_schemes.NOCTALIA_VERSION
-    generated = tool.render((source / tool.SOURCE_FILE).read_text(encoding="utf-8"), version)
+    generated = tool.render(
+        (source / tool.SOURCE_FILE).read_text(encoding="utf-8"),
+        version,
+        (source / "LICENSE").read_text(encoding="utf-8"),
+    )
     assert tool.TARGET.read_text(encoding="utf-8") == generated, (
         "theme/builtin_schemes.py is out of date with the pinned Noctalia source; run "
         f"tools/gen_builtin_schemes.py {source} --write"
     )
+
+
+def _table(*, names: list[str] | None = None, extra: str = "") -> str:
+    """A complete synthetic table in Noctalia's layout, `extra` added to the first variant."""
+    tool = _tool()
+    colours = "\n".join(
+        f'.{key} = hex("#102030"),'
+        for key in [r for r, _ in tool.ROLES]
+        + ["foreground"]
+        + [f for f, _ in tool.TERMINAL_SCALARS if f != "foreground"]
+    )
+    ansi = "\n".join(f'.{key} = hex("#102030"),' for key in tool.ANSI)
+
+    def variant(mode: str, more: str) -> str:
+        return (
+            f".{mode} = FixedPaletteMode{{\n{colours}\n{more}\n"
+            f".normal = TerminalAnsiColors{{\n{ansi} }},\n"
+            f".bright = TerminalAnsiColors{{\n{ansi} }}, }},\n"
+        )
+
+    return "".join(
+        f'.name = "{name}",\n{variant("dark", extra if index == 0 else "")}{variant("light", "")}'
+        for index, name in enumerate(names or [f"P{n}" for n in range(tool.EXPECTED_PALETTES)])
+    )
+
+
+def test_a_complete_synthetic_table_parses() -> None:
+    tool = _tool()
+    assert len(tool.parse(_table())) == tool.EXPECTED_PALETTES
+
+
+def test_the_generator_refuses_a_repeated_palette_name() -> None:
+    tool = _tool()
+    names = [f"P{n}" for n in range(tool.EXPECTED_PALETTES - 1)] + ["P0"]
+    with pytest.raises(tool.GenerationError, match="twice"):
+        tool.parse(_table(names=names))
+
+
+def test_the_generator_refuses_a_repeated_key_in_a_variant() -> None:
+    tool = _tool()
+    with pytest.raises(tool.GenerationError, match="twice"):
+        tool.parse(_table(extra='.primary = hex("#445566"),'))
+    with pytest.raises(tool.GenerationError, match="twice"):
+        tool.parse(_table(extra='.dark = FixedPaletteMode{\n.primary = hex("#445566"),'))
+
+
+def test_the_generator_refuses_an_unexpected_palette_count() -> None:
+    tool = _tool()
+    with pytest.raises(tool.GenerationError, match="expected"):
+        tool.parse(_table(names=["A", "B"]))
+
+
+def test_the_pinned_tag_in_the_flake_is_the_table_version() -> None:
+    flake = Path(__file__).resolve().parent.parent / "flake.nix"
+    if not flake.is_file():
+        pytest.skip("no flake.nix beside the tests (a packaged build)")
+    tags = re.findall(r"github:noctalia-dev/noctalia/v(\d+\.\d+\.\d+)", flake.read_text("utf-8"))
+    assert len(set(tags)) == 1, tags
+    assert tags[0] == builtin_schemes.NOCTALIA_VERSION, (
+        "flake.nix pins a different Noctalia than theme/builtin_schemes.py was made from; run "
+        "tools/gen_builtin_schemes.py <source of the new pin> --write"
+    )
+
+
+def test_the_module_carries_noctalias_full_licence() -> None:
+    doc = builtin_schemes.__doc__ or ""
+    assert "Copyright (c) 2026 noctalia-dev" in doc
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in doc
+    assert "Permission is hereby granted" in doc

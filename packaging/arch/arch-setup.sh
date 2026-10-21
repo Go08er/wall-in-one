@@ -340,13 +340,20 @@ if [ "$enable" = 1 ]; then
     fi
     systemctl --user daemon-reload
     if [ "$has_display" = 1 ]; then
+      systemctl --user enable wall-in-one.service
+      # A first install has no saved settings yet, and the unit's preparation
+      # then refuses to start (exit 78) until the app has chosen a library
+      # folder: that is expected, not a failed setup.
       if [ "$installed_new" = 1 ] && systemctl --user is-active --quiet wall-in-one.service; then
-        systemctl --user enable wall-in-one.service
-        systemctl --user restart wall-in-one.service
-        say "the wallpaper service is restarted on the new version"
-      else
-        systemctl --user enable --now wall-in-one.service
+        if systemctl --user restart wall-in-one.service; then
+          say "the wallpaper service is restarted on the new version"
+        else
+          say "the wallpaper service did not restart; see: systemctl --user status wall-in-one.service"
+        fi
+      elif systemctl --user start wall-in-one.service; then
         say "the wallpaper service is enabled and running"
+      else
+        say "the wallpaper service is enabled, and starts once Wall-in-One has its settings: open Wall-in-One, choose your library folder, then run: systemctl --user start wall-in-one.service (or log in again)"
       fi
     else
       systemctl --user enable wall-in-one.service

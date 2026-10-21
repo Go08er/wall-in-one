@@ -127,13 +127,18 @@ class Setup:
             f'case "$1 $2" in "-Q wall-in-one") {answer} ;; "-Q base-devel") exit 0 ;; esac',
         )
 
-    def systemctl(self, env: str = "", active: bool = False) -> None:
-        """A user manager whose environment is `env`, with the unit running or not."""
+    def systemctl(self, env: str = "", active: bool = False, start_fails: bool = False) -> None:
+        """A user manager whose environment is `env`, with the unit running or not.
+
+        `start_fails` is a first install: the unit's preparation refuses (exit 78)
+        until the app has saved its settings.
+        """
         _stub(
             self.bin,
             "systemctl",
             f'case "$*" in "--user show-environment") printf "PATH=/usr/bin\\n{env}\\n" ;;'
-            f' "--user is-active --quiet wall-in-one.service") exit {0 if active else 3} ;; esac',
+            f' "--user is-active --quiet wall-in-one.service") exit {0 if active else 3} ;;'
+            f' "--user start wall-in-one.service") exit {1 if start_fails else 0} ;; esac',
         )
 
     def run(
@@ -195,7 +200,8 @@ def test_it_builds_the_latest_release_and_enables_the_service(setup: Setup) -> N
         if call.startswith("curl ")
     ), calls
     assert "makepkg -si" in calls
-    assert "systemctl --user enable --now wall-in-one.service" in calls
+    assert "systemctl --user enable wall-in-one.service" in calls
+    assert "systemctl --user start wall-in-one.service" in calls
     assert "wall-in-one --setup-status" in calls
     # Without a terminal to ask on, no AUR helper is run, though two are there,
     # and paru's config is not touched.
@@ -246,7 +252,7 @@ def test_the_session_display_is_given_to_the_user_manager(setup: Setup) -> None:
     calls = setup.calls()
     assert "systemctl --user import-environment WAYLAND_DISPLAY" in calls
     assert calls.index("systemctl --user import-environment WAYLAND_DISPLAY") < calls.index(
-        "systemctl --user enable --now wall-in-one.service"
+        "systemctl --user start wall-in-one.service"
     )
 
 
@@ -254,7 +260,8 @@ def test_no_user_manager_means_no_systemctl_enable(setup: Setup) -> None:
     _stub(setup.bin, "systemctl", "exit 1")
     result = setup.run("--no-renderers")
     assert result.returncode == 0, result.stderr
-    assert "systemctl --user enable --now wall-in-one.service" not in setup.calls()
+    assert not setup.made("systemctl --user enable")
+    assert not setup.made("systemctl --user start")
     assert "companion plugin starts the service directly" in result.stdout
 
 
@@ -371,7 +378,7 @@ def test_a_manager_that_has_the_display_is_not_given_it_again(setup: Setup) -> N
     result = setup.run("--no-renderers", WAYLAND_DISPLAY="wayland-1")
     assert result.returncode == 0, result.stderr
     assert not setup.made("systemctl --user import-environment")
-    assert "systemctl --user enable --now wall-in-one.service" in setup.calls()
+    assert "systemctl --user start wall-in-one.service" in setup.calls()
 
 
 def test_without_any_display_the_unit_is_enabled_but_not_started(setup: Setup) -> None:
@@ -408,7 +415,8 @@ def test_an_up_to_date_install_is_not_rebuilt_but_still_set_up(setup: Setup) -> 
     assert not setup.made("makepkg ")
     assert "which is this release" in result.stdout
     calls = setup.calls()
-    assert "systemctl --user enable --now wall-in-one.service" in calls
+    assert "systemctl --user enable wall-in-one.service" in calls
+    assert "systemctl --user start wall-in-one.service" in calls
     assert "wall-in-one --setup-status" in calls
     assert not setup.made("systemctl --user restart")
 
@@ -434,7 +442,7 @@ def test_a_failing_helper_does_not_stop_the_setup(setup: Setup) -> None:
     result = setup.run("--renderers")
     assert result.returncode == 0, result.stderr
     assert "paru could not install" in result.stdout
-    assert "systemctl --user enable --now wall-in-one.service" in setup.calls()
+    assert "systemctl --user start wall-in-one.service" in setup.calls()
     assert "wall-in-one --setup-status" in setup.calls()
 
 
@@ -472,7 +480,8 @@ def test_paru_installs_it_and_the_new_config_keeps_the_system_one(setup: Setup) 
     calls = setup.calls()
     assert calls.index("paru -Sy --pkgbuilds") < calls.index("paru -S wall-in-one/wall-in-one")
     assert not setup.made("makepkg ")
-    assert "systemctl --user enable --now wall-in-one.service" in calls
+    assert "systemctl --user enable wall-in-one.service" in calls
+    assert "systemctl --user start wall-in-one.service" in calls
 
 
 def test_a_new_paru_config_without_a_system_one_is_just_the_section(setup: Setup) -> None:
@@ -708,3 +717,15 @@ def test_paru_with_nothing_to_do_does_not_restart_the_service(setup: Setup) -> N
     assert result.returncode == 0, result.stderr
     assert "paru had nothing to install" in result.stdout
     assert not setup.made("systemctl --user restart")
+
+
+def test_a_first_install_without_settings_is_enabled_and_explained(setup: Setup) -> None:
+    """On real Arch the first start fails until the app has a library folder (exit 78)."""
+    setup.systemctl(env="WAYLAND_DISPLAY=wayland-0", start_fails=True)
+    result = setup.run("--no-renderers")
+    assert result.returncode == 0, result.stderr
+    calls = setup.calls()
+    assert "systemctl --user enable wall-in-one.service" in calls
+    assert "systemctl --user start wall-in-one.service" in calls
+    assert "open Wall-in-One, choose your library folder" in result.stdout
+    assert "wall-in-one --setup-status" in calls

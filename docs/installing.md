@@ -44,11 +44,42 @@ and no menu entry appears -- which is the right behaviour for trying it out.
 ### On Arch Linux, from a release
 
 Wall-in-One is not on the AUR. Each release from 0.4.0 on carries the PKGBUILD
-it was checked with, which builds that release from source:
+it was checked with, which builds that release from source, and a setup
+script that does the whole install. Download it, then run it from a terminal
+as your normal user (not as root, and not piped into `bash`: `sudo` and
+`makepkg` ask questions of you):
+
+```console
+$ curl -fLO https://github.com/Go08er/wall-in-one/releases/latest/download/arch-setup.sh
+$ bash arch-setup.sh
+```
+
+The script:
+
+- refuses to run as root, from a pipe, or beside a Nix install;
+- installs `base-devel` if it is missing, and downloads the release's PKGBUILD,
+  which it refuses unless the source has a SHA-256 checksum;
+- builds and installs it with `makepkg -si`, in `~/.cache` (or
+  `$XDG_CACHE_HOME`), not in `/tmp`, which is memory on Arch and too small for
+  a Rust build; it removes the build directory when the build succeeds and
+  keeps it, saying where, when it fails;
+- asks for your password through `sudo` when pacman installs packages, so
+  `sudo` has to be set up for your user;
+- offers the renderers from the AUR when you have `paru` or `yay`;
+- gives your user manager the session's `WAYLAND_DISPLAY` if it lacks it, and
+  enables the user unit (starting it only when the manager has a display), then
+  ends with `wall-in-one --setup-status`.
+
+To update, run the script again (download the newest copy first): it builds the
+latest release if you are on an older one, restarts the running service on the
+new version, does nothing to the package if you are up to date, and refuses to
+replace a newer package with an older release. `bash arch-setup.sh --help`
+lists its options (another release, renderers or not, no service). By hand,
+the same is:
 
 ```console
 $ mkdir wall-in-one && cd wall-in-one
-$ curl -LO https://github.com/Go08er/wall-in-one/releases/latest/download/PKGBUILD
+$ curl -fLO https://github.com/Go08er/wall-in-one/releases/latest/download/PKGBUILD
 $ makepkg -si
 $ systemctl --user enable --now wall-in-one.service
 ```

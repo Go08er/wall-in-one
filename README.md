@@ -104,12 +104,13 @@ the wallpaper renderers:
 }
 ```
 
-On Arch Linux, without Nix, each release's PKGBUILD builds it from source
+On Arch Linux, without Nix, each release's setup script builds it from source
+with its PKGBUILD and sets it up
 ([installing on Arch](docs/installing.md#on-arch-linux-from-a-release)):
 
 ```console
-$ curl -LO https://github.com/Go08er/wall-in-one/releases/latest/download/PKGBUILD
-$ makepkg -si
+$ curl -fLO https://github.com/Go08er/wall-in-one/releases/latest/download/arch-setup.sh
+$ bash arch-setup.sh
 ```
 
 Flakes must be enabled. If `nix run` complains about an experimental feature,

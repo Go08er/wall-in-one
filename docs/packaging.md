@@ -273,12 +273,19 @@ is published is made from it after the tag exists, in this order:
    `.SRCINFO` is what makepkg writes. (Without Arch, the `.SRCINFO` is the
    checked-in one with only the sum filled in, which `tests/test_aur_release.py`
    verifies offline.)
-5. **Publish to the AUR.** This pushes to the owner's AUR account, so it needs
-   the owner's approval and is never done by an agent: copy the two files into
-   the AUR repository `wall-in-one`, commit, and push.
+5. **Attach to the GitHub Release** the release `PKGBUILD` from step 3 and
+   `packaging/arch/arch-setup.sh`, as `PKGBUILD` and `arch-setup.sh`. That is
+   what Arch users install from
+   ([installing on Arch](installing.md#on-arch-linux-from-a-release)): the
+   script downloads the latest release's `PKGBUILD` by that name. (Leave
+   `.SRCINFO` off: GitHub renames a file whose name starts with a dot.)
+6. **Publish to the AUR**, if it is published there. This pushes to the
+   owner's AUR account, so it needs the owner's approval and is never done by
+   an agent: copy the two files into the AUR repository `wall-in-one`, commit,
+   and push.
 
 If a later fix needs another package build of the same release, raise `pkgrel`
-in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 5, with a
+in both the checked-in PKGBUILD and `.SRCINFO` and repeat steps 3 to 6, with a
 new output directory for step 3 (the script does not reuse one).
 
 ## How it is tested

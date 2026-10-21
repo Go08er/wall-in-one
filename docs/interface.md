@@ -278,6 +278,17 @@ A save that fails is reported, and every row goes back to what is saved.
 **Palettes** opens the palette manager:
 
 - browse every installed palette and apply one through Noctalia;
+- see a swatch strip for every palette. Community and custom palettes are read
+  from their files. The ten built-in palettes live inside Noctalia's binary, so
+  the app carries a copy of Noctalia's own table
+  (`src/wall_in_one/theme/builtin_schemes.py`, from Noctalia's
+  `src/theme/builtin_palettes.cpp`, MIT licensed). When the pinned Noctalia
+  version in `flake.nix` changes, regenerate it with
+  `tools/gen_builtin_schemes.py NOCTALIA_SOURCE --write`;
+  `tests/test_builtin_schemes.py` checks it against the source when
+  `WIO_NOCTALIA_SOURCE` points at one. Wallpaper-generated schemes (the
+  "preview each scheme" below) have no fixed colours and are always generated
+  from the still;
 - duplicate one into yours, named "<name> copy" (numbered if that is taken),
   and edit its colours;
 - preview each scheme on a still, then use it as the default or keep it as a

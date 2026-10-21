@@ -285,10 +285,13 @@ A save that fails is reported, and every row goes back to what is saved.
   `src/theme/builtin_palettes.cpp`, MIT licensed). When the pinned Noctalia
   version in `flake.nix` changes, regenerate it with
   `tools/gen_builtin_schemes.py NOCTALIA_SOURCE --write`;
-  `tests/test_builtin_schemes.py` checks it against the source when
-  `WIO_NOCTALIA_SOURCE` points at one. Wallpaper-generated schemes (the
+  the `builtin-schemes` flake check (`tests/test_builtin_schemes.py`, with
+  `WIO_NOCTALIA_SOURCE` set to the pinned input) fails when it is stale. Wallpaper-generated schemes (the
   "preview each scheme" below) have no fixed colours and are always generated
   from the still;
+  the swatches show Noctalia's seed palette for a built-in: once it is applied,
+  Noctalia derives contrast-adjusted outline and container tokens, so the
+  outline can differ slightly, while the surface and accents shown are exact;
 - duplicate one into yours, named "<name> copy" (numbered if that is taken),
   and edit its colours;
 - preview each scheme on a still, then use it as the default or keep it as a

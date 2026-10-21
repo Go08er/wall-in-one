@@ -316,6 +316,25 @@
                 touch $out
               '';
 
+          # The built-in palette table (src/wall_in_one/theme/builtin_schemes.py) is
+          # a copy of Noctalia's own, and the pinned release is this flake's
+          # `noctalia` input. This compares the two, so a pin bump that changes
+          # the table fails here rather than leaving stale previews.
+          builtin-schemes =
+            pkgs.runCommand "wall-in-one-builtin-schemes"
+              {
+                nativeBuildInputs = [
+                  (python.withPackages (ps: [ ps.pytest ]))
+                ];
+              }
+              ''
+                export HOME="$TMPDIR/home"
+                export WIO_NOCTALIA_SOURCE=${noctalia}
+                cd ${./.}
+                PYTHONPATH=$PWD/src pytest tests/test_builtin_schemes.py -q -p no:cacheprovider
+                touch $out
+              '';
+
           # The golden-profile gate against the installed artifact rather than
           # this checkout's src: the same tests, but `wall_in_one` comes from
           # the package's own site-packages (a test asserts that), so a module

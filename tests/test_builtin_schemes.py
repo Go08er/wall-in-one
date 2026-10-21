@@ -109,4 +109,7 @@ def test_the_checked_in_table_matches_the_pinned_noctalia_source() -> None:
     version = (source / "VERSION").read_text(encoding="utf-8").strip()
     assert version == builtin_schemes.NOCTALIA_VERSION
     generated = tool.render((source / tool.SOURCE_FILE).read_text(encoding="utf-8"), version)
-    assert tool.TARGET.read_text(encoding="utf-8") == generated
+    assert tool.TARGET.read_text(encoding="utf-8") == generated, (
+        "theme/builtin_schemes.py is out of date with the pinned Noctalia source; run "
+        f"tools/gen_builtin_schemes.py {source} --write"
+    )

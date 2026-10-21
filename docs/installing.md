@@ -41,6 +41,34 @@ thing through the system or user profile.
 `bin/wall-in-one` without adding anything to a profile, so nothing is installed
 and no menu entry appears -- which is the right behaviour for trying it out.
 
+### On Arch Linux, from a release
+
+Wall-in-One is not on the AUR. Each release from 0.4.0 on carries the PKGBUILD
+it was checked with, which builds that release from source:
+
+```console
+$ mkdir wall-in-one && cd wall-in-one
+$ curl -LO https://github.com/Go08er/wall-in-one/releases/latest/download/PKGBUILD
+$ makepkg -si
+$ systemctl --user enable --now wall-in-one.service
+```
+
+`makepkg` downloads the release's source from GitHub, checks it against the
+checksum in the PKGBUILD, builds the app and the service, and runs their tests;
+`-si` first installs what it needs from Arch's repositories (Noctalia 5 from
+`[extra]`, Python 3.14, GTK 4, libadwaita, FFmpeg) and then the package. It
+puts `/usr/bin/wall-in-one`, `/usr/bin/wall-in-one-service`, the launcher entry,
+the icon and the user units in `/usr/lib/systemd/user` in place, and reports
+itself as a `system` install. The wallpaper renderers are optional
+dependencies: install them from the AUR as
+[below](#managing-the-renderers-yourself). Sway and Hyprland users also need
+[the display line](#the-service-needs-your-sessions-display) before the
+service starts. To update, do the same with the newer release's PKGBUILD,
+after reading its notes.
+
+Keep one install: a Nix install and the Arch package side by side is an error
+the companion refuses to work with.
+
 ### The wallpaper renderers
 
 The package brings FFmpeg (thumbnails and stills) and no wallpaper renderer.

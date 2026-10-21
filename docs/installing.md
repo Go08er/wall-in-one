@@ -47,9 +47,18 @@ Wall-in-One is not on the AUR. Its git repository is a source paru can read
 directly, and each release also carries the PKGBUILD it was checked with and
 a setup script. Three ways; all of them build the release from source.
 
-> **Not yet run on Arch.** The paru route has been checked against paru's
-> source but not yet run on Arch (the stand-in tests in
-> `tests/test_arch_setup.py` cover the script only). Watch the first run.
+> **Tested on Arch in a VM.** All three ways were run on a fresh Arch Linux
+> (pacman 7.1, paru 2.1.0, 4 cores): each build, with its tests, takes about
+> eight minutes. The paru route was run against a local copy of this
+> repository (`Url = file:///…`; a plain path is not accepted), so the GitHub
+> address in the section below was not part of that test.
+
+Building asks a few questions on the way. Two of them are which package
+provides something (`jack`, and `cargo`: `rust` or `rustup`): press Enter for
+the default, rather than answering `y`, which those prompts don't accept.
+Cargo leaves its download cache in `~/.cargo`, which you can delete afterwards.
+Before the wallpaper service can start, open Wall-in-One once and choose your
+library folder: until then its unit refuses to start, which is expected.
 
 **With paru, straight from GitHub.** paru (2.0 or later) can treat a git
 repository as a PKGBUILD repository: it fetches it on `paru -Sy`, and installs
@@ -83,10 +92,10 @@ if an AUR or sync package of the same name ever appears. The script follows an
 `Include` one level when it looks for an existing section, and warns when one
 points anywhere but this repository's `packaging/arch/release`. paru has no
 branch setting in its config, so it takes the repository's default branch
-(`main`), and shows the PKGBUILD for review at the first install and at each
-update (`SkipReview` in the section turns that off for this repository). After
-an update, restart the running service:
-`systemctl --user restart wall-in-one.service`.
+(`main`). It shows what changed in the repository for review when it fetches
+it, at `paru -Sy --pkgbuilds` (and at the first `paru -S`); `SkipReview` in the
+section turns that off for this repository. After an update, restart the
+running service: `systemctl --user restart wall-in-one.service`.
 
 **With the setup script.** It does the above for you, and the rest of the
 set-up, and works without paru too. Download it, then run it from a terminal
@@ -118,8 +127,9 @@ The script:
   `paru -S wall-in-one/wall-in-one` instead of `makepkg`; paru shows the PKGBUILD first;
 - offers the renderers from the AUR when you have `paru` or `yay`;
 - gives your user manager the session's `WAYLAND_DISPLAY` if it lacks it, and
-  enables the user unit (starting it only when the manager has a display), then
-  ends with `wall-in-one --setup-status`.
+  enables the user unit, starting it when the manager has a display and the app
+  has its settings (on a first install it says to open Wall-in-One and choose
+  your library folder first), then ends with `wall-in-one --setup-status`.
 
 To update, run the script again (download the newest copy first; if you
 installed through paru, `paru -Syu` does it too). It builds the latest release
@@ -133,8 +143,11 @@ service). **By hand,** with makepkg, the same is:
 $ mkdir wall-in-one && cd wall-in-one
 $ curl -fLO https://github.com/Go08er/wall-in-one/releases/latest/download/PKGBUILD
 $ makepkg -si
-$ systemctl --user enable --now wall-in-one.service
+$ systemctl --user enable wall-in-one.service
 ```
+
+then open Wall-in-One, choose your library folder, and
+`systemctl --user start wall-in-one.service` (or log in again).
 
 `makepkg` downloads the release's source from GitHub, checks it against the
 checksum in the PKGBUILD, builds the app and the service, and runs their tests;

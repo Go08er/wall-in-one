@@ -115,8 +115,8 @@ $ bash arch-setup.sh
 
 With paru, the script can register this repository as a PKGBUILD repository,
 so that `paru -Syu` keeps it updated from GitHub
-([how](docs/installing.md#on-arch-linux-from-a-release)). The paru route has been
-checked against paru's source but not yet run on Arch.
+([how](docs/installing.md#on-arch-linux-from-a-release)). All three ways have
+been run on Arch in a VM.
 
 Flakes must be enabled. If `nix run` complains about an experimental feature,
 add `experimental-features = nix-command flakes` to `/etc/nix/nix.conf` or pass

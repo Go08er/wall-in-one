@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one.library import workshop
+from wall_in_one.library.model import Kind, MediaItem, Unplayable
 
 # -- linking out ----------------------------------------------------------
 #
@@ -225,3 +226,371 @@ def test_the_item_cap_is_said(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert len(found) == 1 and said == [(content, UnseenKind.LIMIT)]
+
+
+# -- every item is listed: web, presets, and what the engine can't run -------
+#
+# The owner added a `web` wallpaper and a preset of it, and neither showed up:
+# the scan kept only playable videos and `scene`s (docs/wallpaper-engine.md).
+# These fixtures copy the shapes of those two real items, built under
+# `tmp_path`; the real Steam folder is never read.
+
+
+def _web(content: Path, workshop_id: str = "2777242023") -> Path:
+    directory = _install(
+        content,
+        workshop_id,
+        {
+            "type": "web",
+            "title": "Electric Eye",
+            "file": "index.html",
+            "preview": "preview.jpg",
+            "general": {
+                "properties": {
+                    "arcs": {"type": "bool", "value": True, "text": "Arcs"},
+                    "arcsDivider": {"type": "text", "text": "<hr>"},
+                    "arcsGeneralRadius": {"type": "slider", "value": 225, "min": 0, "max": 500},
+                    "beamHaloRing1RotationSpeed": {"type": "slider", "value": 0.5},
+                    "arcsVisualsColor1": {"type": "color", "value": "0.6 0.6 0.6"},
+                    "arcsVisualsColor2": {"type": "color", "value": "0.5 0.75 1"},
+                    "arcsGeneralBounceType": {
+                        "type": "combo",
+                        "value": 2,
+                        "options": [{"label": "A", "value": 0}, {"label": "B", "value": 2}],
+                    },
+                    "theme": {
+                        "type": "combo",
+                        "value": "dark",
+                        "options": [{"label": "Dark", "value": "dark"}],
+                    },
+                    "customImageVisualsFile": {"type": "file", "value": ""},
+                }
+            },
+        },
+        file="index.html",
+    )
+    (directory / "preview.jpg").write_bytes(b"\xff\xd8\xff")
+    return directory
+
+
+def _preset(content: Path, values: dict[str, object], dependency: object = "2777242023") -> Path:
+    directory = _install(
+        content,
+        "2946165131",
+        {
+            "title": "Y2K Matrix",
+            "preview": "preview.gif",
+            "dependency": dependency,
+            "preset": values,
+        },
+    )
+    (directory / "preview.gif").write_bytes(b"GIF89a")
+    return directory
+
+
+def _listed(tmp_path: Path) -> dict[str, MediaItem]:
+    from wall_in_one.library import scan
+
+    return {item.scene or item.path.name: item for item in scan.workshop_items((tmp_path,))}
+
+
+def test_a_web_wallpaper_is_listed_as_a_scene_the_engine_plays(tmp_path: Path) -> None:
+    from wall_in_one.library import scan
+
+    web = _web(_content(tmp_path))
+
+    (item,) = scan.workshop_items((tmp_path,))
+
+    assert item.kind is Kind.SCENE
+    assert item.path == web and item.scene == "2777242023"
+    assert item.title == "Electric Eye" and item.workshop_type == "web"
+    assert item.preview == web / "preview.jpg"
+    assert item.unplayable is None and item.rendered_scene == "2777242023"
+    assert item.scene_properties == () and item.still_from_preview
+    assert item.provider == scan.WORKSHOP_PROVIDER
+
+
+def test_a_preset_is_its_own_item_playing_its_base_with_its_values(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _web(content)
+    preset = _preset(
+        content,
+        {
+            "arcs": False,
+            "arcsDivider": None,
+            "arcsGeneralRadius": 350,
+            "beamHaloRing1RotationSpeed": -2.5,
+            # Wallpaper Engine's 0-1 floats, which linux-wallpaperengine would
+            # read as 0-255 integers without a decimal point.
+            "arcsVisualsColor1": "0 0.5019607843137255 0",
+            "arcsVisualsColor2": "1,1,0",
+            "arcsGeneralBounceType": 0,
+            "theme": "dark",
+            # Not declared by the base, or not a type that is passed on.
+            "_d0": None,
+            "wec_hue": 3,
+            "customImageVisualsFile": "/etc/passwd",
+        },
+    )
+
+    found = _listed(tmp_path)
+
+    item = found["2946165131"]
+    assert item.kind is Kind.SCENE and item.path == preset
+    assert item.title == "Y2K Matrix" and item.workshop_type == "preset"
+    assert item.preview == preset / "preview.gif"
+    assert item.scene == "2946165131", "its own identity, not its base's"
+    assert item.scene_base == "2777242023" and item.rendered_scene == "2777242023"
+    assert item.unplayable is None
+    assert item.scene_properties == (
+        ("arcs", "false"),
+        ("arcsGeneralBounceType", "0"),
+        ("arcsGeneralRadius", "350"),
+        ("arcsVisualsColor1", "0.000000 0.501961 0.000000"),
+        ("arcsVisualsColor2", "1.000000 1.000000 0.000000"),
+        ("beamHaloRing1RotationSpeed", "-2.5"),
+        ("theme", "dark"),
+    )
+    # The base is listed too, as itself.
+    assert found["2777242023"].scene_properties == ()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("arcs", 1),  # a bool property takes a JSON boolean only
+        ("arcsGeneralRadius", True),
+        ("arcsGeneralRadius", "225"),
+        ("arcsGeneralRadius", 1e20),  # `std::stof` would throw
+        ("arcsGeneralRadius", float("nan")),
+        ("arcsVisualsColor1", "1 1"),
+        ("arcsVisualsColor1", "1.5 0 0"),
+        ("arcsVisualsColor1", "red"),
+        ("arcsVisualsColor1", "#ff0000"),
+        ("arcsGeneralBounceType", 1),  # not one of the options
+        ("arcsGeneralBounceType", 2.5),
+        ("theme", "light"),
+        ("arc=s", True),
+        ("-arcs", True),
+    ),
+)
+def test_a_value_the_engine_would_refuse_is_left_out(
+    tmp_path: Path, name: str, value: object
+) -> None:
+    content = _content(tmp_path)
+    _web(content)
+    _preset(content, {name: value})
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is None
+    assert item.scene_properties == ()
+
+
+def test_a_preset_whose_base_is_not_installed_is_listed_needing_it(tmp_path: Path) -> None:
+    _preset(_content(tmp_path), {"arcs": True})
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.kind is Kind.SCENE and item.title == "Y2K Matrix"
+    assert item.unplayable is Unplayable.NEEDS_BASE
+    assert item.scene_base == "2777242023"
+    assert "2777242023" in item.unplayable_reason
+    assert "isn\u2019t installed" in item.unplayable_reason
+
+
+@pytest.mark.parametrize("dependency", (None, "", "../2777242023", True, ["2777242023"]))
+def test_a_preset_that_names_no_base_is_listed_needing_one(
+    tmp_path: Path, dependency: object
+) -> None:
+    content = _content(tmp_path)
+    _web(content)
+    _preset(content, {"arcs": True}, dependency=dependency)
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is Unplayable.NEEDS_BASE and item.scene_base == ""
+
+
+def test_a_numeric_dependency_names_its_base_too(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _web(content)
+    _preset(content, {"arcs": True}, dependency=2777242023)
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is None and item.scene_base == "2777242023"
+
+
+@pytest.mark.parametrize(
+    ("project", "word"),
+    (
+        ({"type": "Hologram", "title": "Future", "file": "x"}, "hologram"),
+        ({"title": "No type"}, "unknown"),
+        ({"type": "x" * 200, "title": "Long", "file": "x"}, "unknown"),
+    ),
+)
+def test_a_type_the_engine_cant_run_is_listed_and_said(
+    tmp_path: Path, project: dict[str, object], word: str
+) -> None:
+    directory = _install(_content(tmp_path), "4242", project)
+
+    (item,) = _listed(tmp_path).values()
+
+    assert item.kind is Kind.SCENE and item.path == directory
+    assert item.workshop_type == word
+    assert item.unplayable is Unplayable.RUNTIME
+    assert "linux-wallpaperengine can\u2019t play" in item.unplayable_reason
+
+
+def test_a_preset_of_a_wallpaper_the_engine_cant_run_is_unsupported_too(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _install(content, "2777242023", {"type": "application", "title": "App", "file": "a.exe"})
+    _preset(content, {"arcs": True})
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is Unplayable.RUNTIME
+    assert "App" in item.unplayable_reason
+
+
+def test_a_supported_type_without_what_the_engine_requires_is_not_played(tmp_path: Path) -> None:
+    _install(_content(tmp_path), "5150", {"type": "web", "title": "No file"})
+
+    (item,) = _listed(tmp_path).values()
+
+    assert item.workshop_type == "web" and item.unplayable is Unplayable.MALFORMED
+
+
+@pytest.mark.parametrize("file", ("v/a.mp4", "gone.mp4", ""))
+def test_a_video_whose_file_the_app_cant_open_is_not_listed_as_before(
+    tmp_path: Path, file: str
+) -> None:
+    """Deleting a Workshop video's file is how it leaves the library."""
+    _install(_content(tmp_path), "6060", {"type": "video", "title": "Nested", "file": file})
+
+    assert _listed(tmp_path) == {}
+
+
+# -- executable wallpapers are never run (owner decision, security) -------------
+
+
+def _application(content: Path, workshop_id: str = "2777242023") -> Path:
+    directory = _install(
+        content,
+        workshop_id,
+        {"type": "Application", "title": "Rainmeter", "file": "run.exe", "preview": "p.jpg"},
+        file="run.exe",
+    )
+    (directory / "p.jpg").write_bytes(b"\xff\xd8\xff")
+    return directory
+
+
+def test_an_application_is_listed_badged_and_never_run(tmp_path: Path) -> None:
+    directory = _application(_content(tmp_path))
+
+    (item,) = _listed(tmp_path).values()
+
+    assert item.kind is Kind.SCENE and item.path == directory
+    assert item.workshop_type == "application" and item.title == "Rainmeter"
+    assert item.unplayable is Unplayable.RUNTIME, "counted with the unsupported ones"
+    assert "never runs programs" in item.unplayable_reason
+
+
+def test_a_preset_of_an_application_is_never_run_either(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _application(content)
+    _preset(content, {"arcs": True})
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is Unplayable.RUNTIME and item.scene_properties == ()
+    assert "Rainmeter" in item.unplayable_reason
+    assert "never runs programs" in item.unplayable_reason
+
+
+def test_the_deny_list_wins_even_if_the_engine_learns_the_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = _content(tmp_path)
+    _application(content)
+    _preset(content, {"arcs": True})
+    monkeypatch.setattr(workshop, "SUPPORTED_TYPES", workshop.SUPPORTED_TYPES | {"application"})
+
+    found = _listed(tmp_path)
+
+    assert "application" in workshop.SUPPORTED_TYPES and "application" in workshop.NEVER_RUN
+    assert found["2777242023"].unplayable is Unplayable.RUNTIME
+    assert found["2946165131"].unplayable is Unplayable.RUNTIME
+
+
+@pytest.mark.parametrize(
+    ("kind", "file", "runs"),
+    (
+        ("web", "index.html", True),
+        ("web", "INDEX.HTM", True),
+        ("web", "index.sh", False),
+        ("web", "index", False),
+        ("scene", "scene.json", True),
+        ("scene", "scene.elf", False),
+    ),
+)
+def test_a_file_that_isnt_what_its_type_names_is_never_run(
+    tmp_path: Path, kind: str, file: str, runs: bool
+) -> None:
+    """Judged by name: nothing is read or run to decide."""
+    content = _content(tmp_path)
+    directory = _install(content, "2777242023", {"type": kind, "title": "T", "file": file})
+    (directory / file).write_bytes(b"\x7fELF")
+    _preset(content, {"arcs": True})
+
+    found = _listed(tmp_path)
+
+    for item in found.values():
+        assert item.unplayable is (None if runs else Unplayable.RUNTIME), item
+
+
+def test_a_preset_with_more_values_than_are_passed_on_is_not_played(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = _content(tmp_path)
+    _web(content)
+    _preset(content, {"arcs": True, "arcsGeneralRadius": 1, "theme": "dark"})
+    monkeypatch.setattr(workshop, "MAX_PROPERTIES", 2)
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is Unplayable.MALFORMED and item.scene_properties == ()
+    assert "at most 2" in item.unplayable_reason
+
+
+def test_a_folder_that_holds_no_wallpaper_is_said_and_never_blocks_the_compiler(
+    tmp_path: Path,
+) -> None:
+    from wall_in_one.library import scan
+    from wall_in_one.library.model import UnseenKind
+
+    content = _content(tmp_path)
+    empty = content / "9999999999"
+    empty.mkdir(parents=True)
+    broken = content / "8888888888"
+    broken.mkdir()
+    (broken / "project.json").write_text("{not json", encoding="utf-8")
+    listed = content / "7777777777"
+    listed.mkdir()
+    (listed / "project.json").write_text("[1, 2]", encoding="utf-8")
+    library_root = tmp_path / "wallpapers"
+    library_root.mkdir()
+
+    library = scan.scan(
+        (library_root,), include_workshop=True, workshop_roots=(tmp_path,), records={}
+    )
+
+    assert library.items == ()
+    said = {place.path: place for place in library.unseen}
+    assert set(said) == {empty, broken, listed}
+    assert all(place.kind is UnseenKind.NOT_A_WALLPAPER for place in said.values())
+    assert not any(place.kind.could_not_look for place in said.values())
+    assert said[empty].note == f"{empty}: {workshop.NO_PROJECT}"
+    assert said[broken].note == f"{broken}: {workshop.NOT_A_PROJECT}"
+    assert library.skipped == tuple(place.note for place in library.unseen)

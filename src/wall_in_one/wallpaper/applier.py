@@ -91,6 +91,9 @@ class Applier:
         covers the still, and because a palette that fails should not leave a
         video running over the wrong colours.
         """
+        if item.unplayable is not None:
+            # Never handed to a renderer (docs/wallpaper-engine.md).
+            raise ApplyError(f"{item.name} can\u2019t play: {item.unplayable_reason}")
         target = item.playback_path(dynamics_enabled=dynamics_enabled)
         if target is None:
             raise ApplyError(f"{item.name} is a video with no still, and dynamics are off")
@@ -182,7 +185,8 @@ class Applier:
                 f"(pid {held[0]}), so {item.name} was not started. Stop the other one first."
             )
         try:
-            self._scenes.start(item.scene)
+            # A preset renders its base with its own values.
+            self._scenes.start(item.rendered_scene, item.scene_properties)
         except scenes.SceneError as error:
             raise ApplyError(str(error)) from error
         return Applied(item=item, path=path, animated=True)

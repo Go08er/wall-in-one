@@ -34,11 +34,12 @@ from __future__ import annotations
 import stat
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
 from wall_in_one import programs, worker_processes
+from wall_in_one.library import workshop
 from wall_in_one.wallpaper import outputs
 
 #: The wlr-layer-shell layer the engine draws on, as mpvpaper does. The
@@ -211,12 +212,16 @@ class SceneRenderer:
         *,
         window: tuple[int, int] | None = None,
         available_outputs: tuple[str, ...] | None = None,
+        properties: Sequence[tuple[str, str]] = (),
     ) -> list[str]:
         """The argument list, built once so the tests can read it.
 
         `--screen-root` has to come *before* `--bg`: the help is explicit that
         the following options apply to the preceding screen, so ordering is
-        part of the meaning rather than a style choice.
+        part of the meaning rather than a style choice. ``properties`` are a
+        preset's values, each a `--set-property NAME=VALUE` of its own, in
+        name order, as the service passes them; one the service would refuse
+        is refused here too.
         """
         arguments = [
             str(programs.find_program(ENGINE).path),
@@ -231,6 +236,14 @@ class SceneRenderer:
             arguments += ["--volume", str(max(0, self.volume))]
         if not self.pause_when_covered:
             arguments.append("--no-fullscreen-pause")
+        if len(properties) > workshop.MAX_PROPERTIES:
+            raise SceneError(f"more than {workshop.MAX_PROPERTIES} scene properties")
+        for name, value in sorted(properties):
+            if not workshop.PROPERTY_NAME.fullmatch(name) or not workshop.valid_property_value(
+                value
+            ):
+                raise SceneError("a scene property is not one linux-wallpaperengine is given")
+            arguments += ["--set-property", f"{name}={value}"]
         if screenshot is not None:
             arguments += [
                 "--screenshot",
@@ -273,7 +286,7 @@ class SceneRenderer:
             arguments += ["--bg", scene]
         return arguments
 
-    def start(self, scene: str) -> None:
+    def start(self, scene: str, properties: Sequence[tuple[str, str]] = ()) -> None:
         """Render ``scene``, replacing whatever was rendering."""
         if not is_available():
             raise SceneEngineUnavailableError("linux-wallpaperengine is not installed")
@@ -283,7 +296,7 @@ class SceneRenderer:
         self.stop()
         try:
             process = subprocess.Popen(
-                self.command(scene),
+                self.command(scene, properties=properties),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

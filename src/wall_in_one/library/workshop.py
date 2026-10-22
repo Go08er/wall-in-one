@@ -17,6 +17,12 @@ was written, and the survey changed the design:
   a still itself. It is also 900 KB against a 100 MB video, and it is the frame
   the author chose.
 
+Later the owner added a `web` wallpaper and a preset, and both vanished: only
+the two kinds above were kept. Every item is now listed. What the engine can
+run, and how a preset becomes its base plus `--set-property` values, is in
+docs/wallpaper-engine.md, read from linux-wallpaperengine's own source;
+`playback` below is that decision.
+
 Nothing here writes anything. Steam's directories belong to Steam: items are
 `Ownership.USER` so `library.manage` refuses to delete them, and the entry
 below is a read-only view of a directory this app does not own.
@@ -25,15 +31,17 @@ below is a read-only view of a directory this app does not own.
 from __future__ import annotations
 
 import json
+import math
 import re
 import stat
-from collections.abc import Callable, Iterable, Sequence
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
-from wall_in_one.library.model import UnseenKind, is_absent
+from wall_in_one.library.model import Unplayable, UnseenKind, is_absent
 
 #: Where the scan is told about a place it could not look into: the folder,
 #: why (`UnseenKind`), and the system's words. Optional everywhere below.
@@ -76,6 +84,78 @@ _PATH_LINE: Final = re.compile(r'"path"\s*"([^"]+)"')
 #: for one instead.
 _STILL_SUFFIXES: Final[frozenset[str]] = frozenset({".jpg", ".jpeg", ".png", ".webp", ".bmp"})
 
+#: The item types linux-wallpaperengine runs: its project parser knows these
+#: three and exits on any other (ProjectParser.cpp:49-63 in the version
+#: nixpkgs builds; docs/wallpaper-engine.md). A playable `video` still goes to
+#: mpvpaper; the rest of these go to the engine as `--bg <id>`.
+SUPPORTED_TYPES: Final[frozenset[str]] = frozenset({"scene", "video", "web"})
+
+#: Types that are never handed to any renderer, whatever `SUPPORTED_TYPES`
+#: says now or later (owner decision, for security). An `application`
+#: wallpaper is a program Wallpaper Engine executes: a Workshop item anyone
+#: can publish that runs as the user is the easiest trojan there is. It is
+#: listed and counted as unsupported, and `playback` checks this before the
+#: supported set, so adding a type there can never re-enable one of these.
+NEVER_RUN: Final[frozenset[str]] = frozenset({"application"})
+
+#: What the entry file of each type the engine renders must look like. A
+#: scene names its `scene.json` (inside `scene.pkg`), a web wallpaper its
+#: page. Neither is ever executed (the engine parses one and opens the other
+#: in a browser), so this is judged by name alone and no file is read or
+#: run to decide: an item whose file is something else isn't what its type
+#: says, and is not handed over at all. A `video` is checked by what plays
+#: it (mpvpaper, or the engine's own decoder for a preset's base).
+EXPECTED_FILE: Final[Mapping[str, tuple[str, ...]]] = {
+    "scene": (".json",),
+    "web": (".html", ".htm"),
+}
+
+#: What a preset is called where its type would be: it has none of its own.
+PRESET: Final = "preset"
+
+#: What an item with no usable `type` is called.
+UNKNOWN_TYPE: Final = "unknown"
+
+#: A type as it is shown. Anything else an item claims is `UNKNOWN_TYPE`:
+#: these words end up in the interface, and they come from a file anyone
+#: can edit.
+_TYPE_WORD: Final = re.compile(r"\A[a-z0-9][a-z0-9 _.-]{0,31}\Z")
+
+#: Bounds on a preset's properties, shared with the service (`config.rs`,
+#: `MAX_ENTRY_PROPERTIES` and the two after it): each one becomes a
+#: `--set-property NAME=VALUE` argument.
+MAX_PROPERTIES: Final = 512
+MAX_PROPERTY_VALUE_BYTES: Final = 256
+
+#: A property name the service accepts: a TOML bare key that never starts
+#: with `-` and has no `=`, so `NAME=VALUE` is one unambiguous argument.
+PROPERTY_NAME: Final = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_-]{0,63}\Z")
+
+#: How many declarations or preset values one `project.json` may give before
+#: the rest are ignored. The file is already capped at `MAX_PROJECT_BYTES`.
+_MAX_DECLARED: Final = 4096
+
+#: A slider's value is read with `std::stof`; anything near float's range
+#: would throw and stop the engine.
+_MAX_SLIDER_MAGNITUDE: Final = 1e9
+
+#: The declared property types a preset value is passed on for. The engine
+#: reads these from text (Property.h); the rest are labels, files and text
+#: fields, which a preset can't usefully set and a path must not come from.
+_PASSED_TYPES: Final[frozenset[str]] = frozenset({"bool", "slider", "color", "combo"})
+
+
+@dataclass(frozen=True, slots=True)
+class Declared:
+    """One property a wallpaper declares in its ``general.properties``."""
+
+    name: str
+    #: `bool`, `slider`, `color` or `combo` (the only types kept).
+    type: str
+    #: A combo's option values, as the engine keys them (an integer as its
+    #: decimal text). Empty for the other types.
+    options: frozenset[str] = frozenset()
+
 
 @dataclass(frozen=True, slots=True)
 class WorkshopItem:
@@ -93,6 +173,19 @@ class WorkshopItem:
     #: content is inside `scene.pkg`.
     entry: Path | None
     preview: Path | None
+    #: Whether `project.json` has the string `title` and the `file` the engine
+    #: requires of every item it loads (ProjectParser.cpp:36, :44).
+    complete: bool = True
+    #: `file` as `project.json` names it, or empty.
+    file: str = ""
+    #: For a preset (`kind` is `PRESET`): the Workshop id of the wallpaper it
+    #: is a preset of, or empty when it names none that can be trusted.
+    dependency: str = ""
+    #: A preset's own values, as JSON gave them, under names the service
+    #: would accept. Translated against its base by `preset_properties`.
+    preset: tuple[tuple[str, bool | int | float | str], ...] = ()
+    #: The properties this wallpaper declares, for a preset of it.
+    declared: tuple[Declared, ...] = ()
 
     @property
     def is_video(self) -> bool:
@@ -213,34 +306,327 @@ def _read_project(directory: Path, on_unseen: OnUnseen | None = None) -> Worksho
             project, MAX_PROJECT_BYTES, encoding="utf-8", errors="replace"
         )
     except OSError as error:
-        # Not a project that is malformed (no errno): one that could not be
-        # opened, so it is not known whether this is a wallpaper.
-        if on_unseen is not None and getattr(error, "errno", None) is not None:
-            on_unseen(directory, UnseenKind.UNREADABLE, error.strerror or str(error))
+        # With an errno: one that could not be opened, so it is not known
+        # whether this is a wallpaper.
+        if getattr(error, "errno", None) is not None:
+            if on_unseen is not None:
+                on_unseen(directory, UnseenKind.UNREADABLE, error.strerror or str(error))
+        elif on_unseen is not None:
+            # Opened, but not a file this can read: not a regular file, or
+            # larger than any real one. Looked at, and not a wallpaper.
+            on_unseen(directory, UnseenKind.NOT_A_WALLPAPER, f"its project.json {_why(error)}")
         return None
     if raw is None:
+        # Steam makes the folder before the files; it may be on its way.
+        if on_unseen is not None:
+            on_unseen(directory, UnseenKind.NOT_A_WALLPAPER, NO_PROJECT)
         return None
     try:
         document = json.loads(raw)
     except ValueError, RecursionError:
-        return None
+        document = None
     if not isinstance(document, dict):
+        if on_unseen is not None:
+            on_unseen(directory, UnseenKind.NOT_A_WALLPAPER, NOT_A_PROJECT)
         return None
 
     kind = document.get("type")
     title = document.get("title")
-    entry = _beside(directory, document.get("file"), on_unseen)
+    file = document.get("file")
+    entry = _beside(directory, file, on_unseen)
     preview = _beside(directory, document.get("preview"), on_unseen)
+    preset = document.get("preset")
+    dependency = document.get("dependency")
+    if isinstance(dependency, int) and not isinstance(dependency, bool):
+        dependency = str(dependency)
     return WorkshopItem(
         id=directory.name,
         directory=directory,
-        # Case-folded: the real content spells it both `video` and `Video`, and
-        # trusting the casing hid eight wallpapers out of forty-nine.
-        kind=kind.strip().casefold() if isinstance(kind, str) else "",
+        # A preset has no type of its own: it is a set of values for another
+        # item, its `dependency`.
+        kind=PRESET if isinstance(preset, dict) else _type_word(kind),
         title=title.strip() if isinstance(title, str) and title.strip() else directory.name,
         entry=entry,
         preview=preview,
+        complete=isinstance(title, str) and isinstance(file, str) and bool(file.strip()),
+        file=file.strip() if isinstance(file, str) else "",
+        dependency=(
+            dependency.strip()
+            if isinstance(dependency, str) and is_workshop_id(dependency.strip())
+            else ""
+        ),
+        preset=_preset_values(preset) if isinstance(preset, dict) else (),
+        declared=_declarations(document.get("general")),
     )
+
+
+#: What the scan says about a Workshop folder it can't list.
+NO_PROJECT: Final = "a Wallpaper Engine folder with no project.json"
+NOT_A_PROJECT: Final = "its project.json is not Wallpaper Engine's JSON"
+
+
+def _why(error: OSError) -> str:
+    """The end of `file_io.FileReadError`'s sentence, without the path it starts with."""
+    text = str(error)
+    if "exceeds" in text:
+        return f"is larger than {MAX_PROJECT_BYTES // 1024} KiB"
+    if "not a regular file" in text:
+        return "is not a regular file"
+    return "could not be read"
+
+
+def _type_word(kind: object) -> str:
+    """``type`` as it is compared and shown: case-folded, or `UNKNOWN_TYPE`.
+
+    Case-folded because the real content spells it both `video` and `Video`,
+    and trusting the casing hid eight wallpapers out of forty-nine.
+    """
+    if not isinstance(kind, str):
+        return UNKNOWN_TYPE
+    folded = kind.strip().casefold()
+    return folded if _TYPE_WORD.fullmatch(folded) else UNKNOWN_TYPE
+
+
+def _preset_values(
+    preset: dict[object, object],
+) -> tuple[tuple[str, bool | int | float | str], ...]:
+    """A preset's values worth translating: a scalar under a name the service accepts."""
+    kept: list[tuple[str, bool | int | float | str]] = []
+    for name, value in preset.items():
+        if len(kept) >= _MAX_DECLARED:
+            break
+        if (
+            isinstance(name, str)
+            and PROPERTY_NAME.fullmatch(name)
+            and isinstance(value, bool | int | float | str)
+        ):
+            kept.append((name, value))
+    return tuple(kept)
+
+
+def _declarations(general: object) -> tuple[Declared, ...]:
+    """The typed properties ``general.properties`` declares, of the types passed on."""
+    properties = general.get("properties") if isinstance(general, dict) else None
+    if not isinstance(properties, dict):
+        return ()
+    found: list[Declared] = []
+    for name, spec in properties.items():
+        if len(found) >= _MAX_DECLARED:
+            break
+        if not isinstance(name, str) or not PROPERTY_NAME.fullmatch(name):
+            continue
+        if not isinstance(spec, dict):
+            continue
+        kind = spec.get("type")
+        if not isinstance(kind, str) or kind not in _PASSED_TYPES:
+            continue
+        options: frozenset[str] = frozenset()
+        if kind == "combo":
+            listed = spec.get("options")
+            if not isinstance(listed, list):
+                continue
+            options = frozenset(
+                value
+                for value in (_combo_key(option) for option in listed[:_MAX_DECLARED])
+                if value is not None
+            )
+        found.append(Declared(name=name, type=kind, options=options))
+    return tuple(found)
+
+
+def _combo_key(option: object) -> str | None:
+    """A combo option's value as the engine keys it (PropertyParser.cpp:57-68)."""
+    if not isinstance(option, dict):
+        return None
+    value = option.get("value")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float) and math.isfinite(value):
+        return str(int(value))
+    if isinstance(value, str) and valid_property_value(value):
+        return value
+    return None
+
+
+def valid_property_value(value: str) -> bool:
+    """Whether the service accepts ``value`` (`config.rs`, `property_value_is_valid`).
+
+    JSON can spell a lone surrogate, which is no UTF-8 at all.
+    """
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= MAX_PROPERTY_VALUE_BYTES and not any(
+        unicodedata.category(character) == "Cc" for character in value
+    )
+
+
+def property_value(declared: Declared, value: object) -> str | None:
+    """``value`` as the engine reads the property ``declared``, or ``None`` to leave it out.
+
+    Only what the engine's parser for that type accepts (Property.h): a
+    slider is `std::stof`, a colour is `ColorBuilder::parse`, and both stop
+    the engine on anything else. Every colour is written with a decimal
+    point, because `ColorBuilder` reads `"1 1 0"` as 0-255 integers while
+    Wallpaper Engine means 0-1.
+    """
+    if declared.type == "bool":
+        return ("true" if value else "false") if isinstance(value, bool) else None
+    if declared.type == "slider":
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        if not math.isfinite(value) or abs(value) > _MAX_SLIDER_MAGNITUDE:
+            return None
+        return str(value) if isinstance(value, int) else repr(float(value))
+    if declared.type == "color":
+        if not isinstance(value, str):
+            return None
+        parts = value.replace(",", " ").split()
+        if len(parts) not in (3, 4):
+            return None
+        try:
+            numbers = [float(part) for part in parts]
+        except ValueError:
+            return None
+        if not all(math.isfinite(number) and 0.0 <= number <= 1.0 for number in numbers):
+            return None
+        return " ".join(f"{number:.6f}" for number in numbers)
+    if declared.type == "combo":
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int | float):
+            if not math.isfinite(value) or value != int(value):
+                return None
+            text = str(int(value))
+        elif isinstance(value, str):
+            text = value
+        else:
+            return None
+        return text if text in declared.options and valid_property_value(text) else None
+    return None
+
+
+def preset_properties(preset: WorkshopItem, base: WorkshopItem) -> tuple[tuple[str, str], ...]:
+    """``preset``'s values that ``base`` declares, as the engine reads them, in name order.
+
+    A name the base does not declare is left out: the engine would ignore it
+    anyway (it walks the base's declarations, WallpaperApplication.cpp:502-518).
+    """
+    declared = {item.name: item for item in base.declared}
+    kept: dict[str, str] = {}
+    for name, value in preset.preset:
+        found = declared.get(name)
+        if found is None:
+            continue
+        text = property_value(found, value)
+        if text is not None:
+            kept[name] = text
+    return tuple(sorted(kept.items()))
+
+
+@dataclass(frozen=True, slots=True)
+class Playback:
+    """How a Workshop item listed as a scene plays, or why it can't."""
+
+    #: The Workshop id to render when it isn't the item's own: a preset's base.
+    base: str = ""
+    properties: tuple[tuple[str, str], ...] = ()
+    unplayable: Unplayable | None = None
+    reason: str = ""
+
+
+def _type_phrase(kind: str) -> str:
+    return "with no type it can read" if kind == UNKNOWN_TYPE else f"of the type \u201c{kind}\u201d"
+
+
+def _refusal(item: WorkshopItem) -> Playback | None:
+    """Why ``item`` itself must not be handed to the engine, or ``None``.
+
+    `NEVER_RUN` first, so no change to `SUPPORTED_TYPES` can let one through.
+    """
+    if item.kind in NEVER_RUN:
+        return Playback(
+            unplayable=Unplayable.RUNTIME,
+            reason=(
+                f"it is a program (Wallpaper Engine\u2019s \u201c{item.kind}\u201d type), "
+                "and Wall-in-One never runs programs from the Workshop"
+            ),
+        )
+    if item.kind not in SUPPORTED_TYPES:
+        return Playback(
+            unplayable=Unplayable.RUNTIME,
+            reason=(
+                "linux-wallpaperengine can\u2019t play Wallpaper Engine wallpapers "
+                f"{_type_phrase(item.kind)} yet"
+            ),
+        )
+    if not item.complete:
+        return Playback(
+            unplayable=Unplayable.MALFORMED,
+            reason="its project.json lacks the title or file linux-wallpaperengine needs",
+        )
+    expected = EXPECTED_FILE.get(item.kind)
+    if expected is not None and not item.file.casefold().endswith(expected):
+        return Playback(
+            unplayable=Unplayable.RUNTIME,
+            reason=(
+                f"its file isn\u2019t what a \u201c{item.kind}\u201d wallpaper names "
+                f"({' or '.join(expected)}), so it is never run"
+            ),
+        )
+    return None
+
+
+def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playback:
+    """How ``item`` plays through linux-wallpaperengine, given everything ``installed`` by id.
+
+    Its own type must be one the engine runs (`SUPPORTED_TYPES`) and never
+    one of `NEVER_RUN`, with the file its type names; a preset plays its
+    base, which must pass the same, with the values the base declares.
+    Anything else is listed and never handed to the engine.
+    """
+    if item.kind != PRESET:
+        return _refusal(item) or Playback()
+    if not item.dependency:
+        return Playback(
+            unplayable=Unplayable.NEEDS_BASE,
+            reason="it is a preset that doesn\u2019t say which wallpaper it is for",
+        )
+    base = installed.get(item.dependency)
+    if base is None:
+        return Playback(
+            base=item.dependency,
+            unplayable=Unplayable.NEEDS_BASE,
+            reason=(
+                f"it is a preset of Workshop item {item.dependency}, which isn\u2019t installed. "
+                "Subscribe to it in Steam, then check Wallpaper Engine again"
+            ),
+        )
+    if base.kind == PRESET:
+        return Playback(
+            base=base.id,
+            unplayable=Unplayable.MALFORMED,
+            reason=f"it is a preset of {base.title}, which is itself a preset",
+        )
+    refused = _refusal(base)
+    if refused is not None:
+        return Playback(
+            base=base.id,
+            unplayable=refused.unplayable,
+            reason=f"it is a preset of {base.title}, which can\u2019t play: {refused.reason}",
+        )
+    properties = preset_properties(item, base)
+    if len(properties) > MAX_PROPERTIES:
+        return Playback(
+            base=base.id,
+            unplayable=Unplayable.MALFORMED,
+            reason=(
+                f"it sets {len(properties)} of {base.title}\u2019s properties, and Wall-in-One "
+                f"passes at most {MAX_PROPERTIES}"
+            ),
+        )
+    return Playback(base=base.id, properties=properties)
 
 
 def _beside(directory: Path, name: object, on_unseen: OnUnseen | None = None) -> Path | None:

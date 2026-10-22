@@ -394,6 +394,94 @@ def test_the_still_still_reaches_the_screen_when_a_scene_is_refused(
     assert applied == [tmp_path / "a.png"]
 
 
+# -- presets and what can't play (docs/wallpaper-engine.md) ----------------------
+
+
+def test_a_presets_values_are_arguments_of_their_own_in_name_order() -> None:
+    arguments = SceneRenderer().command(
+        "2777242023",
+        available_outputs=("eDP-1",),
+        properties=(("schemecolor", "0.500000 0.200000 1.000000"), ("bloom", "true")),
+    )
+    pairs = [
+        arguments[index + 1] for index, word in enumerate(arguments) if word == "--set-property"
+    ]
+    assert pairs == ["bloom=true", "schemecolor=0.500000 0.200000 1.000000"]
+    assert arguments[-2:] == ["--bg", "2777242023"]
+
+
+@pytest.mark.parametrize(
+    "properties",
+    (
+        (("-bloom", "true"),),
+        (("a=b", "1"),),
+        (("bloom", "1\n--screen-root"),),
+        (("bloom", "x" * 257),),
+    ),
+)
+def test_a_property_the_service_would_refuse_is_refused_here_too(
+    properties: tuple[tuple[str, str], ...],
+) -> None:
+    with pytest.raises(scenes.SceneError):
+        SceneRenderer().command("1", available_outputs=("eDP-1",), properties=properties)
+
+
+def test_the_applier_hands_a_preset_to_the_engine_as_its_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", lambda *a, **k: None)
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.running_elsewhere", lambda _o: ())
+    from dataclasses import replace
+
+    from wall_in_one.wallpaper.applier import Applier
+
+    started: list[tuple[str, object]] = []
+
+    class Engine:
+        layer = "background"
+        fps = 30
+        output = ""
+
+        def start(self, scene: str, properties: object = ()) -> None:
+            started.append((scene, properties))
+
+        def stop(self) -> None: ...
+
+    preset = replace(
+        scene_item("2946165131", still=tmp_path / "a.png"),
+        workshop_type="preset",
+        scene_base="2777242023",
+        scene_properties=(("bloom", "true"),),
+    )
+    applier = Applier(_QuietRenderer(), scene_renderer=Engine(), own_scene_renderer=True)  # type: ignore[arg-type]
+    applier.apply(preset, dynamics_enabled=True)
+    assert started == [("2777242023", (("bloom", "true"),))]
+
+
+def test_the_applier_never_hands_over_what_cant_play(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    from wall_in_one.library.model import Unplayable
+    from wall_in_one.wallpaper.applier import Applier, ApplyError
+
+    shown: list[Path] = []
+    monkeypatch.setattr(
+        "wall_in_one.theme.noctalia.set_wallpaper", lambda path, *a, **k: shown.append(path)
+    )
+    unsupported = replace(
+        scene_item("3000000001", still=tmp_path / "a.png"),
+        workshop_type="application",
+        unplayable=Unplayable.RUNTIME,
+        unplayable_reason="linux-wallpaperengine can\u2019t play it",
+    )
+    applier = Applier(_QuietRenderer(), own_scene_renderer=True)  # type: ignore[arg-type]
+    with pytest.raises(ApplyError, match="can\u2019t play it"):
+        applier.apply(unsupported, dynamics_enabled=True)
+    assert shown == [], "not even its still: nothing about it changes the screen"
+
+
 class _QuietRenderer:
     """Stands in for mpvpaper, which a scene test has no business starting."""
 

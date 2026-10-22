@@ -61,6 +61,23 @@ class Kind(Enum):
         return self is not Kind.STILL
 
 
+class Unplayable(Enum):
+    """Why a listed Wallpaper Engine item can never play as it is.
+
+    Never handed to a renderer: the compiler leaves such an item out of
+    ``runtime.toml`` and Apply says why (docs/wallpaper-engine.md).
+    """
+
+    #: Its type, or its preset base's type, is one linux-wallpaperengine
+    #: can't run (`library.workshop.SUPPORTED_TYPES`). The Library counts these.
+    RUNTIME = "runtime"
+    #: A preset whose base wallpaper isn't installed, or that names none.
+    NEEDS_BASE = "needs base"
+    #: Something else about it the engine would refuse: a ``project.json``
+    #: missing what the engine requires, or more settings than are passed on.
+    MALFORMED = "malformed"
+
+
 class Ownership(Enum):
     """Who put the file there, and therefore who may delete it."""
 
@@ -113,6 +130,22 @@ class MediaItem:
     #: its own. Workshop scenes use the author-supplied preview as a fallback
     #: until their generated still exists.
     preview: Path | None = None
+    #: For a Wallpaper Engine item listed as a scene, Wallpaper Engine's own
+    #: word for it (``scene``, ``web``, ``video``, ``preset``, ``application``,
+    #: whatever the item says, or ``unknown``), shown beside its kind. Empty
+    #: for anything else.
+    workshop_type: str = ""
+    #: For a preset: the Workshop id linux-wallpaperengine is given, the
+    #: wallpaper it is a preset of. Empty: `scene` itself. `scene` stays this
+    #: item's own id, which is what its pairing, still and taboo key on.
+    scene_base: str = ""
+    #: A preset's property values, by name in name order, already checked
+    #: against the base's own declarations (`library.workshop`).
+    scene_properties: tuple[tuple[str, str], ...] = ()
+    #: Why it can never play as it is, or ``None``; ``unplayable_reason`` says
+    #: it for a person.
+    unplayable: Unplayable | None = None
+    unplayable_reason: str = ""
 
     @property
     def name(self) -> str:
@@ -122,6 +155,22 @@ class MediaItem:
     @property
     def is_video(self) -> bool:
         return self.kind is Kind.VIDEO
+
+    @property
+    def rendered_scene(self) -> str:
+        """The Workshop id linux-wallpaperengine renders: a preset's base, else `scene`."""
+        return self.scene_base or self.scene
+
+    @property
+    def still_from_preview(self) -> bool:
+        """Whether its automatic still comes from its own preview, not the engine.
+
+        Everything listed as a scene but a true ``scene``: the engine's
+        screenshot of a web page is taken before the page has painted, and a
+        preset's preview is its author's picture of exactly that look
+        (docs/wallpaper-engine.md).
+        """
+        return self.kind is Kind.SCENE and self.workshop_type not in ("", "scene")
 
     @property
     def is_moving(self) -> bool:
@@ -172,11 +221,16 @@ class UnseenKind(Enum):
     #: A library root that is absent, not a folder, or a symbolic link:
     #: the scan looked and there is nothing usable.
     ROOT_NOT_USABLE = "root not usable"
+    #: A folder that should hold a wallpaper and doesn't hold a usable one:
+    #: a Wallpaper Engine folder with no ``project.json``, or one that isn't
+    #: Wallpaper Engine's JSON. Looked at, like an absent root: a folder Steam
+    #: is still writing must not stop the compiler as "couldn't look" does.
+    NOT_A_WALLPAPER = "not a wallpaper"
 
     @property
     def could_not_look(self) -> bool:
         """Whether files may be at the place (so "nothing there" is not known)."""
-        return self is not UnseenKind.ROOT_NOT_USABLE
+        return self in (UnseenKind.UNREADABLE, UnseenKind.LIMIT)
 
 
 @dataclass(frozen=True, slots=True)

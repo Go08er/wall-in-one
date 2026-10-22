@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings, schedules, state_file
+from wall_in_one.library import pairings, schedules, state_file, workshop
 from wall_in_one.library.model import Kind, MediaItem, Unseen, UnseenKind
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.programs import find_program
@@ -678,6 +678,10 @@ def _resolved_entry(
 ) -> tuple[str, ...] | None:
     _bounded_text(entry_id, label="playlist entry id", maximum_bytes=MAX_IDENTIFIER_BYTES)
     bundle = session.pairings.resolve_accepted(item, session.library)
+    if item.unplayable is not None:
+        # Listed, never played: linux-wallpaperengine can't run it, or a
+        # preset's base isn't there (`library.workshop.playback`).
+        return None
     if bundle.still is None or not bundle.still.is_absolute():
         return None
     _absolute_path(bundle.still, label="playlist entry still")
@@ -712,8 +716,38 @@ def _resolved_entry(
             return None
         _bounded_text(item.scene, label="scene id", maximum_bytes=MAX_IDENTIFIER_BYTES)
         lines.append(f"scene_id = {_quote(item.scene)}")
+        # A preset: what the engine renders, and with which values. Written
+        # only for one, so a document without presets is byte for byte what a
+        # 0.4.0 service reads (docs/wallpaper-engine.md).
+        if item.scene_base:
+            if not workshop.is_workshop_id(item.scene_base):
+                return None
+            lines.append(f"scene_base = {_quote(item.scene_base)}")
+        if item.scene_properties:
+            properties = _scene_properties(item.scene_properties)
+            if properties is None:
+                return None
+            lines.append(f"properties = {properties}")
     lines.append(f"palette = {_palette(bundle.palette, session.settings.preview_scheme)}")
     return tuple(lines)
+
+
+def _scene_properties(properties: Sequence[tuple[str, str]]) -> str | None:
+    """A preset's values as the inline table the service reads, or ``None`` if out of bounds.
+
+    The scan already kept only what the service accepts (`library.workshop`);
+    this is the last look before the values become renderer arguments.
+    """
+    if len(properties) > workshop.MAX_PROPERTIES or len({name for name, _ in properties}) != len(
+        properties
+    ):
+        return None
+    pairs: list[str] = []
+    for name, value in sorted(properties):
+        if not workshop.PROPERTY_NAME.fullmatch(name) or not workshop.valid_property_value(value):
+            return None
+        pairs.append(f"{name} = {_quote(value)}")
+    return "{ " + ", ".join(pairs) + " }"
 
 
 # -- what can play: the compiler's own answer, for every page that asks ---------------
@@ -759,6 +793,10 @@ def entry_playability(item: MediaItem | None, session: Session) -> Playability:
     """
     if item is None:
         return Playability(False, False, "it is not in the library now")
+    if item.unplayable is not None:
+        # A Wallpaper Engine item nothing can play as it is: never compiled,
+        # and no still would change that.
+        return Playability(False, False, item.unplayable_reason or "playback can\u2019t use it")
     try:
         kept = _resolved_entry(item, session, _PROBE_ENTRY_ID) is not None
     except RuntimeConfigError:

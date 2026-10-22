@@ -410,7 +410,14 @@ def workshop_items(
     content_directories: Sequence[Path] | None = None,
     on_unseen: workshop.OnUnseen | None = None,
 ) -> tuple[MediaItem, ...]:
-    """Installed Wallpaper Engine wallpapers, videos and scenes alike.
+    """Every installed Wallpaper Engine item: videos, and everything else as a scene.
+
+    A `video` with its file on disk is an ordinary video, and one without is
+    not listed, as before. Every other item is listed as a scene, whatever
+    its type (owner decision, see docs/wallpaper-engine.md): one
+    linux-wallpaperengine can run plays through it, a preset as its base with
+    its own values, and the rest are listed with why they can't play
+    (`workshop.playback`), executable ones above all.
 
     `Ownership.USER` without exception: these are Steam's files, in Steam's
     directories, and `library.manage` must refuse to touch one however managed
@@ -425,8 +432,15 @@ def workshop_items(
         installed = workshop.scan(on_unseen=on_unseen)
     else:
         installed = workshop.scan(steam_roots, include_defaults=False, on_unseen=on_unseen)
+    by_id = {item.id: item for item in installed}
     for item in installed:
         entry = item.entry
+        if item.kind == "video" and entry is None:
+            # As before: a video whose file is gone (or one this app won't
+            # open) is not listed. Deleting a Workshop video's file is how
+            # it leaves the library, and the dry run of that delete
+            # (`wall_in_one.dry_run`) must agree.
+            continue
         if item.is_video and entry is not None:
             try:
                 info = entry.stat()
@@ -447,12 +461,14 @@ def workshop_items(
                     title=item.title,
                 )
             )
-        elif item.kind == "scene":
-            # No file to point at: the content is inside `scene.pkg`, so the
-            # path is the directory and the Workshop id is what the renderer
+        else:
+            # No file to point at: a scene's content is inside `scene.pkg`, a
+            # web wallpaper is a page, a preset is values for another item. So
+            # the path is the directory and a Workshop id is what the renderer
             # is given. Size is the directory's own, which is meaningless as a
             # wallpaper size but keeps "largest first" from putting every
             # scene at one end of the grid.
+            plays = workshop.playback(item, by_id)
             try:
                 info = item.directory.stat()
             except FileNotFoundError:
@@ -472,6 +488,11 @@ def workshop_items(
                     scene=item.id,
                     title=item.title,
                     preview=item.preview,
+                    workshop_type=item.kind,
+                    scene_base=plays.base,
+                    scene_properties=plays.properties,
+                    unplayable=plays.unplayable,
+                    unplayable_reason=plays.reason,
                 )
             )
     return tuple(found)

@@ -1178,3 +1178,242 @@ def test_favourites_only_falls_back_to_everything_when_none_are_starred(
     )
 
     assert len(document["playlists"][0]["entries"]) == 2
+
+
+# -- Wallpaper Engine items: presets carry two optional fields, nothing else does --
+
+
+def _workshop_session(
+    tmp_path: Path, *extra: MediaItem
+) -> tuple[config.Settings, Session, dict[str, MediaItem]]:
+    """A library with a still, a true scene and a web wallpaper, plus ``extra``."""
+    from wall_in_one.library.scan import WORKSHOP_PROVIDER
+
+    root = tmp_path / "library"
+    content = tmp_path / "steam" / "steamapps" / "workshop" / "content" / "431960"
+    automatic = root / "Wall-in-One" / "Automatic Stills"
+
+    def workshop_item(workshop_id: str, title: str, kind: str) -> MediaItem:
+        return MediaItem(
+            content / workshop_id,
+            Kind.SCENE,
+            7,
+            1,
+            provider=WORKSHOP_PROVIDER,
+            scene=workshop_id,
+            title=title,
+            paired_still=automatic / f"{workshop_id}.png",
+            workshop_type=kind,
+        )
+
+    items = {
+        "still": MediaItem(root / "still.png", Kind.STILL, 7, 1),
+        "scene": workshop_item("1647046763", "Toothless", "scene"),
+        "web": workshop_item("2777242023", "Electric Eye", "web"),
+    }
+    for item in extra:
+        items[item.title] = item
+    settings = config.Settings(roots=(root,))
+    library = Library(roots=(root,), items=tuple(items.values()))
+    session = Session(settings, scanner=lambda _roots: library)
+    session.refresh()
+    return settings, session, items
+
+
+def _preset_items(tmp_path: Path) -> tuple[MediaItem, ...]:
+    from wall_in_one.library.model import Unplayable
+    from wall_in_one.library.scan import WORKSHOP_PROVIDER
+
+    content = tmp_path / "steam" / "steamapps" / "workshop" / "content" / "431960"
+    automatic = tmp_path / "library" / "Wall-in-One" / "Automatic Stills"
+
+    def item(workshop_id: str, title: str, kind: str) -> MediaItem:
+        return MediaItem(
+            content / workshop_id,
+            Kind.SCENE,
+            7,
+            1,
+            provider=WORKSHOP_PROVIDER,
+            scene=workshop_id,
+            title=title,
+            # Even with a still on record, nothing that can't play is compiled.
+            paired_still=automatic / f"{workshop_id}.png",
+            workshop_type=kind,
+        )
+
+    return (
+        replace(
+            item("2946165131", "Y2K Matrix", "preset"),
+            scene_base="2777242023",
+            scene_properties=(
+                ("arcs", "false"),
+                ("arcsVisualsColor1", "0.000000 0.501961 0.000000"),
+            ),
+        ),
+        replace(
+            item("3000000001", "Rainmeter", "application"),
+            unplayable=Unplayable.RUNTIME,
+            unplayable_reason="linux-wallpaperengine can\u2019t play it",
+        ),
+        replace(
+            item("3000000002", "Lonely preset", "preset"),
+            scene_base="3999999999",
+            unplayable=Unplayable.NEEDS_BASE,
+            unplayable_reason="its base isn\u2019t installed",
+        ),
+    )
+
+
+def _entries(document: str) -> list[dict[str, object]]:
+    decoded = tomllib.loads(document)
+    return [entry for playlist in decoded["playlists"] for entry in playlist["entries"]]
+
+
+#: The keys a 0.4.0 service reads on an entry; it refuses any other.
+RELEASED_ENTRY_KEYS = frozenset({"id", "kind", "still", "motion", "scene_id", "taboo", "palette"})
+
+
+def test_a_preset_compiles_its_base_and_values_and_nothing_else_carries_them(
+    tmp_path: Path,
+) -> None:
+    settings, session, _items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+
+    document = runtime_config.render(settings, session)
+    entries = _entries(document)
+
+    presets = [entry for entry in entries if entry.get("scene_id") == "2946165131"]
+    assert presets and all(
+        entry["scene_base"] == "2777242023"
+        and entry["properties"]
+        == {"arcs": "false", "arcsVisualsColor1": "0.000000 0.501961 0.000000"}
+        for entry in presets
+    )
+    assert (
+        'properties = { arcs = "false", arcsVisualsColor1 = "0.000000 0.501961 0.000000" }'
+        in document.splitlines()
+    )
+    others = [entry for entry in entries if entry.get("scene_id") != "2946165131"]
+    assert others and all(set(entry) <= RELEASED_ENTRY_KEYS for entry in others)
+    assert {entry.get("scene_id") for entry in entries} == {
+        None,
+        "1647046763",
+        "2777242023",
+        "2946165131",
+    }, "an item that can't play is never compiled, whatever still it has"
+
+
+def test_wallpaper_engine_items_that_cant_play_say_why_and_never_compile(tmp_path: Path) -> None:
+    _settings, session, items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+
+    for title, reason in (
+        ("Rainmeter", "linux-wallpaperengine can\u2019t play it"),
+        ("Lonely preset", "its base isn\u2019t installed"),
+    ):
+        can = runtime_config.entry_playability(items[title], session)
+        assert can == runtime_config.Playability(False, False, reason)
+    assert runtime_config.entry_playability(items["Y2K Matrix"], session).plays
+    assert runtime_config.entry_playability(items["web"], session).plays
+
+
+def test_scene_properties_out_of_bounds_are_never_compiled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preset = _preset_items(tmp_path)[0]
+    for properties in (
+        (("-arcs", "true"),),
+        (("arcs", "1\n--screen-root"),),
+        (("arcs", "x" * 257),),
+        (("arcs", "true"), ("arcs", "false")),
+    ):
+        settings, session, _items = _workshop_session(
+            tmp_path, replace(preset, scene_properties=properties)
+        )
+        assert "2946165131" not in runtime_config.render(settings, session)
+    from wall_in_one.library import workshop
+
+    monkeypatch.setattr(workshop, "MAX_PROPERTIES", 1)
+    settings, session, _items = _workshop_session(tmp_path, preset)
+    assert "2946165131" not in runtime_config.render(settings, session)
+
+
+#: What 0.4.0's compiler (38bc5ea) writes for `_workshop_session`'s playlists,
+#: recorded by running that compiler over this fixture: a document without
+#: presets must stay byte for byte this, so a 0.4.0 service keeps reading it.
+#: `{root}` is the test's `tmp_path`; the others are entry ids, which hash it.
+RELEASED_PLAYLISTS = """\
+[[playlists]]
+id = "all-media"
+name = "All media"
+
+[[playlists.entries]]
+id = "{still}"
+kind = "still"
+still = "{root}/library/still.png"
+palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "keep" }
+
+[[playlists.entries]]
+id = "{scene}"
+kind = "scene"
+still = "{root}/library/Wall-in-One/Automatic Stills/1647046763.png"
+scene_id = "1647046763"
+palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "keep" }
+
+[[playlists.entries]]
+id = "{web}"
+kind = "scene"
+still = "{root}/library/Wall-in-One/Automatic Stills/2777242023.png"
+scene_id = "2777242023"
+palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "keep" }
+"""
+
+
+def test_a_document_without_presets_is_byte_for_byte_what_0_4_0_wrote(tmp_path: Path) -> None:
+    settings, session, items = _workshop_session(tmp_path)
+
+    document = runtime_config.render(settings, session)
+
+    playlists_part = document[document.index("[[playlists]]") :]
+    expected = RELEASED_PLAYLISTS.replace("{root}", str(tmp_path))
+    for key in ("still", "scene", "web"):
+        expected = expected.replace(
+            f"{{{key}}}", runtime_config.entry_id_for_source(items[key].path)
+        )
+    assert playlists_part == expected
+
+
+def test_executable_wallpaper_engine_items_never_reach_a_renderer(tmp_path: Path) -> None:
+    """From the scan to the document: an `application` and a preset of one are listed,
+    have a still on record, and still never become an entry the service would run."""
+    from wall_in_one.library import scan, workshop
+    from wall_in_one.library.model import Unplayable
+
+    content = tmp_path / "steam" / "steamapps" / "workshop" / "content" / workshop.APP_ID
+    for workshop_id, project in (
+        ("100", {"type": "application", "title": "Trojan", "file": "run.exe"}),
+        ("200", {"title": "Trojan preset", "dependency": "100", "preset": {"a": True}}),
+        ("300", {"type": "web", "title": "Page", "file": "index.html"}),
+    ):
+        (content / workshop_id).mkdir(parents=True)
+        (content / workshop_id / "project.json").write_text(json.dumps(project))
+    root = tmp_path / "library"
+    automatic = root / "Wall-in-One" / "Automatic Stills"
+    automatic.mkdir(parents=True)
+    for workshop_id in ("100", "200", "300"):
+        (automatic / f"{workshop_id}.png").write_bytes(b"\x89PNG")
+    settings = config.Settings(roots=(root,))
+    session = Session(
+        settings,
+        scanner=lambda roots: scan.scan(
+            roots, include_workshop=True, workshop_roots=(tmp_path / "steam",), records={}
+        ),
+    )
+    session.refresh()
+    listed = {item.scene: item for item in session.library.items}
+    assert listed["100"].unplayable is Unplayable.RUNTIME
+    assert listed["200"].unplayable is Unplayable.RUNTIME
+    assert listed["100"].paired_still == automatic / "100.png"
+
+    entries = _entries(runtime_config.render(settings, session))
+
+    assert {entry.get("scene_id") for entry in entries} == {"300"}
+    assert not any(entry.get("scene_base") == "100" for entry in entries)

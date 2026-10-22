@@ -165,6 +165,11 @@ directions is captured again, so an old low-resolution still is replaced. A
 still is never judged against a guessed size or by its shape, and nothing is
 written without the engine or a measured display.
 
+A web wallpaper or a preset gets the same `<id>.png` from its own preview
+instead, through ffmpeg (the first frame of a `.gif`): the engine would
+capture a web page before it has drawn. It needs no display and is made once.
+A Wallpaper Engine item that can't play gets no still.
+
 Generated filenames include a digest of the video's absolute path. Two files
 named `intro.mp4` in different folders therefore get different stills rather
 than silently overwriting each other.
@@ -221,7 +226,10 @@ extension, or a Wallpaper Engine item's title. `snow vil` finds
 Folder names and extensions are not searched.
 
 **Kind** offers All, Images, Videos and Scenes; the **Favorites** chip narrows
-any of them to your favourites.
+any of them to your favourites. Scenes holds every Wallpaper Engine item that
+isn't a video, and its badge says what it is: **Scene**, or **Scene · web**,
+**Scene · preset**, **Scene · application** and so on
+([Wallpaper Engine](#wallpaper-engine)).
 
 **Sort** offers Name, Newest first (modification time), and Largest first.
 Ties fall back to name and then path, so the grid does not reshuffle equal-sized
@@ -233,8 +241,44 @@ search or a filter hides some, with `· scanning…` during a scan. Sorting alon
 does not narrow the results.
 
 *In the classic interface* the search, kind and sort sit in a row under the
-header, Kind offers Everything, Stills only, Videos only and Favourites only,
-and the grid offers **Load more**.
+header, Kind offers Everything, Stills only, Videos and scenes and Favourites
+only, and the grid offers **Load more**.
+
+## Wallpaper Engine
+
+With **Scan Wallpaper Engine library** on (**Settings → Library**, the default), the
+library lists what Steam installed for Wallpaper Engine, from every Steam
+library folder. Steam's files are only read: never deleted, moved or written
+beside.
+
+- A **video** item with its file plays through mpvpaper like any other video.
+- A **scene** or **web** wallpaper plays through linux-wallpaperengine.
+- A **preset** (a set of settings someone published for another wallpaper) is
+  its own item, with its own title and preview. It plays the wallpaper it is a
+  preset of, which must be installed too, with the preset's settings. A
+  preset whose wallpaper isn't installed is listed and says so; subscribe to
+  that wallpaper in Steam. linux-wallpaperengine doesn't pass settings to a
+  web wallpaper's page yet, so a preset of a web wallpaper looks like that
+  wallpaper's defaults for now.
+- **Executable Wallpaper Engine wallpapers** (the "application" type, and
+  presets of them) are never run, for security: one is a program anyone can
+  publish.
+- Any other type is listed and never played.
+
+An item that can't play says **Can't play** on its card, with why, and has no
+Apply. In the Scenes view (classic: Videos and scenes) a notice counts the
+ones no renderer here runs, executable ones included, for example "2
+Wallpaper Engine wallpapers need a runtime linux-wallpaperengine doesn't
+support yet"; its tooltip names them.
+
+Steam adds items whenever it likes. The Scenes and Videos views (classic:
+Videos and scenes) have **Check Wallpaper Engine for new wallpapers**, which
+rescans the library, exactly as `F5` does. A Workshop folder with no
+`project.json`, or one that can't be read as Wallpaper Engine's, is named with
+the scan's other notes (the count's tooltip; classic: the subtitle).
+
+How each type is decided, and why, is in
+[Wallpaper Engine items](wallpaper-engine.md).
 
 ## Favourites
 

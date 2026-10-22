@@ -108,6 +108,14 @@ A paged grid with the details pane beside it.
     reason, until then.
   - A video waiting for its still says **No still** on its card, and its
     Apply is off with the reason until it has one.
+  - A Wallpaper Engine item that can't play (an unsupported or executable
+    type, or a preset whose wallpaper isn't installed) says **Can't play**,
+    and its details pane says why ("Not played here").
+- **Wallpaper Engine:** Scenes holds every Workshop item that isn't a video,
+  its badge saying what it is ("Scene · web", "Scene · preset"). The Scenes
+  and Videos views have **Check Wallpaper Engine for new wallpapers** (the
+  same rescan as `F5`), and Scenes counts the items no renderer here runs. See
+  [Wallpaper Engine](library.md#wallpaper-engine).
 - **Add to playlist**, from:
   - a card or the details pane;
   - a drag to a playlist in the sidebar or onto the Playlists page;

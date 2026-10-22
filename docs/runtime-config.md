@@ -169,6 +169,26 @@ absolute `still`, and inline `palette`. A video additionally has an absolute
 `taboo = { reason, source }` metadata. That is a durable compatibility decision,
 not runtime state: Rust never creates or edits it.
 
+A Wallpaper Engine preset's scene entry carries two more optional keys, and no
+other entry does:
+
+```toml
+scene_id = "2946165131"           # the preset itself: the entry's identity
+scene_base = "2777242023"         # what linux-wallpaperengine renders (--bg)
+properties = { bloom = "true", schemecolor = "0.500000 0.200000 1.000000" }
+```
+
+The service passes each property as `--set-property` and `NAME=VALUE`, two
+arguments of their own, in name order. It refuses a document with more than
+512 properties on an entry, a name outside `[A-Za-z0-9_][A-Za-z0-9_-]{0,63}`,
+a value over 256 bytes or with control characters, a non-numeric
+`scene_base`, or either key on a still or video. They are additive and
+written only for a preset, so a document without one is byte for byte what
+0.4.0 writes and reads, with no schema change. A 0.4.0 service given a
+document with a preset refuses it as an unknown field and keeps its last
+configuration until it is restarted after the update; see
+[Wallpaper Engine items](wallpaper-engine.md#carrying-it-to-the-service-additive-optional-fields).
+
 `config_generation` is a 64-character lowercase SHA-256 token. The Python
 compiler hashes its canonical semantic body before inserting this field, so
 the identity is deterministic and non-recursive. Rust validates and echoes the

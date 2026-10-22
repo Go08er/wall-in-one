@@ -253,8 +253,8 @@ See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-
 | `display_mode` | `mirrored` keeps every display on one wallpaper, cursor and schedule (the default). `independent` gives each live connector its own playlist route, schedule winner, cursor, Shuffle/Cycle overrides and renderer; saved assignments and targeted rules remain dormant rather than being deleted when mirrored mode is restored. | `"mirrored"` |
 | `theme_source_connector` | Display whose wallpaper drives Noctalia's one shell-wide palette. Independent mode requires one connector token with no whitespace; its UI initially designates the first discovered live display. A detached saved connector is preserved rather than rewritten, while runtime status reports the lexically-first live fallback actually in force. Mirrored mode may keep the choice dormant. | `""` |
 | `output` | Legacy single-output compatibility value. New display authoring uses `display_mode`, display assignments and targeted schedule rules; the Settings UI no longer exposes this ambiguous control. | `""` |
-| `own_scene_renderer` | Let Wall-in-One start linux-wallpaperengine for true Workshop scenes. Existing ownership of the target output is still respected. | `true` |
-| `scan_workshop` | Include Wallpaper Engine items found in Steam's Workshop libraries. | `true` |
+| `own_scene_renderer` | Let Wall-in-One start linux-wallpaperengine for Wallpaper Engine scenes, web wallpapers and presets. Existing ownership of the target output is still respected. | `true` |
+| `scan_workshop` | Include Wallpaper Engine items found in Steam's Workshop libraries ([which play](library.md#wallpaper-engine); executable ones never run). | `true` |
 | `active_playlist` | Stable id of the default named playlist when no schedule rule matches. Empty uses the built-in all-media playlist. Runtime overrides do not rewrite it. | `""` |
 
 The Wallhaven key is not in here -- it lives in its own 0600 file. Neither are

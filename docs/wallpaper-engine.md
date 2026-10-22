@@ -82,7 +82,7 @@ CEF asynchronously (`WebBrowser/CEF/RenderHandler.cpp:13-21`), so five frames
 after start is very likely a blank page that would still count as a
 successful capture, and then be somebody's wallpaper and palette. Stills for
 anything but a true `scene` therefore come from the item's own `preview`
-(next section). CEF also makes a fresh cache directory in the system
+(see Stills below). CEF also makes a fresh cache directory in the system
 temporary directory on every start (`WebBrowser/WebBrowserContext.cpp:78`).
 
 ## Design
@@ -98,11 +98,14 @@ in both interfaces' kind badges; the category keeps its name, so the classic
 | Item | Listed as | Plays |
 |---|---|---|
 | `video` with its file | Video | mpvpaper, as before |
-| `scene`, `web`, or `video` whose file the app cannot open itself | Scene | `--bg <id>` |
-| preset whose base is installed and supported | Scene, titled and previewed as the preset | `--bg <base>` plus its properties |
-| preset whose base is not installed (or names none) | Scene, marked "needs its base" | never |
-| `application`, any other type, no type | Scene, marked unsupported | never |
-| a supported type missing what the engine requires (`title`, `file`) | Scene, marked unplayable | never |
+| `video` whose file is gone, or one the app won't open | not listed, as before | – |
+| `scene` naming a `.json`, `web` naming a `.html`/`.htm` | Scene · its type | `--bg <id>` |
+| preset whose base is installed and plays | Scene · preset, titled and previewed as the preset | `--bg <base>` plus its properties |
+| preset whose base is not installed (or names none) | Scene · preset, "needs its base" | never |
+| `application` (or a preset of one) | Scene · application, unsupported | never, whatever the engine supports |
+| any other type, or none (or a preset of one) | Scene · its type, unsupported | never |
+| `scene`/`web` whose file isn't what its type names | Scene · its type, unsupported | never |
+| a supported type missing what the engine requires (`title`, `file`) | Scene · its type, unplayable | never |
 
 An item that can't play is never handed to linux-wallpaperengine, by the
 service, the app's own applier or a still capture: the compiler leaves it out
@@ -114,6 +117,41 @@ durable "Playback unavailable" marker; for a type the engine rejects
 deterministically that would be the right outcome but a noisy way to reach
 it, so such an item is not tried at all, and a later engine that supports it
 needs no marker cleared.
+
+A `video` item whose file is gone stays unlisted, as before, rather than
+going to the engine: deleting a Workshop video's file through the app is how
+it leaves the library, and the dry run of that delete must agree with it.
+
+### Executable wallpapers are never run
+
+Owner decision, for security: a Wallpaper Engine `application` wallpaper is a
+program, and a Workshop item anyone can publish that runs as the user is the
+easiest trojan there is. `library.workshop.NEVER_RUN = {"application"}` is
+checked before the supported set, so a later change to `SUPPORTED_TYPES` (or
+an engine that learns the type) can't re-enable one; a preset whose base is
+one is refused the same way. Such items are listed, badged and counted with
+the unsupported ones. (linux-wallpaperengine doesn't run them today either:
+`ProjectParser.cpp:49-63`.)
+
+The deny is by declared type, plus one cheap check on the entry file's
+**name**: a `scene` must name a `.json` and a `web` wallpaper a `.html` or
+`.htm`, or the item is unsupported. Neither file is ever executed (the engine
+parses the one and opens the other in a browser), so a mislabelled item is
+the only thing to catch, and its name is enough to catch it. Content is not
+sniffed: that would mean reading files from a folder anyone can write to, to
+protect against nothing that runs them. Nothing is executed or probed to
+decide.
+
+Two things the source shows that stay as they are, for the owner to weigh:
+
+- A web wallpaper runs its own JavaScript in CEF, as in Wallpaper Engine
+  itself, and linux-wallpaperengine starts CEF with `--disable-web-security`,
+  site isolation off (`WebBrowser/CEF/BrowserApp.cpp:21-37`).
+- CEF's helper processes are started with the engine's own arguments
+  appended (`BrowserApp.cpp:49-53`), `--screen-root` included. The service
+  doesn't look for other engines, but the app's legacy applier
+  (`wallpaper.scenes.running_elsewhere`) would count those helpers as a
+  foreign engine on that output.
 
 A preset is its **own** library item: its identity (`MediaItem.scene`, which
 keys pairings, stills, lifecycle locks and the service's taboo identity) is
@@ -186,20 +224,28 @@ still at all.
 
 ### Reporting
 
-Nothing that is a Wallpaper Engine item is dropped any more. What the scan
-can't list at all is said with the scan's other notes (the classic subtitle,
-the new interface's count tooltip): a Workshop folder with no `project.json`,
-or one that isn't readable JSON. Those notes use a new kind of unseen place,
-"not a wallpaper", which, like an absent library folder, means "looked, and
-nothing usable is there": a Workshop folder Steam is still writing must not
-make the compiler refuse over "couldn't look".
+Nothing that is a Wallpaper Engine item is dropped any more, a missing-file
+video apart (above). What the scan can't list at all is said with the scan's
+other notes (the classic subtitle, the new interface's count tooltip): a
+Workshop folder with no `project.json`, or one that isn't readable JSON.
+Those notes use a new kind of unseen place, "not a wallpaper", which, like an
+absent library folder, means "looked, and nothing usable is there": a
+Workshop folder Steam is still writing must not make the compiler refuse over
+"couldn't look".
+
+The interfaces keep their category names: the new interface's **Scenes** tab
+and the classic **Videos and scenes** filter now also hold web wallpapers,
+presets and the rest, and each card's kind badge says what it is ("Scene ·
+web", "Scene · preset", "Scene · application"). An item that never plays
+says **Can't play** on its card, with why, and its Apply is off; the new
+interface's details pane says it as "Not played here".
 
 In the Scenes view (classic: "Videos and scenes") a small notice counts the
-items whose type, or whose preset base's type, linux-wallpaperengine can't
-run: "1 Wallpaper Engine wallpaper needs a runtime linux-wallpaperengine
-doesn't support yet" (plural otherwise; hidden at 0), with their titles in its
-tooltip. A preset waiting for its base is not counted there; its own card
-says what it needs.
+items no renderer here runs, executable ones included: "1 Wallpaper Engine
+wallpaper needs a runtime linux-wallpaperengine doesn't support yet" (plural
+otherwise; hidden at 0), with up to ten of their titles in its tooltip. A
+preset waiting for its base is not counted there; its own card says what it
+needs. The notice follows every scan.
 
 ### Checking for new items
 
@@ -207,6 +253,9 @@ Steam adds items whenever it likes. The Scenes and Videos views (classic:
 "Videos and scenes") get a **Check Wallpaper Engine for new wallpapers**
 button. It runs the existing rescan (the one on F5), so it is the same scan,
 with the same cancellation and generations, and the notice above follows it.
+It shows while Wallpaper Engine scanning is on (`scan_workshop`), is off
+during a scan, and in the new interface needs what F5 needs (the library's
+folder authoring).
 
 A file monitor on the Workshop folders was considered and left out: the scan
 is a whole-library generation with its own cancellation and dry runs, and a

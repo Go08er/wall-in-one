@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
-from wall_in_one.library.model import Unplayable, UnseenKind, is_absent
+from wall_in_one.library.model import MediaItem, Unplayable, UnseenKind, is_absent
 
 #: Where the scan is told about a place it could not look into: the folder,
 #: why (`UnseenKind`), and the system's words. Optional everywhere below.
@@ -627,6 +627,23 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
             ),
         )
     return Playback(base=base.id, properties=properties)
+
+
+# -- what the Library says about them ----------------------------------------------
+
+
+def unsupported_titles(items: Iterable[MediaItem]) -> tuple[str, ...]:
+    """The titles of listed items no renderer here runs (`Unplayable.RUNTIME`), by name.
+
+    A preset waiting for its base is not one of them: installing the base
+    is all it needs, and its own card says so.
+    """
+    return tuple(
+        sorted(
+            (item.name for item in items if item.unplayable is Unplayable.RUNTIME),
+            key=str.casefold,
+        )
+    )
 
 
 def _beside(directory: Path, name: object, on_unseen: OnUnseen | None = None) -> Path | None:

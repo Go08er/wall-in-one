@@ -28,7 +28,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE
 from wall_in_one.ui.next import thumbs, widgets
-from wall_in_one.ui.next.catalog import quoted
+from wall_in_one.ui.next.catalog import quoted, unsupported_details, unsupported_notice
 from wall_in_one.ui.next.inspector import Inspector
 from wall_in_one.ui.next.page import Page
 from wall_in_one.ui.next.state import (
@@ -143,6 +143,39 @@ class LibraryPage(Page):
         self._sort_button.set_tooltip_text("Sort and size")
         filters.append(self._sort_button)
 
+        # -- Wallpaper Engine, in the Scenes and Videos views ----------------------------
+        # Steam adds Workshop items whenever it likes, so the views they show in
+        # offer the same rescan as F5; the Scenes view also counts what no
+        # renderer here runs (`AppState.workshop`). Its right end stays clear of
+        # the hanging Select pill, like the filter row's.
+        self._workshop_row = Gtk.Box(
+            spacing=8,
+            margin_start=18,
+            margin_end=widgets.CORNER_RESERVE if self._editing else 18,
+            margin_bottom=6,
+            visible=False,
+        )
+        self.unsupported_notice = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        self.unsupported_notice.add_css_class("pill")
+        self.unsupported_notice.add_css_class("subtle")
+        notice_icon = Gtk.Image.new_from_icon_name("dialog-information-symbolic")
+        notice_icon.set_pixel_size(12)
+        self.unsupported_notice.append(notice_icon)
+        self._unsupported_label = Gtk.Label(wrap=True, xalign=0)
+        self.unsupported_notice.append(self._unsupported_label)
+        self._workshop_row.append(self.unsupported_notice)
+        self._workshop_row.append(Gtk.Box(hexpand=True))
+        self.check_workshop = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.check_workshop.set_child(
+            Adw.ButtonContent(
+                icon_name="view-refresh-symbolic",
+                label="Check Wallpaper Engine for new wallpapers",
+            )
+        )
+        self.check_workshop.add_css_class("flat")
+        self.check_workshop.connect("clicked", lambda *_: self._check_workshop())
+        self._workshop_row.append(self.check_workshop)
+
         # -- problems notice ---------------------------------------------------------
         self._notice = plain(Adw.Banner)
         self._notice.set_button_label("Review")
@@ -237,6 +270,7 @@ class LibraryPage(Page):
         # then hangs between the filter row and the grid without covering anything.
         listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         listing.append(filter_scroller)
+        listing.append(self._workshop_row)
         listing.append(self._grid_stack)
         hanging = Gtk.Overlay(child=listing)
         if self._editing is not None:
@@ -596,6 +630,7 @@ class LibraryPage(Page):
             text += " · scanning…"
         self._count.set_label(text)
         self._count.set_tooltip_text(_skipped_tip(skipped) or None)
+        self._update_workshop()
         self._grid_stack.set_visible_child_name("grid" if shown else "empty")
         # An empty library is not a search that found nothing: say which.
         none = total == 0
@@ -620,6 +655,38 @@ class LibraryPage(Page):
     def count_text(self) -> str:
         """The "N wallpapers" label, as shown."""
         return self._count.get_label()
+
+    def _update_workshop(self) -> None:
+        """The Scenes and Videos views' Wallpaper Engine row, from the last scan."""
+        workshop = self.state.workshop
+        titles = workshop.unsupported if workshop is not None else ()
+        notice = unsupported_notice(len(titles)) if self._kind == "scene" else ""
+        self._unsupported_label.set_label(notice)
+        self.unsupported_notice.set_tooltip_text(unsupported_details(titles) or None)
+        self.unsupported_notice.set_visible(bool(notice))
+        checking = (
+            self._kind in ("video", "scene") and workshop is not None and self._folders is not None
+        )
+        self.check_workshop.set_visible(checking)
+        scanning = self.state.library_scanning
+        self.check_workshop.set_sensitive(not scanning)
+        self.check_workshop.set_tooltip_text(
+            "Looking through the library\u2026"
+            if scanning
+            else "Look through Steam\u2019s Wallpaper Engine folders again, with the rest of "
+            "the library (F5)"
+        )
+        self._workshop_row.set_visible(bool(notice) or checking)
+
+    @property
+    def unsupported_text(self) -> str:
+        """The Scenes view's notice about unsupported Wallpaper Engine items, as shown."""
+        return self._unsupported_label.get_label() if self.unsupported_notice.get_visible() else ""
+
+    def _check_workshop(self) -> None:
+        """Steam may have added something: the library's own rescan (F5), nothing else."""
+        if self._folders is not None:
+            self._folders.rescan()
 
     # -- callbacks ------------------------------------------------------------------------
     def _on_changed(self, _state: AppState, topic: str) -> None:

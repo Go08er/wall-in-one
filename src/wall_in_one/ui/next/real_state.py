@@ -63,7 +63,7 @@ from gi.repository import Gdk, GObject
 
 from wall_in_one import config, runtime_config
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library import pairings
+from wall_in_one.library import pairings, workshop
 from wall_in_one.library.model import Kind, MediaItem, Ownership
 from wall_in_one.library.playlists import DISPLAY_QUICK_CHOICE_ID_PREFIX
 from wall_in_one.library.scan import WORKSHOP_PROVIDER
@@ -97,6 +97,7 @@ from wall_in_one.ui.next.state import (
     ToastButton,
     Undo,
     WallpaperView,
+    Workshop,
     not_on_its_own,
     solo_displays,
 )
@@ -188,6 +189,8 @@ class LibraryWallpaper:
     still_note: str = ""
     tags: tuple[str, ...] = ()
     unplayable: str = ""
+    never_plays: bool = False
+    kind_detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +298,8 @@ def wallpaper_view(
         item=item,
         still_note=_still_note(item, pairing, still_missing),
         unplayable="" if health.is_borked else unplayable,
+        never_plays=item.unplayable is not None,
+        kind_detail=item.workshop_detail,
     )
 
 
@@ -727,6 +732,13 @@ class RealAppState(GObject.Object):
     @property
     def library_skipped(self) -> Sequence[str]:
         return tuple(self._session.library.skipped)
+
+    @property
+    def workshop(self) -> Workshop | None:
+        """What Wallpaper Engine's items in the last scan say, while they are scanned."""
+        if not self._backend.settings.scan_workshop:
+            return None
+        return Workshop(unsupported=workshop.unsupported_titles(self._session.library.items))
 
     # -- playlists ----------------------------------------------------------------
     @property

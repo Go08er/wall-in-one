@@ -38,6 +38,8 @@ class Wallpaper:
     problem: str = ""  # a renderer failure the runtime reported, if any
     tags: tuple[str, ...] = ()
     unplayable: str = ""  # why playback can't use it yet (no still), if so
+    never_plays: bool = False  # a Wallpaper Engine item nothing here runs
+    kind_detail: str = ""  # a Wallpaper Engine item's own type, when not a scene
 
     @property
     def key(self) -> ArtKey:

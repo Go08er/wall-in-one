@@ -24,7 +24,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, Graphene, Gsk, Gtk, Pango
 
 from wall_in_one.ui.next import thumbs
-from wall_in_one.ui.next.catalog import KIND_ICON, KIND_LABEL
+from wall_in_one.ui.next.catalog import KIND_ICON, kind_text
 from wall_in_one.ui.next.state import AppState, WallpaperView
 
 _EXTRA: list[Gtk.CssProvider] = []
@@ -329,7 +329,7 @@ def icon_button(
 
 
 def kind_badge(wallpaper: WallpaperView) -> Gtk.Box:
-    text = KIND_LABEL.get(wallpaper.kind, wallpaper.kind.capitalize())
+    text = kind_text(wallpaper.kind, wallpaper.kind_detail)
     if wallpaper.kind == "video" and wallpaper.duration:
         text = f"{text} · {wallpaper.duration}"
     return pill(text, KIND_ICON.get(wallpaper.kind), "on-image")
@@ -399,6 +399,11 @@ class WallpaperCard(Gtk.Box):
             warn = pill("", "dialog-warning-symbolic", "warning")
             warn.set_tooltip_text("Skipped after a playback problem")
             top.append(warn)
+        elif wallpaper.never_plays:
+            # No still would help: say what it is, not "choose a still".
+            never = pill("Can\u2019t play", "action-unavailable-symbolic", "warning")
+            never.set_tooltip_text(f"Not played here: {wallpaper.unplayable}")
+            top.append(never)
         elif wallpaper.unplayable:
             waiting = pill("No still", "dialog-warning-symbolic", "warning")
             waiting.set_tooltip_text(
@@ -452,6 +457,8 @@ class WallpaperCard(Gtk.Box):
                 apply.set_tooltip_text(
                     "Skipped after a playback problem \u2014 open details to see why"
                 )
+            elif wallpaper.never_plays:
+                apply.set_tooltip_text(f"Not played here: {wallpaper.unplayable}")
             elif unavailable:
                 apply.set_tooltip_text(f"Playback can\u2019t use it yet: {wallpaper.unplayable}")
             elif apply_blocked:

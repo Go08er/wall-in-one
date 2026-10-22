@@ -20,7 +20,8 @@ from gi.repository import Adw, Gdk, Gio, Gtk, Pango
 
 from wall_in_one import thumbnails as thumbnail_cache
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library.model import Kind, MediaItem, Ownership
+from wall_in_one.library.model import MediaItem, Ownership
+from wall_in_one.ui.next.catalog import kind_text
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 #: Tiles keep the thumbnail's aspect ratio so the grid lines up.
@@ -108,14 +109,23 @@ class WallpaperTile(Gtk.Box):
         badges.set_valign(Gtk.Align.START)
         badges.set_margin_top(6)
         badges.set_margin_start(6)
+        #: Why it is never played here (`MediaItem.unplayable`): a Wallpaper
+        #: Engine item no renderer runs. Turns Apply off, like a refusal.
+        self._never: str | None = item.unplayable_reason if item.unplayable is not None else None
         if item.is_moving:
             # Named for what it is, because a scene and a video are shown by
             # different programs and only one of them can be paused to a still
-            # without help.
-            what = "Scene" if item.kind is Kind.SCENE else "Video"
-            badges.append(_badge(what if item.paired_still else f"{what} (no still)"))
+            # without help. A Wallpaper Engine item says its own type too.
+            what = kind_text(item.kind.value, item.workshop_detail)
+            plain_badge = item.paired_still or self._never is not None
+            badges.append(_badge(what if plain_badge else f"{what} (no still)"))
         if item.ownership is Ownership.MANAGED:
             badges.append(_badge(item.provider))
+        if self._never is not None:
+            never = _badge("Can\u2019t play")
+            never.add_css_class("error")
+            never.set_tooltip_text(f"Not played here: {self._never}")
+            badges.append(never)
         self._health_badge = _badge("Playback unavailable")
         self._health_badge.add_css_class("error")
         self._health_badge.set_visible(False)
@@ -185,14 +195,17 @@ class WallpaperTile(Gtk.Box):
             self._menu.set_menu_model(None)
             self._apply_targets.set_menu_model(None)
         self._borked_reason = reason
-        self._apply.set_sensitive(reason is None and self._can_apply)
-        self._apply_targets.set_sensitive(reason is None and self._can_apply)
+        blocked = reason if reason is not None else self._never
+        self._apply.set_sensitive(blocked is None and self._can_apply)
+        self._apply_targets.set_sensitive(blocked is None and self._can_apply)
         self._apply.set_tooltip_text(
-            f"Playback unavailable: {reason}" if reason else "Apply to all displays as Quick choice"
+            f"Playback unavailable: {blocked}"
+            if blocked
+            else "Apply to all displays as Quick choice"
         )
         self._apply_targets.set_tooltip_text(
-            f"Playback unavailable: {reason}"
-            if reason
+            f"Playback unavailable: {blocked}"
+            if blocked
             else "Choose a display, or explicitly choose all displays"
         )
         self._health_badge.set_visible(reason is not None)
@@ -251,7 +264,7 @@ class WallpaperTile(Gtk.Box):
     def _apply_if_healthy(self, on_apply: Callable[[MediaItem], None]) -> None:
         # A display-mode change can hide the direct button while an activation
         # is pending. Never let that stale activation imply all displays.
-        if self._borked_reason is None and self._apply.get_visible():
+        if self._borked_reason is None and self._never is None and self._apply.get_visible():
             on_apply(self.item)
 
     def set_apply_targeting(self, independent: bool) -> None:

@@ -27,7 +27,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango
 
 from wall_in_one.ui.next import thumbs, widgets
-from wall_in_one.ui.next.catalog import KIND_LABEL, quoted
+from wall_in_one.ui.next.catalog import kind_text, quoted
 from wall_in_one.ui.next.state import (
     EXTRA_FRAME,
     EXTRA_LOG,
@@ -323,7 +323,7 @@ class Inspector(Gtk.Box):
 
         title = Gtk.Label(label=wallpaper.name, xalign=0, wrap=True)
         title.add_css_class("inspector-title")
-        meta_bits = [KIND_LABEL.get(wallpaper.kind, wallpaper.kind.capitalize())]
+        meta_bits = [kind_text(wallpaper.kind, wallpaper.kind_detail)]
         if wallpaper.duration:
             meta_bits.append(wallpaper.duration)
         if wallpaper.kind != "scene" and wallpaper.resolution:
@@ -337,6 +337,8 @@ class Inspector(Gtk.Box):
 
         if wallpaper.problem:
             box.append(self._problem(wallpaper))
+        elif wallpaper.never_plays:
+            box.append(self._never_plays(wallpaper))
         box.append(self._actions(wallpaper))
         if wallpaper.is_moving and self._editing is not None:
             # A plain image is its own still; only moving wallpapers need one.
@@ -389,6 +391,19 @@ class Inspector(Gtk.Box):
         box.append(row)
         box.append(child)
         return box
+
+    def _never_plays(self, wallpaper: WallpaperView) -> Gtk.Box:
+        """Why a listed Wallpaper Engine item is never played here: no action helps."""
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.add_css_class("problem-card")
+        top = Gtk.Box(spacing=8)
+        top.append(Gtk.Image.new_from_icon_name("action-unavailable-symbolic"))
+        heading = Gtk.Label(label="Not played here", xalign=0)
+        heading.add_css_class("heading")
+        top.append(heading)
+        card.append(top)
+        card.append(widgets.dim(wallpaper.unplayable))
+        return card
 
     def _problem(self, wallpaper: WallpaperView) -> Gtk.Box:
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)

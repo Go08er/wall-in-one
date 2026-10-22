@@ -15,13 +15,14 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from wall_in_one import config, setup_check
 from wall_in_one.library import filter as library_filter
-from wall_in_one.library import manage, pairings
+from wall_in_one.library import manage, pairings, workshop
 from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem, RepresentativeStillError
 from wall_in_one.session import RemovalResult, Session
 from wall_in_one.theme import palettes, source
 from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.browse_dialog import BrowsePage
 from wall_in_one.ui.grid import WallpaperGrid
+from wall_in_one.ui.next.catalog import unsupported_details, unsupported_notice
 from wall_in_one.ui.pairings_page import PairingsPage
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.palette_catalog import PaletteCatalog
@@ -452,7 +453,52 @@ class MainWindow(Adw.ApplicationWindow):
         self._sorts.set_tooltip_text("Sort the grid")
         self._sorts.connect("notify::selected", self._on_controls_changed)
         bar.append(self._sorts)
+
+        # Wallpaper Engine, while videos and scenes are shown: Steam adds items
+        # whenever it likes, so the same rescan as F5, and a count of the
+        # listed items no renderer here runs (docs/wallpaper-engine.md).
+        self._unsupported_titles: tuple[str, ...] = ()
+        self.unsupported_notice = Gtk.Box(spacing=6, visible=False)
+        self.unsupported_notice.add_css_class("card")
+        notice_icon = Gtk.Image.new_from_icon_name("dialog-information-symbolic")
+        notice_icon.set_margin_start(8)
+        self.unsupported_notice.append(notice_icon)
+        self._unsupported_label = Gtk.Label(wrap=True, xalign=0)
+        self._unsupported_label.add_css_class("caption")
+        self._unsupported_label.set_margin_top(4)
+        self._unsupported_label.set_margin_bottom(4)
+        self._unsupported_label.set_margin_end(8)
+        self.unsupported_notice.append(self._unsupported_label)
+        bar.append(self.unsupported_notice)
+        self.check_workshop = Gtk.Button(visible=False)
+        self.check_workshop.set_child(
+            Adw.ButtonContent(
+                icon_name="view-refresh-symbolic",
+                label="Check Wallpaper Engine for new wallpapers",
+            )
+        )
+        self.check_workshop.connect("clicked", lambda _button: self._app.refresh_library())
+        bar.append(self.check_workshop)
         return bar
+
+    def _update_workshop(self) -> None:
+        """The Wallpaper Engine notice and button, for the kind shown and the last scan."""
+        moving = self._query.kinds is library_filter.Kinds.VIDEOS
+        scanned = self._settings.scan_workshop
+        notice = unsupported_notice(len(self._unsupported_titles)) if moving and scanned else ""
+        self._unsupported_label.set_label(notice)
+        self.unsupported_notice.set_tooltip_text(
+            unsupported_details(self._unsupported_titles) or None
+        )
+        self.unsupported_notice.set_visible(bool(notice))
+        self.check_workshop.set_visible(moving and scanned)
+        self.check_workshop.set_sensitive(not self._library_scanning)
+        self.check_workshop.set_tooltip_text(
+            "Scanning the library\u2026"
+            if self._library_scanning
+            else "Look through Steam\u2019s Wallpaper Engine folders again, with the rest of "
+            "the library (F5)"
+        )
 
     def _on_controls_changed(self, *_arguments: object) -> None:
         self._query = library_filter.Query(
@@ -462,6 +508,7 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self._grid.set_query(self._query)
         self._update_subtitle()
+        self._update_workshop()
 
     def _on_search_stopped(self, _entry: Gtk.SearchEntry) -> None:
         # Escape in the search box means "show me everything again".
@@ -599,6 +646,7 @@ class MainWindow(Adw.ApplicationWindow):
     def apply_settings(self, settings: config.Settings) -> None:
         previous = self._settings
         self._settings = settings
+        self._update_workshop()
         self._grid.set_apply_targeting(settings.display_mode == config.DISPLAY_MODE_INDEPENDENT)
         self._settings_page.apply_settings(settings)
         if settings.roots != previous.roots:
@@ -627,6 +675,8 @@ class MainWindow(Adw.ApplicationWindow):
         # the visible one-entry Quick choice playlist; it does not bypass the
         # playlist model.
         self._grid.populate(library.items)
+        self._unsupported_titles = workshop.unsupported_titles(library.items)
+        self._update_workshop()
 
         self._playable = len(library)
         self._show_media_playback(session)
@@ -699,6 +749,7 @@ class MainWindow(Adw.ApplicationWindow):
             "Scanning the library…" if scanning else "Rescan the library (F5)"
         )
         self._update_subtitle()
+        self._update_workshop()
 
     def playlists_changed(self, session: Session) -> None:
         """Refresh only playlist authoring after a playlist-store mutation.

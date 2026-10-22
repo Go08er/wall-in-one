@@ -40,7 +40,7 @@ gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gtk, Pango
 
 from wall_in_one.ui.next import widgets
-from wall_in_one.ui.next.catalog import KIND_LABEL, quoted
+from wall_in_one.ui.next.catalog import kind_text, quoted
 from wall_in_one.ui.next.page import Page, not_ported
 from wall_in_one.ui.next.playlists_picker import PlaylistPicker
 from wall_in_one.ui.next.playlists_state import (
@@ -193,7 +193,7 @@ class EntryRow(Adw.ActionRow):
         self._compact = compact
         self._bits: list[str] = []
         if wallpaper is not None:
-            self._bits.append(KIND_LABEL.get(wallpaper.kind, wallpaper.kind.capitalize()))
+            self._bits.append(kind_text(wallpaper.kind, wallpaper.kind_detail))
             if wallpaper.duration:
                 self._bits.append(wallpaper.duration)
 

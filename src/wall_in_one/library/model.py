@@ -162,6 +162,17 @@ class MediaItem:
         return self.scene_base or self.scene
 
     @property
+    def workshop_detail(self) -> str:
+        """Wallpaper Engine's own type for a scene that isn't one (``web``, ``preset``...).
+
+        Empty for a true scene and anything else: what both interfaces show
+        after "Scene".
+        """
+        if self.kind is Kind.SCENE and self.workshop_type not in ("", "scene"):
+            return self.workshop_type
+        return ""
+
+    @property
     def still_from_preview(self) -> bool:
         """Whether its automatic still comes from its own preview, not the engine.
 
@@ -170,7 +181,7 @@ class MediaItem:
         preset's preview is its author's picture of exactly that look
         (docs/wallpaper-engine.md).
         """
-        return self.kind is Kind.SCENE and self.workshop_type not in ("", "scene")
+        return bool(self.workshop_detail)
 
     @property
     def is_moving(self) -> bool:

@@ -594,3 +594,40 @@ def test_a_folder_that_holds_no_wallpaper_is_said_and_never_blocks_the_compiler(
     assert said[empty].note == f"{empty}: {workshop.NO_PROJECT}"
     assert said[broken].note == f"{broken}: {workshop.NOT_A_PROJECT}"
     assert library.skipped == tuple(place.note for place in library.unseen)
+
+
+# -- what the Scenes view says about them ------------------------------------
+
+
+def test_the_unsupported_notice_counts_in_words_and_is_empty_at_zero() -> None:
+    from wall_in_one.ui.next.catalog import unsupported_notice
+
+    assert unsupported_notice(0) == ""
+    assert unsupported_notice(1) == (
+        "1 Wallpaper Engine wallpaper needs a runtime linux-wallpaperengine "
+        "doesn\u2019t support yet"
+    )
+    assert unsupported_notice(2) == (
+        "2 Wallpaper Engine wallpapers need a runtime linux-wallpaperengine "
+        "doesn\u2019t support yet"
+    )
+
+
+def test_the_notice_names_ten_by_title_then_how_many_more() -> None:
+    from wall_in_one.ui.next.catalog import unsupported_details
+
+    assert unsupported_details(()) == ""
+    titles = tuple(f"Item {index:02d}" for index in range(12))
+    details = unsupported_details(titles)
+    assert details.startswith("Listed, never played: Item 00, Item 01,")
+    assert "Item 09 and 2 more." in details and "Item 10" not in details
+
+
+def test_only_what_no_renderer_runs_is_counted(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _web(content)
+    _install(content, "100", {"type": "application", "title": "zebra", "file": "x.exe"})
+    _install(content, "101", {"type": "hologram", "title": "Apple", "file": "x"})
+    _preset(content, {"arcs": True}, dependency="999")  # needs its base: not counted
+
+    assert workshop.unsupported_titles(_listed(tmp_path).values()) == ("Apple", "zebra")

@@ -81,6 +81,7 @@ from wall_in_one.ui.next.state import (
     Reason,
     Removal,
     WallpaperView,
+    Workshop,
     not_on_its_own,
     solo_displays,
 )
@@ -314,6 +315,8 @@ class AppState(GObject.Object):
         self.thumbnail_size = "large"  # the Library's cards: "large" or "small"
         self.library_scanning = False
         self.library_skipped: list[str] = []  # the demo's scans never hit a limit
+        #: Wallpaper Engine is scanned, and every demo scene plays.
+        self.workshop: Workshop | None = Workshop()
         self._rng = random.Random(4)
         self._rule_serial = 0
         #: A playlist's own (interval in seconds, shuffle); None for the default.

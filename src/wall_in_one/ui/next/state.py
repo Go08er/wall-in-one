@@ -142,8 +142,30 @@ class WallpaperView(Protocol):
     @property
     def unplayable(self) -> str: ...
 
+    #: Whether nothing (a still included) would make it play here as it is:
+    #: a Wallpaper Engine item no renderer here runs, or a preset whose base
+    #: isn't installed. ``unplayable`` says why.
+    @property
+    def never_plays(self) -> bool: ...
+
+    #: For a Wallpaper Engine item shown as a scene that isn't one, its own
+    #: type (``web``, ``preset``, ``application``...), shown beside the kind.
+    #: Empty otherwise.
+    @property
+    def kind_detail(self) -> str: ...
+
     @property
     def tags(self) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Workshop:
+    """Wallpaper Engine as the Library's Scenes and Videos views show it (`AppState.workshop`)."""
+
+    #: The titles of the listed items no renderer here runs: a type
+    #: linux-wallpaperengine doesn't support (or its preset's base's), or an
+    #: executable one, which is never run. The Scenes view counts them.
+    unsupported: tuple[str, ...] = ()
 
 
 class PlaylistView(Protocol):
@@ -490,6 +512,12 @@ class AppState(Protocol):
     #: as classic's subtitle does.
     @property
     def library_skipped(self) -> Sequence[str]: ...
+
+    #: Wallpaper Engine in the library, or None while its items aren't
+    #: scanned. With `library_folders`, the Scenes and Videos views offer to
+    #: check it for new items (`LibraryFolders.rescan`).
+    @property
+    def workshop(self) -> Workshop | None: ...
 
     # -- playlists ----------------------------------------------------------------
 

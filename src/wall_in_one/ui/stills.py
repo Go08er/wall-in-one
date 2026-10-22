@@ -51,6 +51,11 @@ FailureCallback = Callable[[str], None]
 LOGGER = logging.getLogger(__name__)
 
 
+def _engine_capture(item: MediaItem) -> bool:
+    """Whether ``item``'s still is the scene engine's capture, which needs a measured display."""
+    return item.kind is Kind.SCENE and not item.still_from_preview
+
+
 def _refusal(folder: Path, count: int, reason: str) -> str:
     """What is said for ``count`` wallpapers whose still ``folder`` would not take."""
     wallpapers = "1 wallpaper" if count == 1 else f"{count} wallpapers"
@@ -121,6 +126,8 @@ class StillMaker:
             # on the main thread at the end of every scan: only path
             # arithmetic here.
             if item.kind.moves
+            # Listed but never played (`MediaItem.unplayable`): no still to make.
+            and item.unplayable is None
             and (
                 item.paired_still is None
                 or (
@@ -139,8 +146,9 @@ class StillMaker:
         # wide, so leaving the two interleaved would let a handful of scenes
         # hold up every video behind them.
         wanted.sort(key=lambda item: item.kind is Kind.SCENE)
-        # GTK's monitors can only be read here, on the main thread.
-        fallback = self._local_displays() if any(item.kind is Kind.SCENE for item in wanted) else ()
+        # GTK's monitors can only be read here, on the main thread. A still
+        # made from a preview needs no display.
+        fallback = self._local_displays() if any(_engine_capture(item) for item in wanted) else ()
         self._submit(
             self._run,
             tuple(wanted),
@@ -223,14 +231,14 @@ class StillMaker:
         # an existing one is never judged against a guess.
         display = (
             scenes.measured_capture_size("", outputs.discover(fallback))
-            if any(i.kind is Kind.SCENE for i in items)
+            if any(_engine_capture(i) for i in items)
             else None
         )
         for item in items:
             if self._processes.cancelled():
                 return
             if item.kind is Kind.SCENE and (
-                display is None
+                (display is None and _engine_capture(item))
                 or (
                     item.paired_still is not None
                     and not stills.scene_capture_required(item, root, size=display, automatic=True)

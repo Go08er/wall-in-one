@@ -302,11 +302,15 @@ class PairingsPage(Gtk.Box):
             self._editor.append(self._health_group)
 
         still_group = self._build_still_picker(item, bundle)
-        if item.kind is Kind.SCENE:
+        if item.kind is Kind.SCENE and item.unplayable is None:
             regenerate = plain(
                 Adw.ActionRow,
                 title="Regenerate automatic scene still",
-                subtitle="Recapture at the target display's physical aspect and resolution",
+                subtitle=(
+                    "Take it again from the item's preview"
+                    if item.still_from_preview
+                    else "Recapture at the target display's physical aspect and resolution"
+                ),
             )
             button = Gtk.Button(label="Regenerate")
             button.set_valign(Gtk.Align.CENTER)

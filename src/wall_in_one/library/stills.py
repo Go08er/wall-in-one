@@ -798,7 +798,7 @@ def scene_capture_required(
     its shape alone, so plugging in a monitor of another shape does not
     recapture every scene. Without ``automatic`` the shape counts too.
     """
-    if item.kind is not Kind.SCENE or not item.scene:
+    if item.kind is not Kind.SCENE or not item.scene or item.unplayable is not None:
         return False
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
     if item.paired_still is not None and item.paired_still != target:
@@ -808,6 +808,10 @@ def scene_capture_required(
         # Nothing to judge. Whether a capture can actually be made is
         # `capture_scene`'s question, and it writes nothing when it cannot.
         return True
+    if item.still_from_preview:
+        # Made from the item's preview, which is as large as it will ever be:
+        # judging it against the display would remake it after every scan.
+        return False
     wanted = size or scenes.measured_capture_size()
     if wanted is None:
         return False
@@ -1844,7 +1848,26 @@ def capture_scene(
     """
     if item.kind is not Kind.SCENE or not item.scene:
         raise StillError(f"{item.name} is not a Wallpaper Engine scene")
+    if item.unplayable is not None:
+        # Never handed to the engine, and nothing to show a still for.
+        raise StillError(f"{item.name} can\u2019t play: {item.unplayable_reason}")
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    if item.still_from_preview:
+        # From the preview: no engine, and no display to size it for.
+        if not force and not scene_capture_required(item, root, automatic=True):
+            return target
+        source = _snapshot_source(item.path, Kind.SCENE)
+        try:
+            return _capture_scene_from_source(
+                item,
+                root=root,
+                target=target,
+                size=None,
+                processes=processes,
+                source=source,
+            )
+        finally:
+            source.close()
     measured = size or scenes.measured_capture_size()
     if measured is None:
         # The 2560x1440 fallback is a guess, and a still captured at a guessed
@@ -1873,15 +1896,26 @@ def _capture_scene_from_source(
     *,
     root: Path,
     target: Path,
-    size: tuple[int, int],
+    size: tuple[int, int] | None,
     processes: worker_processes.Cancellation | None,
     source: _SourceSnapshot,
 ) -> Path:
-    """Render and publish a scene while retaining its opened directory identity."""
-    if not scenes.is_available():
-        # Before any directory or temporary exists: a temporary made for a
-        # renderer that is not there is still a file to clean up afterwards.
+    """Render and publish a scene while retaining its opened directory identity.
+
+    An item whose still comes from its preview (`MediaItem.still_from_preview`)
+    has it drawn by ffmpeg instead of the engine; ``size`` is then unused.
+    """
+    # Before any directory or temporary exists: a temporary made for a
+    # renderer that is not there is still a file to clean up afterwards.
+    if item.still_from_preview:
+        if item.preview is None:
+            raise StillError(f"{item.name} has no preview to take a still from")
+        if not is_available():
+            raise StillError("ffmpeg is not installed, so no still can be taken")
+    elif not scenes.is_available():
         raise StillError(f"linux-wallpaperengine is not installed, so no still for {item.name}")
+    elif size is None:
+        raise StillError(f"no display size was measured, so no still was taken for {item.name}")
     try:
         paths.ensure_directory(target.parent)
     except OSError as error:
@@ -1906,7 +1940,9 @@ def _capture_scene_from_source(
         ) from error
     try:
         engine_output = _engine_output_path(temporary, target_context)
-        if processes is None:
+        if item.still_from_preview:
+            _still_from_preview(item, engine_output, processes)
+        elif processes is None:
             scenes.screenshot(
                 item.scene,
                 engine_output,
@@ -1955,6 +1991,30 @@ def _capture_scene_from_source(
         target_context.close()
 
 
+def _still_from_preview(
+    item: MediaItem,
+    output: Path,
+    processes: worker_processes.Cancellation | None,
+) -> None:
+    """Draw the first frame of ``item``'s own preview into ``output``, as PNG.
+
+    The preview is opened once, refusing a symbolic link, and ffmpeg reads
+    that open file: it lives in a folder anyone can write in.
+    """
+    preview = item.preview
+    if preview is None:
+        raise StillError(f"{item.name} has no preview to take a still from")
+    opened = _snapshot_source(preview, Kind.VIDEO)
+    try:
+        complaint = _run(opened.writer_path, output, FALLBACK_SEEK_SECONDS, processes=processes)
+    finally:
+        opened.close()
+    if complaint:
+        raise StillError(
+            f"ffmpeg could not take a still from the preview of {item.name}: {complaint}"
+        )
+
+
 def ensure(
     item: MediaItem,
     root: Path,
@@ -1974,7 +2034,7 @@ def ensure(
     folder that would not be written in (`StillFolderError`). It is forgiven
     like the rest; a caller that can tell a person gives this.
     """
-    if not item.is_moving:
+    if not item.is_moving or item.unplayable is not None:
         return None
     if item.kind is Kind.SCENE:
         if not scene_capture_required(item, root, size=size, automatic=True):

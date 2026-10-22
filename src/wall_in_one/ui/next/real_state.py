@@ -240,7 +240,9 @@ def _still_note(item: MediaItem, pairing: pairings.Pairing | None, missing: bool
     if chosen is not None and not missing:
         return f"Chosen by hand: {chosen.name}"
     automatic = (
-        "Captured from the scene"
+        "Taken from its Wallpaper Engine preview"
+        if item.still_from_preview
+        else "Captured from the scene"
         if item.kind is Kind.SCENE
         else "Taken from the video automatically"
     )

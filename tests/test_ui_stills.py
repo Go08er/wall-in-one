@@ -325,6 +325,32 @@ def test_the_display_is_measured_on_the_worker_once_per_batch(
     assert set(maker.asked) == {Path("/w/1"), Path("/w/2"), Path("/w/3"), Path("/w/clip.mp4")}
 
 
+def test_a_preview_still_needs_no_display_and_what_cant_play_is_never_asked(
+    maker: Recording, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A web or preset item's still is drawn from its own preview, not the engine."""
+    from dataclasses import replace
+
+    from wall_in_one.library.model import Unplayable
+
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: None)
+    web = replace(item("2777242023", Kind.SCENE), scene="2777242023", workshop_type="web")
+    made = replace(_managed_scene(tmp_path, "2946165131"), workshop_type="preset")
+    assert made.paired_still is not None
+    _png_header(made.paired_still, 2, 2)
+    unsupported = replace(
+        item("3000000001", Kind.SCENE),
+        scene="3000000001",
+        workshop_type="application",
+        unplayable=Unplayable.RUNTIME,
+    )
+
+    maker.request((web, made, unsupported), tmp_path, maker.batches.append)
+    maker.drain()
+
+    assert maker.asked == [web.path], "a small preview still is never made again"
+
+
 def test_a_video_only_batch_asks_for_no_display(
     maker: Recording, measured_display: list[str]
 ) -> None:

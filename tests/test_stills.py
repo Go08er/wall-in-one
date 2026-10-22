@@ -1233,6 +1233,96 @@ def test_a_scene_capture_that_cannot_be_made_writes_nothing(
     assert not root.exists(), "not even the Automatic Stills directory"
 
 
+# -- Wallpaper Engine items whose still comes from their preview ---------------
+
+
+def _preview(path: Path, size: str = "64x36") -> Path:
+    """A real picture in the format ``path`` names, made by ffmpeg."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=green:s={size}:d=0.3:r=10"]
+        + (["-frames:v", "1"] if path.suffix != ".gif" else [])
+        + [str(path)],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def _workshop_scene(root: Path, workshop_id: str, kind: str, preview: str) -> MediaItem:
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / workshop_id
+    installation.mkdir(parents=True)
+    return replace(
+        _scene(workshop_id, directory=installation),
+        workshop_type=kind,
+        preview=_preview(installation / preview),
+    )
+
+
+@pytest.mark.parametrize(("kind", "preview"), (("web", "preview.jpg"), ("preset", "preview.gif")))
+def test_a_still_comes_from_the_preview_with_no_engine_and_no_display(
+    monkeypatch: pytest.MonkeyPatch, root: Path, kind: str, preview: str
+) -> None:
+    """The engine's screenshot of a web page is taken before the page paints."""
+    item = _workshop_scene(root, "2777242023", kind, preview)
+    monkeypatch.setattr(scenes, "is_available", lambda: False)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: None)
+
+    def never(*_arguments: object, **_keywords: object) -> Path:
+        raise AssertionError("the engine was asked for a still that comes from the preview")
+
+    monkeypatch.setattr(scenes, "screenshot", never)
+    target = pairing.still_directory(root) / "2777242023.png"
+
+    assert item.still_from_preview
+    assert stills.scene_capture_required(item, root, automatic=True)
+    assert stills.ensure(item, root) == target
+    assert stills._png_size(target) == (64, 36)
+    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
+    # Made once: a preview is as large as it gets, so a big display never
+    # asks for it again.
+    made = replace(item, paired_still=target)
+    assert not stills.scene_capture_required(made, root, size=(3840, 2160), automatic=True)
+    assert not stills.scene_capture_required(made, root, size=(3840, 2160))
+    # Asked for by hand, it is drawn again.
+    target.unlink()
+    assert stills.capture_scene(made, root, force=True) == target
+
+
+def test_a_preview_link_is_never_followed(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    item = _workshop_scene(root, "2777242023", "web", "real.jpg")
+    assert item.preview is not None
+    link = item.preview.with_name("preview.jpg")
+    link.symlink_to(item.preview)
+
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(replace(item, preview=link), root)
+    assert not (pairing.still_directory(root) / "2777242023.png").exists()
+
+
+def test_an_item_that_cant_play_gets_no_still(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    from wall_in_one.library.model import Unplayable
+
+    item = replace(
+        _workshop_scene(root, "3000000001", "application", "preview.jpg"),
+        unplayable=Unplayable.RUNTIME,
+        unplayable_reason="linux-wallpaperengine can\u2019t play it",
+    )
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1600))
+
+    def never(*_arguments: object, **_keywords: object) -> Path:
+        raise AssertionError("an item that can't play was handed to the engine")
+
+    monkeypatch.setattr(scenes, "screenshot", never)
+
+    assert not stills.scene_capture_required(item, root)
+    assert stills.ensure(item, root) is None
+    with pytest.raises(stills.StillError, match="can\u2019t play it"):
+        stills.capture_scene(item, root, force=True)
+    assert not pairing.still_directory(root).exists()
+
+
 def _real_png(width: int, height: int) -> bytes:
     """A complete, decodable PNG, unlike `_png_header`."""
 

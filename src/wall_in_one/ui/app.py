@@ -5659,7 +5659,7 @@ class Application(Adw.Application):
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
         roots = self._session.library.roots
-        if not roots or not item.scene:
+        if not roots or not item.scene or item.unplayable is not None:
             return False
         self._stills.regenerate_scene(item, roots[0], self._on_stills_made)
         return True

@@ -50,8 +50,9 @@ a setup script. Three ways; all of them build the release from source.
 > **Tested on Arch in a VM.** All three ways were run on a fresh Arch Linux
 > (pacman 7.1, paru 2.1.0, 4 cores): each build, with its tests, takes about
 > eight minutes. The paru route was run against a local copy of this
-> repository (`Url = file:///…`; a plain path is not accepted), so the GitHub
-> address in the section below was not part of that test.
+> repository (`Url = file:///…`; a plain path is not accepted), and then once
+> more as a reader would: the setup script downloaded from the release, and
+> paru fetching this repository from GitHub (its `main` branch).
 
 Building asks a few questions on the way. Two of them are which package
 provides something (`jack`, and `cargo`: `rust` or `rustup`): press Enter for

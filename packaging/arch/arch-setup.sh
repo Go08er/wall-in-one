@@ -237,13 +237,24 @@ register_with_paru() {
     report_section
   else
     mkdir -p -- "${conf%/*}" || die "could not create ${conf%/*}"
-    {
-      # A user config replaces the system one, so pull the system one in.
-      if [ -f "$paru_system_conf" ]; then
-        printf 'Include = %s\n\n' "$paru_system_conf"
-      fi
-      printf '[wall-in-one]\nUrl = %s\nPath = %s\n' "$paru_url" "$paru_path"
-    } >"$conf" || die "could not write $conf"
+    # Create it only if it is still not there (noclobber opens it with
+    # O_EXCL): a file that appeared since the check, from an editor or another
+    # run, is added to like any existing one instead of being replaced.
+    if ! (
+      set -C
+      {
+        # A user config replaces the system one, so pull the system one in.
+        if [ -f "$paru_system_conf" ]; then
+          printf 'Include = %s\n\n' "$paru_system_conf"
+        fi
+        printf '[wall-in-one]\nUrl = %s\nPath = %s\n' "$paru_url" "$paru_path"
+      } >"$conf"
+    ) 2>/dev/null; then
+      [ -f "$conf" ] || die "could not write $conf"
+      say "$conf appeared while this ran; adding to it instead of creating it"
+      register_with_paru
+      return 0
+    fi
     if [ -f "$paru_system_conf" ]; then
       say "created $conf: it includes $paru_system_conf, so your paru settings stay, and adds the [wall-in-one] section"
     else
@@ -331,8 +342,10 @@ fi
 
 if [ "$enable" = 1 ]; then
   if manager_env=$(systemctl --user show-environment 2>/dev/null); then
+    # An empty WAYLAND_DISPLAY in the manager is no display either.
+    manager_display=$(printf '%s\n' "$manager_env" | sed -n 's/^WAYLAND_DISPLAY=//p')
     has_display=0
-    case $'\n'$manager_env in *$'\n'WAYLAND_DISPLAY=*) has_display=1 ;; esac
+    [ -z "$manager_display" ] || has_display=1
     if [ "$has_display" = 0 ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
       systemctl --user import-environment WAYLAND_DISPLAY
       has_display=1

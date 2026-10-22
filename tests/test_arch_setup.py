@@ -729,3 +729,46 @@ def test_a_first_install_without_settings_is_enabled_and_explained(setup: Setup)
     assert "systemctl --user start wall-in-one.service" in calls
     assert "open Wall-in-One, choose your library folder" in result.stdout
     assert "wall-in-one --setup-status" in calls
+
+
+@pytest.mark.parametrize("manager", ["absent", "empty", "valid"])
+def test_only_a_usable_manager_display_prevents_the_import(setup: Setup, manager: str) -> None:
+    """An empty WAYLAND_DISPLAY in the user manager is no display (R10-1)."""
+    setup.systemctl(
+        env={"absent": "", "empty": "WAYLAND_DISPLAY=", "valid": "WAYLAND_DISPLAY=wayland-0"}[
+            manager
+        ]
+    )
+    result = setup.run("--no-renderers", WAYLAND_DISPLAY="wayland-1")
+    assert result.returncode == 0, result.stderr
+    calls = setup.calls()
+    imported = "systemctl --user import-environment WAYLAND_DISPLAY"
+    if manager == "valid":
+        assert imported not in calls
+    else:
+        assert imported in calls
+        assert calls.index(imported) < calls.index("systemctl --user start wall-in-one.service")
+
+
+def test_a_paru_config_that_appears_meanwhile_is_added_to_not_replaced(setup: Setup) -> None:
+    """The first-creation write is exclusive (R10-2): a file made since the check stays."""
+    conf = _paru(setup)
+    original = "[options]\nSudoLoop\n"
+    real_mkdir = shutil.which("mkdir")
+    assert real_mkdir is not None
+    # Replace the harness's link to the real mkdir (never write through it) with
+    # one that, as an editor might, creates the config right after the check.
+    (setup.bin / "mkdir").unlink()
+    _stub(
+        setup.bin,
+        "mkdir",
+        f'"{real_mkdir}" "$@" || exit $?\n'
+        'last=""; for argument in "$@"; do last=$argument; done\n'
+        f'if [ "$last" = "{conf.parent}" ]; then printf "%s" "{original}" > "{conf}"; fi',
+    )
+    result = setup.run("--paru", "--no-renderers", "--no-enable")
+    assert result.returncode == 0, result.stderr
+    text = conf.read_text(encoding="utf-8")
+    assert text.startswith(original)
+    assert text.endswith(SECTION)
+    assert "appeared while this ran" in result.stdout

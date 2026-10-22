@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wall_in_one_service::config::{
     Config, ConfigError, DisplayAssignment, DisplayMode, EntryKind, MAX_CONFIG_BYTES,
-    OVERRIDES_FILENAME, Overrides, Palette, Playlist, SceneClamp, SceneScaling, ScheduleRule,
-    overrides_path,
+    MAX_ENTRY_PROPERTIES, MAX_PROPERTY_NAME_BYTES, MAX_PROPERTY_VALUE_BYTES, OVERRIDES_FILENAME,
+    Overrides, Palette, Playlist, SceneClamp, SceneScaling, ScheduleRule, overrides_path,
 };
 
 fn temp_file(name: &str) -> PathBuf {
@@ -497,6 +497,97 @@ fn entry_taboo_metadata_is_optional_bounded_and_backwards_compatible() {
             .to_string()
             .contains("taboo reason")
     );
+}
+
+/// `document` with a Wallpaper Engine preset in a playlist of its own:
+/// `extra` goes after its `scene_id`.
+fn with_preset(extra: &str) -> String {
+    format!(
+        "{}\n[[playlists]]\nid = \"presets\"\nname = \"Presets\"\n\
+         [[playlists.entries]]\nid = \"y2k\"\nkind = \"scene\"\nstill = \"/tmp/y2k.png\"\n\
+         scene_id = \"2946165131\"\n{extra}\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+        document(4)
+    )
+}
+
+fn refusal(document: &str) -> String {
+    let parsed: Config = toml::from_str(document).unwrap();
+    parsed.validate().unwrap_err().to_string()
+}
+
+#[test]
+fn a_preset_carries_an_optional_base_and_bounded_properties() {
+    // Without either field: what 0.4.0 wrote and reads.
+    let plain: Config = toml::from_str(&with_preset("")).unwrap();
+    plain.validate().unwrap();
+    let entry = &plain.playlists[1].entries[0];
+    assert_eq!(entry.scene_base, None);
+    assert!(entry.properties.is_empty());
+    assert_eq!(entry.rendered_scene().unwrap(), "2946165131");
+
+    let preset: Config = toml::from_str(&with_preset(
+        "scene_base = \"2777242023\"\n\
+         properties = { zeta = \"1\", arcs = \"true\", colour_1 = \"0.000000 0.501961 0.000000\" }",
+    ))
+    .unwrap();
+    preset.validate().unwrap();
+    let entry = &preset.playlists[1].entries[0];
+    assert_eq!(entry.scene_id.as_deref(), Some("2946165131"));
+    assert_eq!(entry.rendered_scene().unwrap(), "2777242023");
+    assert_eq!(
+        entry.properties.keys().collect::<Vec<_>>(),
+        ["arcs", "colour_1", "zeta"],
+        "name order, whatever order the document gives"
+    );
+
+    // The bounds: count, name, value, base, and only on a scene.
+    let many = (0..=MAX_ENTRY_PROPERTIES)
+        .map(|index| format!("p{index} = \"1\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(refusal(&with_preset(&format!("properties = {{ {many} }}"))).contains("properties"));
+    let most = (0..MAX_ENTRY_PROPERTIES)
+        .map(|index| format!("p{index} = \"1\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let parsed: Config =
+        toml::from_str(&with_preset(&format!("properties = {{ {most} }}"))).unwrap();
+    parsed.validate().unwrap();
+    for name in [
+        "\"-flag\"",
+        "\"a=b\"",
+        "\"a b\"",
+        "\"a.b\"",
+        "\"\"",
+        &format!("\"{}\"", "n".repeat(MAX_PROPERTY_NAME_BYTES + 1)),
+    ] {
+        let message = refusal(&with_preset(&format!("properties = {{ {name} = \"1\" }}")));
+        assert!(message.contains("property name"), "{name}: {message}");
+    }
+    for value in [
+        format!("\"{}\"", "v".repeat(MAX_PROPERTY_VALUE_BYTES + 1)),
+        "\"1\\n--screen-root\"".to_string(),
+    ] {
+        let message = refusal(&with_preset(&format!("properties = {{ ok = {value} }}")));
+        assert!(message.contains("\"ok\""), "{value}: {message}");
+    }
+    let longest = "v".repeat(MAX_PROPERTY_VALUE_BYTES);
+    let parsed: Config = toml::from_str(&with_preset(&format!(
+        "properties = {{ ok = \"{longest}\" }}"
+    )))
+    .unwrap();
+    parsed.validate().unwrap();
+    assert!(refusal(&with_preset("scene_base = \"../12\"")).contains("scene_base"));
+    let on_a_video = document(4).replace(
+        "motion = \"/tmp/two.mp4\"",
+        "motion = \"/tmp/two.mp4\"\nproperties = { a = \"1\" }",
+    );
+    assert!(refusal(&on_a_video).contains("only a scene entry"));
+    let base_on_a_still = document(4).replace(
+        "still = \"/tmp/one.png\"",
+        "still = \"/tmp/one.png\"\nscene_base = \"12\"",
+    );
+    assert!(refusal(&base_on_a_still).contains("only a scene entry"));
 }
 
 #[test]

@@ -1313,9 +1313,10 @@ impl SystemDriver {
                 "scene renderer ownership is disabled; paired still remains applied".into(),
             ));
         }
+        // A preset renders its base, with its own property values; the
+        // entry's identity stays its `scene_id` (docs/wallpaper-engine.md).
         let scene = entry
-            .scene_id
-            .as_ref()
+            .rendered_scene()
             .ok_or_else(|| StartError::Failed("scene entry has no scene id".into()))?;
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
         command
@@ -1332,6 +1333,12 @@ impl SystemDriver {
         }
         if !self.settings.scene_pause_when_covered {
             command.arg("--no-fullscreen-pause");
+        }
+        // One process-wide override each (ApplicationContext.cpp's
+        // `--set-property`), as two arguments of their own: the loader
+        // bounded both halves and the name can't start with '-' or hold '='.
+        for (name, value) in &entry.properties {
+            command.arg("--set-property").arg(format!("{name}={value}"));
         }
         if output.is_empty() {
             for connector in self.current_outputs().map_err(StartError::Failed)? {

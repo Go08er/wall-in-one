@@ -1,7 +1,7 @@
 use crate::protocol::MAX_RESPONSE_BYTES;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{Error, ErrorKind, Read};
@@ -40,6 +40,13 @@ pub const MAX_PATH_BYTES: usize = 4096;
 const CONFIG_GENERATION_HEX_BYTES: usize = 64;
 const MAX_TABOO_REASON_BYTES: usize = 512;
 const MAX_TABOO_SOURCE_BYTES: usize = 64;
+/// A Wallpaper Engine preset's property values, as the app compiles them
+/// (`wall_in_one.library.workshop`). Each becomes one `--set-property`
+/// argument, so these bound the renderer's command line as well as the
+/// document (docs/wallpaper-engine.md).
+pub const MAX_ENTRY_PROPERTIES: usize = 512;
+pub const MAX_PROPERTY_NAME_BYTES: usize = 64;
+pub const MAX_PROPERTY_VALUE_BYTES: usize = 256;
 
 // Status is a single atomic snapshot containing every playlist and schedule.
 // Reserve room for JSON structure and ordinary bounded runtime diagnostics,
@@ -248,9 +255,52 @@ pub struct Entry {
     pub motion: Option<PathBuf>,
     #[serde(default)]
     pub scene_id: Option<String>,
+    /// For a Wallpaper Engine preset: the Workshop id of the wallpaper it is
+    /// a preset of, which is what linux-wallpaperengine renders. `scene_id`
+    /// stays the preset's own id, the entry's identity. Optional, and written
+    /// only for a preset, so a document without one keeps 0.4.0's shape.
+    #[serde(default)]
+    pub scene_base: Option<String>,
+    /// A preset's property values, each passed as its own
+    /// `--set-property NAME=VALUE` argument, in name order. Optional like
+    /// `scene_base`; empty means none.
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
     #[serde(default)]
     pub taboo: Option<EntryTaboo>,
     pub palette: Palette,
+}
+
+impl Entry {
+    /// The Workshop id linux-wallpaperengine is given for a scene entry:
+    /// a preset's base, or the scene itself.
+    pub fn rendered_scene(&self) -> Option<&String> {
+        self.scene_base.as_ref().or(self.scene_id.as_ref())
+    }
+}
+
+/// Whether `name` may be a scene property's name: what Wallpaper Engine
+/// names its properties with, a TOML bare key that never starts with `-`
+/// and has no `=`, so `NAME=VALUE` is one unambiguous argument.
+pub fn property_name_is_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_PROPERTY_NAME_BYTES
+        && (bytes[0].is_ascii_alphanumeric() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
+}
+
+/// Whether `value` may be a scene property's value.
+pub fn property_value_is_valid(value: &str) -> bool {
+    value.len() <= MAX_PROPERTY_VALUE_BYTES && !value.chars().any(char::is_control)
+}
+
+fn workshop_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -739,10 +789,7 @@ impl Config {
                         None => return invalid("video entry needs motion"),
                     },
                     EntryKind::Scene if entry.motion.is_none() => match &entry.scene_id {
-                        Some(id)
-                            if !id.is_empty()
-                                && id.len() <= MAX_IDENTIFIER_BYTES
-                                && id.bytes().all(|b| b.is_ascii_digit()) => {}
+                        Some(id) if workshop_id(id) => {}
                         _ => return invalid("scene entry needs a numeric scene_id"),
                     },
                     EntryKind::Still => {
@@ -750,6 +797,37 @@ impl Config {
                     }
                     EntryKind::Video => return invalid("video entry must not carry scene_id"),
                     EntryKind::Scene => return invalid("scene entry must not carry motion"),
+                }
+                if entry.kind != EntryKind::Scene
+                    && (entry.scene_base.is_some() || !entry.properties.is_empty())
+                {
+                    return invalid("only a scene entry may carry scene_base or properties");
+                }
+                if let Some(base) = &entry.scene_base
+                    && !workshop_id(base)
+                {
+                    return invalid("scene_base must be a numeric Workshop id");
+                }
+                if entry.properties.len() > MAX_ENTRY_PROPERTIES {
+                    return invalid(format!(
+                        "a scene entry has {} properties; no more than {MAX_ENTRY_PROPERTIES} are supported",
+                        entry.properties.len()
+                    ));
+                }
+                for (name, value) in &entry.properties {
+                    if !property_name_is_valid(name) {
+                        return invalid(format!(
+                            "a scene property name is empty, longer than {MAX_PROPERTY_NAME_BYTES} \
+                             bytes, or has a character other than a letter, a digit, '_' or '-' \
+                             (or starts with '-')"
+                        ));
+                    }
+                    if !property_value_is_valid(value) {
+                        return invalid(format!(
+                            "the value of scene property {name:?} is longer than \
+                             {MAX_PROPERTY_VALUE_BYTES} bytes or contains control characters"
+                        ));
+                    }
                 }
                 match &entry.palette {
                     Palette::Keep { .. } => {}

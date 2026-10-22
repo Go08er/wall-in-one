@@ -756,6 +756,86 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
 }
 
 #[test]
+fn a_preset_renders_its_base_with_each_property_as_arguments_of_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("scene-preset");
+    let arguments = root.join("arguments");
+    let noctalia = root.join("noctalia");
+    let engine = root.join("linux-wallpaperengine");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    // One argument per line, so a value with spaces shows as one argument.
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done >> {:?}\nsleep 30\n",
+            arguments
+        ),
+    )
+    .unwrap();
+    for executable in [&noctalia, &engine] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let document = config(&noctalia, Path::new("/bin/true"), true)
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!("linux_wallpaperengine_program = {engine:?}"),
+        )
+        .replace(
+            "scene_id = \"12345\"",
+            "scene_id = \"12345\"\nscene_base = \"67890\"\n\
+             properties = { schemecolor = \"0.500000 0.200000 1.000000\", bloom = \"true\" }",
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    parsed.validate().unwrap();
+    let preset = parsed.playlists[1].entries[0].clone();
+    let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
+
+    without_text_file_busy(|| driver.apply(&preset, "DP-1", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let launched = fs::read_to_string(&arguments).unwrap();
+    let words: Vec<&str> = launched.lines().collect();
+    let pairs: Vec<(&str, &str)> = words
+        .windows(2)
+        .filter(|pair| pair[0] == "--set-property")
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("--set-property", "bloom=true"),
+            ("--set-property", "schemecolor=0.500000 0.200000 1.000000"),
+        ],
+        "{launched}"
+    );
+    let bg: Vec<&str> = words
+        .windows(2)
+        .filter(|pair| pair[0] == "--bg")
+        .map(|pair| pair[1])
+        .collect();
+    assert_eq!(bg, ["67890"], "the base renders, never the preset's own id");
+    assert!(!words.contains(&"12345"), "{launched}");
+    driver.stop();
+
+    // The same entry without them launches exactly as a scene always did.
+    fs::remove_file(&arguments).unwrap();
+    let plain = config(&noctalia, Path::new("/bin/true"), true).replace(
+        "linux_wallpaperengine_program = \"/bin/true\"",
+        &format!("linux_wallpaperengine_program = {engine:?}"),
+    );
+    let parsed: Config = toml::from_str(&plain).unwrap();
+    let scene = parsed.playlists[1].entries[0].clone();
+    let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
+    without_text_file_busy(|| driver.apply(&scene, "DP-1", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let launched = fs::read_to_string(&arguments).unwrap();
+    assert!(!launched.contains("--set-property"), "{launched}");
+    assert!(launched.ends_with("--bg\n12345\n"), "{launched}");
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_switched_off_head_is_published_but_never_a_scene_target() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("scene-switched-off");

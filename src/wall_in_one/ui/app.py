@@ -841,13 +841,15 @@ class Application(Adw.Application):
         self._runtime_loaded_generation = 0
         # The runtime.toml texts replaced since the service last confirmed a
         # reload: what it may still hold if it refused one since (at most
-        # HELD_CANDIDATES; past that, what it holds isn't known). Each is
-        # numbered in the order it was replaced, so that a reload confirms only
-        # the texts replaced before it was sent (`_service_holds_what_is_on_disk`).
+        # HELD_CANDIDATES; past that, what it holds isn't known, but whether
+        # one that was dropped allowed web wallpapers is). Each is numbered in
+        # the order it was replaced, so that a reload confirms only the texts
+        # replaced before it was sent (`_service_holds_what_is_on_disk`).
         self._held_candidates: list[tuple[int, str]] = []
         self._held_replaced = 0
         self._held_candidates_unknown = False
         self._held_dropped_through = 0
+        self._held_dropped_allowing = False
         self._runtime_shutdown = False
         # A GTK object can be destroyed while a worker is waiting on the
         # socket, then replaced by a later activation.  The monotonically
@@ -4253,6 +4255,7 @@ class Application(Adw.Application):
         with runtime_config.compiler_lock():
             changed, left_out, replaced = _runtime_installed(settings, session)
             pointer = self._default_pointer(left_out)
+            dropped: str | None = None
             with self._runtime_config_lock:
                 self._compiled_left_out = left_out
                 self._compiled_default_pointer = pointer
@@ -4260,9 +4263,14 @@ class Application(Adw.Application):
                     self._held_candidates.append((self._held_replaced, replaced))
                     self._held_replaced += 1
                     if len(self._held_candidates) > HELD_CANDIDATES:
-                        place, _dropped = self._held_candidates.pop(0)
+                        place, dropped = self._held_candidates.pop(0)
                         self._held_candidates_unknown = True
                         self._held_dropped_through = place + 1
+            # Read outside the GTK-shared lock; the compiler lock still orders it
+            # before any guard that judges the texts.
+            if dropped is not None and runtime_config.allows_web_wallpapers(text=dropped):
+                with self._runtime_config_lock:
+                    self._held_dropped_allowing = True
         return changed
 
     def _held_mark(self) -> int:
@@ -4288,6 +4296,7 @@ class Application(Adw.Application):
                 ]
             if through is None or self._held_dropped_through <= through:
                 self._held_candidates_unknown = False
+                self._held_dropped_allowing = False
 
     @staticmethod
     def _default_pointer(left_out: tuple[runtime_config.LeftOut, ...]) -> str:
@@ -4329,6 +4338,16 @@ class Application(Adw.Application):
         so does a reload it refuses. When that document may still play a web
         page, `_web_off_guard` ends it for good and the failure says so. Runs
         on the compile lane, never on GTK.
+
+        Not once shutdown has begun (`_runtime_shutdown`). A deliberate quit
+        (the last window closed, ``ctl quit`` under ``--service``) gets here
+        first: a publication holds the application until it settles, and
+        `_maybe_finish_requested_quit` waits for that hold, so this runs for
+        it. What is left is work the shutdown itself cut off, by closing its
+        socket; the document it installed is on disk for the service's own
+        poll of the file, and the next service start is guarded
+        (``--service-startup-prepare``). Socket calls past that point would
+        hold the process's exit for as long as they wait.
         """
         if publication.deferred or self._runtime_shutdown:
             return publication
@@ -4353,16 +4372,33 @@ class Application(Adw.Application):
         whatever the lane (the compile lane, ``--service``'s synchronous
         one, the health lane). What the service may hold is the file on disk
         or one of the texts publications replaced since it last confirmed a
-        reload (`runtime_config.Published.replaced`). When any of them plays
-        a web page, or a Workshop item whose type can't be checked, the
-        service is told to stop at once, then given a document that plays
-        nothing (`runtime_config.nothing_to_play_document`) and told to load
-        it: unlike a ``stop``, nothing it is asked afterwards (play, toggle,
-        the companion's Resume, its own poll of the file, a restart through
-        ExecStartPre) brings the page back. A service that can't load that
-        document (one older than this app, still running after an update)
-        is told to quit, so that whatever starts it next runs the updated one
-        through its ExecStartPre guard. Empty when there is nothing to end.
+        reload (`runtime_config.Published.replaced`). Its status says which
+        (``config_generation``), so that one alone is judged when it is one of
+        them, and whether the one it holds allows web wallpapers
+        (``allow_web_wallpapers``), which is taken over any text when it says
+        it. Only what lets a page play is ended (review r13, L2):
+
+        * a document that allows web wallpapers (`runtime_config.allows_web_wallpapers`),
+          whatever it names: it turns the service's own check off (L4);
+        * for a service not confirmed to read schema 8, which has no such
+          check, one that plays a web page or a Workshop item whose type
+          can't be checked, or one that isn't known any more (past
+          `HELD_CANDIDATES`).
+
+        A service that reads 8 and holds a document that doesn't allow web
+        wallpapers plays no page: it reads an item's type before it starts
+        the engine, and a change of the setting starts every display again.
+        Nothing but its status is asked of it then.
+
+        Otherwise the service is told to stop at once, then given a document
+        that plays nothing (`runtime_config.nothing_to_play_document`) and
+        told to load it: unlike a ``stop``, nothing it is asked afterwards
+        (play, toggle, the companion's Resume, its own poll of the file, a
+        restart through ExecStartPre) brings the page back. A service that
+        can't load that document (one older than this app, still running
+        after an update, or one whose status can't be read) is told to quit,
+        so that whatever starts it next runs the updated one through its
+        ExecStartPre guard. Empty when there is nothing to end or say.
         """
         try:
             settings = config.load_strict()
@@ -4384,23 +4420,42 @@ class Application(Adw.Application):
             except OSError, UnicodeDecodeError:
                 on_disk = None
             with self._runtime_config_lock:
-                candidates = [text for _place, text in self._held_candidates]
+                texts = [text for _place, text in self._held_candidates]
                 unknown = self._held_candidates_unknown
-            titles, unchecked = runtime_config.web_wallpapers_in(
-                [*candidates, *([on_disk] if on_disk is not None else [])]
-            )
-            if not titles and not unchecked and not unknown:
-                return ""
-            what = self._held_web_words(titles, unchecked)
+                dropped_allowing = self._held_dropped_allowing
+            if on_disk is not None:
+                texts.append(on_disk)
+            # Asked whatever the texts say: the document it holds may be one this
+            # app never saw replaced (another writer's), and its answer says so.
             try:
                 status_reply = client.send_runtime("status")
-                status = json.loads(status_reply.message) if status_reply.ok else None
+                decoded = json.loads(status_reply.message) if status_reply.ok else None
             except client.NotRunningError:
                 # Nothing plays; the next start is guarded (ExecStartPre).
                 self._service_holds_what_is_on_disk()
                 return ""
             except client.ControlError, OSError, ValueError, RecursionError:
-                status = None
+                decoded = None
+            status = decoded if isinstance(decoded, dict) else None
+            holding = self._held_text_loaded(status, texts)
+            # The one it holds when that is known; otherwise any of them, and
+            # what is no longer known (fail closed).
+            judged = [texts[holding]] if holding is not None else texts
+            said = status.get("allow_web_wallpapers") if status is not None else None
+            if type(said) is bool:
+                allows, unsure = said, False
+                if holding is None:
+                    judged = []  # which text it holds isn't known: only what it said
+            else:
+                allows = any(
+                    runtime_config.allows_web_wallpapers(text=text) for text in judged
+                ) or (holding is None and dropped_allowing)
+                unsure = holding is None and unknown
+            reads_eight = runtime_config.nothing_to_play_supported(status)
+            titles, unchecked = runtime_config.web_wallpapers_in(judged)
+            if not allows and (reads_eight or not (titles or unchecked or unsure)):
+                return self._web_off_not_reached(titles) if reads_eight else ""
+            what = self._held_web_words(titles, unchecked, allows=allows)
             # Whether it was playing: the stop below only bridges until the
             # document that plays nothing is loaded, after which Play is put
             # back, so that turning web wallpapers on again plays as before.
@@ -4414,7 +4469,7 @@ class Application(Adw.Application):
                 stopped = False
             written = False
             mark = 0
-            if locked and runtime_config.nothing_to_play_supported(status):
+            if locked and reads_eight:
                 try:
                     document = runtime_config.nothing_to_play_document(
                         settings, runtime_config.WEB_OFF_REASON
@@ -4447,7 +4502,8 @@ class Application(Adw.Application):
                 return (
                     f"Allow web wallpapers is off, but the wallpaper service still {what}. "
                     "Playback was stopped, and the service now has nothing to play: web "
-                    "wallpapers are off. It stays so until a publication gets through."
+                    "wallpapers are off. Until a publication gets through, no wallpaper is "
+                    "played, and the last still Noctalia was given stays on screen."
                 )
         if not locked:
             return f"Allow web wallpapers is off, but the wallpaper service still {what}. " + (
@@ -4467,12 +4523,20 @@ class Application(Adw.Application):
             quit_ok = False
         if quit_ok:
             self._service_holds_what_is_on_disk()
+            # Why it couldn't be given nothing to play, as far as is known (N3).
+            why = (
+                "its status couldn\u2019t be read, so it couldn\u2019t be told to play nothing"
+                if status is None
+                else "it is older than this app, so it can\u2019t be told to play nothing"
+                if not reads_eight
+                else "it couldn\u2019t be given a document that plays nothing"
+            )
             return (
                 f"Allow web wallpapers is off, but the wallpaper service still {what}. It "
-                "was stopped: it is older than this app, or couldn\u2019t load a document "
-                "that plays nothing, so it can\u2019t be told to play nothing. Starting it "
-                "again (systemctl --user start wall-in-one, or the panel) runs the updated "
-                "service, which plays nothing while web wallpapers are off."
+                f"was stopped: {why}. Starting it again (systemctl --user start wall-in-one, "
+                "or the panel) runs the installed service through its start check, which "
+                "doesn\u2019t start it on a configuration that may play a web wallpaper "
+                "while they are off."
             )
         if stopped:
             return (
@@ -4486,8 +4550,52 @@ class Application(Adw.Application):
         )
 
     @staticmethod
-    def _held_web_words(titles: Sequence[str], unchecked: Sequence[str]) -> str:
-        """What the held document plays that web wallpapers being off forbids, after "still"."""
+    def _held_text_loaded(status: dict[str, object] | None, texts: Sequence[str]) -> int | None:
+        """Which of ``texts`` the service holds, by its status's ``config_generation``; or None.
+
+        None when its status wasn't read, names no generation, or names one none
+        of them has: another writer's (the health sync, a hand edit) that this
+        app never saw replaced. Two texts with one generation compile alike.
+        """
+        generation = status.get("config_generation") if status is not None else None
+        if not isinstance(generation, str):
+            return None
+        for index, text in enumerate(texts):
+            try:
+                if runtime_config.document_generation(text) == generation:
+                    return index
+            except runtime_config.RuntimeConfigError:
+                continue
+        return None
+
+    @staticmethod
+    def _web_off_not_reached(titles: Sequence[str]) -> str:
+        """What is said when the service holds web wallpapers it doesn't play; empty if none.
+
+        A service that reads schema 8, holding a document that doesn't allow
+        web wallpapers: it refuses each page when it would start it.
+        """
+        if not titles:
+            return ""
+        return (
+            "Allow web wallpapers is off, and that hasn\u2019t reached the wallpaper service "
+            f"yet: it still holds a configuration that names {', '.join(titles)}. It doesn\u2019t "
+            "play them, since that configuration doesn\u2019t allow web wallpapers, so nothing "
+            "was stopped."
+        )
+
+    @staticmethod
+    def _held_web_words(
+        titles: Sequence[str], unchecked: Sequence[str], *, allows: bool = False
+    ) -> str:
+        """What the held document plays that web wallpapers being off forbids, after "still".
+
+        ``allows``: it allows web wallpapers (`runtime_config.allows_web_wallpapers`).
+        """
+        if allows:
+            if titles:
+                return f"plays {', '.join(titles)}, from a configuration that allows web wallpapers"
+            return "holds a configuration that allows web wallpapers"
         if titles and not unchecked:
             return f"plays {', '.join(titles)}"
         if unchecked:

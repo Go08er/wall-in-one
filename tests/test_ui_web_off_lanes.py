@@ -39,6 +39,13 @@ from wall_in_one.control.protocol import Response  # noqa: E402
 
 READS_EIGHT = [4, 5, 6, 7, 8]
 OLDER = [4, 5]
+#: What a service that reads schema 8 held while web wallpapers were on: the page, and the
+#: key that allows it. Without the key that service refuses the page itself when it would
+#: start it, and nothing is ended (`test_web_off_guard_scope.py`); the schema-4 `DOCUMENT`
+#: is what an older one holds.
+ALLOWING = DOCUMENT.replace(
+    "schema_version = 4\n", "schema_version = 8\n[settings]\nallow_web_wallpapers = true\n", 1
+)
 
 
 def _turn_off(
@@ -54,7 +61,8 @@ def _turn_off(
     """Turn the setting off; what was sent to the service, and what the app said.
 
     ``refuse_reload``: the service refuses every document but one that plays
-    nothing. ``schemas``: what its status lists (None: a reply that isn't one).
+    nothing. ``schemas``: what its status lists (None: a reply that isn't one);
+    it holds `ALLOWING` when that lists 8, `DOCUMENT` otherwise.
     """
     profile = profiles(service=service)
     application = profile.application
@@ -63,7 +71,8 @@ def _turn_off(
     application._settings = config.load_strict()
     application._settings_requested = application._settings
     paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
-    paths.runtime_config_path().write_text(DOCUMENT, encoding="utf-8")
+    held = ALLOWING if schemas == READS_EIGHT else DOCUMENT
+    paths.runtime_config_path().write_text(held, encoding="utf-8")
     sent: list[str] = []
     reports: list[str] = []
 
@@ -253,7 +262,11 @@ def test_a_held_document_without_web_is_left_alone(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused reload over a document that plays no page: nothing is stopped or replaced."""
+    """A refused reload over a document that plays no page: nothing is stopped or replaced.
+
+    Its status is read (what the service holds may be a document this app never saw
+    replaced, and the service says whether that allows web wallpapers), and nothing else.
+    """
     profile = profiles()
     application = profile.application
     paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
@@ -263,7 +276,7 @@ def test_a_held_document_without_web_is_left_alone(
     config.save(config.Settings(roots=application.settings.roots, allow_web_wallpapers=False))
     sent = _recorded(monkeypatch)
     assert application._web_off_guard() == ""
-    assert sent == []
+    assert sent == ["status"]
 
 
 def test_the_guard_does_nothing_while_web_wallpapers_are_on(

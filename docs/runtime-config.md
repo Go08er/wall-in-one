@@ -392,8 +392,13 @@ false`) nothing is started, so nothing is refused, and a scene's still shows
 as before; the next start of motion asks.
 
 Publishing steps down as for 6 and 7. A running service that isn't confirmed
-to read 8 gets the document without `allow_web_wallpapers` (it then plays web
-pages as 0.4.0 did, while the setting is on). A playlist that plays nothing
+to read 8 gets the document without `allow_web_wallpapers`. One that predates
+8 then plays web pages as 0.4.0 did, while the setting is on. One that lists 8
+but isn't confirmed (its units can't be verified, or it didn't answer) refuses
+every page, so the app says "Web wallpapers aren't played until the wallpaper
+service is confirmed to read them", and `--write-config` prints a `warning:`
+line; the app publishes again once such a service lists 8, and again when it
+is started. A playlist that plays nothing
 has no older shape, so for such a service that document is refused and
 nothing is written. While web wallpapers are off, the app then ends the page
 the service still holds (see below). The health sync tries the stepped-down
@@ -401,14 +406,24 @@ variants too.
 
 **When a publication fails while web wallpapers are off.** The setting is
 saved first, so a compile or write that fails, or a reload the service
-refuses, leaves the service on what it holds. When that may play a web page
-(the file on disk, or a text a publication replaced since the service last
-confirmed a reload), the app stops playback. A service that reads 8 is then
+refuses, leaves the service on what it holds: the file on disk, or a text a
+publication replaced since the service last confirmed a reload (a reload
+confirms only the texts replaced before it was sent). The app asks the
+service's status, and judges the one whose `config_generation` it reports,
+or all of them when it reports none of theirs. It stops playback only when
+that lets a page play: a document with `allow_web_wallpapers = true` (as the
+service's status says, where it says it), whatever it names; or, for a
+service not confirmed to read 8, which has no check of its own, a document
+that plays a web page or an item the scan can't classify, or one the app no
+longer knows. A service that reads 8 and holds a document that doesn't allow
+web wallpapers refuses every page itself, and is left alone. Otherwise a
+service that reads 8 is
 given a document that plays nothing anywhere and reloads it: unlike a `stop`,
 nothing it is asked afterwards brings the page back. If it was playing, it is
 told to play again, so that turning web wallpapers on later plays as before;
 nothing can start from that document. A service that can't
-load it (one older than the app, still running after an update) is told to
+load it (one older than the app, still running after an update, or one whose
+status can't be read) is told to
 quit, as `wall-in-one ctl quit` does. It exits cleanly, so systemd leaves it
 stopped, and whatever starts it next (the companion, or `systemctl --user
 start wall-in-one`) runs the updated service through the start guard below.

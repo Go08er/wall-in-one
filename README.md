@@ -141,8 +141,11 @@ presets and captures scene stills, and Wall-in-One finds and controls the
 ones installed on the system. Executable Wallpaper Engine wallpapers are never
 run, for security, and web wallpapers play only once **Allow web wallpapers**
 is turned on ([docs/library.md](docs/library.md#wallpaper-engine)). With it
-off, a display whose only wallpapers are web pages shows nothing, and the app
-says "Nothing to play: web wallpapers are off"
+off, a web wallpaper is skipped in its playlist, and a playlist of nothing else
+is left out, so its display follows the schedule and the default playlist, then
+All media. Only when nothing in the library can play is no wallpaper played: the
+app says "Nothing to play: web wallpapers are off", and the last still Noctalia
+was given stays on screen
 ([docs/wallpaper-engine.md](docs/wallpaper-engine.md#web-wallpapers-are-off-until-allowed)).
 The NixOS and home-manager modules install both unless you set
 `programs.wall-in-one.manualWallpaperInstalls = true`; with a plain

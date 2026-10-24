@@ -162,20 +162,46 @@ reloads as any other does, and turning it on also makes their stills. The key
 is written to `settings.toml` only when on, so a profile that never turns it
 on keeps its bytes. Executables stay refused either way.
 
-**When web pages are all that plays.** Turning the setting off then leaves
-All media with nothing to play. The display shows nothing, and the app says
-"Nothing to play: web wallpapers are off." The document says so
+**Where a web wallpaper was.** Owner: "skip to next, if it's in a playlist
+alone, then use the default playlist". The compiler leaves a web wallpaper
+out of its playlist, and the rest of that playlist plays. A playlist left
+with nothing (a web wallpaper alone) is left out too, and so is what names
+it: a display whose own playlist it is follows the schedule and the default
+playlist, a schedule rule that names it doesn't apply, and a default that
+names it is built as All media. The app says each of these
+([runtime-config.md](runtime-config.md)).
+
+**When web pages are all that plays.** Only then, when nothing in the
+library can play with the setting off, does All media have nothing to play,
+and no wallpaper is played. The app says "Nothing to play: web wallpapers are
+off." The document says so
 ([schema 8](runtime-config.md#nothing-to-play-schema-8)), so `play`, the
 companion's Resume, `ctl toggle` and the service's own reload of the file
-can't bring the page back. Noctalia keeps the last still it was given, which
-for a page is its own still: the service has no way to clear it.
+can't bring the page back. The display isn't blank: Noctalia keeps the last
+still it was given, which for a page is its own still, and the service has
+no way to clear it.
 
 **When the setting can't reach the service.** A compile that fails, or a
-reload the service refuses, leaves it on the document it holds. When that
-plays a web page, or an item the scan can't classify, the app stops it and
-hands the service a document that plays nothing; an older service that can't
-read that is told to quit, and its next start is guarded. At service start,
-a kept document that plays a web page is still refused with exit 78.
+reload the service refuses, leaves it on the document it holds; its status
+says which (`config_generation`), and the app judges that one. When it
+allows web wallpapers (`allow_web_wallpapers = true`, from while the setting
+was on), whatever it names, or when the service predates schema 8 (it has no
+check of its own) and the document plays a web page, an item the scan can't
+classify, or one the app no longer knows, the app stops it. A service that
+reads 8 is then handed a document that plays nothing; one that can't read it
+is told to quit, and its next start is guarded. A service that reads 8 and
+holds a document that doesn't allow web wallpapers is left alone: it refuses
+every page itself (below), and the app only says that the setting hasn't
+reached it yet. At service start, a kept document that plays a web page, or
+that allows web wallpapers, is refused with exit 78.
+
+**When it is on and can't reach the service either.** A service that lists
+schema 8 but isn't confirmed to read it (its installed units can't be
+verified, say) gets the document without `allow_web_wallpapers`, so it plays
+no web page. The app says "Web wallpapers aren't played until the wallpaper
+service is confirmed to read them", and publishes again once it lists 8 and
+again when it is started. One that predates 8 gets the same document and
+plays the pages without a check, as 0.4.0 did.
 
 **The service checks too.** linux-wallpaperengine reads `project.json` again
 when it starts, so an item whose type changed to `web` after the compile (a

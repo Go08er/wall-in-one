@@ -266,6 +266,10 @@ class WallpaperTile(Gtk.Box):
             f"The wallpaper service skips it: {reason}" if shown else None
         )
 
+    @property
+    def shows_refused(self) -> bool:
+        return self._refused_badge.get_visible()
+
     def set_favourite(self, favourite: bool) -> None:
         """Show whether this one is starred. Never reads as a click."""
         self._reflecting = True
@@ -545,6 +549,10 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             tile = self._tiles.get(path)
             if tile is not None:
                 tile.set_refused(self._refused.get(path))
+
+    def refused_marked_count(self) -> int:
+        """How many tiles show "Can't play here" now."""
+        return sum(tile.shows_refused for tile in self._tiles.values())
 
     def set_apply_targeting(self, independent: bool) -> None:
         self._independent = independent

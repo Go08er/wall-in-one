@@ -468,7 +468,16 @@ def workshop_items(
             # is given. Size is the directory's own, which is meaningless as a
             # wallpaper size but keeps "largest first" from putting every
             # scene at one end of the grid.
-            plays = workshop.playback(item, by_id)
+            try:
+                plays = workshop.playback(item, by_id)
+            except Exception as error:  # one item never costs the scan
+                if on_unseen is not None:
+                    on_unseen(
+                        item.directory,
+                        UnseenKind.NOT_A_WALLPAPER,
+                        f"its project.json could not be read ({type(error).__name__})",
+                    )
+                continue
             try:
                 info = item.directory.stat()
             except FileNotFoundError:

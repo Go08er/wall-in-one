@@ -139,6 +139,12 @@ _MAX_DECLARED: Final = 4096
 #: would throw and stop the engine.
 _MAX_SLIDER_MAGNITUDE: Final = 1e9
 
+#: A number the engine reads as an `int` (a combo's option value, through
+#: nlohmann's ``get<int>``): anything outside this does not fit, and is left
+#: out rather than handed over to be truncated.
+_INT_MIN: Final = -(2**31)
+_INT_MAX: Final = 2**31 - 1
+
 #: The declared property types a preset value is passed on for. The engine
 #: reads these from text (Property.h); the rest are labels, files and text
 #: fields, which a preset can't usefully set and a path must not come from.
@@ -299,7 +305,25 @@ def _read_project(directory: Path, on_unseen: OnUnseen | None = None) -> Worksho
 
     Never raises: a Workshop directory is written by Steam and edited by
     whoever likes, and one unreadable item must not cost the other forty-eight.
+    Whatever reading one raises (a value nothing here foresaw) is said for that
+    folder, as one whose `project.json` could not be read, and the scan goes
+    on. It is a "not a wallpaper" place, as a malformed file is: one item's
+    surprise must not stop the compiler either.
     """
+    try:
+        return _parse_project(directory, on_unseen)
+    except Exception as error:  # the promise above
+        if on_unseen is not None:
+            on_unseen(
+                directory,
+                UnseenKind.NOT_A_WALLPAPER,
+                f"its project.json could not be read ({type(error).__name__})",
+            )
+        return None
+
+
+def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem | None:
+    """`_read_project`'s work, which may raise for what nothing here foresaw."""
     project = directory / "project.json"
     try:
         raw = file_io.read_regular_text(
@@ -441,11 +465,25 @@ def _combo_key(option: object) -> str | None:
     value = option.get("value")
     if isinstance(value, bool):
         return None
-    if isinstance(value, int | float) and math.isfinite(value):
-        return str(int(value))
+    if isinstance(value, int | float):
+        return _engine_int(value)
     if isinstance(value, str) and valid_property_value(value):
         return value
     return None
+
+
+def _engine_int(value: int | float, *, integral: bool = False) -> str | None:
+    """``value`` as the engine's ``int`` of it, in decimal, or ``None`` if it doesn't fit.
+
+    An integer is judged as one: JSON allows any number of digits, and
+    `math.isfinite` on a 400-digit integer raises `OverflowError` rather than
+    answering. ``integral``: a float with a fraction is refused, not truncated.
+    """
+    if isinstance(value, int):
+        return str(value) if _INT_MIN <= value <= _INT_MAX else None
+    if not math.isfinite(value) or (integral and value != int(value)):
+        return None
+    return str(int(value)) if _INT_MIN <= value <= _INT_MAX else None
 
 
 def valid_property_value(value: str) -> bool:
@@ -476,9 +514,13 @@ def property_value(declared: Declared, value: object) -> str | None:
     if declared.type == "slider":
         if isinstance(value, bool) or not isinstance(value, int | float):
             return None
+        if isinstance(value, int):
+            # Compared as an integer: a JSON integer can have any number of
+            # digits, and turning one that size into a float raises.
+            return str(value) if abs(value) <= _MAX_SLIDER_MAGNITUDE else None
         if not math.isfinite(value) or abs(value) > _MAX_SLIDER_MAGNITUDE:
             return None
-        return str(value) if isinstance(value, int) else repr(float(value))
+        return repr(float(value))
     if declared.type == "color":
         if not isinstance(value, str):
             return None
@@ -496,9 +538,10 @@ def property_value(declared: Declared, value: object) -> str | None:
         if isinstance(value, bool):
             return None
         if isinstance(value, int | float):
-            if not math.isfinite(value) or value != int(value):
+            number = _engine_int(value, integral=True)
+            if number is None:
                 return None
-            text = str(int(value))
+            text = number
         elif isinstance(value, str):
             text = value
         else:

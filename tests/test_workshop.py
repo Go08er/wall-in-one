@@ -631,3 +631,101 @@ def test_only_what_no_renderer_runs_is_counted(tmp_path: Path) -> None:
     _preset(content, {"arcs": True}, dependency="999")  # needs its base: not counted
 
     assert workshop.unsupported_titles(_listed(tmp_path).values()) == ("Apple", "zebra")
+
+
+# -- one item never costs the scan (review of r11, finding 1) -------------------
+
+#: More digits than any float holds: `math.isfinite` on it raises OverflowError.
+HUGE = "1" + "0" * 400
+
+
+def _raw(content: Path, workshop_id: str, text: str, file: str = "") -> Path:
+    directory = content / workshop_id
+    directory.mkdir(parents=True)
+    (directory / "project.json").write_text(text, encoding="utf-8")
+    if file:
+        (directory / file).write_bytes(b"\x00")
+    return directory
+
+
+def test_a_huge_integer_in_a_combo_option_costs_nothing(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _install(content, "200", {"type": "video", "title": "Innocent", "file": "v.mp4"}, file="v.mp4")
+    _raw(
+        content,
+        "201",
+        '{"title":"x","type":"scene","file":"scene.json","general":{"properties":'
+        '{"k":{"type":"combo","value":1,"options":[{"value":' + HUGE + ',"label":"a"},'
+        '{"value":3,"label":"b"},{"value":2147483648,"label":"c"}]}}}}',
+    )
+
+    found = workshop.scan((tmp_path,), include_defaults=False)
+
+    assert {item.id for item in found} == {"200", "201"}
+    (scene,) = (item for item in found if item.id == "201")
+    assert scene.declared == (workshop.Declared("k", "combo", frozenset({"3"})),)
+
+
+def test_a_huge_integer_in_a_presets_values_costs_nothing(tmp_path: Path) -> None:
+    content = _content(tmp_path)
+    _install(content, "200", {"type": "video", "title": "Innocent", "file": "v.mp4"}, file="v.mp4")
+    _install(
+        content,
+        "201",
+        {
+            "title": "base",
+            "type": "scene",
+            "file": "scene.json",
+            "general": {
+                "properties": {
+                    "s": {"type": "slider", "value": 1},
+                    "k": {"type": "combo", "value": 1, "options": [{"value": 1, "label": "a"}]},
+                    "t": {"type": "slider", "value": 1},
+                }
+            },
+        },
+    )
+    _raw(
+        content,
+        "202",
+        '{"title":"p","preset":{"s":' + HUGE + ',"k":' + HUGE + ',"t":7},"dependency":"201"}',
+    )
+
+    found = _listed(tmp_path)
+
+    assert {"201", "202"} <= set(found)
+    preset = found["202"]
+    assert preset.unplayable is None
+    assert preset.scene_properties == (("t", "7"),), "the huge ones are left out"
+    assert any(item.title == "Innocent" for item in found.values())
+
+
+def test_whatever_reading_one_item_raises_is_said_and_the_rest_are_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one.library.model import UnseenKind
+
+    content = _content(tmp_path)
+    _install(content, "200", {"type": "video", "title": "Innocent", "file": "v.mp4"}, file="v.mp4")
+    broken = _install(content, "201", {"type": "scene", "title": "Boom", "file": "scene.json"})
+    real = workshop._declarations
+
+    def boom(general: object) -> tuple[workshop.Declared, ...]:
+        if isinstance(general, dict) and general.get("boom"):
+            raise RuntimeError("nothing foresaw this")
+        return real(general)
+
+    monkeypatch.setattr(workshop, "_declarations", boom)
+    (broken / "project.json").write_text(
+        json.dumps({"type": "scene", "title": "Boom", "file": "scene.json", "general": {"boom": 1}})
+    )
+    said: list[tuple[Path, UnseenKind, str]] = []
+
+    found = workshop.scan(
+        (tmp_path,), include_defaults=False, on_unseen=lambda p, k, w: said.append((p, k, w))
+    )
+
+    assert [item.id for item in found] == ["200"]
+    assert said == [
+        (broken, UnseenKind.NOT_A_WALLPAPER, "its project.json could not be read (RuntimeError)")
+    ]

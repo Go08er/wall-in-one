@@ -368,28 +368,47 @@ loaded document allows:
 |---|---|---|
 | `allow_web_wallpapers` | top level | `true` when the document the service holds has `allow_web_wallpapers = true`, `false` otherwise (no key, or a document below 8). Status is only answered with a document loaded; after a refused reload it is the one kept. Added in 0.4.1. |
 
-**An entry the service refuses is skipped.** Such an entry is never started
-and never shown: the service asks before its still goes up, and moves on to
-the next entry of the same playlist. When every entry of the playlist a
-display is on was refused (a taboo entry counts as unable to play too, but a
-playlist of taboo entries only keeps its taboo rules), the display plays the
-document's `default_playlist`, then `all-media`, each only when something of
-it can play. The display row then names that playlist as its `playlist_id`;
-`assigned_playlist_id`, `route_source` and `schedule_rule_id` stay what chose
-the refused one, and a rule's window ending onto the playlist already shown
-changes nothing on screen. When nothing can play at all, the display plays
-nothing, exactly as above, with the reason `this configuration doesn't allow
-web wallpapers` when every refused item is a web page and `no wallpaper here
-can start` otherwise. `next`, `previous`, `random` and the rotation step over
-refused entries; with nothing else to move to, `next` and `random` answer `no
-other wallpaper here can start`, which `last_error` doesn't keep. A skip is no
-fault either: nothing is a taboo, nothing is saved, and `last_error` and
-`renderer_failed` say nothing about it. The service's journal names each
-skipped entry with its reason. The service remembers what it refused for the
-document it holds and asks each item once; a reload, the file poll's
-included, forgets. With motion off (stopped, on battery, `dynamics_enabled =
-false`) nothing is started, so nothing is refused, and a scene's still shows
-as before; the next start of motion asks.
+**An entry the service refuses is skipped.** Such an entry is never started.
+While motion can start, the service asks before its still goes up, so it isn't
+shown either, and moves on to the next entry of the same playlist. With motion
+off (stopped, on battery with the battery policy on, a pause held from
+battery, `dynamics_enabled = false`) nothing is started, so nothing is asked:
+a scene's still shows as before, and the next start of motion asks. An item
+whose type changes between the service's read and the engine's own is refused
+by the engine's start instead; its still is up until the service moves on, at
+once. When every entry of the playlist a display is on was refused (a taboo
+entry counts as unable to play too, but a playlist of taboo entries only keeps
+its taboo rules), the display plays the document's `default_playlist`, then
+`all-media`, each only when something of it can play. The display row then
+names that stand-in as its `playlist_id`, as `entry_id` is its entry, and the
+playlist asked for as `stand_in_for`; `assigned_playlist_id`, `route_source`
+and `schedule_rule_id` stay what chose the refused one. A rule's window
+starting or ending onto a playlist whose stand-in is already shown changes
+nothing on screen, and a pick of a playlist known to be refused leaves the
+stand-in's rotation where it is. When nothing can play at all, the display
+plays nothing, exactly as above, with no `stand_in_for`: the reason is `this
+configuration doesn't allow web wallpapers` when every item it was refused
+(on its own playlist and on each that could stand in) is a web page, and `no
+wallpaper here can start` otherwise. `next`, `previous`, `random` and the
+rotation step over refused entries; with nothing else to move to, `next` and
+`random` answer `no other wallpaper here can start`, which `last_error`
+doesn't keep. A skip is no fault either: nothing is a taboo, nothing is saved,
+and `last_error` and `renderer_failed` say nothing about it. The service's
+journal names each skipped entry with its reason, and status lists the items.
+The service remembers what it refused for the document it holds and asks each
+item once, in one pass along a playlist however long the run of refused
+entries; a reload, the file poll's included, forgets.
+
+| Field | Where | Meaning |
+|---|---|---|
+| `stand_in_for` | each display row; top level | The playlist the display asked for (its pick, rule, assignment or the default) while `playlist_id` stands in for it. Absent otherwise, never `null`. At the top level, only when every connected display plays the same stand-in for the same playlist. Added in 0.4.1. |
+| `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none. Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
+| `refused_omitted` | top level | How many more items were refused than `refused` lists. Added in 0.4.1. |
+
+The status budget counts these: the largest playlist id once more per row and
+for the summary, and 16 rows of the largest Workshop id an entry renders with
+a 256-byte reason, for a document with a Wallpaper Engine entry (only such an
+entry is ever refused).
 
 Publishing steps down as for 6 and 7. A running service that isn't confirmed
 to read 8 gets the document without `allow_web_wallpapers`. One that predates

@@ -217,17 +217,30 @@ down to web wallpapers ("this configuration doesn't allow web wallpapers",
 since a document can lack the key for other reasons than the setting being
 off). The engine isn't started, and the entry is skipped, as the owner put
 it: "skip to next, if it's in a playlist alone, then use the default playlist
-in schedule". The service asks before anything of the entry is shown, so its
-still never goes up; the next entry of the same playlist takes over. A
-playlist with nothing left that can play gives way to the document's default
-playlist, then to All media; with nothing left at all the display plays
-nothing ([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never
-a taboo, so nothing is saved against the item; the service's journal says
-what it skipped and why. Each item is asked once per document: a reload
-(which turning the setting on or off is) asks again. A document from before
-schema 8 has no such key, so it allows no web page. While the document does
-allow web wallpapers nothing is checked, and such a scene fails in the engine
-as at 0.4.0.
+in schedule". While motion can start, the service asks before anything of the
+entry is shown, so its still doesn't go up, and the next entry of the same
+playlist takes over. While motion is off (on battery with the battery policy
+on, stopped, in a pause held from battery, or with motion turned off) nothing
+is asked, since nothing would be started: the entry's still shows, as any
+still-only entry's does, and the service asks once motion resumes. An item
+whose type changes between the service's read and the engine's own is refused
+by the engine's start instead: its still is up for that moment, and the
+service moves on at once. A playlist with nothing left that can play gives way
+to the document's default playlist, then to All media; with nothing left at
+all the display plays nothing
+([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never a taboo,
+so nothing is saved against the item. The service's journal says what it
+skipped and why, and so does its status
+([fields](runtime-config.md#nothing-to-play-schema-8)): `refused` lists the
+items, each with its reason, and a display that plays a stand-in names the
+playlist it asked for (`stand_in_for`), so the app and the companion don't
+present the stand-in as what was chosen. The app marks such an item "Can't
+play here", with the service's reason. Each item is asked once per document,
+in one pass along the playlist however many are refused: a reload (which
+turning the setting on or off is) asks again. A document from before schema 8
+has no such key, so it allows no web page. While the document does allow web
+wallpapers nothing is checked, and such a scene fails in the engine as at
+0.4.0.
 
 **No previews while it is off.** Owner: "it shouldn't load the papers to make a
 preview if web wallpapers are off." While the setting is off, nothing in a web

@@ -281,7 +281,9 @@ class StillMaker:
                     processes=processes,
                     size=display,
                     refused=folder_refused,
-                    allow_web=web,
+                    # Only a web page is told: for it alone is it ever true, and
+                    # `stills.ensure` has the safe default.
+                    **({"allow_web": True} if item.web_page else {}),
                 )
                 is not None
             ):
@@ -345,7 +347,12 @@ class StillMaker:
             )
             size = scenes.measured_capture_size("", outputs.discover(fallback))
             stills.capture_scene(
-                item, root, force=True, processes=processes, size=size, allow_web=web
+                item,
+                root,
+                force=True,
+                processes=processes,
+                size=size,
+                **({"allow_web": True} if item.web_page else {}),
             )
             if not self._processes.cancelled():
 

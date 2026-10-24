@@ -110,43 +110,50 @@ class ThumbnailLoader:
                 # inheriting, or being settled by, the old item's result.
                 callbacks.append(callback)
                 return
-            future = self._pool.submit(self._texture_for, item, self._processes, self._web_allowed)
+            future = self._pool.submit(self._job, item)
             self._pending[item] = future
             self._waiters[item] = [callback]
         future.add_done_callback(lambda done: self._finish(item, done))
+
+    def _job(self, item: MediaItem) -> Gdk.Texture | None:
+        """One request, on the pool: the setting is read now, not when it was queued.
+
+        A web wallpaper while they are off is answered ``None`` before anything
+        of it is looked at. While they are on its ffmpeg runs under a
+        cancellation that also ends when they are turned off, which ends that
+        one child (by its own process group, nothing by name).
+        """
+        if not item.web_page:
+            return self._texture_for(item, self._processes)
+        if workshop.previews_off(item, self._web_allowed()):
+            return None
+        gated = worker_processes.GatedCancellation(self._processes, self._web_allowed)
+        texture = self._texture_for(item, gated, allow_web=True)
+        return None if workshop.previews_off(item, self._web_allowed()) else texture
 
     @staticmethod
     def _texture_for(
         item: MediaItem,
         processes: worker_processes.Cancellation | None = None,
-        web_allowed: Callable[[], bool] = lambda: False,
+        *,
+        allow_web: bool = False,
     ) -> Gdk.Texture | None:
         """Cache lookup, generation if needed, and the decode. Off-thread.
 
         `lookup` validates the entry before answering, so a thumbnail
         truncated by a power cut is regenerated here rather than failing to
-        decode in a tile.
-
-        A web wallpaper while they are off is answered ``None`` before any of
-        that: setting read now, not when the request was queued. If they are
-        turned off while its ffmpeg runs, the poll below ends that one child.
+        decode in a tile. ``allow_web`` is only true when `_job` has just seen
+        ``allow_web_wallpapers`` on.
         """
-        allowed = web_allowed()
-        if workshop.previews_off(item, allowed):
-            return None
-        if item.web_page and processes is not None:
-            processes = worker_processes.GatedCancellation(processes, web_allowed)
         try:
-            path = thumbnails.lookup(item, allow_web=allowed) or (
-                thumbnails.generate(item, processes=processes, allow_web=allowed)
+            path = thumbnails.lookup(item, allow_web=allow_web) or (
+                thumbnails.generate(item, processes=processes, allow_web=allow_web)
                 if processes is not None
-                else thumbnails.generate(item, allow_web=allowed)
+                else thumbnails.generate(item, allow_web=allow_web)
             )
         except thumbnails.ThumbnailError:
             # A wallpaper we cannot thumbnail is not an error worth stopping
             # for; the tile falls back to a placeholder.
-            return None
-        if workshop.previews_off(item, web_allowed()):
             return None
         try:
             return Gdk.Texture.new_from_filename(str(path))

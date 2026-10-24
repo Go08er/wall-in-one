@@ -366,6 +366,7 @@ TEST_WAYLAND_REFUSAL: Final = _SANDBOX[2]
 
 # Only now import the application: nothing may resolve a path before the
 # sandbox is the baseline.
+from tests.web_previews import watch, web_folder  # noqa: E402, F401  (fixtures: web previews)
 from wall_in_one.theme import noctalia  # noqa: E402
 
 #: The account's real home from the password database, not ``$HOME``.

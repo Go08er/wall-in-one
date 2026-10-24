@@ -106,17 +106,10 @@ def test_turning_web_off_when_web_pages_are_all_that_plays_publishes_nothing_to_
 ) -> None:
     """Review probe `probe_web_only_off.py`. Before: All media without `entries`, unparseable."""
     on = _publish(web_only, allow_web=True)
-    document = _document()
-    assert document["schema_version"] == runtime_config.NOTHING_TO_PLAY_SCHEMA_VERSION
-    assert document["settings"]["allow_web_wallpapers"] is True
-    assert f'scene_id = "{WEB}"' in paths.runtime_config_path().read_text()
-    assert not on.left_out
-
+    on_text = paths.runtime_config_path().read_text()
     off = _publish(web_only, allow_web=False)
     document = _document()
-    assert document["schema_version"] == runtime_config.NOTHING_TO_PLAY_SCHEMA_VERSION
-    assert "allow_web_wallpapers" not in document["settings"]
-    assert document["default_playlist"] == ALL_MEDIA
+    # The probe's point first: what the service is given to play once web is off.
     assert document["playlists"] == [
         {
             "id": ALL_MEDIA,
@@ -125,13 +118,22 @@ def test_turning_web_off_when_web_pages_are_all_that_plays_publishes_nothing_to_
             "entries": [],
         }
     ]
+    assert document["schema_version"] == 8
+    assert "allow_web_wallpapers" not in document["settings"]
+    assert document["default_playlist"] == ALL_MEDIA
     assert runtime_config.left_out_notice(off.left_out) == (
         "Nothing to play: web wallpapers are off."
     )
     # What it replaced is kept, for a service that refuses it (the GUI's guard).
-    assert off.replaced is not None and f'scene_id = "{WEB}"' in off.replaced
+    assert off.replaced == on_text
     assert runtime_config.retained_web_wallpapers(text=off.replaced) == ("Electric Eye",)
     assert runtime_config.retained_web_wallpapers() == ()
+    # While it was on, the page played, and the document said it may.
+    allowed = tomllib.loads(on_text)
+    assert allowed["schema_version"] == runtime_config.NOTHING_TO_PLAY_SCHEMA_VERSION
+    assert allowed["settings"]["allow_web_wallpapers"] is True
+    assert f'scene_id = "{WEB}"' in on_text
+    assert not on.left_out
 
 
 def test_control_a_still_beside_the_page_plays_and_says_nothing(

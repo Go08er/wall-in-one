@@ -75,19 +75,48 @@ palette = {{ kind = "keep", mode = "keep" }}
     config
 }
 
-fn spawn(config: &Path, socket: &Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
-        // Never a desktop's compositor.
-        .env_remove("WAYLAND_DISPLAY")
-        .env_remove("WAYLAND_SOCKET")
-        .arg("--config")
-        .arg(config)
-        .arg("--socket")
-        .arg(socket)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+/// A spawned service that is killed and reaped when it goes out of scope, so a
+/// failing assertion never leaves it running (holding cargo's output pipe).
+struct ServiceChild(Child);
+
+impl Drop for ServiceChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+impl std::ops::Deref for ServiceChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ServiceChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+fn spawn(config: &Path, socket: &Path) -> ServiceChild {
+    ServiceChild(
+        Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"))
+            // Never a desktop's compositor.
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET")
+            .arg("--config")
+            .arg(config)
+            .arg("--socket")
+            .arg(socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    )
 }
 
 fn wait_for_socket(socket: &Path) {
@@ -231,4 +260,31 @@ fn a_wedged_listener_is_an_owner_and_never_hangs_startup() {
     assert!(socket.exists(), "an owned socket is never removed");
     drop(listener);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_failing_assertion_never_leaves_the_service_running() {
+    // r13b N-h: these tests' services were bare `Child`ren, which a panic drops without a
+    // kill. The service then outlives the test, holding cargo's output pipe.
+    let root = directory("guarded");
+    let config = fixture(&root);
+    let socket = root.join("runtime.sock");
+    let mut pid = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let child = spawn(&config, &socket);
+        pid = Some(child.id());
+        wait_for_socket(&socket);
+        panic!("an assertion fails while the service runs");
+    }));
+    assert!(outcome.is_err());
+    let pid = pid.expect("the service was started") as libc::pid_t;
+    // The guard killed and reaped it. Whatever happened, end this one process.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if alive {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+    assert!(!alive, "the service {pid} outlived the failed test");
 }

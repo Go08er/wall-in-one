@@ -1370,7 +1370,7 @@ impl SystemDriver {
             && let Some(refusal) =
                 workshop::refusal_without_web(self.workshop_home.as_deref(), scene)
         {
-            return Err(StartError::Refused(refusal));
+            return Err(StartError::Refused(format!("{refusal}; its still stays")));
         }
         // Its own dials over the defaults (docs/renderer-settings.md).
         let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());

@@ -9,6 +9,7 @@
 //! the item's type itself, just before it starts the engine, and refuses a
 //! web page or an item it can't classify (docs/wallpaper-engine.md).
 
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -36,6 +37,24 @@ pub fn engine_home() -> Option<PathBuf> {
         .filter(|home| home.is_absolute())
 }
 
+/// Why the engine must not be started for one Workshop item while web
+/// wallpapers aren't allowed. Each reason says what it is about: only a web
+/// page is about web wallpapers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// The item is a web page. Every other refusal is an item the service
+    /// can't find, read or play.
+    pub web_page: bool,
+    /// What the service says, naming the item.
+    pub reason: String,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Why the engine must not be started for Workshop item `id` while web
 /// wallpapers aren't allowed, or None when it may.
 ///
@@ -45,21 +64,38 @@ pub fn engine_home() -> Option<PathBuf> {
 /// page, a type the engine doesn't play, a missing or unreadable
 /// `project.json` (or one that is a link, not a regular file, or larger than
 /// the app's scan reads), and an item found in none of them are refused.
-pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<String> {
+pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<Refusal> {
     let why = match home {
-        None => Some("can't be checked: the service has no home folder".to_string()),
-        Some(_) if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) => {
-            Some("has no Workshop id the service can check".to_string())
-        }
-        Some(home) => classify(home, id),
-    }?;
-    Some(format!(
-        "web wallpapers are off: Workshop item {id} {why}, so linux-wallpaperengine was not \
-         started for it; its still stays"
-    ))
+        None => Why::Other(format!(
+            "Workshop item {id} can't be checked: the service has no home folder"
+        )),
+        Some(_) if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) => Why::Other(
+            format!("Workshop item {id:?} has no Workshop id the service can check"),
+        ),
+        Some(home) => classify(home, id)?,
+    };
+    Some(match why {
+        Why::WebPage => Refusal {
+            web_page: true,
+            reason: format!(
+                "this configuration doesn't allow web wallpapers: Workshop item {id} is a web \
+                 page, so linux-wallpaperengine was not started for it"
+            ),
+        },
+        Why::Other(why) => Refusal {
+            web_page: false,
+            reason: format!("{why}, so linux-wallpaperengine was not started for it"),
+        },
+    })
 }
 
-fn classify(home: &Path, id: &str) -> Option<String> {
+/// What `classify` found wrong with an item.
+enum Why {
+    WebPage,
+    Other(String),
+}
+
+fn classify(home: &Path, id: &str) -> Option<Why> {
     let mut found = false;
     for folder in ENGINE_WORKSHOP_FOLDERS {
         let item = home.join(folder).join(id);
@@ -69,60 +105,94 @@ fn classify(home: &Path, id: &str) -> Option<String> {
             Ok(_) => continue,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => {
-                return Some(format!("can't be checked: {}: {error}", item.display()));
+                return Some(Why::Other(format!(
+                    "Workshop item {id} can't be checked: {}: {error}",
+                    item.display()
+                )));
             }
         }
         found = true;
         match project_type(&item.join("project.json")) {
-            Ok(kind) if kind == "web" => return Some("is a web page".to_string()),
+            Ok(kind) if kind == "web" => return Some(Why::WebPage),
             Ok(kind) if kind == "scene" || kind == "video" => {}
             Ok(kind) => {
-                return Some(format!(
-                    "has a type the service doesn't play ({kind:?}) in {}",
+                return Some(Why::Other(format!(
+                    "Workshop item {id} has a type the service doesn't play ({kind:?}) in {}",
                     item.display()
-                ));
+                )));
             }
-            Err(error) => return Some(format!("can't be checked: {error}")),
+            Err(ProjectError::Unreadable(error)) => {
+                return Some(Why::Other(format!(
+                    "Workshop item {id}'s project file can't be read: {error}"
+                )));
+            }
+            Err(ProjectError::Unparsable(error)) => {
+                return Some(Why::Other(format!(
+                    "Workshop item {id}'s project file can't be parsed: {error}"
+                )));
+            }
         }
     }
     if found {
         None
     } else {
-        Some("can't be checked: its Workshop folder wasn't found".to_string())
+        // A Steam library on another drive (`libraryfolders.vdf`) is one the
+        // app lists and the engine never looks in.
+        Some(Why::Other(format!(
+            "Workshop item {id} wasn't found where linux-wallpaperengine looks: Steam's, the \
+             Flatpak's and the Snap's Workshop folders under {}, never another Steam library",
+            home.display()
+        )))
     }
+}
+
+/// Why an item's `project.json` gives no type.
+enum ProjectError {
+    /// It can't be opened or read, or isn't a regular file of a size the
+    /// app's scan reads.
+    Unreadable(String),
+    /// It is read, but isn't JSON or names no type.
+    Unparsable(String),
 }
 
 /// The item's `type`, lower-cased as the engine lower-cases it (ASCII only,
 /// nothing trimmed). Read without following a final link, bounded, from a
 /// regular file, as the app's scan reads it.
-fn project_type(path: &Path) -> Result<String, String> {
+fn project_type(path: &Path) -> Result<String, ProjectError> {
+    let unreadable =
+        |error: std::io::Error| ProjectError::Unreadable(format!("{}: {error}", path.display()));
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+        .map_err(unreadable)?;
+    let metadata = file.metadata().map_err(unreadable)?;
     if !metadata.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
+        return Err(ProjectError::Unreadable(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
     }
     let mut bytes = Vec::new();
     file.take(MAX_PROJECT_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+        .map_err(unreadable)?;
     if bytes.len() as u64 > MAX_PROJECT_BYTES {
-        return Err(format!(
+        return Err(ProjectError::Unreadable(format!(
             "{} is larger than {} KiB",
             path.display(),
             MAX_PROJECT_BYTES / 1024
-        ));
+        )));
     }
-    let project: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{} is not JSON: {error}", path.display()))?;
+    let project: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        ProjectError::Unparsable(format!("{} is not JSON: {error}", path.display()))
+    })?;
     match project.get("type") {
         Some(serde_json::Value::String(kind)) => Ok(kind.to_ascii_lowercase()),
-        _ => Err(format!("{} names no type", path.display())),
+        _ => Err(ProjectError::Unparsable(format!(
+            "{} names no type",
+            path.display()
+        ))),
     }
 }
 
@@ -162,8 +232,14 @@ mod tests {
         assert_eq!(refusal_without_web(Some(&home), "2"), None);
         for id in ["3", "4"] {
             let refused = refusal_without_web(Some(&home), id).unwrap();
-            assert!(refused.contains("is a web page"), "{refused}");
-            assert!(refused.starts_with("web wallpapers are off"), "{refused}");
+            assert!(refused.web_page);
+            assert_eq!(
+                refused.reason,
+                format!(
+                    "this configuration doesn't allow web wallpapers: Workshop item {id} is a \
+                     web page, so linux-wallpaperengine was not started for it"
+                )
+            );
         }
         fs::remove_dir_all(home).unwrap();
     }
@@ -194,6 +270,93 @@ mod tests {
             );
         }
         assert!(refusal_without_web(None, "1").is_some());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn only_a_web_page_is_blamed_on_web_wallpapers() {
+        // r13 L6: every refusal was worded "web wallpapers are off: …", also for an item
+        // that isn't a web page at all, such as a scene on a second Steam library.
+        let home = home("worded");
+        item(&home, 0, "40", r#"{"type":"web","file":"index.html"}"#);
+        item(&home, 0, "41", r#"{"type":"application"}"#);
+        item(&home, 0, "42", "{not json");
+        item(&home, 0, "43", r#"{"title":"no type"}"#);
+        let unreadable = item(&home, 0, "44", r#"{"type":"scene"}"#);
+        fs::remove_file(unreadable.join("project.json")).unwrap();
+        let said = |home: Option<&Path>, id: &str| {
+            refusal_without_web(home, id)
+                .map(|refusal| refusal.to_string())
+                .unwrap_or_default()
+        };
+        let base = home.join(ENGINE_WORKSHOP_FOLDERS[0]);
+        let cases = [
+            (
+                "40",
+                "this configuration doesn't allow web wallpapers: Workshop item 40 is a web \
+                 page, so linux-wallpaperengine was not started for it"
+                    .to_string(),
+            ),
+            (
+                "41",
+                format!(
+                    "Workshop item 41 has a type the service doesn't play (\"application\") in \
+                     {}, so linux-wallpaperengine was not started for it",
+                    base.join("41").display()
+                ),
+            ),
+            (
+                "42",
+                format!(
+                    "Workshop item 42's project file can't be parsed: {} is not JSON",
+                    base.join("42/project.json").display()
+                ),
+            ),
+            (
+                "43",
+                format!(
+                    "Workshop item 43's project file can't be parsed: {} names no type, so \
+                     linux-wallpaperengine was not started for it",
+                    base.join("43/project.json").display()
+                ),
+            ),
+            (
+                "44",
+                format!(
+                    "Workshop item 44's project file can't be read: {}: ",
+                    base.join("44/project.json").display()
+                ),
+            ),
+            (
+                "45",
+                format!(
+                    "Workshop item 45 wasn't found where linux-wallpaperengine looks: Steam's, \
+                     the Flatpak's and the Snap's Workshop folders under {}, never another \
+                     Steam library, so linux-wallpaperengine was not started for it",
+                    home.display()
+                ),
+            ),
+            (
+                "x1",
+                "Workshop item \"x1\" has no Workshop id the service can check, so \
+                 linux-wallpaperengine was not started for it"
+                    .to_string(),
+            ),
+        ];
+        for (id, expected) in cases {
+            let refused = said(Some(&home), id);
+            assert!(refused.starts_with(&expected), "{id}: {refused}");
+            assert_eq!(
+                refused.contains("web wallpapers"),
+                id == "40",
+                "{id}: {refused}"
+            );
+        }
+        assert_eq!(
+            said(None, "1"),
+            "Workshop item 1 can't be checked: the service has no home folder, so \
+             linux-wallpaperengine was not started for it"
+        );
         fs::remove_dir_all(home).unwrap();
     }
 

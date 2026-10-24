@@ -11421,7 +11421,7 @@ fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
     let snapshot = status(&mut runtime, noon());
     let said = snapshot["last_error"].as_str().unwrap();
     assert!(
-        said.contains("web wallpapers are off") && said.contains("is a web page"),
+        said.contains("doesn't allow web wallpapers") && said.contains("is a web page"),
         "{said}"
     );
     assert_eq!(snapshot["motion_active"], false);
@@ -11457,7 +11457,7 @@ fn an_item_whose_type_cant_be_read_is_refused_while_web_is_off() {
     thread::sleep(Duration::from_millis(300));
     assert!(!arguments.exists());
     let said = status(&mut runtime, noon())["last_error"].to_string();
-    assert!(said.contains("its Workshop folder wasn't found"), "{said}");
+    assert!(said.contains("wasn't found where linux-wallpaperengine looks"), "{said}");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();

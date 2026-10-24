@@ -1,3 +1,6 @@
+use crate::dials::{
+    self, SceneOverrides, VideoFit, VideoHiddenTrigger, VideoOverrides, VideoScale,
+};
 use crate::protocol::MAX_RESPONSE_BYTES;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -16,7 +19,17 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// out for one without it (docs/wallpaper-engine.md). Schema 6 carries
 /// everything schema 5 does.
 pub const PRESET_SCHEMA_VERSION: u32 = 6;
-pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[4, SCHEMA_VERSION, PRESET_SCHEMA_VERSION];
+/// A document with a renderer dial a schema-6 service doesn't know: a
+/// per-wallpaper `video` or `scene` table, or a `[renderer]` key added for
+/// the dials (docs/renderer-settings.md). Written only then, and asked for
+/// first, like 5 and 6. Carries everything 6 does.
+pub const DIALS_SCHEMA_VERSION: u32 = 7;
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[
+    4,
+    SCHEMA_VERSION,
+    PRESET_SCHEMA_VERSION,
+    DIALS_SCHEMA_VERSION,
+];
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The optional sibling of `runtime.toml` that carries per-playlist rotation
@@ -161,6 +174,49 @@ pub struct RendererSettings {
     pub scene_pause_when_covered: bool,
     pub scene_scaling: SceneScaling,
     pub scene_clamp: SceneClamp,
+    // The dials added with schema 7 (docs/renderer-settings.md). Each is
+    // written only when it isn't its default, so every one has a default
+    // here and an older document reads exactly as it always did.
+    #[serde(default)]
+    pub video_fit: VideoFit,
+    #[serde(default = "one")]
+    pub video_speed: f64,
+    #[serde(default)]
+    pub video_brightness: i16,
+    #[serde(default)]
+    pub video_contrast: i16,
+    #[serde(default)]
+    pub video_saturation: i16,
+    #[serde(default)]
+    pub video_gamma: i16,
+    #[serde(default)]
+    pub video_rotate: u16,
+    #[serde(default)]
+    pub video_deband: bool,
+    #[serde(default)]
+    pub video_scale: VideoScale,
+    #[serde(default)]
+    pub video_hidden_trigger: VideoHiddenTrigger,
+    #[serde(default)]
+    pub scene_pause_only_active: bool,
+    #[serde(default = "yes")]
+    pub scene_automute: bool,
+    #[serde(default = "yes")]
+    pub scene_audio_processing: bool,
+    #[serde(default = "yes")]
+    pub scene_particles: bool,
+    #[serde(default = "yes")]
+    pub scene_mouse: bool,
+    #[serde(default = "yes")]
+    pub scene_parallax: bool,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -273,6 +329,12 @@ pub struct Entry {
     /// `scene_base`; empty means none.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+    /// A video wallpaper's own dials (schema 7); `None` follows `[renderer]`.
+    #[serde(default)]
+    pub video: Option<VideoOverrides>,
+    /// A scene's own dials (schema 7); `None` follows `[renderer]`.
+    #[serde(default)]
+    pub scene: Option<SceneOverrides>,
     #[serde(default)]
     pub taboo: Option<EntryTaboo>,
     pub palette: Palette,
@@ -684,7 +746,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !SUPPORTED_SCHEMA_VERSIONS.contains(&self.schema_version) {
             return invalid(format!(
-                "schema_version {} is unsupported; expected 4, {SCHEMA_VERSION} or {PRESET_SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
+                "schema_version {} is unsupported; expected 4, {SCHEMA_VERSION}, {PRESET_SCHEMA_VERSION} or {DIALS_SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
                 self.schema_version
             ));
         }
@@ -719,6 +781,16 @@ impl Config {
         }
         if self.renderer.scene_fps == 0 || self.renderer.scene_fps > 240 {
             return invalid("scene_fps must be between 1 and 240");
+        }
+        if let Some(problem) = dials::renderer_problem(&self.renderer) {
+            return invalid(problem);
+        }
+        if self.schema_version < DIALS_SCHEMA_VERSION
+            && dials::renderer_needs_schema_seven(&self.renderer)
+        {
+            return invalid(format!(
+                "a renderer dial other than its default requires schema_version {DIALS_SCHEMA_VERSION}"
+            ));
         }
         bounded_nonempty("renderer layer", &self.renderer.layer, MAX_OPTION_BYTES)?;
         for (label, path) in [
@@ -809,6 +881,31 @@ impl Config {
                     && (entry.scene_base.is_some() || !entry.properties.is_empty())
                 {
                     return invalid("only a scene entry may carry scene_base or properties");
+                }
+                match (&entry.video, &entry.scene, entry.kind) {
+                    (None, None, _) => {}
+                    (Some(own), None, EntryKind::Video) => {
+                        if let Some(problem) = dials::video_problem(own) {
+                            return invalid(problem);
+                        }
+                    }
+                    (None, Some(own), EntryKind::Scene) => {
+                        if let Some(problem) = dials::scene_problem(own) {
+                            return invalid(problem);
+                        }
+                    }
+                    _ => {
+                        return invalid(
+                            "only a video entry may carry video dials, and only a scene entry scene dials",
+                        );
+                    }
+                }
+                if self.schema_version < DIALS_SCHEMA_VERSION
+                    && (entry.video.is_some() || entry.scene.is_some())
+                {
+                    return invalid(format!(
+                        "an entry's own video or scene dials require schema_version {DIALS_SCHEMA_VERSION}"
+                    ));
                 }
                 if self.schema_version < PRESET_SCHEMA_VERSION
                     && (entry.scene_base.is_some() || !entry.properties.is_empty())

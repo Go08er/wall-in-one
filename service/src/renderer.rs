@@ -2,6 +2,7 @@ use crate::config::{
     Entry, EntryKind, Palette, PaletteSource, RendererSettings, ThemeMode, VideoInterpolation,
     VideoWhenHidden,
 };
+use crate::dials;
 use crate::outputs::{Output, OutputSource, WaylandOutputs};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -661,9 +662,10 @@ impl Mpvpaper {
             .join(mpv_socket_name(self.socket_namespace, output));
         let socket =
             (socket.as_os_str().as_bytes().len() <= MAX_SOCKET_PATH_BYTES).then_some(socket);
+        let own = entry.video.as_ref();
         let mut options = vec![
             "loop-file=inf".to_string(),
-            "panscan=1.0".to_string(),
+            dials::mpv_panscan(settings, own).to_string(),
             "terminal=no".to_string(),
             format!("mute={}", if settings.video_muted { "yes" } else { "no" }),
             format!("volume={}", settings.video_volume),
@@ -683,6 +685,9 @@ impl Mpvpaper {
             settings.video_interpolation,
             refresh_millihz,
         ));
+        // The dials, each only when set (docs/renderer-settings.md): a video
+        // nobody adjusted runs with exactly the options it always had.
+        options.extend(dials::mpv_options(settings, own));
         let mut command = Command::new(&settings.mpvpaper_program);
         command.arg("--layer").arg(&settings.layer);
         match settings.video_when_hidden {
@@ -693,6 +698,9 @@ impl Mpvpaper {
                 command.arg("--auto-stop");
             }
             VideoWhenHidden::Play => {}
+        }
+        if let Some(mode) = dials::mpvpaper_auto_mode(settings) {
+            command.arg("--auto-mode").arg(mode);
         }
         command
             .arg("-o")
@@ -1296,12 +1304,18 @@ impl SystemDriver {
             .map(|outputs| outputs.into_iter().map(|output| output.name).collect())
     }
 
-    fn add_scene_target(&self, command: &mut Command, output: &str, scene: &str) {
+    fn add_scene_target(
+        &self,
+        command: &mut Command,
+        output: &str,
+        scene: &str,
+        dials: &dials::SceneDials,
+    ) {
         command.arg("--screen-root").arg(output);
-        if let Some(scaling) = self.settings.scene_scaling.option() {
+        if let Some(scaling) = dials.scaling.option() {
             command.arg("--scaling").arg(scaling);
         }
-        if let Some(clamp) = self.settings.scene_clamp.option() {
+        if let Some(clamp) = dials.clamp.option() {
             command.arg("--clamp").arg(clamp);
         }
         command.arg("--bg").arg(scene);
@@ -1318,22 +1332,15 @@ impl SystemDriver {
         let scene = entry
             .rendered_scene()
             .ok_or_else(|| StartError::Failed("scene entry has no scene id".into()))?;
+        // Its own dials over the defaults (docs/renderer-settings.md).
+        let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
         command
             .arg("--layer")
             .arg(&self.settings.layer)
             .arg("--fps")
-            .arg(self.settings.scene_fps.to_string());
-        if self.settings.scene_muted {
-            command.arg("--silent");
-        } else {
-            command
-                .arg("--volume")
-                .arg(self.settings.scene_volume.to_string());
-        }
-        if !self.settings.scene_pause_when_covered {
-            command.arg("--no-fullscreen-pause");
-        }
+            .arg(dials.fps.to_string());
+        command.args(dials::scene_flags(&self.settings, dials));
         // One process-wide override each (ApplicationContext.cpp's
         // `--set-property`), as two arguments of their own: the loader
         // bounded both halves and the name can't start with '-' or hold '='.
@@ -1342,10 +1349,10 @@ impl SystemDriver {
         }
         if output.is_empty() {
             for connector in self.current_outputs().map_err(StartError::Failed)? {
-                self.add_scene_target(&mut command, &connector, scene);
+                self.add_scene_target(&mut command, &connector, scene, &dials);
             }
         } else {
-            self.add_scene_target(&mut command, output, scene);
+            self.add_scene_target(&mut command, output, scene, &dials);
         }
         command
             .stdin(Stdio::null())

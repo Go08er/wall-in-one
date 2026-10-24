@@ -5,6 +5,7 @@
 //! versioned TOML document.
 
 pub mod config;
+pub mod dials;
 pub mod outputs;
 pub mod power;
 pub mod protocol;

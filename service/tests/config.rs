@@ -57,10 +57,10 @@ fn override_fields_are_never_runtime_toml_keys() {
             assert!(error.contains("unknown field"), "{schema} {key}: {error}");
         }
     }
-    let error = Config::from_bytes(document(7).into_bytes())
+    let error = Config::from_bytes(document(8).into_bytes())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("expected 4, 5 or 6"), "{error}");
+    assert!(error.contains("expected 4, 5, 6 or 7"), "{error}");
 }
 
 fn config_directory(label: &str) -> PathBuf {
@@ -540,7 +540,7 @@ fn a_preset_needs_schema_six_and_schema_six_carries_everything_five_does() {
     assert!(battery.settings.stop_animations_on_battery);
     assert_eq!(
         wall_in_one_service::config::SUPPORTED_SCHEMA_VERSIONS,
-        &[4, 5, 6]
+        &[4, 5, 6, 7]
     );
 }
 
@@ -622,6 +622,97 @@ fn a_preset_carries_an_optional_base_and_bounded_properties() {
         "still = \"/tmp/one.png\"\nscene_base = \"12\"",
     );
     assert!(refusal(&base_on_a_still).contains("only a scene entry"));
+}
+
+#[test]
+fn the_renderer_dials_need_schema_seven_and_stay_in_bounds() {
+    let video_dials = "motion = \"/tmp/two.mp4\"\nvideo = { speed = 1.5 }";
+    let global_dial = "scene_clamp = \"\"\nvideo_rotate = 90\n";
+    for schema in [4, 5, 6] {
+        let own = document(schema).replace("motion = \"/tmp/two.mp4\"", video_dials);
+        assert!(
+            refusal(&own).contains("require schema_version 7"),
+            "{schema}"
+        );
+        let global = document(schema).replace("scene_clamp = \"\"\n", global_dial);
+        assert!(
+            refusal(&global).contains("requires schema_version 7"),
+            "{schema}"
+        );
+        // A dial written at its default is no dial: an older document's shape.
+        let default = document(schema).replace(
+            "scene_clamp = \"\"\n",
+            "scene_clamp = \"\"\nvideo_speed = 1.0\nscene_particles = true\n",
+        );
+        let parsed: Config = toml::from_str(&default).unwrap();
+        parsed.validate().unwrap();
+    }
+    let both = document(7)
+        .replace("motion = \"/tmp/two.mp4\"", video_dials)
+        .replace("scene_clamp = \"\"\n", global_dial);
+    let parsed: Config = toml::from_str(&both).unwrap();
+    parsed.validate().unwrap();
+    assert_eq!(parsed.renderer.video_rotate, 90);
+    assert_eq!(
+        parsed.playlists[0].entries[1].video.as_ref().unwrap().speed,
+        Some(1.5)
+    );
+
+    for (needle, replacement, expected) in [
+        (
+            "motion = \"/tmp/two.mp4\"",
+            "motion = \"/tmp/two.mp4\"\nvideo = { speed = 9.0 }",
+            "speed",
+        ),
+        (
+            "motion = \"/tmp/two.mp4\"",
+            "motion = \"/tmp/two.mp4\"\nvideo = { rotate = 45 }",
+            "rotate",
+        ),
+        (
+            "motion = \"/tmp/two.mp4\"",
+            "motion = \"/tmp/two.mp4\"\nvideo = { gamma = -101 }",
+            "gamma",
+        ),
+        (
+            "scene_clamp = \"\"\n",
+            "scene_clamp = \"\"\nvideo_speed = 0.1\n",
+            "video_speed",
+        ),
+        (
+            "scene_clamp = \"\"\n",
+            "scene_clamp = \"\"\nvideo_brightness = 200\n",
+            "video_brightness",
+        ),
+    ] {
+        let message = refusal(&document(7).replace(needle, replacement));
+        assert!(message.contains(expected), "{replacement}: {message}");
+    }
+    // Typed: a word where a number goes, or an option nobody allowed, never loads.
+    for replacement in [
+        "motion = \"/tmp/two.mp4\"\nvideo = { speed = \"1.5 script=/x.lua\" }",
+        "motion = \"/tmp/two.mp4\"\nvideo = { script = \"/x.lua\" }",
+        "motion = \"/tmp/two.mp4\"\nvideo = { fit = \"fill include=/etc/passwd\" }",
+        // Not a dial: mpv's loop goes back to the file's start, not `start`.
+        "motion = \"/tmp/two.mp4\"\nvideo = { start = 42 }",
+    ] {
+        let decoded = toml::from_str::<Config>(
+            &document(7).replace("motion = \"/tmp/two.mp4\"", replacement),
+        );
+        assert!(decoded.is_err(), "{replacement}");
+    }
+    let video_on_a_still = document(7).replace(
+        "still = \"/tmp/one.png\"",
+        "still = \"/tmp/one.png\"\nvideo = { speed = 2.0 }",
+    );
+    assert!(refusal(&video_on_a_still).contains("only a video entry"));
+    let scene_dials = with_preset_in(7, "scene = { fps = 0 }");
+    assert!(refusal(&scene_dials).contains("fps"));
+    let scene_on_video = document(7).replace(
+        "motion = \"/tmp/two.mp4\"",
+        "motion = \"/tmp/two.mp4\"\nscene = { fps = 60 }",
+    );
+    assert!(refusal(&scene_on_video).contains("only a video entry"));
 }
 
 #[test]

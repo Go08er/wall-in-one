@@ -610,6 +610,183 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     driver.stop();
     fs::remove_dir_all(root).unwrap();
 }
+/// A stand-in renderer that writes each argument on a line of its own.
+fn argument_recorder(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let arguments = root.join(format!("{name}-arguments"));
+    let program = root.join(name);
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done >> {:?}\nsleep 30\n",
+            arguments
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    (program, arguments)
+}
+
+#[test]
+fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("video-dials");
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let (mpvpaper, arguments) = argument_recorder(&root, "mpvpaper");
+    let document = config(&noctalia, &mpvpaper, false)
+        .replace("schema_version = 4", "schema_version = 7")
+        .replace(
+            "scene_clamp = \"\"\n",
+            "scene_clamp = \"\"\nvideo_speed = 2.0\nvideo_contrast = -20\nvideo_scale = \"lanczos\"\nvideo_hidden_trigger = \"max\"\n",
+        )
+        .replace(
+            "motion = \"/tmp/two.mp4\"",
+            "motion = \"/tmp/two.mp4\"\nvideo = { fit = \"stretch\", speed = 0.5, gamma = 15, rotate = 90, deband = true }",
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    parsed.validate().unwrap();
+    let video = parsed.playlists[0].entries[1].clone();
+    let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
+    without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let words: Vec<String> = fs::read_to_string(&arguments)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let position = |word: &str| words.iter().position(|w| w == word);
+    let auto = position("--auto-mode").expect("--auto-mode");
+    assert_eq!(words[auto + 1], "max");
+    let options = &words[position("-o").expect("-o") + 1];
+    let options: Vec<&str> = options.split(' ').collect();
+    for expected in [
+        "loop-file=inf",
+        "panscan=0.0",
+        "keepaspect=no",
+        "speed=0.50",
+        "contrast=-20",
+        "gamma=15",
+        "video-rotate=90",
+        "deband=yes",
+        "scale=lanczos",
+    ] {
+        assert!(
+            options.contains(&expected),
+            "missing {expected}: {options:?}"
+        );
+    }
+    assert!(
+        !options
+            .iter()
+            .any(|option| option.starts_with("brightness"))
+    );
+    driver.stop();
+
+    // A video with no dials of its own, under default dials, gets today's options.
+    fs::remove_file(&arguments).unwrap();
+    let plain: Config = toml::from_str(&config(&noctalia, &mpvpaper, false)).unwrap();
+    let video = plain.playlists[0].entries[1].clone();
+    let (mut driver, _) = driver_with(plain.renderer.clone(), vec![live("DP-1", None)]);
+    without_text_file_busy(|| driver.apply(&video, "DP-1", &plain.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let words: Vec<String> = fs::read_to_string(&arguments)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(!words.iter().any(|word| word == "--auto-mode"));
+    let options = &words[words.iter().position(|w| w == "-o").unwrap() + 1];
+    assert!(
+        options.starts_with("loop-file=inf panscan=1.0 terminal=no mute=yes volume=50 hwdec=auto"),
+        "{options}"
+    );
+    for option in options.split(' ') {
+        assert!(
+            ![
+                "keepaspect",
+                "speed",
+                "contrast",
+                "gamma",
+                "video-rotate",
+                "deband",
+                "scale",
+                "start"
+            ]
+            .iter()
+            .any(|name| option.starts_with(&format!("{name}="))),
+            "{options}"
+        );
+    }
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_scenes_dials_reach_linux_wallpaperengine() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("scene-dials");
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let (engine, arguments) = argument_recorder(&root, "linux-wallpaperengine");
+    let document = config(&noctalia, Path::new("/bin/true"), true)
+        .replace("schema_version = 4", "schema_version = 7")
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!("linux_wallpaperengine_program = {engine:?}"),
+        )
+        .replace(
+            "scene_clamp = \"\"\n",
+            "scene_clamp = \"\"\nscene_pause_only_active = true\nscene_automute = false\nscene_mouse = false\n",
+        )
+        .replace(
+            "scene_id = \"12345\"",
+            "scene_id = \"12345\"\nscene = { fps = 60, scaling = \"fill\", clamp = \"border\", muted = false, volume = 40, audio_processing = false, particles = false, parallax = false }",
+        );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    parsed.validate().unwrap();
+    let scene = parsed.playlists[1].entries[0].clone();
+    let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
+    without_text_file_busy(|| driver.apply(&scene, "DP-1", &parsed.settings)).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let words: Vec<String> = fs::read_to_string(&arguments)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let after = |flag: &str| {
+        let at = words
+            .iter()
+            .position(|w| w == flag)
+            .unwrap_or_else(|| panic!("{flag}"));
+        words[at + 1].clone()
+    };
+    assert_eq!(after("--fps"), "60");
+    assert_eq!(after("--volume"), "40");
+    assert_eq!(after("--scaling"), "fill");
+    assert_eq!(after("--clamp"), "border");
+    for flag in [
+        "--fullscreen-pause-only-active",
+        "--noautomute",
+        "--no-audio-processing",
+        "--disable-particles",
+        "--disable-mouse",
+        "--disable-parallax",
+    ] {
+        assert!(words.iter().any(|w| w == flag), "missing {flag}: {words:?}");
+    }
+    assert!(
+        !words.iter().any(|w| w == "--silent"),
+        "never both --silent and --volume"
+    );
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn interpolation_off_never_asks_the_compositor() {
     use std::os::unix::fs::PermissionsExt;
@@ -2532,7 +2709,7 @@ fn independent_apply_stages_stills_theme_palette_then_renderers() {
     assert_eq!(snapshot["status_version"], 2);
     assert_eq!(
         snapshot["supported_config_schemas"],
-        serde_json::json!([4, 5, 6])
+        serde_json::json!([4, 5, 6, 7])
     );
     assert_eq!(snapshot["runtime_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot["install_kind"], wall_in_one_service::INSTALL_KIND);
@@ -6830,6 +7007,96 @@ fn reload_applies_video_audio_live_without_restarting_the_renderer() {
 }
 
 #[test]
+fn one_wallpapers_dials_hand_over_only_the_display_showing_it() {
+    // DP-1 shows video-two, HDMI-A-1 shows video-four, each from its own playlist.
+    let root = directory("dials-hand-over");
+    let config_path = root.join("runtime.toml");
+    let original = independent_config()
+        .replace("schema_version = 4", "schema_version = 7")
+        .replace(
+            "[[playlists.entries]]\nid = \"still-one\"\nkind = \"still\"\nstill = \"/tmp/one.png\"\npalette = { kind = \"adaptive\", scheme = \"m3-tonal-spot\", mode = \"dark\" }\n",
+            "",
+        )
+        .replace(
+            "[[playlists]]\nid = \"night\"",
+            "[[playlists]]\nid = \"evening\"\nname = \"Evening\"\n[[playlists.entries]]\nid = \"video-four\"\nkind = \"video\"\nstill = \"/tmp/four.png\"\nmotion = \"/tmp/four.mp4\"\npalette = { kind = \"keep\", mode = \"keep\" }\n[[playlists]]\nid = \"night\"",
+        )
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"day\"",
+            "connector = \"HDMI-A-1\"\nplaylist = \"evening\"",
+        );
+    fs::write(&config_path, &original).unwrap();
+    let at = NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        Config::load(&config_path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let take = |state: &Arc<Mutex<RuntimeDriverState>>| {
+        let mut recorded = state.lock().unwrap();
+        // Which displays were handed over; a display may be applied in
+        // more than one step.
+        let mut outputs = std::mem::take(&mut recorded.applied_outputs);
+        outputs.sort();
+        outputs.dedup();
+        let reconfigures = std::mem::take(&mut recorded.reconfigures);
+        recorded.applies.clear();
+        (outputs, reconfigures)
+    };
+    take(&state);
+
+    // video-four's own dials: only HDMI-A-1's renderer is handed over.
+    let four = original.replace(
+        "motion = \"/tmp/four.mp4\"",
+        "motion = \"/tmp/four.mp4\"\nvideo = { speed = 2.0 }",
+    );
+    fs::write(&config_path, &four).unwrap();
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(take(&state), (vec!["HDMI-A-1".to_string()], 0));
+
+    // video-two's: only DP-1's.
+    let two = four.replace(
+        "motion = \"/tmp/two.mp4\"",
+        "motion = \"/tmp/two.mp4\"\nvideo = { fit = \"fit\" }",
+    );
+    fs::write(&config_path, &two).unwrap();
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(take(&state), (vec!["DP-1".to_string()], 0));
+
+    // The same dials again: nothing is handed over.
+    fs::write(&config_path, format!("{two}\n")).unwrap();
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(take(&state), (Vec::<String>::new(), 0));
+
+    // A global dial is a renderer change: every display, after a reconfigure.
+    let global = two.replace(
+        "scene_clamp = \"\"\n",
+        "scene_clamp = \"\"\nvideo_deband = true\n",
+    );
+    fs::write(&config_path, &global).unwrap();
+    let response = runtime_command(&mut runtime, at, "reload", None);
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(
+        take(&state),
+        (vec!["DP-1".to_string(), "HDMI-A-1".to_string()], 1)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn losing_singleton_has_no_wallpaper_side_effects() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
@@ -7809,7 +8076,7 @@ fn display_precedence_with_the_flag_off_is_exactly_todays_order() {
     assert_eq!(rule_status(&expected, "global-now")["selected"], true);
     assert_eq!(
         expected["supported_config_schemas"],
-        serde_json::json!([4, 5, 6])
+        serde_json::json!([4, 5, 6, 7])
     );
     assert_eq!(
         expected["supported_override_schemas"],

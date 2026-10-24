@@ -59,6 +59,17 @@ class RuntimeCompatibilityError(Exception):
     """A live runtime has not demonstrated support for the proposed schema."""
 
 
+class SchemaNotListedError(RuntimeCompatibilityError):
+    """The running service answered, and its answer doesn't list the schema: it predates it.
+
+    Unlike units that can't be verified, or a service that didn't answer, this
+    says what the running service is. Publishing steps down for either, but a
+    document without schema 8's ``allow_web_wallpapers`` means something else
+    to one that predates 8: it plays web pages without checking them
+    (`runtime_config._fitted`).
+    """
+
+
 def _require_current_loaded_units(deadline: float) -> None:
     loaded = update_status.inspect_loaded_units(timeout=deadline - time.monotonic())
     if loaded.state not in ("current", "absent", "unmanaged"):
@@ -118,7 +129,7 @@ def require_schema(schema: int) -> None:
     ):
         _require_current_loaded_units(deadline)
         return
-    raise RuntimeCompatibilityError(
+    raise SchemaNotListedError(
         "The running wallpaper service does not support this setting yet. "
         "No changes were saved. Finish updating the wallpaper service, then try again."
     )

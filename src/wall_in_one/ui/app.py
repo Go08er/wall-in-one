@@ -817,6 +817,8 @@ class Application(Adw.Application):
         self._nothing_readable_seen = False
         #: A republish was already asked for what is left out (`_publish_again_...`).
         self._left_out_retried = False
+        #: The service process the last status came from (its ``runtime_instance``).
+        self._runtime_instance_seen: str | None = None
         self._default_pointer_said = ""
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
@@ -5374,6 +5376,10 @@ class Application(Adw.Application):
         GUI would otherwise not make after the service restarted. Only the
         change to "reads presets" (or the dials) asks, so units that can't be
         verified (which leave them out again) are not asked over and over.
+        So does ``allow_web_wallpapers`` left out for a service that lists 8
+        but isn't confirmed (`runtime_config.WEB_OWNER`), as the dials do; and
+        a service started again (a new ``runtime_instance``, as the notice
+        asks after its units are made current) is asked once more.
         """
         reads = runtime_config.presets_supported(status)
         newly = reads and not self._presets_readable_seen
@@ -5382,14 +5388,27 @@ class Application(Adw.Application):
         dials = runtime_config.dials_supported(status)
         newly = newly or (dials and not self._dials_readable_seen)
         self._dials_readable_seen = dials
+        eight = runtime_config.nothing_to_play_supported(status)
+        instance = status.get("runtime_instance")
+        if isinstance(instance, str):
+            if self._runtime_instance_seen is not None and instance != self._runtime_instance_seen:
+                self._left_out_retried = False
+            self._runtime_instance_seen = instance
         # Left out of the last publication, which compiled without a
-        # confirmation (a status that timed out, say), while this status lists
-        # what was left out: ask for it again, once. A service that lists it
-        # but whose units can't be verified leaves it out again, and is not
-        # asked a second time until it is no longer waiting for that.
+        # confirmation (a status that timed out, say, or units that couldn't
+        # be verified), while this status lists what was left out: ask for it
+        # again, once. A service that lists it but whose units still can't be
+        # verified leaves it out again, and is not asked a second time until
+        # it is no longer waiting for that, or is started again.
         waiting = any(
             one.why == runtime_config.NEEDS_NEWER_SERVICE
-            and (dials if one.owner == runtime_config.DIALS_OWNER else reads)
+            and (
+                eight
+                if one.owner == runtime_config.WEB_OWNER
+                else dials
+                if one.owner == runtime_config.DIALS_OWNER
+                else reads
+            )
             for one in self._left_out_said
         )
         retry = waiting and not self._left_out_retried
@@ -5398,7 +5417,6 @@ class Application(Adw.Application):
         # was told to quit): a publication that couldn't be given to the older
         # one (a playlist that plays nothing), or one that left out
         # `allow_web_wallpapers` for it, is made again, once.
-        eight = runtime_config.nothing_to_play_supported(status)
         newly_eight = eight and not self._nothing_readable_seen
         self._nothing_readable_seen = eight
         if newly_eight and (self._publication_problem or self._settings.allow_web_wallpapers):

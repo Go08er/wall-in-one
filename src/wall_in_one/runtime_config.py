@@ -20,7 +20,7 @@ import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
@@ -160,6 +160,10 @@ DIALS_OWNER: Final = "dials"
 #: Not a reference left out but what plays: All media plays nothing because
 #: web wallpapers are off, so a display on it shows nothing (``why``).
 NOTHING_OWNER: Final = "nothing"
+#: Not a reference but ``allow_web_wallpapers``, while the setting is on:
+#: left out for a service not confirmed to read schema 8, whose own check
+#: then refuses every web page the document names (`_fitted`). Said once.
+WEB_OWNER: Final = "web"
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -196,6 +200,12 @@ class LeftOut:
         """
         if self.owner == NOTHING_OWNER:
             return f"{NOTHING_TO_PLAY_LABEL}{self.why}."
+        if self.owner == WEB_OWNER:
+            return (
+                "Web wallpapers aren\u2019t played until the wallpaper service is confirmed "
+                "to read them: restart it after an update, and make sure its installed units "
+                "are current."
+            )
         if self.owner == DIALS_OWNER:
             return (
                 "Renderer settings and scene sound, in Settings and in each wallpaper\u2019s "
@@ -254,6 +264,13 @@ class LeftOut:
                 f"nothing to play: {self.why}; the wallpaper service shows nothing "
                 f'on a display that plays "{FALLBACK_PLAYLIST_NAME}"'
             )
+        if self.owner == WEB_OWNER:
+            return (
+                "allow_web_wallpapers is left out: the running wallpaper service has not "
+                f"confirmed schema_version {NOTHING_TO_PLAY_SCHEMA_VERSION}, and it plays no "
+                "web wallpaper without it; restart it after an update, and check that its "
+                "installed units are current, to play them"
+            )
         if self.owner == DIALS_OWNER:
             return (
                 "renderer settings are left out: the running wallpaper service has not "
@@ -296,6 +313,7 @@ _NOTICE_ORDER: Final = (
     DEFAULT_OWNER,
     SCHEDULE_OWNER,
     DISPLAY_OWNER,
+    WEB_OWNER,
     PRESET_OWNER,
     DIALS_OWNER,
 )
@@ -2938,17 +2956,41 @@ def _fitted(
     shape below 8: that document is returned as it is, and
     `_require_publishable` refuses it for such a service in the words it
     uses for any schema it can't confirm. Nothing is written.
+
+    Leaving ``allow_web_wallpapers`` out while the setting is on is said
+    (`WEB_OWNER`) when the document names a web page, unless the running
+    service predates schema 8: one that reads 8 but isn't confirmed (its
+    units can't be verified, or it didn't answer) refuses every web page in
+    a document that doesn't allow them, while an older one plays them as
+    0.4.0 did, with nothing to say.
     """
     built = built if built is not None else _compile(settings, session)
-    if _schema_publishable(built.document, target) or built.nothing:
+    refusal = None if built.nothing else _schema_refusal(built.document, target)
+    if refusal is None:
         return built
+    refused_web = settings.allow_web_wallpapers and not isinstance(
+        refusal, runtime_compatibility.SchemaNotListedError
+    )
     built = _compile(settings, session, nothing_to_play=False)
-    if _schema_publishable(built.document, target):
+    if not _schema_publishable(built.document, target):
+        built = _compile(settings, session, renderer_dials=False, nothing_to_play=False)
+        if not _schema_publishable(built.document, target):
+            built = _compile(
+                settings, session, presets=False, renderer_dials=False, nothing_to_play=False
+            )
+    return _web_waiting(built, session) if refused_web else built
+
+
+def _web_waiting(built: Compiled, session: Session) -> Compiled:
+    """``built``, saying ``allow_web_wallpapers`` was left out of it when it names a web page."""
+    named = _named_scenes(None, built.document)
+    if not any(
+        item.web_page and item.unplayable is None and item.scene in named
+        for item in session.library.items
+    ):
         return built
-    built = _compile(settings, session, renderer_dials=False, nothing_to_play=False)
-    if _schema_publishable(built.document, target):
-        return built
-    return _compile(settings, session, presets=False, renderer_dials=False, nothing_to_play=False)
+    said = LeftOut(WEB_OWNER, "", "", "", NEEDS_NEWER_SERVICE)
+    return replace(built, left_out=(*built.left_out, said))
 
 
 def _schema_publishable(document: str, target: Path) -> bool:
@@ -2957,16 +2999,23 @@ def _schema_publishable(document: str, target: Path) -> bool:
     Asked only of a document that needs presets or the dials, and only for
     the live path: 4 and 5 are `_require_publishable`'s to refuse, as before.
     """
+    return _schema_refusal(document, target) is None
+
+
+def _schema_refusal(
+    document: str, target: Path
+) -> runtime_compatibility.RuntimeCompatibilityError | None:
+    """`_schema_publishable`, with why not: None when ``document`` may go as it is."""
     if target.absolute() != paths.runtime_config_path().absolute():
-        return True
+        return None
     schema = tomllib.loads(document)["schema_version"]
     if schema < PRESET_SCHEMA_VERSION:
-        return True
+        return None
     try:
         runtime_compatibility.require_schema(schema)
-    except runtime_compatibility.RuntimeCompatibilityError:
-        return False
-    return True
+    except runtime_compatibility.RuntimeCompatibilityError as error:
+        return error
+    return None
 
 
 def _require_publishable(document: str, target: Path, nothing: str = "") -> None:

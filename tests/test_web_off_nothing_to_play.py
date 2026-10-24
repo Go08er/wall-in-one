@@ -249,6 +249,62 @@ def test_service_start_with_units_that_cant_be_verified_keeps_the_exit_78_guard(
     assert f'scene_id = "{WEB}"' in paths.runtime_config_path().read_text()
 
 
+# -- web wallpapers on, the key left out for a service not confirmed for 8 (r13 L5) -----------
+
+
+def test_web_on_with_units_that_cant_be_verified_says_web_wallpapers_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r13 probe F. Before: the key was left out and nothing said so, and the service
+    then refused every page with "web wallpapers are off" to someone who had turned them on."""
+    root = _library(Path(os.environ["HOME"]), still_beside=True)
+    _service(monkeypatch, schemas=[4, 5, 6, 7, 8], units="unverified")
+    published = _publish(root, allow_web=True)
+    text = paths.runtime_config_path().read_text()
+    assert "allow_web_wallpapers" not in text  # the step-down happened
+    assert f'scene_id = "{WEB}"' in text
+    assert runtime_config.left_out_notice(published.left_out) == (
+        "Web wallpapers aren\u2019t played until the wallpaper service is confirmed to read "
+        "them: restart it after an update, and make sure its installed units are current."
+    )
+    warnings = [one.warning() for one in published.left_out]
+    assert len(warnings) == 1 and "allow_web_wallpapers is left out" in warnings[0], warnings
+    assert "schema_version 8" in warnings[0]
+
+
+def test_control_web_on_with_units_verified_writes_the_key_and_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _library(Path(os.environ["HOME"]), still_beside=True)
+    _service(monkeypatch, schemas=[4, 5, 6, 7, 8], units="current")
+    published = _publish(root, allow_web=True)
+    assert "allow_web_wallpapers = true" in paths.runtime_config_path().read_text()
+    assert not published.left_out
+
+
+def test_an_older_service_that_plays_web_pages_isnt_told_they_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One that predates 8 plays them without the key, as 0.4.0 did: nothing waits."""
+    root = _library(Path(os.environ["HOME"]), still_beside=True)
+    _service(monkeypatch, schemas=[4, 5])
+    published = _publish(root, allow_web=True)
+    text = paths.runtime_config_path().read_text()
+    assert f'scene_id = "{WEB}"' in text and "allow_web_wallpapers" not in text
+    assert not published.left_out
+
+
+def test_web_on_without_a_web_page_says_nothing_of_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Units that can't be verified, web on, but no web page: the key changes nothing."""
+    root = Path(os.environ["HOME"]) / "Pictures/wallpapers"
+    root.mkdir(parents=True)
+    (root / "dawn.png").write_bytes(b"\x89PNG")
+    _service(monkeypatch, schemas=[4, 5, 6, 7, 8], units="unverified")
+    published = _publish(root, allow_web=True)
+    assert "allow_web_wallpapers" not in paths.runtime_config_path().read_text()
+    assert not published.left_out
+
+
 def test_the_document_that_plays_nothing_is_built_from_settings_alone() -> None:
     settings = config.Settings(display_mode="independent", theme_source_connector="DP-1")
     text = runtime_config.nothing_to_play_document(settings, runtime_config.WEB_OFF_REASON)

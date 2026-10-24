@@ -37,9 +37,12 @@ gi.require_version("Adw", "1")
 
 from tests.test_ui_codex030_round1b import profiles  # noqa: E402, F401
 from tests.test_ui_web_off_failed_publish import DOCUMENT, _steam_with_web  # noqa: E402
+from tests.test_web_off_nothing_to_play import _library  # noqa: E402
+from tests.test_web_off_nothing_to_play import _service as _units  # noqa: E402
 from wall_in_one import config, paths  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
+from wall_in_one.session import Session  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 
 READS_EIGHT = [4, 5, 6, 7, 8]
@@ -426,3 +429,54 @@ def test_a_service_whose_status_cant_be_read_isnt_called_older(
     assert "older than this app" not in said
     # Nor does its next start play nothing: it plays no web wallpaper (L3).
     assert "plays nothing while" not in said
+
+
+# -- allow_web_wallpapers left out for a service not confirmed for 8 (L5) ---------------------
+
+
+def test_web_wallpapers_left_out_are_published_again_once_the_service_is_confirmed(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before: the key was left out without a word, and a service already listing 8 was never
+    asked again: verifying its units brought it back only with the next edit.
+
+    As the dials: asked again once while it waits, and once more when the service is started
+    again (as the notice asks).
+    """
+    application = profiles().application
+    root = _library(Path(os.environ["HOME"]), still_beside=True)
+    settings = config.Settings(roots=(root,), allow_web_wallpapers=True)
+    config.save(settings)
+    application._settings = config.load_strict()
+    publications: list[str] = []
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: publications.append("p"))
+    status = {
+        "status_version": 2,
+        "supported_config_schemas": READS_EIGHT,
+        "runtime_instance": "a" * 32,
+    }
+    # The first status: 8 read, web wallpapers on, so the document is published for it.
+    application._publish_again_when_presets_become_readable(status)
+    assert publications == ["p"]
+    # That publication, with units that can't be verified: the key is left out, and said.
+    _units(monkeypatch, schemas=READS_EIGHT, units="unverified")
+    session = Session(settings)
+    try:
+        session.refresh()
+        application._installed_leaving_out(settings, session)
+    finally:
+        session.shutdown()
+    application._note_left_out()
+    assert "allow_web_wallpapers" not in paths.runtime_config_path().read_text(encoding="utf-8")
+    assert application.left_out_notice.startswith(
+        "Web wallpapers aren\u2019t played until the wallpaper service is confirmed to read them"
+    )
+    application._publish_again_when_presets_become_readable(status)
+    assert publications == ["p", "p"], "asked again while it waits"
+    application._publish_again_when_presets_become_readable(status)
+    assert publications == ["p", "p"], "once, not on every poll"
+    application._publish_again_when_presets_become_readable(
+        {**status, "runtime_instance": "b" * 32}
+    )
+    assert publications == ["p", "p", "p"], "and once more when it is started again"

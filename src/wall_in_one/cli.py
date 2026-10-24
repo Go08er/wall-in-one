@@ -629,7 +629,10 @@ def _retained_web_refusal() -> str:
 
     "Allow web wallpapers" is off, yet the document compiled while it was on
     still plays a web page, and the service can't tell one from a scene. A
-    service that starts on it plays what the person turned off.
+    service that starts on it plays what the person turned off. So does one
+    that starts on a document that allows web wallpapers whatever it names
+    (`runtime_config.allows_web_wallpapers`): that turns the service's own
+    check off, and a Workshop item that became a web page would play.
     """
     from wall_in_one import config, runtime_config
 
@@ -640,8 +643,18 @@ def _retained_web_refusal() -> str:
         return ""  # settings.toml's own error is said by the compile
     titles = runtime_config.retained_web_wallpapers()
     unchecked = runtime_config.unchecked_scene_wallpapers()
-    if not titles and not unchecked:
+    allowing = runtime_config.allows_web_wallpapers()
+    if not titles and not unchecked and not allowing:
         return ""
+    if not titles and not unchecked:
+        return (
+            "the last-known-good runtime allows web wallpapers (it was compiled while "
+            "Allow web wallpapers was on), and Allow web wallpapers is off; the service "
+            "was not started on it, since it would play a Workshop wallpaper that has "
+            "become a web page. Fix what stops the compile (the message above), or turn "
+            "Allow web wallpapers on, then start the service again (systemctl --user "
+            "start wall-in-one)"
+        )
     what = (
         f"the last-known-good runtime still plays web wallpapers ({', '.join(titles)}), "
         "and Allow web wallpapers is off"

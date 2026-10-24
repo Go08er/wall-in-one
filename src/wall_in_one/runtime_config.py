@@ -853,6 +853,28 @@ def unchecked_scene_wallpapers(
     return tuple(sorted(unchecked))
 
 
+def allows_web_wallpapers(path: Path | None = None, *, text: str | None = None) -> bool:
+    """Whether the published ``runtime.toml`` says ``allow_web_wallpapers = true`` (schema 8).
+
+    Such a document lets a web page play whatever it names today: it turns
+    the service's own check off (the service reads an item's type before it
+    starts the engine only while the document doesn't allow web wallpapers),
+    so a Workshop item whose type became ``web`` after the compile would play
+    as one. A caller that must not keep a web page while the setting is off
+    counts it as one. An unreadable or malformed document says nothing, as for
+    `retained_web_wallpapers`; ``text`` as there.
+    """
+    target = path if path is not None else paths.runtime_config_path()
+    try:
+        if text is None:
+            text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+        document = tomllib.loads(text) if text is not None else {}
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
+        return False
+    settings = document.get("settings")
+    return isinstance(settings, dict) and settings.get("allow_web_wallpapers") is True
+
+
 def web_wallpapers_in(texts: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """What any of ``texts`` (``runtime.toml`` documents) plays that web being off forbids.
 

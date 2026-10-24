@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_web_off_nothing_to_play import _service
 from wall_in_one import cli, config, paths, runtime_config
 from wall_in_one.session import Session
 
@@ -167,3 +168,81 @@ def test_refusal_says_to_start_the_service_again(capsys: pytest.CaptureFixture[s
         root.chmod(0o755)
     said = capsys.readouterr().err
     assert "remove the web wallpaper" in said and "start the service again" in said
+
+
+# -- a kept document that allows web wallpapers (review r13, L4) ------------------------------
+
+SCENE = "1111111111"
+
+
+def _scene_profile(home: Path) -> Path:
+    """A Workshop scene (with its still) under the home's Steam, and a library folder."""
+    item = home / ".local/share/Steam/steamapps/workshop/content/431960" / SCENE
+    item.mkdir(parents=True)
+    (item / "project.json").write_text(
+        json.dumps({"type": "scene", "title": "Toothless", "file": "scene.json"})
+    )
+    (item / "scene.json").write_text("{}")
+    root = home / "Pictures/wallpapers"
+    automatic = root / "Wall-in-One" / "Automatic Stills"
+    automatic.mkdir(parents=True)
+    (automatic / f"{SCENE}.png").write_bytes(b"\x89PNG")
+    return root
+
+
+def _kept_scenes(monkeypatch: pytest.MonkeyPatch, *, allow_web: bool) -> Path:
+    """Scenes compiled for a service that reads 8, with web on or off; then web turned off."""
+    root = _scene_profile(Path(os.environ["HOME"]))
+    _service(monkeypatch, schemas=[4, 5, 6, 7, 8], units="current")
+    settings = config.Settings(roots=(root,), allow_web_wallpapers=allow_web)
+    config.save(settings)
+    session = Session(settings)
+    try:
+        session.refresh()
+        runtime_config.publish_changes(settings, session)
+    finally:
+        session.shutdown()
+    text = paths.runtime_config_path().read_text()
+    assert SCENE in text and ("allow_web_wallpapers = true" in text) is allow_web
+    config.save(config.Settings(roots=(root,), allow_web_wallpapers=False))
+    return root
+
+
+def test_a_kept_document_that_allows_web_wallpapers_is_refused_while_they_are_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review's probe. Before: "" for a document that turns the service's own check off."""
+    _kept_scenes(monkeypatch, allow_web=True)
+    refusal = cli._retained_web_refusal()
+    assert "allows web wallpapers" in refusal and "Allow web wallpapers is off" in refusal
+
+
+def test_control_a_kept_document_without_the_key_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    _kept_scenes(monkeypatch, allow_web=False)
+    assert cli._retained_web_refusal() == ""
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads an unreadable folder")
+@pytest.mark.parametrize("allow_web", [True, False], ids=("allows web", "control"))
+def test_start_does_not_keep_a_runtime_that_allows_web_while_they_are_off(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], allow_web: bool
+) -> None:
+    """Before: exit 0, the service started on a document that names only scenes but allows web
+    wallpapers, so a Workshop update that made one of them a web page would play it."""
+    root = _kept_scenes(monkeypatch, allow_web=allow_web)
+    _service(monkeypatch, schemas=None)  # not running yet: this is its ExecStartPre
+    root.chmod(0)
+    try:
+        code = cli._prepare_service_start()
+    finally:
+        root.chmod(0o755)
+    said = capsys.readouterr().err
+    if not allow_web:
+        assert code == 0, said
+        assert "validating the last-known-good runtime" in said
+        return
+    assert code == cli.EXIT_CONFIG, said
+    assert "allows web wallpapers" in said and "start the service again" in said
+    assert "validating the last-known-good runtime" not in said
+    # Kept as it is: nothing was started on it, and nothing else was written.
+    assert "allow_web_wallpapers = true" in paths.runtime_config_path().read_text()

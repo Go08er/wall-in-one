@@ -245,9 +245,14 @@ so nothing is saved against the item. The service's journal says what it
 skipped and why, and so does its status
 ([fields](runtime-config.md#nothing-to-play-schema-8)): `refused` lists the
 items, each with its reason, and a display that plays a stand-in names the
-playlist it asked for (`stand_in_for`), so the app and the companion don't
-present the stand-in as what was chosen. The app marks such an item "Can't
-play here", with the service's reason. Each item is asked once per document,
+playlist it asked for (`stand_in_for`), so the app doesn't present the
+stand-in as what was chosen. The app marks such an item "Can't play here",
+with the service's reason. The pinned companion (0.3.0) reads neither field:
+it names what plays with the reason that chose the refused playlist, so a
+refused pick shows as "<stand-in> · your pick", with Resume schedule offered,
+and nothing names the pick; refused items aren't mentioned at all (its
+"being skipped" count is of taboo entries only). Showing either needs a
+companion update. Each item is asked once per document,
 in one pass along the playlist however many are refused: a reload (which
 turning the setting on or off is) asks again. A document from before schema 8
 has no such key, so it allows no web page. While the document does allow web

@@ -287,3 +287,25 @@ def test_a_service_that_newly_reads_schema_8_gets_the_failed_publication_again(
     application._publish_again_when_presets_become_readable(older)
     application._publish_again_when_presets_become_readable(newer)
     assert publications == ["p"]
+
+
+def test_a_busy_compiler_lock_still_stops_the_page(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another writer holding the lock past its timeout: stop now, write nothing, quit nothing."""
+    application = profiles().application
+    _steam_with_web()
+    paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.runtime_config_path().write_text(DOCUMENT, encoding="utf-8")
+    config.save(config.Settings(roots=application.settings.roots, allow_web_wallpapers=False))
+    sent = _recorded(monkeypatch)
+
+    def busy(*_a: object, **_k: object) -> object:
+        raise runtime_config.RuntimeConfigError("timed out waiting for the compiler lock")
+
+    monkeypatch.setattr(runtime_config, "compiler_lock", busy)
+    said = application._web_off_guard()
+    assert sent == ["stop", "status"]
+    assert "still plays Electric Eye" in said and "Playback was stopped" in said
+    assert _names_page(), "nothing was written without the lock"

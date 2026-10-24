@@ -4340,55 +4340,57 @@ class Application(Adw.Application):
         if settings.allow_web_wallpapers:
             return ""
         target = paths.runtime_config_path()
-        try:
-            with runtime_config.compiler_lock():
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(runtime_config.compiler_lock())
+                locked = True
+            except runtime_config.RuntimeConfigError:
+                # Another writer holds it past its timeout: judge what is there,
+                # stop, and write nothing; that writer's own publication follows.
+                locked = False
+            try:
+                on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
+            except OSError, UnicodeDecodeError:
+                on_disk = None
+            with self._runtime_config_lock:
+                candidates = list(self._held_candidates)
+                unknown = self._held_candidates_unknown
+            titles, unchecked = runtime_config.web_wallpapers_in(
+                [*candidates, *([on_disk] if on_disk is not None else [])]
+            )
+            if not titles and not unchecked and not unknown:
+                return ""
+            what = self._held_web_words(titles, unchecked)
+            try:
+                stopped = client.send_runtime("stop").ok
+            except client.NotRunningError:
+                # Nothing plays; the next start is guarded (ExecStartPre).
+                self._service_holds_what_is_on_disk()
+                return ""
+            except client.ControlError, OSError:
+                stopped = False
+            try:
+                status_reply = client.send_runtime("status")
+                status = json.loads(status_reply.message) if status_reply.ok else None
+            except client.ControlError, OSError, ValueError, RecursionError:
+                status = None
+            written = False
+            if locked and runtime_config.nothing_to_play_supported(status):
                 try:
-                    on_disk = file_io.read_regular_text(
-                        target, runtime_config.MAX_RUNTIME_CONFIG_BYTES
+                    document = runtime_config.nothing_to_play_document(
+                        settings, runtime_config.WEB_OFF_REASON
                     )
-                except OSError, UnicodeDecodeError:
-                    on_disk = None
-                with self._runtime_config_lock:
-                    candidates = list(self._held_candidates)
-                    unknown = self._held_candidates_unknown
-                titles, unchecked = runtime_config.web_wallpapers_in(
-                    [*candidates, *([on_disk] if on_disk is not None else [])]
-                )
-                if not titles and not unchecked and not unknown:
-                    return ""
-                what = self._held_web_words(titles, unchecked)
-                try:
-                    stopped = client.send_runtime("stop").ok
-                except client.NotRunningError:
-                    # Nothing plays; the next start is guarded (ExecStartPre).
-                    self._service_holds_what_is_on_disk()
-                    return ""
-                except client.ControlError, OSError:
-                    stopped = False
-                try:
-                    status_reply = client.send_runtime("status")
-                    status = json.loads(status_reply.message) if status_reply.ok else None
-                except client.ControlError, OSError, ValueError, RecursionError:
-                    status = None
-                written = False
-                if runtime_config.nothing_to_play_supported(status):
-                    try:
-                        document = runtime_config.nothing_to_play_document(
-                            settings, runtime_config.WEB_OFF_REASON
-                        )
-                        if on_disk != document:
-                            runtime_config.install_nothing_to_play(document, target)
-                        written = True
-                    except runtime_config.RuntimeConfigNotDurableError as uncertain:
-                        state_file.report_not_durable(str(uncertain))
-                        written = True
-                    except runtime_config.RuntimeConfigError:
-                        written = False
-                    if written:
-                        with self._runtime_config_lock:
-                            self._runtime_document_generation += 1
-        except runtime_config.RuntimeConfigError:
-            return ""  # the compiler lock: the failure itself is already said
+                    if on_disk != document:
+                        runtime_config.install_nothing_to_play(document, target)
+                    written = True
+                except runtime_config.RuntimeConfigNotDurableError as uncertain:
+                    state_file.report_not_durable(str(uncertain))
+                    written = True
+                except runtime_config.RuntimeConfigError:
+                    written = False
+                if written:
+                    with self._runtime_config_lock:
+                        self._runtime_document_generation += 1
         if written:
             try:
                 loaded = client.send_runtime("reload").ok
@@ -4403,6 +4405,13 @@ class Application(Adw.Application):
                     "Playback was stopped, and the service now has nothing to play: web "
                     "wallpapers are off. It stays so until a publication gets through."
                 )
+        if not locked:
+            return f"Allow web wallpapers is off, but the wallpaper service still {what}. " + (
+                "Playback was stopped so it doesn\u2019t keep playing, but the service "
+                "can start it again (Resume, ctl play) until a publication gets through."
+                if stopped
+                else "It may still be playing; stop it from the wallpaper service."
+            )
         # A service that can't be given nothing to play: end it, as `ctl quit`
         # does. It exits cleanly, so systemd leaves it stopped; the next start
         # (the companion's, or systemctl's) runs ExecStartPre's guard first.

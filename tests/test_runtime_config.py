@@ -1558,3 +1558,52 @@ def test_a_scene_id_that_is_not_ascii_digits_is_never_compiled(tmp_path: Path) -
     entries = _entries(runtime_config.render(settings, session))
 
     assert "\u0661\u0662\u0663" not in {entry.get("scene_id") for entry in entries}
+
+
+def test_a_playlist_of_only_presets_is_said_as_waiting_for_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not "has nothing to play": it has presets, which the running service doesn't read yet."""
+    from wall_in_one import paths
+
+    _settings, _session, items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+    preset = items["Y2K Matrix"]
+    only = playlists.Playlist(
+        id="presets", name="Presets", entries=(playlists.Entry(id="y2k", source=str(preset.path)),)
+    )
+    settings = config.Settings(roots=(tmp_path / "library",), active_playlist="presets")
+    library = Library(roots=(tmp_path / "library",), items=tuple(items.values()))
+    session = Session(
+        settings,
+        scanner=lambda _roots: library,
+        playlist_store=playlists.Store({only.id: only}),
+    )
+    session.refresh()
+    _live_service(monkeypatch, [4, 5])
+
+    left_out = runtime_config.publish_changes(settings, session).left_out
+
+    document = tomllib.loads(paths.runtime_config_path().read_text(encoding="utf-8"))
+    assert document["default_playlist"] == "all-media"
+    assert set(left_out) == {
+        runtime_config.LeftOut(
+            runtime_config.DEFAULT_OWNER,
+            "",
+            "presets",
+            "Presets",
+            runtime_config.NEEDS_NEWER_SERVICE,
+        ),
+        runtime_config.LeftOut(
+            runtime_config.PRESET_OWNER,
+            "2946165131",
+            "Y2K Matrix",
+            "",
+            runtime_config.NEEDS_NEWER_SERVICE,
+        ),
+    }
+    notice = runtime_config.left_out_notice(left_out)
+    assert "has nothing to play" not in notice
+    assert (
+        "The default names \u201cPresets\u201d, which holds only Wallpaper Engine presets the "
+        "running wallpaper service doesn\u2019t read yet, so \u201cAll media\u201d plays instead."
+    ) in notice

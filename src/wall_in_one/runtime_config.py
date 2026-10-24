@@ -165,10 +165,17 @@ class LeftOut:
                 "service is restarted after the update: the one running doesn\u2019t read presets."
             )
         missing = self.why == DOES_NOT_EXIST
+        presets = self.why == NEEDS_NEWER_SERVICE
         if self.owner == DISPLAY_OWNER:
             own = (
                 f"{self.owner_id}\u2019s own playlist doesn\u2019t exist ({self.reference})"
                 if missing
+                else (
+                    f"{self.owner_id}\u2019s own playlist, \u201c{self.playlist}\u201d, "
+                    "holds only Wallpaper Engine presets the running wallpaper service "
+                    "doesn\u2019t read yet"
+                )
+                if presets
                 else (
                     f"{self.owner_id}\u2019s own playlist, \u201c{self.playlist}\u201d, "
                     "has nothing to play"
@@ -178,6 +185,11 @@ class LeftOut:
         named = (
             f"a playlist that doesn\u2019t exist ({self.reference})"
             if missing
+            else (
+                f"\u201c{self.playlist}\u201d, which holds only Wallpaper Engine presets the "
+                "running wallpaper service doesn\u2019t read yet"
+            )
+            if presets
             else f"\u201c{self.playlist}\u201d, which has nothing to play"
         )
         if self.owner == DEFAULT_OWNER:
@@ -199,6 +211,11 @@ class LeftOut:
         named = (
             f"a playlist that doesn't exist ({self.reference!r})"
             if self.why == DOES_NOT_EXIST
+            else (
+                f"playlist {self.playlist!r}, which holds only Wallpaper Engine presets the "
+                "running wallpaper service does not read yet"
+            )
+            if self.why == NEEDS_NEWER_SERVICE
             else f"playlist {self.playlist!r}, which has nothing to play"
         )
         if self.owner == DEFAULT_OWNER:
@@ -1843,9 +1860,13 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
     # Playlists that play nothing only because the scan could not look under a
     # folder their entries may be in: "couldn't look" is not "nothing there".
     unseen: dict[str, Unseen] = {}
+    # Playlists that play nothing only because their presets were left out for
+    # an older service: what names them is said as that, not "nothing to play".
+    presets_only: set[str] = set()
     rotations: list[tuple[str, int | None, bool | None]] = []
     for playlist in session.playlists.all():
         resolved: list[tuple[str, ...]] = []
+        held_presets = False
         for authored_entry in playlist.entries:
             found_item = known.get(authored_entry.path)
             if found_item is None:
@@ -1853,6 +1874,11 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
             compiled = entry_lines(found_item, authored_entry.id)
             if compiled is not None:
                 resolved.append(compiled)
+            elif found_item.scene in presets_left_out and _is_preset(found_item):
+                held_presets = True
+        if not resolved and held_presets:
+            presets_only.add(playlist.id)
+            continue
         if not resolved:
             # Nothing the runtime could play: empty, or every authored entry
             # is missing or unresolved. Not emitted; whatever refers to it is
@@ -1933,6 +1959,11 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
             return None
         if authored.id not in existing_ids:
             if quiet:
+                return None
+            if authored.id in presets_only:
+                left_out.append(
+                    LeftOut(owner, owner_id, reference, authored.name, NEEDS_NEWER_SERVICE)
+                )
                 return None
             if authored.id in unseen:
                 raise RuntimeConfigError(

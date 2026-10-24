@@ -264,6 +264,12 @@ beside.
   presets of them) are never run, for security: one is a program anyone can
   publish.
 - Any other type is listed and never played.
+- linux-wallpaperengine looks for Workshop items, and Wallpaper Engine's own
+  assets, only in the Steam folders under your home (`~/.local/share/Steam`,
+  `~/.steam/steam`, the Flatpak's and the Snap's). Wall-in-One lists every
+  Steam library folder's items, a second drive's too, but a scene, web
+  wallpaper or preset in a library outside your home may not play there.
+  Videos play from anywhere.
 
 An item that can't play says **Can't play** on its card, with why, and has no
 Apply. In the Scenes view (classic: Videos and scenes) a notice counts the

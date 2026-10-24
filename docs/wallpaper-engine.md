@@ -27,6 +27,20 @@ catches and turns into exit status 1 (`main.cpp:74-77`).
 So the **supported set is `scene`, `video` and `web`**. `application`, any
 other type, and a missing type are not.
 
+**Where it looks.** An id given to `--bg` is looked for only under the home
+folder's Steam installations: `~/.local/share/Steam`, `~/.steam/steam`, the
+Flatpak's and the Snap's `steamapps/workshop/content/431960/<id>`
+(`Steam/FileSystem/FileSystem.cpp:16-21`, `:39-53`), and Wallpaper Engine's
+own assets the same way (`:9-14`, `:55-69`). Wall-in-One lists the items of
+every library folder `libraryfolders.vdf` names, a second drive's included.
+A video there plays (mpvpaper is given its path), but a scene, web
+wallpaper or preset in a library outside those home folders may not: the
+engine won't find it, or its assets. This is documented rather than worked
+around. Handing the engine a directory instead of an id (it takes a path
+for `--bg`) would mean a new wire field, and it would still not find the
+assets, which have no such option per item. The wire is unchanged for every
+existing scene.
+
 **Web.** A `web` item is a first-class wallpaper there: `WallpaperParser.cpp:89-94`
 builds it, `WallpaperApplication.cpp:526-540` starts CEF only when a web
 background is loaded, and `Render/Wallpapers/CWeb.cpp:33-37` opens

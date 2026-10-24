@@ -244,6 +244,15 @@ class Inspector(Gtk.Box):
             # A new view of the same wallpaper: the favorite, its problem, its colors.
             self.show(self.state.wallpaper(wallpaper.id))
             return
+        if (
+            topic == "settings"
+            and wallpaper.is_moving
+            and self._editing is not None
+            and self.state.has_wallpaper(wallpaper.id)
+        ):
+            # The defaults its own renderer settings follow may be others now.
+            self.show(self.state.wallpaper(wallpaper.id))
+            return
         if topic in ("colors", "settings") and self._refresh_colors is not None:
             # New previews or palettes, or another default scheme in Settings.
             self._refresh_colors()

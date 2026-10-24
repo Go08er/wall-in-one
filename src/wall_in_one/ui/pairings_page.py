@@ -20,7 +20,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-from wall_in_one import dial_view
+from wall_in_one import dial_view, dials
 from wall_in_one.dials import Value as DialValue
 from wall_in_one.library import manage, pairings, scan
 from wall_in_one.library.model import (
@@ -106,7 +106,7 @@ class PairingsPage(Gtk.Box):
         self._on_remove = on_remove
         self._session: Session | None = None
         self._selected: MediaItem | None = None
-        self._rendered: tuple[MediaItem, pairings.Pairing] | None = None
+        self._rendered: tuple[MediaItem, pairings.Pairing, tuple[dials.Value, ...]] | None = None
         self._preview_loader = SchemePreviewLoader(max_workers=2)
         self._thumbnail_loader = ThumbnailLoader(max_workers=2)
         self._adaptive_boxes: dict[str, Gtk.Box] = {}
@@ -190,21 +190,23 @@ class PairingsPage(Gtk.Box):
         if self._rendered != self._editor_key(item, bundle):
             self._show_editor(item, bundle=bundle)
 
-    @staticmethod
     def _editor_key(
+        self,
         item: MediaItem,
         bundle: pairings.Pairing,
-    ) -> tuple[MediaItem, pairings.Pairing]:
+    ) -> tuple[MediaItem, pairings.Pairing, tuple[dials.Value, ...]]:
         """Canonical inputs, across the short scan-after-write window.
 
         The pairing store learns a manual still synchronously.  The library's
         moving item learns the same derived ``paired_still`` on its following
         asynchronous rescan.  Normalising both sides prevents either phase
         from looking like a new editor while still letting every other item
-        field and pairing choice invalidate the surface.
+        field and pairing choice invalidate the surface. The dials' defaults
+        are inputs too: the renderer rows say which default each follows.
         """
         resolved_item = item.with_still(bundle.still) if item.is_moving else item
-        return resolved_item, bundle
+        defaults = tuple(getattr(self._app.settings, dial.setting) for dial in dials.GLOBAL)
+        return resolved_item, bundle, defaults
 
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:

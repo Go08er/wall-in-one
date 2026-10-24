@@ -250,6 +250,12 @@ def test_the_details_set_a_wallpapers_own_dials_and_values(
         assert isinstance(speed, Adw.SpinRow) and speed.get_subtitle() == "Default (2.00)"
         assert "video = {" not in paths.runtime_config_path().read_text(encoding="utf-8")
 
+        # Another default in Settings: the open details say the one in use.
+        application.update_settings_async(video_speed=1.25)
+        yield "the new default", lambda: settled(application) and config.load().video_speed == 1.25
+        speed = page.inspector.renderer_rows["dial:video:speed"]
+        assert isinstance(speed, Adw.SpinRow) and speed.get_subtitle() == "Default (1.25)"
+
         # A scene: its dials, then what it declares, never a file.
         page.inspect(state.wallpaper(str(scene)))
         rows = page.inspector.renderer_rows
@@ -370,6 +376,13 @@ def test_the_classic_pairing_editor_sets_a_wallpapers_own_dials_and_values(
 
     # A video's own speed: a spin through the range is one save, once it stops.
     page.edit(session, video)
+    assert page.renderer_rows["dial:video:speed"].get_name() == "dial:video:speed"
+    # Another default in Settings: the open editor says the one in use.
+    session.update_settings(replace(session.settings, video_speed=1.5), rescan_library=False)
+    application.settings = session.settings
+    page.refresh(session)
+    shown = page.renderer_rows["dial:video:speed"]
+    assert isinstance(shown, Adw.SpinRow) and shown.get_subtitle() == "Default (1.50)"
     speed = page.renderer_rows["dial:video:speed"]
     assert isinstance(speed, Adw.SpinRow)
     before = application.changes

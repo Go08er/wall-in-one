@@ -675,6 +675,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._settings_page.apply_settings(settings)
         if settings.roots != previous.roots:
             self._browse_page.update_library_roots(settings.roots)
+        if self._management_session is not None:
+            # An open pairing editor says which default each renderer dial follows.
+            self._pairings_page.refresh(self._management_session)
 
     # -- display ---------------------------------------------------------
 

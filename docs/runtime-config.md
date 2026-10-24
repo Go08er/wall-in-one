@@ -13,7 +13,9 @@ The compiler retains schema 4, byte for byte for unchanged inputs, while
 `settings.stop_animations_on_battery = true`. The new service accepts both
 versions; a schema-4 document cannot enable the new policy. This preserves
 older upgrade journals and prevents an older service from silently ignoring
-an enabled battery preference.
+an enabled battery preference. A document with a Wallpaper Engine preset is
+schema 6, which carries everything 5 does; only such a document is (see
+below, after the entry fields).
 
 From 0.4.0 the compiler no longer writes `[renderer] niri_program`, which
 0.3.x and earlier wrote when the service asked niri for displays. The service

@@ -5,7 +5,9 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import logging
 import re
+import signal
 import sys
 import threading
 import time
@@ -183,6 +185,22 @@ def _runtime_installed(
 #: How many replaced ``runtime.toml`` texts are kept as what the service may
 #: still hold (`Application._web_off_guard`); past it, one isn't known.
 HELD_CANDIDATES: Final = 4
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _save_in_order(works: Sequence[Callable[[], Any]]) -> None:
+    """Run each renderer number's write handed on at shutdown, one after another.
+
+    On the authoring worker, after the write it was queued behind
+    (`Application._shutdown_authoring_jobs`). One that fails is logged and the
+    rest still run: nobody is left to tell.
+    """
+    for work in works:
+        try:
+            work()
+        except Exception:
+            LOGGER.exception("a renderer setting handed on at shutdown could not be saved")
 
 
 def _settings_published[Saved: (config.Settings, config.Settings | None)](
@@ -408,7 +426,8 @@ class _AuthoringTask:
     guard_migration_transaction: bool = True
     application_held: bool = False
     #: A renderer number handed on (`dial_rows.handing_on`): by its own timer or a flush.
-    #: What `Application._settle_before_shutdown` waits for.
+    #: What `Application._settle_before_shutdown` waits for, and what a shutdown still
+    #: attempts when it never started (`Application._shutdown_authoring_jobs`).
     handed_on: bool = False
     #: What the work saved but could not confirm durable (`state_file.report_not_durable`).
     spoken: _Said = field(default_factory=_Said, compare=False)
@@ -719,6 +738,8 @@ class Application(Adw.Application):
         #: whatever the mode, so that its socket calls can be cut off
         #: (`_publish_runtime_for_context`).
         self._shutting_down = False
+        #: A second interrupt (Ctrl-C) ended the shutdown settle (`_settle_before_shutdown`).
+        self._settle_cut = False
         self._removal_active = False
         self._removal_runtime_invalidated = False
         # A committed Delete/Trash retains a second hold until a post-delete
@@ -2245,18 +2266,61 @@ class Application(Adw.Application):
         the loop, since every publication from `do_shutdown` on runs on the
         runtime lane, ``--service`` included (`_publish_runtime_for_context`),
         whose socket calls the shutdown then cuts off (review r13c, G1-L1).
-        After it, shutdown goes on as before: a write already running still
-        reaches its durability boundary (`_shutdown_authoring_jobs`).
+        A second Ctrl-C ends it at once (`_second_interrupt_ends_the_settle`,
+        N-2). Either way shutdown goes on as before, and every number handed
+        on is still saved: a write already running reaches its durability
+        boundary, and one still queued is started on the same worker
+        (`_shutdown_authoring_jobs`).
         """
         context = GLib.MainContext.default()
         deadline = time.monotonic() + SHUTDOWN_SETTLE_SECONDS
         # Wakes the loop with nothing else to do, so the deadline is looked at.
         tick = GLib.timeout_add(100, lambda: GLib.SOURCE_CONTINUE)
+        restore = self._second_interrupt_ends_the_settle()
         try:
-            while self._numbers_unsettled() and time.monotonic() < deadline:
+            while (
+                self._numbers_unsettled() and not self._settle_cut and time.monotonic() < deadline
+            ):
                 context.iteration(True)
         finally:
+            restore()
             GLib.source_remove(tick)
+
+    def _second_interrupt_ends_the_settle(self) -> Callable[[], None]:
+        """Let a Ctrl-C during the settle end it; what puts the previous handler back.
+
+        PyGObject's SIGINT fallback calls ``quit()`` once and ignores every
+        later SIGINT while ``run()`` is on the stack, which it still is in
+        `do_shutdown`, so a second Ctrl-C did nothing for as long as the
+        settle took (review r13c, N-2). While it runs, a SIGINT sets
+        `_settle_cut` and is then handed to PyGObject's own handler, so that
+        ``run()`` still ends as a Ctrl-C ends it. Python runs the handler
+        between the loop's iterations: PyGObject wakes the loop on a signal,
+        and so does the settle's tick. Off the main thread, or with a handler
+        that isn't Python's (or one that ignores it), nothing changes.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            return lambda: None
+        previous = signal.getsignal(signal.SIGINT)
+        if previous is None or previous in (signal.SIG_IGN, signal.SIG_DFL):
+            return lambda: None
+
+        def interrupted(number: int, frame: Any) -> None:
+            self._settle_cut = True
+            if callable(previous) and getattr(previous, "__module__", "") == "gi._ossighelper":
+                previous(number, frame)
+
+        try:
+            signal.signal(signal.SIGINT, interrupted)
+        except ValueError, OSError:
+            return lambda: None
+
+        def restore() -> None:
+            with contextlib.suppress(ValueError, OSError, TypeError):
+                if signal.getsignal(signal.SIGINT) is interrupted:
+                    signal.signal(signal.SIGINT, previous)
+
+        return restore
 
     @property
     def legacy_service(self) -> bool:
@@ -3469,20 +3533,60 @@ class Application(Adw.Application):
         )
 
     def _shutdown_authoring_jobs(self) -> None:
-        """Invalidate queued authoring and suppress every late socket reply."""
+        """Invalidate queued authoring and suppress every late socket reply.
+
+        A renderer number handed on (`_AuthoringTask.handed_on`) that is still
+        queued, behind another write when the settle ended (its bound, or a
+        second Ctrl-C), is still saved: its work is prepared here and started
+        on the same worker after the write it waited for, and the process
+        waits for that worker before it exits, as for any write already
+        running (review r13c, N-2). Nothing of it reaches the application
+        afterwards. Every other queued task is dropped, as before.
+        """
         self._authoring_shutdown = True
         queued = tuple(self._authoring_queue)
         self._authoring_queue.clear()
+        numbers: list[Callable[[], Any]] = []
         for task in queued:
+            if task.handed_on and (not task.requires_migration or self._authoring_migration_ready):
+                attempt = self._prepared_number(task)
+                if attempt is not None:
+                    numbers.append(attempt)
             self._finalize_authoring_task(task)
             self._release_authoring_lifetime(task)
+        if numbers:
+            with contextlib.suppress(RuntimeError):
+                self._authoring_pool().submit(_save_in_order, tuple(numbers))
         if self._authoring_jobs is not None:
             # A running atomic store operation owns its own bounded lock/write
             # transaction and must be allowed to reach that durability
             # boundary.  It contains no Session or GTK object, and its late
             # completion is deliberately ineligible to touch the application.
-            self._authoring_jobs.shutdown(wait=False, cancel_futures=True)
+            # The numbers above are the only work queued behind it.
+            self._authoring_jobs.shutdown(wait=False, cancel_futures=not numbers)
             self._authoring_jobs = None
+
+    def _prepared_number(self, task: _AuthoringTask) -> Callable[[], Any] | None:
+        """A queued number's work, prepared as at the head of the queue; None when it is gone.
+
+        A wallpaper whose removal committed has no number to save, and is
+        dropped quietly, as its timer would drop it (`current_item_for_authoring`).
+        """
+        try:
+            work = task.prepare() if task.prepare is not None else task.work
+        except ValueError:
+            return None
+        except Exception:
+            LOGGER.exception("a renderer setting handed on at shutdown could not be prepared")
+            return None
+        if not task.guard_migration_transaction:
+            return work
+
+        def guarded() -> Any:
+            with legacy_migration.unattended_transaction():
+                return work()
+
+        return guarded
 
     def _hold_authoring_lifetime(self) -> bool:
         """Keep a normal GUI resident until one accepted transaction settles."""

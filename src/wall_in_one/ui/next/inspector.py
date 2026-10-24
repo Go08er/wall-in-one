@@ -208,6 +208,7 @@ class Inspector(Gtk.Box):
         #: by its widget name (``dial:video:speed``, ``property:bloom``).
         self.renderer_rows: dict[str, Gtk.Widget] = {}
         self.renderer_reset: Gtk.Button | None = None
+        self._settling = dial_rows.Settling()
 
         header = Adw.HeaderBar(
             show_start_title_buttons=False, show_end_title_buttons=False, show_back_button=False
@@ -676,6 +677,8 @@ class Inspector(Gtk.Box):
         Each says "Default (…)" until it has a value of its own, with a button
         that takes it back; the defaults are Settings' (docs/renderer-settings.md).
         """
+        self._settling.cancel()  # a number nudged on the pane being replaced writes nothing
+        settling = self._settling = dial_rows.Settling()
         shown = editing.wallpaper_dials(wallpaper.id)
         if not shown.renderer:
             return None
@@ -692,7 +695,9 @@ class Inspector(Gtk.Box):
             return lambda value: editing.set_wallpaper_property(wid, name, value)
 
         for view in shown.dials:
-            row = dial_rows.own_row(view, set_dial(view.dial.key), locked=blocked)
+            row = dial_rows.own_row(
+                view, set_dial(view.dial.key), locked=blocked, settling=settling
+            )
             self.renderer_rows[row.get_name()] = row
             dials_list.append(row)
         box.append(dials_list)
@@ -702,7 +707,7 @@ class Inspector(Gtk.Box):
             properties.add_css_class("boxed-list")
             for found in shown.properties:
                 row = dial_rows.property_row(
-                    found, set_property(found.setting.name), locked=blocked
+                    found, set_property(found.setting.name), locked=blocked, settling=settling
                 )
                 self.renderer_rows[row.get_name()] = row
                 properties.append(row)
@@ -713,7 +718,12 @@ class Inspector(Gtk.Box):
         reset.add_css_class("flat")
         reset.set_tooltip_text("Every setting here back to its default")
         reset.set_sensitive(shown.any_own and not blocked)
-        reset.connect("clicked", lambda _button: editing.reset_wallpaper_dials(wid))
+
+        def use_defaults(_button: Gtk.Button) -> None:
+            settling.cancel()
+            editing.reset_wallpaper_dials(wid)
+
+        reset.connect("clicked", use_defaults)
         self.renderer_reset = reset
         return self._section("Renderer", box, extra=reset)
 

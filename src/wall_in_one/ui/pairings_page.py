@@ -128,6 +128,7 @@ class PairingsPage(Gtk.Box):
         # save writes only the field its gesture changed, onto whatever is
         # durable when it reaches the head of the queue.
         self._palette_intent: dict[str, tuple[pairings.PalettePolicy, int]] = {}
+        self._settling = dial_rows.Settling()
         self._still_intent: dict[str, tuple[Path | None, int]] = {}
         self._palette_catalog = palette_catalog or PaletteCatalog()
         self._owns_palette_catalog = palette_catalog is None
@@ -1013,6 +1014,8 @@ class PairingsPage(Gtk.Box):
         own; "Reset this pairing" leaves them, and "Use defaults" is theirs
         (docs/renderer-settings.md).
         """
+        self._settling.cancel()  # a number nudged on the pane being replaced writes nothing
+        settling = self._settling = dial_rows.Settling()
         shown = dial_view.wallpaper_dials(item, bundle.renderer, self._app.settings)
         if not shown.renderer:
             return None
@@ -1029,14 +1032,16 @@ class PairingsPage(Gtk.Box):
         reset.add_css_class("flat")
         reset.set_tooltip_text("Every renderer setting of this wallpaper back to its default")
         reset.set_sensitive(shown.any_own)
-        reset.connect(
-            "clicked",
-            lambda _button: self._store_renderer(
+
+        def use_defaults(_button: Gtk.Button) -> None:
+            settling.cancel()
+            self._store_renderer(
                 item,
                 lambda store, current: store.reset_renderer(current),
                 done=f"{item.name}\u2019s renderer settings are back to the defaults",
-            ),
-        )
+            )
+
+        reset.connect("clicked", use_defaults)
         group.set_header_suffix(reset)
         self.renderer_reset = reset
         renderer = shown.renderer
@@ -1058,7 +1063,7 @@ class PairingsPage(Gtk.Box):
             return change
 
         for view in shown.dials:
-            row = dial_rows.own_row(view, set_dial(view.dial.key))
+            row = dial_rows.own_row(view, set_dial(view.dial.key), settling=settling)
             self.renderer_rows[row.get_name()] = row
             group.add(row)
         box.append(group)
@@ -1068,7 +1073,9 @@ class PairingsPage(Gtk.Box):
                 description=shown.note or "What this scene declares, as its author named it",
             )
             for found in shown.properties:
-                row = dial_rows.property_row(found, set_property(found.setting.name))
+                row = dial_rows.property_row(
+                    found, set_property(found.setting.name), settling=settling
+                )
                 self.renderer_rows[row.get_name()] = row
                 properties.add(row)
             box.append(properties)

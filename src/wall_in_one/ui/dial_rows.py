@@ -35,9 +35,38 @@ def _digits(step: float) -> int:
     return min(6, max(0, math.ceil(-math.log10(step) - 1e-9)))
 
 
-def _settled(callback: Callable[[], None]) -> Callable[[], None]:
-    """``callback``, run once the calls to it have stopped for `SETTLE_MS`."""
+class Settling:
+    """The pending settle timers of one pane's rows, to be cancelled together.
+
+    A pane makes one per build and calls `cancel` when a reset of its own
+    applies (a number nudged a moment ago must not write itself back over
+    "Use defaults") and when it builds again.
+    """
+
+    def __init__(self) -> None:
+        self._cancels: list[Callable[[], None]] = []
+
+    def add(self, cancel: Callable[[], None]) -> None:
+        self._cancels.append(cancel)
+
+    def cancel(self) -> None:
+        for cancel in self._cancels:
+            cancel()
+
+
+def _settled(
+    callback: Callable[[], None], row: Gtk.Widget, settling: Settling | None
+) -> tuple[Callable[[], None], Callable[[], None]]:
+    """``callback``, run once the calls to it have stopped for `SETTLE_MS`; and its cancel.
+
+    Cancelled too when ``row`` leaves its window: a pane that was built again,
+    or is showing another wallpaper, has no use for the old row's number.
+    """
     pending: list[int] = []
+
+    def cancel() -> None:
+        while pending:
+            GLib.source_remove(pending.pop())
 
     def fire() -> bool:
         pending.clear()
@@ -49,7 +78,10 @@ def _settled(callback: Callable[[], None]) -> Callable[[], None]:
             GLib.source_remove(pending.pop())
         pending.append(GLib.timeout_add(SETTLE_MS, fire))
 
-    return call
+    row.connect("notify::root", lambda widget, _p: cancel() if widget.get_root() is None else None)
+    if settling is not None:
+        settling.add(cancel)
+    return call, cancel
 
 
 def setting_row(dial: dials.Dial) -> Adw.PreferencesRow:
@@ -134,6 +166,7 @@ def own_row(
     on_change: Callable[[dials.Value | None], None],
     *,
     locked: str = "",
+    settling: Settling | None = None,
 ) -> Adw.PreferencesRow:
     """A wallpaper's own row for one dial. ``on_change(None)``: back to the default.
 
@@ -145,7 +178,14 @@ def own_row(
     if isinstance(row, Adw.ActionRow):
         row.set_subtitle(own_subtitle(view.own, dial.label_of(view.default)))
     show_value(dial, row, view.value)
-    reset = _reset_button(view.own, lambda: on_change(None), dial.label.lower())
+    cancel_settling: list[Callable[[], None]] = []
+
+    def back() -> None:
+        for cancel in cancel_settling:
+            cancel()
+        on_change(None)
+
+    reset = _reset_button(view.own, back, dial.label.lower())
     if isinstance(row, Adw.ActionRow):
         row.add_suffix(reset)
 
@@ -154,7 +194,10 @@ def own_row(
         if value != view.value or not view.own:
             on_change(value)
 
-    handler = _settled(hand_on) if dial.kind in ("int", "float") else hand_on
+    handler = hand_on
+    if dial.kind in ("int", "float"):
+        handler, cancel = _settled(hand_on, row, settling)
+        cancel_settling.append(cancel)
     row.connect(setting_signal(row), lambda *_arguments: handler())
     row.set_sensitive(view.available and not locked)
     if locked:
@@ -183,10 +226,18 @@ def property_row(
     on_change: Callable[[str | None], None],
     *,
     locked: str = "",
+    settling: Settling | None = None,
 ) -> Adw.PreferencesRow:
     """A scene's row for one Wallpaper Engine property, as the engine reads its value."""
     setting = view.setting
-    reset = _reset_button(view.own, lambda: on_change(None), setting.label)
+    cancel_settling: list[Callable[[], None]] = []
+
+    def back() -> None:
+        for cancel in cancel_settling:
+            cancel()
+        on_change(None)
+
+    reset = _reset_button(view.own, back, setting.label)
     default_text = view.default
     row: Adw.PreferencesRow
     if setting.type == "bool":
@@ -211,7 +262,10 @@ def property_row(
             ),
             digits=digits,
         )
-        settled = _settled(lambda: on_change(repr(round(spin.get_value(), max(digits, 2)))))
+        settled, cancel = _settled(
+            lambda: on_change(repr(round(spin.get_value(), max(digits, 2)))), spin, settling
+        )
+        cancel_settling.append(cancel)
         spin.connect("notify::value", lambda *_arguments: settled())
         row = spin
     elif setting.type == "color":

@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -270,6 +271,10 @@ SCHEDULE_TICK_SECONDS: Final = 60
 RUNTIME_STATUS_TICK_SECONDS: Final = 2
 PALETTE_RELOAD_DEBOUNCE_MS: Final = 75
 MAX_GUI_AUTHORING_QUEUE: Final = 32
+#: How long a shutdown that wasn't asked for through `Application.request_quit`
+#: (SIGINT's ``quit()``) keeps running the loop for the numbers it hands on to
+#: be saved, and published: as long as ``ctl`` gives one authoring change.
+SHUTDOWN_SETTLE_SECONDS: Final = client.AUTHORING_TIMEOUT
 PACKAGE_SOURCE_ACTION: Final = "package-source"
 PRESENT_PACKAGE_ACTION: Final = "present-package"
 # Installed Nix package directories are immutable and distinguish revisions
@@ -701,6 +706,9 @@ class Application(Adw.Application):
         # hold through its complete adoption/runtime tail.
         self._authoring_lifetime_holds = 0
         self._quit_requested = False
+        #: While `_hand_on_waiting_numbers` runs: what it hands on is admitted
+        #: even once a quit was asked, since the person entered it before.
+        self._handing_on_numbers = False
         self._removal_active = False
         self._removal_runtime_invalidated = False
         # A committed Delete/Trash retains a second hold until a post-delete
@@ -2073,6 +2081,14 @@ class Application(Adw.Application):
         GLib.idle_add(say, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def do_shutdown(self) -> None:
+        # A shutdown that `request_quit` didn't ask for (SIGINT's ``quit()``)
+        # ends the loop with the window open and numbers still waiting out
+        # their settle time. Hand them on before anything is torn down, and run
+        # the loop until their writes settle, as a close or ``ctl quit`` lets
+        # them (review r13b, G1). Not a GTK teardown signal (`notify::root`):
+        # that runs while GTK is already taking the window apart.
+        if self._hand_on_waiting_numbers():
+            self._settle_before_shutdown()
         current = state_file.set_durability_sink(self._previous_durability_sink)
         if current != self._not_durable:
             state_file.set_durability_sink(current)  # another application's since: keep it
@@ -2140,7 +2156,7 @@ class Application(Adw.Application):
         # was entered for, through the same queued write the timer would use;
         # the accepted write keeps the process resident until it is durable.
         # Not a `notify::root` handler: that runs during teardown.
-        dial_rows.flush_all()
+        self._hand_on_waiting_numbers()
         # The stored reference is typed as WindowServices, which says nothing
         # about GTK, so compare identities as plain objects.
         closing: object = window
@@ -2161,8 +2177,45 @@ class Application(Adw.Application):
 
     def request_quit(self) -> None:
         """Stop deliberately, after every already-accepted durable tail."""
+        # A number nudged under 450 ms ago (`ctl quit` with the window open) is
+        # handed on first: its write is one of those tails (review r13b, G1).
+        self._hand_on_waiting_numbers()
         self._quit_requested = True
         self._maybe_finish_requested_quit()
+
+    def _hand_on_waiting_numbers(self) -> int:
+        """Save every renderer number still waiting out its settle time; how many.
+
+        `dial_rows.flush_all`, for every way the application ends: a window's
+        close, ``ctl quit`` (`request_quit`) and a shutdown that comes another
+        way (`do_shutdown`). Each takes the queued write its timer would have
+        taken, admitted even once a quit was asked; that write holds the
+        application until it is durable (`_maybe_finish_requested_quit`).
+        """
+        self._handing_on_numbers = True
+        try:
+            return dial_rows.flush_all()
+        finally:
+            self._handing_on_numbers = False
+
+    def _settle_before_shutdown(self) -> None:
+        """Run the loop until what a requested quit waits for has settled.
+
+        For `do_shutdown` only, once the loop has ended without that wait:
+        the writes it just handed on, and what follows them (the
+        publication). At most `SHUTDOWN_SETTLE_SECONDS`, after which shutdown
+        goes on as before: a write already running still reaches its
+        durability boundary (`_shutdown_authoring_jobs`).
+        """
+        context = GLib.MainContext.default()
+        deadline = time.monotonic() + SHUTDOWN_SETTLE_SECONDS
+        # Wakes the loop with nothing else to do, so the deadline is looked at.
+        tick = GLib.timeout_add(100, lambda: GLib.SOURCE_CONTINUE)
+        try:
+            while self._quit_waits() and time.monotonic() < deadline:
+                context.iteration(True)
+        finally:
+            GLib.source_remove(tick)
 
     @property
     def legacy_service(self) -> bool:
@@ -3402,15 +3455,13 @@ class Application(Adw.Application):
         self.release()
         self._maybe_finish_requested_quit()
 
-    def _maybe_finish_requested_quit(self) -> None:
-        """Honor explicit quit only after every accepted durable tail settles."""
-        if not self._quit_requested:
-            return
+    def _quit_waits(self) -> bool:
+        """Whether an accepted durable tail hasn't settled yet: what a requested quit waits for."""
         with self._settings_authoring_lock:
             settings_busy = bool(
                 self._settings_authoring_running or self._settings_authoring_pending
             )
-        if (
+        return bool(
             self._authoring_active
             or self._authoring_queue
             or self._authoring_lifetime_holds
@@ -3418,7 +3469,13 @@ class Application(Adw.Application):
             or self._runtime_library_scan_held
             or self._removal_convergence_held
             or settings_busy
-        ):
+        )
+
+    def _maybe_finish_requested_quit(self) -> None:
+        """Honor explicit quit only after every accepted durable tail settles."""
+        if not self._quit_requested:
+            return
+        if self._quit_waits():
             return
         if self._held:
             self.release()
@@ -3451,7 +3508,7 @@ class Application(Adw.Application):
             if (
                 self._authoring_shutdown
                 or self._runtime_shutdown
-                or (self._quit_requested and not allow_during_quit)
+                or (self._quit_requested and not (allow_during_quit or self._handing_on_numbers))
             ):
                 reply(Response.failure("application is shutting down"))
                 return
@@ -3745,7 +3802,7 @@ class Application(Adw.Application):
         """
         if self._authoring_shutdown or self._runtime_shutdown:
             return False
-        if self._quit_requested and not allow_during_quit:
+        if self._quit_requested and not (allow_during_quit or self._handing_on_numbers):
             return False
         if requires_migration and not self._authoring_migration_ready:
             self.require_authoring_ready()

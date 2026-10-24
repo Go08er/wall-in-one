@@ -11192,6 +11192,19 @@ fn independent_displays_that_play_nothing_say_so_and_status_still_answers() {
     assert!(display_status(&mut runtime, noon(), "DP-1")["nothing_to_play"].is_null());
 }
 
+/// The service a test started, ended if the test fails first: otherwise it outlives the
+/// test, holding cargo's output pipe open. Only that one process is signalled.
+struct ServiceChild(Child);
+
+impl Drop for ServiceChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 #[test]
 fn the_file_poll_loads_the_document_that_plays_nothing_and_play_leaves_it() {
     // The service's own reload when runtime.toml changes (main.rs), with the real driver.
@@ -11228,13 +11241,15 @@ fn the_file_poll_loads_the_document_that_plays_nothing_and_play_leaves_it() {
     // As published for a service that isn't confirmed for 8; the page is a scene to the
     // driver's checks here (`scene_home`), so it starts.
     fs::write(&config_path, assigned(&stepped_down(WEB_ONLY_ON))).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     let started = |count: usize| {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -11273,7 +11288,7 @@ fn the_file_poll_loads_the_document_that_plays_nothing_and_play_leaves_it() {
     }
     thread::sleep(Duration::from_millis(1500));
     assert_eq!(started(2).len(), 1, "play started the engine again");
-    stop(&mut child, &socket);
+    stop(&mut child.0, &socket);
     fs::remove_dir_all(root).unwrap();
 }
 

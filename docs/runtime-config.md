@@ -300,12 +300,16 @@ A change to one wallpaper's own changes only its entries, so only the display
 showing it is handed over; a `[renderer]` change reconfigures every renderer,
 as before.
 
-Publishing works as for presets: a running service that doesn't list 7 gets
-the document without the dials (the global keys and every entry's table), and
-one that doesn't list 6 without presets and a scene's own values too (that
-scene still plays); the app says once that renderer settings apply after the
-service is restarted. Saving them is never refused, unlike the battery option.
-The health sync compiles exactly what was published for the service it asked.
+Publishing works as for presets: a running service that isn't confirmed to
+read 7 (it doesn't list it, or its installed units can't be verified) gets the
+document without the dials (the global keys and every entry's table), and one
+not confirmed for 6 without presets and a scene's own values too (that scene
+still plays); the app says once that renderer settings apply once the service
+is confirmed, and publishes again when a status newly lists 7. Saving them is
+never refused, unlike the battery option. The health sync accepts any document
+publishing could have made for the service it asked (`compiled_as_published`:
+everything, without the dials, without both, and the one its status calls
+for), so a document without the dials still matches its generation.
 
 ```toml
 palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "auto" }

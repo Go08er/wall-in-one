@@ -306,9 +306,9 @@ restarts that renderer (video mute and volume stay live, as before). A
 change to one wallpaper's own restarts only the display showing it.
 
 The dials need the wallpaper service from this release (runtime schema 7).
-An older one that is still running gets everything else, and the app says
-once that renderer settings apply after the service is restarted: saving is
-never refused over them. The legacy Python `--service` mode doesn't apply
+An older one that is still running (or one whose installed units can't be
+verified) gets everything else, and the app says once that renderer settings
+apply once it is confirmed to read them: saving is never refused over them. The legacy Python `--service` mode doesn't apply
 them.
 
 ## Battery animation control

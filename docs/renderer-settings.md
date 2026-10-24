@@ -226,10 +226,12 @@ other document keeps 4, 5 or 6, byte for byte. As for presets, publishing a
 schema-7 document to the live path asks the running service first; one that
 doesn't list 7 gets the document without the tables and the new keys (then,
 if it doesn't list 6, without presets and a scene's own values too: that scene
-still plays), and the app says once that those settings apply after the
-service is restarted. Saving is never refused over them, unlike the battery
-option: an older service just doesn't apply them yet. The health sync
-compiles exactly that for the status it holds (`dials_supported`). The legacy
+still plays), and the app says once that those settings apply once the
+service is confirmed to read them (restarted after an update, its units
+current). Saving is never refused over them, unlike the battery option: an
+older service just doesn't apply them yet. The health sync accepts any of the
+documents publishing could have made (`compiled_as_published`), and the app
+publishes again when a status newly lists 7. The legacy
 Python `--service` mode (installs without the Rust service) doesn't apply
 the dials.
 

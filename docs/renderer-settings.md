@@ -111,7 +111,9 @@ video mute and volume stay live over mpv's IPC.
 A dial that would do nothing as things are set is greyed out, never shown as
 a working control: the `--auto-mode` trigger while videos keep playing when
 covered, pausing for the active window only while scenes never pause, a
-wallpaper's own volume while it is silent. Neither is written then either.
+wallpaper's own volume while it is silent. The first two are not written
+then either. A scene's own volume is written if it was set (`volume = 40`
+beside `muted = true`); `--silent` wins, so it does nothing.
 A **web** wallpaper's own settings hold only what reaches a page (frame rate,
 scaling, texture edges, mouse): particles and parallax are a scene's, and a
 page plays its own sound through the engine's browser, past `--silent` and
@@ -191,6 +193,9 @@ have made every older build refuse to save pairings at all. An older build's
 reset is. In this build "Reset to defaults" still means the still and the
 colours; each override has a reset of its own, and "Use defaults" takes them
 all back. A record holding only overrides is kept; one holding nothing goes.
+0.4.0's Retry on a broken wallpaper deletes a record that holds only
+overrides, so a downgrade can lose them. With any dial off its default, 0.4.0's
+Settings go read-only ("settings this version doesn't recognize").
 
 A dial's value is kept as the file holds it, valid in this build or not, so a
 newer build's wider range survives this one's saves (this build applies only

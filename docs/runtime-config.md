@@ -258,6 +258,9 @@ is now a setting too. All three keys are 0.4.0's, so they need no newer schema.
 
 ### Renderer dials (schema 7)
 
+The legacy Python `--service` mode (installs without the Rust service) does
+not apply the dials, though Settings shows them.
+
 Every other dial ([settings](settings.md#renderer-dials),
 [design](renderer-settings.md)) is a `[renderer]` key written **only when it
 isn't its default**, with a default of its own on the service side, so a

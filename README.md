@@ -45,8 +45,10 @@ The core workflows have been exercised on a single-display desktop.
 
 The core Luau workflows are present, but the authoring models are not identical.
 The software supports per-display wallpaper routing, schedules and transport;
-video mute and volume and cadence values remain global, while the renderer
-dials can be each wallpaper's own.
+video mute, volume and cadence values remain global. Most renderer dials can
+be each wallpaper's own; five stay global only (the video scale, the
+`--auto-mode` trigger, and for scenes pausing when covered, pausing for the
+active window only, and muting while other apps play).
 Legacy gesture bindings and several provider/capture tuning fields have no
 app-owned equivalent. Scene scaling and clamp migrate from one designated
 display into typed global settings. The exact import and intentional-reset list is in
@@ -353,10 +355,13 @@ scaling, particles, mouse, parallax, reacting to sound and pausing. Settings
 holds the defaults; each wallpaper's own settings (its pairing editor, or its
 details in the new interface) can override any of its own, with a reset to
 the default, and list the Wallpaper Engine properties its scene declares
-(switches, sliders, colours, choices, text). No option is free text, and
-nothing that runs code or reads or writes a file of its choosing is offered:
+(switches, sliders, colours, choices, text). No renderer option is free text.
+A scene's text property is free text: one line of up to 256 bytes with no
+control characters, passed as a single `--set-property` value. Nothing that
+runs code or reads or writes a file of its choosing is offered:
 [`docs/renderer-settings.md`](docs/renderer-settings.md) has the list and
 the reasons, [`docs/settings.md`](docs/settings.md#renderer-dials) the keys.
+The legacy `wall-in-one --service` mode ignores the dials.
 
 **Wallpaper Engine frame rate** is a 1–240 FPS native scene-rendering limit (30
 by default). Video wallpapers keep their source rate: mpv's post-decode FPS

@@ -715,24 +715,14 @@ def read_config_generation(path: Path | None = None) -> str:
         raise RuntimeConfigError(f"runtime configuration {target}: {error}") from error
 
 
-def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
-    """Titles of the web wallpapers the published ``runtime.toml`` still plays.
-
-    A document compiled while ``allow_web_wallpapers`` was on keeps naming
-    them after it is turned off, until a compile replaces it; the service
-    can't tell a web page from a scene. So a caller that is about to keep or
-    leave that document in force asks here (service start with a compile that
-    failed, the app after a publication that failed). The Workshop scan
-    doesn't depend on the library folders, so it usually works when the
-    compile didn't. An unreadable or malformed document says nothing: the
-    service's own validation judges that.
-    """
+def _named_scenes(path: Path | None) -> set[str]:
+    """The Workshop ids a ``runtime.toml`` names (`scene_id`, `scene_base`); none if unreadable."""
     target = path if path is not None else paths.runtime_config_path()
     try:
         text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
         document = tomllib.loads(text) if text is not None else {}
     except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
-        return ()
+        return set()
     named: set[str] = set()
     pending: list[object] = [document]
     while pending:
@@ -745,6 +735,23 @@ def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
                     pending.append(value)
         elif isinstance(node, list):
             pending.extend(node)
+    return named
+
+
+def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
+    """Titles of the web wallpapers the published ``runtime.toml`` still plays.
+
+    A document compiled while ``allow_web_wallpapers`` was on keeps naming
+    them after it is turned off, until a compile replaces it; the service
+    can't tell a web page from a scene. So a caller that is about to keep or
+    leave that document in force asks here (service start with a compile that
+    failed, the app after a publication that failed). The Workshop scan
+    doesn't depend on the library folders, so it usually works when the
+    compile didn't. An unreadable or malformed document says nothing: the
+    service's own validation judges that. What the scan can't classify is
+    `unchecked_scene_wallpapers`'s to say.
+    """
+    named = _named_scenes(path)
     if not named:
         return ()
     items = scan.workshop_items(workshop.steam_roots())
@@ -759,6 +766,28 @@ def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
             key=str.casefold,
         )
     )
+
+
+def unchecked_scene_wallpapers(path: Path | None = None) -> tuple[str, ...]:
+    """Workshop ids the published ``runtime.toml`` names that the scan can't classify.
+
+    The Workshop scan lists an item only when it could read its folder and
+    its `project.json` (an unreadable or unmounted Steam folder, a missing
+    item, or a project file over the scan's size cap all leave it out), so
+    for these it isn't known whether the page is a web page. A caller that
+    must not keep a web page counts them as possibly one (fail closed). Also
+    an id whose preset base the scan doesn't list.
+    """
+    named = _named_scenes(path)
+    if not named:
+        return ()
+    listed = {item.scene: item for item in scan.workshop_items(workshop.steam_roots())}
+    unchecked = {name for name in named if name not in listed}
+    for name in named & listed.keys():
+        base = listed[name].scene_base
+        if base and base not in listed:
+            unchecked.add(base)
+    return tuple(sorted(unchecked))
 
 
 def _program(name: str) -> Path:

@@ -609,8 +609,9 @@ def _prepare_service_start() -> int:
             return result
         refused = _retained_web_refusal()
         if refused:
-            # Not a failure a restart cures (the unit forces one for exit 1):
-            # a person has to decide.
+            # Not a failure a retry cures by itself: the unit does not restart
+            # on 78, and a person has to decide (the companion tries the unit
+            # again every 300 s, which re-runs this check).
             print(f"error: {refused}", file=sys.stderr)
             return EXIT_CONFIG
         print(
@@ -638,13 +639,27 @@ def _retained_web_refusal() -> str:
     except config.ConfigError:
         return ""  # settings.toml's own error is said by the compile
     titles = runtime_config.retained_web_wallpapers()
-    if not titles:
+    unchecked = runtime_config.unchecked_scene_wallpapers()
+    if not titles and not unchecked:
         return ""
+    what = (
+        f"the last-known-good runtime still plays web wallpapers ({', '.join(titles)}), "
+        "and Allow web wallpapers is off"
+    )
+    if unchecked:
+        # The scan can't see these (Steam's folder unreadable or not mounted yet, the
+        # item gone, or a project.json too large to read), so a web page can't be ruled out.
+        what = (
+            "the last-known-good runtime plays Workshop wallpapers whose type could not be "
+            f"checked ({', '.join(unchecked)}), so a web wallpaper can't be ruled out, "
+            "and Allow web wallpapers is off"
+        )
+        if titles:
+            what += f"; it also plays the web wallpapers {', '.join(titles)}"
     return (
-        "the last-known-good runtime still plays web wallpapers "
-        f"({', '.join(titles)}), and Allow web wallpapers is off; the service was not "
-        "started on it. Fix what stops the compile (the message above), or turn "
-        "Allow web wallpapers on"
+        f"{what}; the service was not started on it. Fix what stops the compile "
+        "(the message above), remove the web wallpaper, or turn Allow web wallpapers on, "
+        "then start the service again (systemctl --user start wall-in-one)"
     )
 
 

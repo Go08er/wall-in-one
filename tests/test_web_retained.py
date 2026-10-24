@@ -64,7 +64,7 @@ def test_start_does_not_keep_a_runtime_that_plays_web_while_they_are_off(
         root.chmod(0o755)
     said = capsys.readouterr().err
 
-    assert code == cli.EXIT_CONFIG, said  # not 1: the unit would restart the service on it
+    assert code == cli.EXIT_CONFIG, said  # 78, not 1: the unit does not restart it on 78
     assert "Electric Eye" in said and "Allow web wallpapers" in said
     assert "validating the last-known-good runtime" not in said
 
@@ -83,3 +83,87 @@ def test_start_keeps_a_runtime_that_plays_no_web_page(
         root.chmod(0o755)
     assert code == 0
     assert "validating the last-known-good runtime" in capsys.readouterr().err
+
+
+# -- the guard fails closed where the scan can't classify (review of r11 fix 2, L1) -------
+
+
+def _kept_web_with_the_library_unreadable(damage: str) -> tuple[int, str]:
+    """Compile with web on, turn it off, damage Steam's side as `damage` says, run the unit's step."""
+    home = Path(os.environ["HOME"])
+    root = _web_profile(home)
+    steam = home / ".local/share/Steam"
+    item = steam / "steamapps/workshop/content/431960" / WEB
+    _compiled_with_web(root)
+    config.save(config.Settings(roots=(root,), allow_web_wallpapers=False))
+    locked = [root]
+    if damage == "steam_unreadable":
+        locked.append(steam)
+    elif damage == "project_large":
+        (item / "project.json").write_text(
+            json.dumps(
+                {"type": "web", "title": "Electric Eye", "file": "index.html", "preview": "p.jpg"}
+                | {"description": "x" * (300 * 1024)}
+            )
+        )
+    elif damage == "item_gone":
+        for leftover in item.iterdir():
+            leftover.unlink()
+        item.rmdir()
+    for path in locked:
+        path.chmod(0)
+    try:
+        code = cli._prepare_service_start()
+    finally:
+        for path in reversed(locked):
+            path.chmod(0o755)
+    return code, WEB
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads an unreadable folder")
+@pytest.mark.parametrize("damage", ("steam_unreadable", "project_large", "item_gone"))
+def test_start_refuses_a_kept_runtime_whose_scene_the_scan_cannot_classify(
+    damage: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Before: exit 0, the kept document (with the web page) validated and started."""
+    code, web = _kept_web_with_the_library_unreadable(damage)
+    said = capsys.readouterr().err
+
+    assert code == cli.EXIT_CONFIG, said
+    assert web in paths.runtime_config_path().read_text()
+    assert "could not be checked" in said and web in said
+    assert "validating the last-known-good runtime" not in said
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads an unreadable folder")
+def test_unchecked_scene_does_not_stop_a_start_with_web_on(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Web on: nothing changes, even where the scan is blind."""
+    home = Path(os.environ["HOME"])
+    root = _web_profile(home)
+    steam = home / ".local/share/Steam"
+    _compiled_with_web(root)
+    root.chmod(0)
+    steam.chmod(0)
+    try:
+        code = cli._prepare_service_start()
+    finally:
+        steam.chmod(0o755)
+        root.chmod(0o755)
+    assert code == 0
+    assert "validating the last-known-good runtime" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads an unreadable folder")
+def test_refusal_says_to_start_the_service_again(capsys: pytest.CaptureFixture[str]) -> None:
+    root = _web_profile(Path(os.environ["HOME"]))
+    _compiled_with_web(root)
+    config.save(config.Settings(roots=(root,), allow_web_wallpapers=False))
+    root.chmod(0)
+    try:
+        cli._prepare_service_start()
+    finally:
+        root.chmod(0o755)
+    said = capsys.readouterr().err
+    assert "remove the web wallpaper" in said and "start the service again" in said

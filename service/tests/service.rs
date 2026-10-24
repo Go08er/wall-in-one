@@ -1907,6 +1907,15 @@ struct RuntimeDriverState {
     refused_outputs: std::collections::HashMap<String, String>,
     /// Whether what `refuse_entry_ids` refuses at the start is a web page.
     refuse_as_web_page: bool,
+    /// Entries this driver says it won't start when asked first
+    /// (`motion_refusal`), as a real one answers for a scene the engine won't
+    /// find; and how often each entry was asked.
+    refuse_when_asked: HashSet<String>,
+    asked: std::collections::HashMap<String, usize>,
+    /// How often the runtime set the animation policy, which it does once
+    /// for each display each time it works out the settings motion starts
+    /// with.
+    inhibition_sets: usize,
 }
 
 #[derive(Clone)]
@@ -2111,6 +2120,26 @@ impl WallpaperDriver for RuntimeDriver {
                 web_page: state.refuse_as_web_page,
                 reason: reason.clone(),
             })
+    }
+
+    fn motion_refusal(
+        &self,
+        entry: &wall_in_one_service::config::Entry,
+        settings: &wall_in_one_service::config::Settings,
+    ) -> Option<wall_in_one_service::workshop::Refusal> {
+        let mut state = self.0.lock().unwrap();
+        *state.asked.entry(entry.id.clone()).or_default() += 1;
+        (settings.dynamics_enabled
+            && entry.kind == wall_in_one_service::config::EntryKind::Scene
+            && state.refuse_when_asked.contains(&entry.id))
+        .then(|| wall_in_one_service::workshop::Refusal {
+            web_page: false,
+            reason: format!("the test driver won't start {}", entry.id),
+        })
+    }
+
+    fn set_animation_inhibited(&mut self, _inhibited: bool) {
+        self.0.lock().unwrap().inhibition_sets += 1;
     }
 
     fn poll_failures(&mut self) -> Vec<RendererFailure> {
@@ -12441,4 +12470,773 @@ fn control_independent_displays_on_a_rule_that_can_play_change_back_at_its_end()
     assert_eq!(rows[3]["playlist_id"], "all-media");
     assert_eq!(rows[3]["entry_id"], "all-media-1");
     assert!(!hdmi_at_one.is_empty());
+}
+
+// -- r13c: what the person is told about a refused entry, and what the walk costs ------------
+//
+// Review r13b S1, S2, A1 and the service Nits. Each test here uses only what b3d1398 has
+// (its test driver's `motion_refused` aside, whose reason is typed now), so each fails there
+// by what the service does, not by a missing name.
+
+/// `skip_runtime`, started at `at` instead of noon.
+fn skip_runtime_at(
+    root: &Path,
+    document: &str,
+    home: &Path,
+    outputs: &[&str],
+    at: chrono::NaiveDateTime,
+) -> (Runtime<SystemDriver>, PathBuf, PathBuf) {
+    let log = root.join("noctalia.log");
+    let noctalia = root.join("noctalia");
+    script(&noctalia, &format!("printf '%s\\n' \"$*\" >> {log:?}"));
+    let (engine, arguments) = argument_recorder(root, "linux-wallpaperengine");
+    let document = document
+        .replace(
+            "noctalia_program = \"/bin/true\"",
+            &format!("noctalia_program = {:?}", noctalia.display().to_string()),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!(
+                "linux_wallpaperengine_program = {:?}",
+                engine.display().to_string()
+            ),
+        );
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, &document).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let (driver, _) = driver_with(
+        parsed.renderer.clone(),
+        outputs.iter().map(|output| live(output, None)).collect(),
+    );
+    let driver = driver.with_workshop_home(Some(home.to_path_buf()));
+    let runtime = Runtime::new(config_path, parsed, driver, at).unwrap();
+    (runtime, arguments, log)
+}
+
+/// Whether anything in `snapshot` outside its playlist and rule inventories names `id`.
+fn names_outside_inventory(snapshot: &serde_json::Value, id: &str) -> bool {
+    let mut copy = snapshot.clone();
+    let object = copy.as_object_mut().unwrap();
+    object.remove("playlists");
+    object.remove("schedules");
+    copy.to_string().contains(&format!("\"{id}\""))
+}
+
+/// The probe's pick (r13b S1): `playlist-use pages` over scenes = [SKIP_SCENE], pages =
+/// [WEB_PAGE] typed `page`, all-media = both; the default is `scenes`. The status after it.
+fn pick_of_pages(label: &str, page: &str) -> serde_json::Value {
+    let root = directory(label);
+    let home = skip_home(&format!("{label}-home"), page, false);
+    let document = skip_document(
+        "scenes",
+        &[
+            ("scenes", &[SKIP_SCENE]),
+            ("pages", &[WEB_PAGE]),
+            ("all-media", &[SKIP_SCENE, WEB_PAGE]),
+        ],
+        "",
+    );
+    let (mut runtime, _arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    let reply = runtime_command(&mut runtime, noon(), "playlist-use", Some("pages"));
+    assert!(reply.ok, "{}", reply.message);
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    snapshot
+}
+
+#[test]
+fn a_pick_the_service_refuses_throughout_is_named_beside_its_stand_in() {
+    // r13b S1: the person picked `pages`, whose one entry the service refuses; the default
+    // `scenes` stands in. At b3d1398 status said `source: manual`, `playlist_id: scenes`, and
+    // nothing named `pages`, so the app said "Manual override · scenes is playing".
+    let snapshot = pick_of_pages("r13c-pick", "web");
+    assert_eq!(snapshot["source"], "manual");
+    assert!(
+        names_outside_inventory(&snapshot, "pages"),
+        "status presents the stand-in as the pick: {snapshot}"
+    );
+    // What plays is still the stand-in, as `entry_id` is its entry.
+    assert_eq!(snapshot["playlist_id"], "scenes");
+    assert_eq!(snapshot["stand_in_for"], "pages");
+    let row = &snapshot["displays"][0];
+    assert_eq!(row["playlist_id"], "scenes", "{row}");
+    assert_eq!(row["entry_id"], "scenes-1", "{row}");
+    assert_eq!(row["stand_in_for"], "pages", "{row}");
+    assert_eq!(row["manual_override"], true);
+    assert!(row["nothing_to_play"].is_null());
+}
+
+#[test]
+fn control_a_pick_that_plays_names_no_stand_in() {
+    let snapshot = pick_of_pages("r13c-pick-control", "scene");
+    assert_eq!(snapshot["playlist_id"], "pages");
+    assert!(snapshot.get("stand_in_for").is_none(), "{snapshot}");
+    assert!(
+        snapshot["displays"][0].get("stand_in_for").is_none(),
+        "absent, not null, while a display plays its own"
+    );
+}
+
+/// Independent DP-1 and HDMI-A-1, both assigned `scenes`; DP-1 picks `pages` (typed `page`)
+/// with `on`. DP-1's row.
+fn independent_pick_of_pages(label: &str, page: &str) -> serde_json::Value {
+    let root = directory(label);
+    let home = skip_home(&format!("{label}-home"), page, false);
+    let document = skip_document(
+        "scenes",
+        &[("scenes", &[SKIP_SCENE]), ("pages", &[WEB_PAGE])],
+        "[[displays]]\nconnector = \"DP-1\"\nplaylist = \"scenes\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"scenes\"\n",
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP-1\"",
+    );
+    let (mut runtime, _arguments, _log, _config) =
+        skip_runtime(&root, &document, &home, &["DP-1", "HDMI-A-1"]);
+    runtime.apply_current().unwrap();
+    let reply = runtime_command(&mut runtime, noon(), "on", Some("DP-1 playlist-use pages"));
+    assert!(reply.ok, "{}", reply.message);
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    snapshot
+}
+
+#[test]
+fn an_independent_displays_refused_pick_is_named_on_its_row() {
+    let snapshot = independent_pick_of_pages("r13c-independent-pick", "web");
+    assert!(
+        names_outside_inventory(&snapshot, "pages"),
+        "DP-1's pick is presented as its stand-in: {snapshot}"
+    );
+    let row = route(&snapshot, "DP-1");
+    assert_eq!(row["route_source"], "manual", "{row}");
+    assert_eq!(row["playlist_id"], "scenes", "{row}");
+    assert_eq!(row["stand_in_for"], "pages", "{row}");
+    assert!(route(&snapshot, "HDMI-A-1").get("stand_in_for").is_none());
+    // Not every display plays that stand-in for it, so the summary names none.
+    assert!(snapshot.get("stand_in_for").is_none(), "{snapshot}");
+}
+
+#[test]
+fn control_an_independent_displays_pick_that_plays_is_its_own() {
+    let snapshot = independent_pick_of_pages("r13c-independent-pick-control", "scene");
+    let row = route(&snapshot, "DP-1");
+    assert_eq!(row["playlist_id"], "pages", "{row}");
+    assert!(row.get("stand_in_for").is_none(), "{row}");
+}
+
+#[test]
+fn a_rules_and_an_assignments_refused_playlist_are_named_beside_the_stand_in() {
+    // The rule's: mirrored, `pages` in force at noon, All media stands in.
+    let (at_noon, _at_one, _started, _told_again) = schedule_fallback(
+        "all-media",
+        &[("all-media", &[WEB_PAGE, ""]), ("pages", &[WEB_PAGE])],
+        "web",
+    );
+    assert_eq!(at_noon["displays"][0]["route_source"], "schedule");
+    assert_eq!(at_noon["displays"][0]["stand_in_for"], "pages", "{at_noon}");
+    assert_eq!(at_noon["stand_in_for"], "pages", "{at_noon}");
+    // Independent, under the same rule: each row names the rule's playlist; at 13:00
+    // HDMI-A-1's own assignment, All media, is what plays, so it names none.
+    let (rows, _hdmi_at_one) = independent_window("web");
+    assert_eq!(rows[0]["stand_in_for"], "pages", "{}", rows[0]);
+    assert_eq!(rows[1]["stand_in_for"], "pages", "{}", rows[1]);
+    assert_eq!(rows[3]["route_source"], "assignment", "{}", rows[3]);
+    assert!(rows[3].get("stand_in_for").is_none(), "{}", rows[3]);
+    // The assignment's: independent DP-1 is assigned `pages`.
+    let root = directory("r13c-assigned");
+    let home = skip_home("r13c-assigned-home", "web", false);
+    let document = skip_document(
+        "scenes",
+        &[("scenes", &[SKIP_SCENE]), ("pages", &[WEB_PAGE])],
+        "[[displays]]\nconnector = \"DP-1\"\nplaylist = \"pages\"\n",
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP-1\"",
+    );
+    let (mut runtime, _arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    let row = route(&snapshot, "DP-1");
+    assert_eq!(row["route_source"], "assignment", "{row}");
+    assert_eq!(row["assigned_playlist_id"], "pages", "{row}");
+    assert_eq!(row["playlist_id"], "scenes", "{row}");
+    assert_eq!(row["stand_in_for"], "pages", "{row}");
+    assert_eq!(
+        snapshot["stand_in_for"], "pages",
+        "every display plays it: {snapshot}"
+    );
+}
+
+#[test]
+fn with_nothing_to_stand_in_the_row_names_its_own_playlist_and_why() {
+    // No stand-in: the display plays nothing, on the playlist asked for, and says why.
+    let (snapshot, _applied, _replies, _started, _handed) = nothing_but(WEB_PAGE, false);
+    let row = &snapshot["displays"][0];
+    assert!(row.get("stand_in_for").is_none(), "{row}");
+    assert!(row["nothing_to_play"].is_string(), "{row}");
+}
+
+/// The statuses the app's tests read (`tests/test_stand_in_status.py`): a manual pick of
+/// `pages` that the service refuses throughout, and one that plays. Captured here, in this
+/// crate, because the package builds from `service/` alone; blessed with
+/// WALL_IN_ONE_BLESS_STAND_IN_STATUS.
+#[test]
+fn the_apps_captured_stand_in_statuses_keep_this_services_shape() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stand-in");
+    let keys = |value: &serde_json::Value| {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for (name, page) in [("pick-refused", "web"), ("pick-plays", "scene")] {
+        let live = pick_of_pages(&format!("r13c-captured-{name}"), page);
+        let path = fixtures.join(format!("{name}.json"));
+        if std::env::var_os("WALL_IN_ONE_BLESS_STAND_IN_STATUS").is_some() {
+            // What differs per process or per run is masked.
+            let mut blessed = live.clone();
+            for key in ["runtime_instance", "runtime_executable"] {
+                blessed[key] = "<masked>".into();
+            }
+            blessed["config_path"] = "/tmp/runtime.toml".into();
+            fs::create_dir_all(&fixtures).unwrap();
+            fs::write(
+                &path,
+                serde_json::to_string_pretty(&blessed).unwrap() + "\n",
+            )
+            .unwrap();
+        }
+        let captured: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(keys(&live), keys(&captured), "{name}");
+        assert_eq!(
+            keys(&live["displays"][0]),
+            keys(&captured["displays"][0]),
+            "{name}"
+        );
+        for key in [
+            "playlist_id",
+            "playlist",
+            "source",
+            "stand_in_for",
+            "entry_id",
+        ] {
+            assert_eq!(live[key], captured[key], "{name}: {key}");
+            assert_eq!(
+                live["displays"][0][key], captured["displays"][0][key],
+                "{name}: row {key}"
+            );
+        }
+        assert_eq!(live["playlists"], captured["playlists"], "{name}");
+    }
+}
+
+#[test]
+fn a_skipped_scene_on_another_library_is_listed_as_refused() {
+    // r13b S2: at 0.4.0 such a scene became a taboo, and status listed it; at b3d1398 it
+    // was skipped with only a journal line. Now status lists it, and why, without a taboo.
+    let root = directory("r13c-told");
+    let home = skip_home("r13c-told-home", "web", false);
+    let document = skip_document("all-media", &[("all-media", &["", OTHER_LIBRARY, ""])], "");
+    let (mut runtime, _arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    assert_eq!(snapshot["entry_id"], "all-media-3", "skipped, as designed");
+    assert!(
+        snapshot.to_string().contains(OTHER_LIBRARY),
+        "status says nothing about the skipped item {OTHER_LIBRARY}: {snapshot}"
+    );
+    assert_skipped_quietly(&snapshot);
+    let refused = snapshot["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{snapshot}");
+    assert_eq!(refused[0]["scene_id"], OTHER_LIBRARY);
+    assert_eq!(refused[0]["web_page"], false);
+    let reason = refused[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(OTHER_LIBRARY) && reason.contains("never another Steam library"),
+        "{reason}"
+    );
+    assert_eq!(snapshot["refused_omitted"], 0);
+}
+
+#[test]
+fn control_a_scene_where_the_engine_looks_is_not_listed() {
+    let root = directory("r13c-told-control");
+    let home = skip_home("r13c-told-control-home", "web", true);
+    let document = skip_document("all-media", &[("all-media", &["", OTHER_LIBRARY, ""])], "");
+    let (mut runtime, _arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    assert_eq!(snapshot["entry_id"], "all-media-2");
+    // It plays: nothing names it as refused (nor did anything at b3d1398).
+    assert!(!snapshot.to_string().contains(OTHER_LIBRARY), "{snapshot}");
+    assert_eq!(snapshot["refused"].as_array().map_or(0, Vec::len), 0);
+}
+
+#[test]
+fn a_refused_web_page_is_listed_as_one_and_a_reload_that_allows_it_forgets_it() {
+    let root = directory("r13c-told-web");
+    let home = skip_home("r13c-told-web-home", "web", false);
+    let (mut runtime, _arguments, _log, config_path) =
+        skip_runtime(&root, &stepped_down(WITH_STILL_ON), &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    let refused = status(&mut runtime, noon())["refused"].clone();
+    assert_eq!(refused.as_array().unwrap().len(), 1, "{refused}");
+    assert_eq!(refused[0]["scene_id"], WEB_PAGE);
+    assert_eq!(refused[0]["web_page"], true);
+    let allowed = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("schema_version = 4", "schema_version = 8")
+        .replace(
+            "theme_source_connector = \"\"\n",
+            "theme_source_connector = \"\"\nallow_web_wallpapers = true\n",
+        );
+    fs::write(&config_path, allowed).unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    assert_eq!(
+        status(&mut runtime, noon())["refused"],
+        serde_json::json!([])
+    );
+    remove_skip_fixture(runtime, &root, &home);
+}
+
+#[test]
+fn the_refused_list_is_capped_its_reasons_bounded_and_the_rest_counted() {
+    // Forty items of a type the service doesn't play, each named by a type far longer than
+    // any reason status carries; then a still. All forty are walked past at the first apply.
+    let long_type = "x".repeat(4096);
+    let ids: Vec<String> = (0..40)
+        .map(|index| format!("{}", 3_100_000_000_u64 + index))
+        .collect();
+    let project = format!(r#"{{"type":"{long_type}","file":"scene.json"}}"#);
+    let items: Vec<(&str, &str)> = ids
+        .iter()
+        .map(|id| (id.as_str(), project.as_str()))
+        .collect();
+    let home = workshop_home_with("r13c-cap-home", &items);
+    let root = directory("r13c-cap");
+    let mut entries: Vec<&str> = ids.iter().map(String::as_str).collect();
+    entries.push("");
+    let document = skip_document("all-media", &[("all-media", &entries)], "");
+    let (mut runtime, _arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    assert_eq!(snapshot["entry_id"], "all-media-41");
+    let refused = snapshot["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 16, "{snapshot}");
+    assert_eq!(snapshot["refused_omitted"], 24);
+    for (row, id) in refused.iter().zip(&ids) {
+        assert_eq!(
+            row["scene_id"],
+            id.as_str(),
+            "in the order the walk found them"
+        );
+        let reason = row["reason"].as_str().unwrap();
+        assert!(reason.len() <= 256, "{}", reason.len());
+        assert!(
+            reason.contains(id.as_str()) && reason.contains("[truncated]"),
+            "{reason}"
+        );
+    }
+}
+
+/// All media of `n` scenes the test driver says, when asked first, it won't start, then a
+/// still, applied once: the time the apply took, how often each scene was asked, how often
+/// the runtime worked out the settings motion starts with (once a display each round of the
+/// walk), and the entry that plays.
+fn walk_past(n: usize) -> (Duration, Vec<usize>, usize, String) {
+    let ids: Vec<String> = (0..n)
+        .map(|index| format!("{}", 3_000_000_000_u64 + index as u64))
+        .collect();
+    let mut entries: Vec<&str> = ids.iter().map(String::as_str).collect();
+    entries.push("");
+    let document = skip_document("all-media", &[("all-media", &entries)], "");
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        refuse_when_asked: (1..=n).map(|index| format!("all-media-{index}")).collect(),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        loaded(&document, &[]),
+        RuntimeDriver(state.clone()),
+        noon(),
+    )
+    .unwrap();
+    let started = Instant::now();
+    runtime.apply_current().unwrap();
+    let took = started.elapsed();
+    println!("walk past {n}: one apply took {took:?}");
+    let entry = status(&mut runtime, noon())["entry_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let state = state.lock().unwrap();
+    let asked = (1..=n)
+        .map(|index| {
+            state
+                .asked
+                .get(&format!("all-media-{index}"))
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect();
+    (took, asked, state.inhibition_sets, entry)
+}
+
+#[test]
+fn a_walk_past_a_long_run_of_refused_entries_is_one_pass() {
+    // r13b A1: each skip round learned one refusal and walked the playlist again, so a run
+    // of n refused entries cost n rounds of O(n) work on the service's one thread (8000 in
+    // 11 s, release). Now the walk asks ahead in one pass: each item is asked once, the
+    // rounds don't grow with the run, and 6000 take well under the app's status timeout.
+    let n = 6000;
+    let (took, asked, rounds, entry) = walk_past(n);
+    assert_eq!(
+        entry,
+        format!("all-media-{}", n + 1),
+        "past the run, to the still"
+    );
+    assert!(
+        asked.iter().all(|count| *count == 1),
+        "each asked once a walk"
+    );
+    assert!(
+        rounds <= 8,
+        "the walk went round {rounds} times for {n} refused entries: it walks again for each"
+    );
+    assert!(
+        took < Duration::from_secs(2),
+        "one apply held the service thread {took:?}"
+    );
+}
+
+#[test]
+fn control_a_walk_past_a_short_run_is_as_short() {
+    let (_took, asked, rounds, entry) = walk_past(2);
+    assert_eq!(entry, "all-media-3");
+    assert_eq!(asked, [1, 1]);
+    assert!(rounds <= 8, "{rounds}");
+}
+
+#[test]
+fn a_page_refused_only_at_the_engines_start_gives_the_web_reason() {
+    // r13b N-a: a refusal learned at the engine's start was recorded as not a web page, so a
+    // page refused that way made the reason "no wallpaper here can start".
+    let document = skip_document("all-media", &[("all-media", &[SKIP_SCENE])], "");
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        refuse_entry_ids: HashSet::from(["all-media-1".to_string()]),
+        refuse_as_web_page: true,
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        loaded(&document, &[]),
+        RuntimeDriver(state),
+        noon(),
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(
+        snapshot["nothing_to_play"], "this configuration doesn't allow web wallpapers",
+        "{snapshot}"
+    );
+}
+
+#[test]
+fn control_an_item_refused_only_at_the_start_that_isnt_a_page_cant_start() {
+    let document = skip_document("all-media", &[("all-media", &[SKIP_SCENE])], "");
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        refuse_entry_ids: HashSet::from(["all-media-1".to_string()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        loaded(&document, &[]),
+        RuntimeDriver(state),
+        noon(),
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert_eq!(
+        status(&mut runtime, noon())["nothing_to_play"],
+        "no wallpaper here can start"
+    );
+}
+
+/// Independent DP-1 on `pages` (the page alone, typed `page`), HDMI-A-1 on `other` (the
+/// scene on another Steam library alone); the default is `pages`, and there is no All
+/// media. Each row, at noon.
+fn each_displays_own_reason(page: &str) -> (serde_json::Value, serde_json::Value) {
+    let root = directory("r13c-own-reason");
+    let home = skip_home("r13c-own-reason-home", page, false);
+    let document = skip_document(
+        "pages",
+        &[("pages", &[WEB_PAGE]), ("other", &[OTHER_LIBRARY])],
+        "[[displays]]\nconnector = \"DP-1\"\nplaylist = \"pages\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"other\"\n",
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP-1\"",
+    );
+    let (mut runtime, _arguments, _log, _config) =
+        skip_runtime(&root, &document, &home, &["DP-1", "HDMI-A-1"]);
+    let _ = runtime.apply_current();
+    let rows = (
+        display_status(&mut runtime, noon(), "DP-1"),
+        display_status(&mut runtime, noon(), "HDMI-A-1"),
+    );
+    remove_skip_fixture(runtime, &root, &home);
+    rows
+}
+
+#[test]
+fn each_display_that_plays_nothing_gives_its_own_reason() {
+    // r13b N-b: the reason was worked out over every refusal of the document, so DP-1, whose
+    // only items are web pages, said "no wallpaper here can start" because HDMI-A-1's item
+    // is a scene the engine won't find.
+    let (dp, hdmi) = each_displays_own_reason("web");
+    assert_eq!(
+        dp["nothing_to_play"], "this configuration doesn't allow web wallpapers",
+        "{dp}"
+    );
+    assert_eq!(
+        hdmi["nothing_to_play"], "no wallpaper here can start",
+        "{hdmi}"
+    );
+}
+
+#[test]
+fn control_a_page_that_is_a_scene_plays_beside_a_display_that_cant() {
+    let (dp, hdmi) = each_displays_own_reason("scene");
+    assert!(dp["nothing_to_play"].is_null(), "{dp}");
+    // HDMI-A-1's `other` gives way to the default, `pages`, which plays.
+    assert_eq!(hdmi["playlist_id"], "pages", "{hdmi}");
+}
+
+/// Mirrored All media of three stills (the default) and `pages`, the page alone (typed
+/// `page`). `pages` picked, `next`, then `pages` picked `picks` times: the entry that plays
+/// after `next`, and at the end.
+fn picks_of_pages(page: &str, picks: usize) -> (String, String) {
+    let root = directory("r13c-repick");
+    let home = skip_home("r13c-repick-home", page, false);
+    let document = skip_document(
+        "all-media",
+        &[("all-media", &["", "", ""]), ("pages", &[WEB_PAGE])],
+        "",
+    );
+    let (mut runtime, _arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "playlist-use", Some("pages")).ok);
+    // A one-entry `pages` that plays has no next: not asserted here.
+    let _ = runtime_command(&mut runtime, noon(), "next", None);
+    let entry = |runtime: &mut Runtime<SystemDriver>| {
+        status(runtime, noon())["entry_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let after_next = entry(&mut runtime);
+    for _ in 0..picks {
+        assert!(runtime_command(&mut runtime, noon(), "playlist-use", Some("pages")).ok);
+    }
+    let at_end = entry(&mut runtime);
+    remove_skip_fixture(runtime, &root, &home);
+    (after_next, at_end)
+}
+
+#[test]
+fn picking_a_playlist_known_to_be_refused_keeps_the_stand_ins_rotation() {
+    // r13b N-c: picking `pages` again, already known to be refused throughout, put the
+    // stand-in's rotation back to its first entry.
+    let (after_next, at_end) = picks_of_pages("web", 2);
+    assert_eq!(after_next, "all-media-2", "the stand-in rotates");
+    assert_eq!(
+        at_end, "all-media-2",
+        "and a pick of what it stands in for keeps it there"
+    );
+}
+
+#[test]
+fn control_picking_a_playlist_that_plays_starts_it_from_its_first_entry() {
+    let (_after_next, at_end) = picks_of_pages("scene", 1);
+    assert_eq!(at_end, "pages-1");
+}
+
+/// A rule puts `pages` (the scene on another Steam library alone: never asked before the
+/// rule starts) in force from 11:00; All media of a still and SKIP_SCENE is the default,
+/// in `mode`. Started at 10:00; the row at 11:00, and what Noctalia and the engine were
+/// told when the rule started.
+fn a_rule_starting_on_an_unasked_refused_playlist(
+    mode: &str,
+    other_library_found: bool,
+) -> (serde_json::Value, usize, usize) {
+    let root = directory("r13c-rule-start");
+    let home = skip_home("r13c-rule-start-home", "web", other_library_found);
+    let mut tail = String::from(
+        "[[schedules]]\nid = \"noon\"\nplaylist = \"pages\"\nstart = \"11:00\"\nend = \"13:00\"\n",
+    );
+    if mode == "independent" {
+        tail += "[[displays]]\nconnector = \"DP-1\"\nplaylist = \"all-media\"\n";
+    }
+    let document = skip_document(
+        "all-media",
+        &[
+            ("all-media", &[SKIP_SCENE, ""]),
+            ("pages", &[OTHER_LIBRARY]),
+        ],
+        &tail,
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        &format!("display_mode = \"{mode}\""),
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        if mode == "independent" {
+            "theme_source_connector = \"DP-1\""
+        } else {
+            "theme_source_connector = \"\""
+        },
+    );
+    let ten = noon() - chrono::TimeDelta::hours(2);
+    let (mut runtime, arguments, log) = skip_runtime_at(&root, &document, &home, &["DP-1"], ten);
+    runtime.apply_current().unwrap();
+    // Let the engine's recorder write its first start.
+    thread::sleep(Duration::from_millis(300));
+    let calls = stills_handed(&log).len();
+    let starts = fs::read_to_string(&arguments)
+        .unwrap_or_default()
+        .matches("--bg")
+        .count();
+    let eleven = ten + chrono::TimeDelta::hours(1);
+    runtime.tick(eleven, Instant::now());
+    thread::sleep(Duration::from_millis(300));
+    let row = status(&mut runtime, eleven)["displays"][0].clone();
+    let told = stills_handed(&log).len() - calls;
+    let restarted = fs::read_to_string(&arguments)
+        .unwrap_or_default()
+        .matches("--bg")
+        .count()
+        - starts;
+    remove_skip_fixture(runtime, &root, &home);
+    (row, told, restarted)
+}
+
+/// r13b N-d: the rule's playlist went through a transition, the refusal was learned by
+/// applying it, and the stand-in (what already played) was applied again: its still handed
+/// again and its engine started again.
+fn the_stand_in_isnt_started_again_at_the_rules_start(mode: &str) {
+    let (row, told, restarted) = a_rule_starting_on_an_unasked_refused_playlist(mode, false);
+    assert_eq!(
+        told, 0,
+        "{mode}: Noctalia was told again at the rule's start"
+    );
+    assert_eq!(
+        restarted, 0,
+        "{mode}: the stand-in's engine was started again"
+    );
+    assert_eq!(row["schedule_rule_id"], "noon", "{mode}: {row}");
+    assert_eq!(row["playlist_id"], "all-media", "{mode}: {row}");
+    assert_eq!(row["entry_id"], "all-media-1", "{mode}: {row}");
+    assert_eq!(row["stand_in_for"], "pages", "{mode}: {row}");
+}
+
+#[test]
+fn a_rule_starting_on_a_refused_playlist_doesnt_start_the_mirrored_stand_in_again() {
+    the_stand_in_isnt_started_again_at_the_rules_start("mirrored");
+}
+
+#[test]
+fn a_rule_starting_on_a_refused_playlist_doesnt_start_an_independent_stand_in_again() {
+    the_stand_in_isnt_started_again_at_the_rules_start("independent");
+}
+
+#[test]
+fn control_a_rule_starting_on_a_playlist_that_plays_changes_the_display() {
+    for mode in ["mirrored", "independent"] {
+        let (row, told, _restarted) = a_rule_starting_on_an_unasked_refused_playlist(mode, true);
+        assert_eq!(row["playlist_id"], "pages", "{mode}: {row}");
+        assert_eq!(told, 1, "{mode}");
+    }
+}
+
+#[test]
+fn a_shuffled_walk_from_a_random_jump_past_refused_entries_is_one_pass_too() {
+    // A shuffled cursor with nothing it can start after its entry deals the eligible ones
+    // again, some never asked: the walk's next round asks along that new deal, so the deal
+    // costs a round, not a round for each entry in it.
+    let n = 200;
+    let ids: Vec<String> = (0..n)
+        .map(|index| format!("{}", 3_200_000_000_u64 + index as u64))
+        .collect();
+    let mut entries = vec![""];
+    entries.extend(ids.iter().map(String::as_str));
+    let document = skip_document("all-media", &[("all-media", &entries)], "")
+        .replace("shuffle = false", "shuffle = true");
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        refuse_when_asked: (2..=n + 1)
+            .map(|index| format!("all-media-{index}"))
+            .collect(),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        loaded(&document, &[]),
+        RuntimeDriver(state.clone()),
+        noon(),
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert_eq!(status(&mut runtime, noon())["entry_id"], "all-media-1");
+    state.lock().unwrap().inhibition_sets = 0;
+    // Somewhere into the run of entries not asked yet.
+    let reply = runtime_command(&mut runtime, noon(), "random", None);
+    assert!(reply.ok, "{}", reply.message);
+    assert_eq!(
+        status(&mut runtime, noon())["entry_id"],
+        "all-media-1",
+        "the still"
+    );
+    let state = state.lock().unwrap();
+    assert!(
+        (2..=n + 1).all(|index| state
+            .asked
+            .get(&format!("all-media-{index}"))
+            .copied()
+            .unwrap_or(0)
+            <= 1),
+        "each asked at most once"
+    );
+    assert!(
+        state.inhibition_sets <= 8,
+        "the walk went round {} times",
+        state.inhibition_sets
+    );
 }

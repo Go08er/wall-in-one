@@ -1,0 +1,157 @@
+{
+  "allow_web_wallpapers": false,
+  "animation_inhibition_reason": "",
+  "animations_inhibited": false,
+  "automatic_retry": null,
+  "config_epoch": 1,
+  "config_generation": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "config_path": "/tmp/runtime.toml",
+  "cycle_default": false,
+  "cycle_enabled": false,
+  "cycle_interval_seconds": 300,
+  "cycle_source": "config",
+  "display_mode": "mirrored",
+  "displays": [
+    {
+      "assigned_playlist": "scenes",
+      "assigned_playlist_id": "scenes",
+      "assignment_source": "default",
+      "automatic_retry": null,
+      "beats_global_rules": false,
+      "connected": true,
+      "connector": "ALL",
+      "cycle_default": false,
+      "cycle_enabled": false,
+      "cycle_interval_seconds": 300,
+      "cycle_source": "config",
+      "entry_id": "scenes-1",
+      "entry_name": null,
+      "entry_taboo": false,
+      "kind": "scene",
+      "last_error": "",
+      "manual_override": true,
+      "motion_active": true,
+      "next_change_in_s": null,
+      "next_cycle_at": null,
+      "next_cycle_in_s": null,
+      "nothing_to_play": null,
+      "paused": false,
+      "playback_state": "playing",
+      "playlist": "scenes",
+      "playlist_id": "scenes",
+      "renderer_failed": false,
+      "route_change_at": null,
+      "route_change_in_s": null,
+      "route_source": "manual",
+      "schedule_rule_id": null,
+      "shuffle": false,
+      "shuffle_default": false,
+      "shuffle_source": "config",
+      "stand_in_for": "pages",
+      "still": "/stills/scenes-1.png",
+      "stopped": false,
+      "until": null
+    }
+  ],
+  "entry_id": "scenes-1",
+  "entry_taboo": false,
+  "install_kind": "source",
+  "kind": "scene",
+  "last_error": "",
+  "loaded_config_sha256": "875ea3d6f59f78d3f3d01b4d5c514bc13869728380859e2fe3574fbd2410df55",
+  "loaded_overrides_sha256": null,
+  "missing_renderers": [],
+  "motion_active": true,
+  "nothing_to_play": null,
+  "output_discovery_error": "",
+  "outputs": [
+    {
+      "enabled": true,
+      "height": 0,
+      "make": "",
+      "mode_height": 0,
+      "mode_width": 0,
+      "model": "",
+      "name": "DP-1",
+      "physical_height_mm": 0,
+      "physical_width_mm": 0,
+      "refresh_millihz": null,
+      "scale": 0.0,
+      "width": 0,
+      "x": 0,
+      "y": 0
+    }
+  ],
+  "overrides_ignored": null,
+  "paused": false,
+  "playback_state": "playing",
+  "playlist": "scenes",
+  "playlist_id": "scenes",
+  "playlists": [
+    {
+      "active": true,
+      "entries": 1,
+      "id": "scenes",
+      "name": "scenes"
+    },
+    {
+      "active": false,
+      "entries": 1,
+      "id": "pages",
+      "name": "pages"
+    },
+    {
+      "active": false,
+      "entries": 2,
+      "id": "all-media",
+      "name": "all-media"
+    }
+  ],
+  "power_available": false,
+  "power_source": "unknown",
+  "refused": [
+    {
+      "reason": "this configuration doesn't allow web wallpapers: Workshop item 2777242023 is a web page, so linux-wallpaperengine was not started for it",
+      "scene_id": "2777242023",
+      "web_page": true
+    }
+  ],
+  "refused_omitted": 0,
+  "renderer_failed": false,
+  "runtime_executable": "<masked>",
+  "runtime_instance": "<masked>",
+  "runtime_version": "0.4.0",
+  "schedule": {
+    "following": false,
+    "playlist": "scenes",
+    "playlist_id": "scenes",
+    "rule_id": null
+  },
+  "schedules": [],
+  "shuffle": false,
+  "shuffle_default": false,
+  "shuffle_source": "config",
+  "source": "manual",
+  "stand_in_for": "pages",
+  "status_version": 2,
+  "still": "/stills/scenes-1.png",
+  "stop_animations_on_battery": false,
+  "stopped": false,
+  "supported_config_schemas": [
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "supported_override_schemas": [
+    1
+  ],
+  "taboo_entries": [],
+  "taboo_entries_omitted": 0,
+  "theme_source": {
+    "configured": "",
+    "effective": null,
+    "fallback": false
+  }
+}

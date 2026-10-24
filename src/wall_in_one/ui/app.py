@@ -841,9 +841,13 @@ class Application(Adw.Application):
         self._runtime_loaded_generation = 0
         # The runtime.toml texts replaced since the service last confirmed a
         # reload: what it may still hold if it refused one since (at most
-        # HELD_CANDIDATES; past that, what it holds isn't known).
-        self._held_candidates: list[str] = []
+        # HELD_CANDIDATES; past that, what it holds isn't known). Each is
+        # numbered in the order it was replaced, so that a reload confirms only
+        # the texts replaced before it was sent (`_service_holds_what_is_on_disk`).
+        self._held_candidates: list[tuple[int, str]] = []
+        self._held_replaced = 0
         self._held_candidates_unknown = False
+        self._held_dropped_through = 0
         self._runtime_shutdown = False
         # A GTK object can be destroyed while a worker is waiting on the
         # socket, then replaced by a later activation.  The monotonically
@@ -3180,6 +3184,7 @@ class Application(Adw.Application):
             return False
         if not changed:
             return True
+        mark = self._held_mark()
         try:
             response = client.send_runtime("reload")
         except client.NotRunningError:
@@ -3194,7 +3199,7 @@ class Application(Adw.Application):
             done = self._web_off_guard()
             self.window_report(f"{refused.rstrip().rstrip('.')}. {done}" if done else refused)
             return False
-        self._service_holds_what_is_on_disk()
+        self._service_holds_what_is_on_disk(mark)
         with self._runtime_config_lock:
             self._runtime_loaded_generation = self._runtime_document_generation
         return True
@@ -4252,17 +4257,37 @@ class Application(Adw.Application):
                 self._compiled_left_out = left_out
                 self._compiled_default_pointer = pointer
                 if replaced is not None:
-                    self._held_candidates.append(replaced)
+                    self._held_candidates.append((self._held_replaced, replaced))
+                    self._held_replaced += 1
                     if len(self._held_candidates) > HELD_CANDIDATES:
-                        del self._held_candidates[0]
+                        place, _dropped = self._held_candidates.pop(0)
                         self._held_candidates_unknown = True
+                        self._held_dropped_through = place + 1
         return changed
 
-    def _service_holds_what_is_on_disk(self) -> None:
-        """The service confirmed a reload (or isn't running): it holds the file on disk now."""
+    def _held_mark(self) -> int:
+        """Where the replaced texts stand now: pass it, taken before a reload is sent, to
+        `_service_holds_what_is_on_disk` once that reload is confirmed."""
         with self._runtime_config_lock:
-            self._held_candidates.clear()
-            self._held_candidates_unknown = False
+            return self._held_replaced
+
+    def _service_holds_what_is_on_disk(self, through: int | None = None) -> None:
+        """The service confirmed a reload (or isn't running): it holds the file on disk now.
+
+        ``through``: `_held_mark` as it stood when that reload was sent. Only the
+        texts replaced before then are forgotten: one replaced while the reload
+        was on the wire may be the very one it loaded (review r13, N2). None:
+        every one, for a service that isn't running, or has quit.
+        """
+        with self._runtime_config_lock:
+            if through is None:
+                self._held_candidates.clear()
+            else:
+                self._held_candidates = [
+                    (place, text) for place, text in self._held_candidates if place >= through
+                ]
+            if through is None or self._held_dropped_through <= through:
+                self._held_candidates_unknown = False
 
     @staticmethod
     def _default_pointer(left_out: tuple[runtime_config.LeftOut, ...]) -> str:
@@ -4359,7 +4384,7 @@ class Application(Adw.Application):
             except OSError, UnicodeDecodeError:
                 on_disk = None
             with self._runtime_config_lock:
-                candidates = list(self._held_candidates)
+                candidates = [text for _place, text in self._held_candidates]
                 unknown = self._held_candidates_unknown
             titles, unchecked = runtime_config.web_wallpapers_in(
                 [*candidates, *([on_disk] if on_disk is not None else [])]
@@ -4388,6 +4413,7 @@ class Application(Adw.Application):
             except client.ControlError, OSError:
                 stopped = False
             written = False
+            mark = 0
             if locked and runtime_config.nothing_to_play_supported(status):
                 try:
                     document = runtime_config.nothing_to_play_document(
@@ -4404,13 +4430,14 @@ class Application(Adw.Application):
                 if written:
                     with self._runtime_config_lock:
                         self._runtime_document_generation += 1
+                        mark = self._held_replaced
         if written:
             try:
                 loaded = client.send_runtime("reload").ok
             except client.ControlError, OSError:
                 loaded = False
             if loaded:
-                self._service_holds_what_is_on_disk()
+                self._service_holds_what_is_on_disk(mark)
                 with self._runtime_config_lock:
                     self._runtime_loaded_generation = self._runtime_document_generation
                 if was_playing:
@@ -4995,12 +5022,13 @@ class Application(Adw.Application):
             with self._runtime_config_lock:
                 wanted = self._runtime_document_generation
                 loaded = self._runtime_loaded_generation
+                mark = self._held_replaced
             if loaded >= wanted:
                 return Response.success()
             response = self._send_gui_runtime("reload")
             if not response.ok:
                 return response
-            self._service_holds_what_is_on_disk()
+            self._service_holds_what_is_on_disk(mark)
             with self._runtime_config_lock:
                 self._runtime_loaded_generation = max(
                     self._runtime_loaded_generation,

@@ -191,7 +191,7 @@ has no such key, so it allows no web page.
 
 **No previews while it is off.** Owner: "it shouldn't load the papers to make a
 preview if web wallpapers are off." While the setting is off, nothing in a web
-wallpaper's folder (`MediaItem.web_page`, so a preset of one too) is opened
+wallpaper's folder (`MediaItem.web_files`, below) is opened
 except its `project.json`, which the scan reads to know what the item is.
 No thumbnail, still, colour or screenshot is made from its preview, its page
 or anything else there, and linux-wallpaperengine is never started for one.

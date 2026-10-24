@@ -456,8 +456,8 @@ class Inspector(Gtk.Box):
         card.append(widgets.dim(wallpaper.refused_here))
         card.append(
             widgets.dim(
-                "Playback skips it to the next wallpaper. The service checks again "
-                "when its configuration is next published."
+                "Playback skips it to the next wallpaper. This notice goes once the "
+                "service stops refusing it."
             )
         )
         return card

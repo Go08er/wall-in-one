@@ -13457,3 +13457,80 @@ fn at_the_limit_refused_rows_go_before_the_stand_ins_and_each_is_counted() {
         "left out more than needed: {encoded} bytes"
     );
 }
+
+// -- r13d N-8: an independent row's stand-in is named as of the decision it shows ------------
+
+/// `independent_window`'s document and runtime, started at `at`: independent DP-1 assigned
+/// `mixed`, HDMI-A-1 assigned All media, and `NOON_RULE` putting `pages`, the page alone
+/// (refused), in force from 11:00 to 13:00 for both.
+fn rule_boundary_runtime(
+    label: &str,
+    at: chrono::NaiveDateTime,
+) -> (Runtime<SystemDriver>, PathBuf, PathBuf) {
+    let root = directory(label);
+    let home = skip_home(&format!("{label}-home"), "web", false);
+    let document = skip_document(
+        "all-media",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("mixed", &["", ""]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        &format!(
+            "{NOON_RULE}[[displays]]\nconnector = \"DP-1\"\nplaylist = \"mixed\"\n\
+             [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"all-media\"\n"
+        ),
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP-1\"",
+    );
+    let (mut runtime, _arguments, _log) =
+        skip_runtime_at(&root, &document, &home, &["DP-1", "HDMI-A-1"], at);
+    runtime.apply_current().unwrap();
+    (runtime, root, home)
+}
+
+#[test]
+fn an_independent_rows_stand_in_is_named_as_of_the_decision_it_shows() {
+    // Review r13c N-8: a row's `stand_in_for` asked the schedule again at the status's own
+    // moment, while `playlist_id`, `route_source` and `schedule_rule_id` are the route's last
+    // decision. Between a rule's boundary and the tick that applies it the row said two things.
+    let one = noon() + chrono::TimeDelta::hours(1);
+    let (mut runtime, root, home) = rule_boundary_runtime("r13d-rule-end", noon());
+    // 13:00, the rule's end, not applied yet: both still play All media for `pages`.
+    let before = status(&mut runtime, one);
+    runtime.tick(one, Instant::now());
+    let after = status(&mut runtime, one);
+    remove_skip_fixture(runtime, &root, &home);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&before, connector);
+        assert_eq!(row["schedule_rule_id"], "noon", "{row}");
+        assert_eq!(row["playlist_id"], "all-media", "{row}");
+        assert_eq!(row["stand_in_for"], "pages", "{row}");
+    }
+    assert_eq!(before["stand_in_for"], "pages", "{before}");
+    // Applied: DP-1 plays its own playlist, and HDMI-A-1's own is All media.
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&after, connector);
+        assert_eq!(row["route_source"], "assignment", "{row}");
+        assert!(row.get("stand_in_for").is_none(), "{row}");
+    }
+
+    // 11:00, the rule's start, not applied yet: HDMI-A-1 still plays its own assignment.
+    let eleven = noon() - chrono::TimeDelta::hours(1);
+    let (mut runtime, root, home) =
+        rule_boundary_runtime("r13d-rule-start", eleven - chrono::TimeDelta::seconds(1));
+    let before = status(&mut runtime, eleven);
+    remove_skip_fixture(runtime, &root, &home);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&before, connector);
+        assert_eq!(row["route_source"], "assignment", "{row}");
+        assert!(row.get("stand_in_for").is_none(), "{row}");
+    }
+    assert_eq!(route(&before, "HDMI-A-1")["playlist_id"], "all-media");
+}

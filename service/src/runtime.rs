@@ -2442,6 +2442,32 @@ impl<D: WallpaperDriver> Runtime<D> {
             .then_some(asked.id.as_str())
     }
 
+    /// The playlist `route` asked for when it last decided what `connector`
+    /// plays: its pick, its rule's, its assignment or the default, as its
+    /// `source` and `schedule_rule_id` say. The same moment as its
+    /// `active_playlist`, which a fresh `automatic_route` isn't between a
+    /// rule's boundary and the tick that applies it.
+    fn route_asked_for<'a>(&'a self, connector: &str, route: &'a DisplayRoute) -> Option<&'a str> {
+        match route.source {
+            RouteSource::Manual => route.manual_playlist.as_deref(),
+            RouteSource::Schedule => {
+                let rule_id = route.schedule_rule_id.as_deref()?;
+                self.config
+                    .schedules
+                    .iter()
+                    .find(|rule| rule.id == rule_id)
+                    .map(|rule| rule.playlist.as_str())
+            }
+            RouteSource::Assignment => self
+                .config
+                .displays
+                .iter()
+                .find(|assignment| assignment.connector == connector)
+                .map(|assignment| assignment.playlist.as_str()),
+            RouteSource::Default => Some(self.config.default_playlist.as_str()),
+        }
+    }
+
     /// Why a display on `playlist` plays nothing when every entry it could
     /// play was refused (`stand_in` is None): over the refusals of what it
     /// tried, its own playlist and each that could stand in, not over every
@@ -6503,14 +6529,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                 assigned_playlist: &assigned.name,
                 playlist_id: &effective.id,
                 playlist: &effective.name,
-                stand_in_for: match &route.manual_playlist {
-                    Some(manual) => Some(manual.clone()),
-                    None => self
-                        .automatic_route(output, at)
-                        .ok()
-                        .map(|(playlist, _, _)| playlist),
-                }
-                .and_then(|asked| self.stood_in_for(&asked, &effective.id)),
+                stand_in_for: self
+                    .route_asked_for(output, route)
+                    .and_then(|asked| self.stood_in_for(asked, &effective.id)),
                 entry_id: entry.map_or("", |entry| entry.id.as_str()),
                 entry_taboo: entry.is_some_and(|entry| self.is_taboo(&effective.id, &entry.id)),
                 kind: entry.map_or("", |entry| entry_kind(entry.kind)),

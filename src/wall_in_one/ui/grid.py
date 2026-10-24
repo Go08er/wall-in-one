@@ -521,7 +521,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             return
         self._allow_web = allowed
         for path, tile in list(self._tiles.items()):
-            if tile.item.web_page:
+            if tile.item.holds_web:
                 self._flow.remove(tile)
                 del self._tiles[path]
         self._apply_query()

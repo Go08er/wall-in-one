@@ -193,6 +193,8 @@ class LibraryWallpaper:
     kind_detail: str = ""
     kind_note: str = ""
     settings_target: str = ""
+    #: Said in place of a picture while web wallpapers are off, else empty.
+    preview_note: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +307,9 @@ def wallpaper_view(
         kind_detail=item.workshop_detail,
         kind_note=item.scene_note,
         settings_target=WEB_SETTING if workshop.web_off(item, allow_web) else "",
+        preview_note=(
+            workshop.WEB_PREVIEW_OFF_NOTE if workshop.previews_off(item, allow_web) else ""
+        ),
     )
 
 

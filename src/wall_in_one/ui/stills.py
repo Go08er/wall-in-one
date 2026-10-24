@@ -258,7 +258,7 @@ class StillMaker:
                 continue
             processes = (
                 worker_processes.GatedCancellation(self._processes, self._web_allowed)
-                if item.web_page
+                if item.holds_web
                 else self._processes
             )
             if item.kind is Kind.SCENE and (
@@ -283,7 +283,7 @@ class StillMaker:
                     refused=folder_refused,
                     # Only a web page is told: for it alone is it ever true, and
                     # `stills.ensure` has the safe default.
-                    **({"allow_web": True} if item.web_page else {}),
+                    **({"allow_web": True} if item.holds_web else {}),
                 )
                 is not None
             ):
@@ -342,7 +342,7 @@ class StillMaker:
                 return
             processes = (
                 worker_processes.GatedCancellation(self._processes, self._web_allowed)
-                if item.web_page
+                if item.holds_web
                 else self._processes
             )
             size = scenes.measured_capture_size("", outputs.discover(fallback))
@@ -352,7 +352,7 @@ class StillMaker:
                 force=True,
                 processes=processes,
                 size=size,
-                **({"allow_web": True} if item.web_page else {}),
+                **({"allow_web": True} if item.holds_web else {}),
             )
             if not self._processes.cancelled():
 

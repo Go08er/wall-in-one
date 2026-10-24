@@ -160,6 +160,12 @@ class MediaItem:
     #: a ``web`` wallpaper, or a preset of one. Played only with
     #: ``allow_web_wallpapers`` on (`library.workshop.web_off`).
     web_page: bool = False
+    #: It is, or may be, a web wallpaper's folder, however playback judges it:
+    #: an item whose type reads ``web`` (stripped, case-folded) even if it can't
+    #: play, or a preset whose base is web, missing or unclassifiable. Failing
+    #: closed, nothing is made from its files while web wallpapers are off
+    #: (`library.workshop.previews_off`). ``web_page`` stays playback's word.
+    web_files: bool = False
     #: Why it can never play as it is, or ``None``; ``unplayable_reason`` says
     #: it for a person.
     unplayable: Unplayable | None = None
@@ -173,6 +179,11 @@ class MediaItem:
     @property
     def is_video(self) -> bool:
         return self.kind is Kind.VIDEO
+
+    @property
+    def holds_web(self) -> bool:
+        """It is, or may be, a web wallpaper's folder: what the preview gate asks."""
+        return self.web_page or self.web_files
 
     @property
     def rendered_scene(self) -> str:

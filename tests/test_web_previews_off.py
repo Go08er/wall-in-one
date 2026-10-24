@@ -330,3 +330,32 @@ def test_the_still_maker_drops_a_web_page_that_was_queued_before_web_went_off(
     maker._run((web_folder.web,), web_folder.root, lambda made: None)
     assert ensured == [web_folder.web]
     maker.shutdown()
+
+
+def test_a_refused_web_item_and_a_preset_of_nothing_get_nothing_while_web_is_off(
+    web_folder: Fixture, watch: _Watch
+) -> None:
+    """Fail closed: a web-typed item that can't play, or a preset whose base is unknown."""
+    assert web_folder.malformed.holds_web and web_folder.orphan.holds_web
+    assert not web_folder.malformed.web_page  # playback's word is unchanged
+    for item in (web_folder.malformed, web_folder.orphan):
+        assert thumbnails.lookup(item) is None
+        with pytest.raises(thumbnails.ThumbnailError):
+            thumbnails.generate(item)
+        assert stills.ensure(item, web_folder.root) is None
+    assert watch.clean(), (watch.opens, watch.started)
+
+
+def test_a_malformed_scene_still_gets_its_cant_play_preview(
+    web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_options: object) -> subprocess.CompletedProcess[bytes]:
+        ran.append(argv)
+        Path(argv[-1]).write_bytes(PNG)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    made = thumbnails.generate(web_folder.bad_scene)
+    assert made.is_file() and str(web_folder.bad_scene.preview) in ran[0]

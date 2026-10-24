@@ -311,7 +311,7 @@ class Inspector(Gtk.Box):
         overlay.set_child(
             widgets.Thumb.of(wallpaper, 360, 203, radius=14, fill=True, size=(960, 540))
         )
-        if wallpaper.settings_target:
+        if getattr(wallpaper, "preview_note", ""):
             overlay.add_overlay(widgets.web_off_note())
         badges = Gtk.Box(spacing=6, valign=Gtk.Align.START, halign=Gtk.Align.START)
         badges.add_css_class("inspector-preview-badges")
@@ -758,7 +758,14 @@ class Inspector(Gtk.Box):
             self.state.wallpaper_swatches(wallpaper, _dark()),
             _unknown_colors(wallpaper),
         )
-        box.append(preview)
+        if getattr(wallpaper, "preview_note", ""):
+            # No picture under the miniature desktop while web wallpapers are off.
+            framed = Gtk.Overlay()
+            framed.set_child(preview)
+            framed.add_overlay(widgets.web_off_note())
+            box.append(framed)
+        else:
+            box.append(preview)
 
         # Sized to its labels: "From wallpaper" and "Don't change" ellipsize in equal thirds.
         mode_group = Adw.ToggleGroup(homogeneous=False, can_shrink=False, halign=Gtk.Align.FILL)

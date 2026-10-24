@@ -993,7 +993,7 @@ class PlaylistsPage(Gtk.Box):
         shown = [
             (item, card.show_thumbnail)
             for card, item in self._source_cards.items()
-            if item.web_page
+            if item.holds_web
         ]
         shown += [
             (item, row.show_thumbnail)

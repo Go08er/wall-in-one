@@ -395,7 +395,7 @@ class WallpaperCard(Gtk.Box):
         # Fill the grid cell at 16:9 so outlines and badges always hug the picture.
         self.picture = Thumb.of(wallpaper, width, height, radius=12, fill=True)
         overlay.set_child(self.picture)
-        if wallpaper.settings_target:
+        if getattr(wallpaper, "preview_note", ""):
             # A web wallpaper while they are off has no picture: say why.
             overlay.add_overlay(web_off_note())
 

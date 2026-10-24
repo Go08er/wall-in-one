@@ -937,7 +937,26 @@ def previews_off(item: MediaItem, allowed: bool) -> bool:
     is about previews, stills and colours, which open the wallpaper's own files.
     Only its ``project.json`` is read then.
     """
-    return item.web_page and not allowed
+    return item.holds_web and not allowed
+
+
+def holds_web(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> bool:
+    """Whether ``item``'s folder is, or may be, a web wallpaper's, read from ``project.json`` alone.
+
+    Fails closed, unlike `playback`: a type that reads ``web`` leniently counts
+    though it can't play, and a preset counts unless its base is installed and
+    plainly not web (a base that is missing, unnamed or itself a preset can't
+    be ruled out).
+    """
+    own = {item.kind, item.declared_type, item.lenient_type}
+    if item.kind != PRESET:
+        return "web" in own
+    if "web" in own:
+        return True
+    base = installed.get(item.dependency) if item.dependency else None
+    if base is None or base.kind == PRESET:
+        return True
+    return "web" in {base.kind, base.declared_type, base.lenient_type}
 
 
 def why_not_played(item: MediaItem, allow_web: bool) -> str:

@@ -124,7 +124,7 @@ class ThumbnailLoader:
         cancellation that also ends when they are turned off, which ends that
         one child (by its own process group, nothing by name).
         """
-        if not item.web_page:
+        if not item.holds_web:
             return self._texture_for(item, self._processes)
         if workshop.previews_off(item, self.web_allowed()):
             return None

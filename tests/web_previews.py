@@ -82,6 +82,9 @@ class Fixture(SimpleNamespace):
     web: MediaItem
     preset: MediaItem
     scene: MediaItem
+    malformed: MediaItem
+    orphan: MediaItem
+    bad_scene: MediaItem
     root: Path
     cache: Path
     folders: tuple[Path, ...]
@@ -99,6 +102,11 @@ def web_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixt
             "preview": "preview.gif",
         },
         "400": {"title": "Y2K Matrix", "dependency": "300", "preset": {"a": True}},
+        # Refused by the scan, so not `web_page`: a web item with no page to name,
+        # a preset of an uninstalled wallpaper, and (the control) a malformed scene.
+        "500": {"type": " Web ", "title": "No Page", "preview": "preview.gif"},
+        "600": {"title": "Orphan", "dependency": "999", "preset": {"a": True}, "preview": "p.gif"},
+        "700": {"type": "scene", "title": "Bad Scene", "file": "scene.txt", "preview": "p.gif"},
         "200": {"type": "scene", "title": "Toothless", "file": "scene.json", "preview": "p.gif"},
     }
     for workshop_id, project in projects.items():
@@ -110,6 +118,9 @@ def web_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixt
     (root / "Wall-in-One" / "Automatic Stills").mkdir(parents=True)
     library = scan.scan([root], include_workshop=True, workshop_roots=(steam,), records={})
     items = {item.scene: item for item in library.items}
+    assert items["500"].unplayable is not None and not items["500"].web_page
+    assert items["600"].unplayable is not None and not items["600"].web_page
+    assert items["700"].unplayable is not None and not items["700"].holds_web
     assert items["300"].web_page and items["400"].web_page and not items["200"].web_page
     assert items["300"].preview is not None
     # Unreadable from here on: any attempt to read one is an error somewhere.
@@ -130,6 +141,9 @@ def web_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fixt
             web=items["300"],
             preset=items["400"],
             scene=items["200"],
+            malformed=items["500"],
+            orphan=items["600"],
+            bad_scene=items["700"],
             root=root,
             cache=cache,
             folders=folders,

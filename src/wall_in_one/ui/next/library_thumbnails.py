@@ -141,8 +141,8 @@ class LibraryThumbnails:
         a picture drawn while they were on is dropped (it is not handed out
         while they are off, and is made afresh or found in the cache after).
         """
-        self._failed = {item for item in self._failed if not item.web_page}
-        for item in [item for item in self._ready if item.web_page]:
+        self._failed = {item for item in self._failed if not item.holds_web}
+        for item in [item for item in self._ready if item.holds_web]:
             del self._ready[item]
 
     def pending(self) -> int:

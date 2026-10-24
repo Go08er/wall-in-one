@@ -527,6 +527,7 @@ def workshop_items(
                     scene_note=plays.note,
                     runs_program=plays.program,
                     web_page=plays.web,
+                    web_files=workshop.holds_web(item, by_id),
                     unplayable=plays.unplayable,
                     unplayable_reason=plays.reason,
                 )

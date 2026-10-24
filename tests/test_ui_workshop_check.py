@@ -195,7 +195,8 @@ def test_web_wallpapers_are_off_until_allowed_and_then_play(
 
         # Its details lead to the setting.
         page.inspect(electric)
-        assert workshop.WEB_PREVIEW_OFF_NOTE in _visible_labels(page.inspector), "no picture"
+        said = _visible_labels(page.inspector).count(workshop.WEB_PREVIEW_OFF_NOTE)
+        assert said == 2, "the header picture and the colours' miniature desktop both say it"
         button = page.inspector.setting_button
         assert button is not None
         button.emit("clicked")

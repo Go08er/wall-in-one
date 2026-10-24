@@ -205,7 +205,12 @@ work was queued. Turning it on makes the previews as usual. Turning it off
 again drops what is queued for web wallpapers, discards a picture that was
 being made, and ends a running ffmpeg or linux-wallpaperengine started for
 one by its own process group (`worker_processes.GatedCancellation`); nothing
-is signalled by name. The scan only `lstat`s the files `project.json` names
+is signalled by name. The preview gate fails closed and is wider than
+`web_page`, which stays playback's word: `MediaItem.web_files` (set from
+`project.json` alone, `workshop.holds_web`) is also true for an item whose type
+reads `web` leniently (stripped, case-folded) though it can't play, and for a
+preset whose base is web, not installed, unnamed or itself a preset. A malformed
+scene keeps its "Can't play" preview. The scan only `lstat`s the files `project.json` names
 (it never opens them).
 
 ### Executable wallpapers are never run

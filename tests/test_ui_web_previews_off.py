@@ -137,4 +137,17 @@ def test_the_next_interface_gives_a_web_page_no_picture_and_says_why(
         web_folder.web, favourite=False, pairing=None, health=pairings.Health(), allow_web=True
     )
     assert workshop.WEB_PREVIEW_OFF_NOTE not in _labels(WallpaperCard(on))
+    for refused in (web_folder.malformed, web_folder.orphan):
+        refused_view = wallpaper_view(
+            refused, favourite=False, pairing=None, health=pairings.Health(), allow_web=False
+        )
+        assert workshop.WEB_PREVIEW_OFF_NOTE in _labels(WallpaperCard(refused_view))
+    control = wallpaper_view(
+        web_folder.bad_scene,
+        favourite=False,
+        pairing=None,
+        health=pairings.Health(),
+        allow_web=False,
+    )
+    assert workshop.WEB_PREVIEW_OFF_NOTE not in _labels(WallpaperCard(control))
     assert watch.clean(), (watch.opens, watch.started)

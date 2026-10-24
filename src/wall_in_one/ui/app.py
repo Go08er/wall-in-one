@@ -797,6 +797,8 @@ class Application(Adw.Application):
         self._left_out_said: frozenset[runtime_config.LeftOut] = frozenset()
         #: Whether the last status showed a service that reads presets.
         self._presets_readable_seen = False
+        #: And one that reads the renderer dials (schema 7).
+        self._dials_readable_seen = False
         self._default_pointer_said = ""
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
@@ -5038,16 +5040,20 @@ class Application(Adw.Application):
         self._queue_runtime_health(request)
 
     def _publish_again_when_presets_become_readable(self, status: dict[str, object]) -> None:
-        """Presets left out for a service that didn't read them: publish again once it does.
+        """Presets or dials left out for a service that didn't read them: publish again.
 
-        The notice stands until the next publication, which the GUI would
-        otherwise not make after the service restarted. Only the change to
-        "reads presets" asks, so units that can't be verified (which leave
-        them out again) are not asked over and over.
+        Once it does. The notice stands until the next publication, which the
+        GUI would otherwise not make after the service restarted. Only the
+        change to "reads presets" (or the dials) asks, so units that can't be
+        verified (which leave them out again) are not asked over and over.
         """
         reads = runtime_config.presets_supported(status)
         newly = reads and not self._presets_readable_seen
         self._presets_readable_seen = reads
+        # The renderer dials too: left out the same way, for schema 7.
+        dials = runtime_config.dials_supported(status)
+        newly = newly or (dials and not self._dials_readable_seen)
+        self._dials_readable_seen = dials
         if newly and any(
             one.why == runtime_config.NEEDS_NEWER_SERVICE for one in self._left_out_said
         ):
@@ -5129,8 +5135,8 @@ class Application(Adw.Application):
                     or runtime_config.read_config_generation(expected_path) != status_generation
                     or runtime_config.document_generation(
                         # What was published for this service: without
-                        # presets when it doesn't read them or its units
-                        # can't be verified.
+                        # presets or the dials when it doesn't read them
+                        # or its units can't be verified.
                         runtime_config.compiled_as_published(
                             settings, snapshot, status, status_generation
                         ).document

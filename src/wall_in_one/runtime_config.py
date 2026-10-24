@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import config, file_io, paths, runtime_compatibility
+from wall_in_one import config, dials, file_io, paths, runtime_compatibility
 from wall_in_one.library import pairings, scan, schedules, state_file, workshop
 from wall_in_one.library.model import Kind, MediaItem, Unseen, UnseenKind
 from wall_in_one.library.playlists import Entry, Playlist
@@ -40,6 +40,12 @@ BATTERY_SCHEMA_VERSION: Final = 5
 #: document without the presets (`LeftOut`, `PRESET_OWNER`), never a refusal
 #: of the whole save (docs/wallpaper-engine.md).
 PRESET_SCHEMA_VERSION: Final = 6
+#: A document with a renderer dial (docs/renderer-settings.md): a new
+#: ``[renderer]`` key at other than its default, or an entry's own ``video``
+#: or ``scene`` table. Written only then, and carrying everything 6 does. A
+#: live service that doesn't list it gets the document without them
+#: (`LeftOut`, `DIALS_OWNER`), never a refusal of the whole save.
+DIALS_SCHEMA_VERSION: Final = 7
 
 #: Per-playlist interval/shuffle and a display's own playlist beating global
 #: schedule rules live beside ``runtime.toml`` in this file, never in it, so
@@ -127,6 +133,10 @@ DISPLAY_OWNER: Final = "display"
 #: Not a reference but a wallpaper: a preset left out of every playlist, its
 #: Workshop id in ``owner_id`` and its title in ``reference``.
 PRESET_OWNER: Final = "preset"
+#: Not a reference but the renderer dials, the global ones and each
+#: wallpaper's own (and, under a service that predates presets, a scene's
+#: own Wallpaper Engine values): left out together, said once.
+DIALS_OWNER: Final = "dials"
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -161,6 +171,12 @@ class LeftOut:
 
         ``rules``: how many schedule rules (or presets) this one sentence speaks for.
         """
+        if self.owner == DIALS_OWNER:
+            return (
+                "Renderer settings, in Settings and in each wallpaper\u2019s own, aren\u2019t "
+                "applied until the wallpaper service is confirmed to read them: restart it "
+                "after an update, and make sure its installed units are current."
+            )
         if self.owner == PRESET_OWNER:
             if rules == 1:
                 return (
@@ -208,6 +224,12 @@ class LeftOut:
 
     def warning(self) -> str:
         """The same for an unattended command's ``warning:`` line: ids, and where it is saved."""
+        if self.owner == DIALS_OWNER:
+            return (
+                "renderer settings are left out: the running wallpaper service has not "
+                f"confirmed schema_version {DIALS_SCHEMA_VERSION}; restart it after an update, "
+                "and check that its installed units are current, to apply them"
+            )
         if self.owner == PRESET_OWNER:
             return (
                 f"Wallpaper Engine preset {self.reference!r} ({self.owner_id}) is left out: "
@@ -239,7 +261,7 @@ class LeftOut:
 
 
 #: The order a notice speaks in: the default, the rules, then the displays.
-_NOTICE_ORDER: Final = (DEFAULT_OWNER, SCHEDULE_OWNER, DISPLAY_OWNER, PRESET_OWNER)
+_NOTICE_ORDER: Final = (DEFAULT_OWNER, SCHEDULE_OWNER, DISPLAY_OWNER, PRESET_OWNER, DIALS_OWNER)
 
 
 def left_out_notice(left_out: Iterable[LeftOut]) -> str:
@@ -779,13 +801,21 @@ def _resolved_entry(
     entry_id: str,
     *,
     allow_web: bool | None = None,
+    settings: config.Settings | None = None,
+    presets: bool = True,
+    renderer_dials: bool = True,
+    withheld: set[str] | None = None,
 ) -> tuple[str, ...] | None:
     """One playlist entry's lines, or ``None`` when it isn't one the runtime can play.
 
     ``allow_web``: the ``allow_web_wallpapers`` the document is compiled for;
-    ``None`` is the session's own.
+    ``None`` is the session's own; ``settings`` likewise. Without
+    ``renderer_dials`` its own dials are left out, and without ``presets`` a
+    scene's own Wallpaper Engine values: it still plays, and its identity
+    goes in ``withheld`` so that is said (`DIALS_OWNER`).
     """
     allowed = session.settings.allow_web_wallpapers if allow_web is None else allow_web
+    compiled_for = session.settings if settings is None else settings
     if workshop.web_off(item, allowed):
         # A web page while they are off: listed, never handed to the engine.
         return None
@@ -824,6 +854,11 @@ def _resolved_entry(
             return None
         _absolute_path(bundle.motion, label="playlist entry motion")
         lines.append(f"motion = {_quote(bundle.motion)}")
+        own_video = bundle.renderer.applied("video")
+        if own_video and renderer_dials:
+            lines.append(f"video = {_dial_table(own_video)}")
+        elif own_video and withheld is not None:
+            withheld.add(str(item.path))
     elif item.kind is Kind.SCENE:
         # ASCII digits only: `str.isdigit` also takes "١٢٣", which no Steam
         # folder is named and which the service refuses.
@@ -838,13 +873,92 @@ def _resolved_entry(
             if not workshop.is_workshop_id(item.scene_base):
                 return None
             lines.append(f"scene_base = {_quote(item.scene_base)}")
-        if item.scene_properties:
-            properties = _scene_properties(item.scene_properties)
+        # A preset's values, then the person's own over them (docs/renderer-settings.md).
+        values = item.scene_properties
+        own_values = _own_properties(item, bundle.renderer)
+        if own_values and presets:
+            values = (
+                *((name, value) for name, value in values if name not in own_values),
+                *own_values.items(),
+            )
+        elif own_values and withheld is not None:
+            withheld.add(item.scene)
+        if values:
+            properties = _scene_properties(values)
             if properties is None:
                 return None
             lines.append(f"properties = {properties}")
+        own_scene = _own_scene_dials(bundle.renderer, compiled_for)
+        if own_scene and renderer_dials:
+            lines.append(f"scene = {_dial_table(own_scene)}")
+        elif own_scene and withheld is not None:
+            withheld.add(item.scene)
     lines.append(f"palette = {_palette(bundle.palette, session.settings.preview_scheme)}")
     return tuple(lines)
+
+
+def _dial_table(table: Sequence[tuple[str, dials.Value]]) -> str:
+    """A wallpaper's own dials as the inline table the service reads: typed values only."""
+    return "{ " + ", ".join(f"{key} = {dials.toml_value(value)}" for key, value in table) + " }"
+
+
+def _own_properties(item: MediaItem, own: pairings.RendererOverrides) -> dict[str, str]:
+    """The person's own Wallpaper Engine values for ``item`` that the engine would read.
+
+    Only for a property ``item`` declares and a person may set
+    (`MediaItem.scene_settings`, empty for a web page and for one that can't
+    play), each checked against that declaration (`workshop.own_value`).
+    """
+    if item.web_page or not own.properties:
+        return {}
+    declared = {setting.name: setting for setting in item.scene_settings}
+    kept: dict[str, str] = {}
+    for name, value in own.properties:
+        setting = declared.get(name)
+        text = workshop.own_value(setting, value) if setting is not None else None
+        if text is not None:
+            kept[name] = text
+    return kept
+
+
+def _own_scene_dials(
+    own: pairings.RendererOverrides, settings: config.Settings
+) -> tuple[tuple[str, dials.Value], ...]:
+    """A scene's own dials, with the volume it would have when it sounds and the default doesn't.
+
+    ``[renderer]`` writes ``scene_volume = 0`` while scenes are silent, as
+    every document before the dials did; a scene that sounds by itself then
+    carries the default's volume, the one Settings shows it following.
+    """
+    table = own.applied("scene")
+    keys = {key for key, _value in table}
+    if ("muted", False) in table and "volume" not in keys and settings.scene_muted:
+        order = [known.key for known in dials.PER_WALLPAPER["scene"]]
+        table = tuple(
+            sorted((*table, ("volume", settings.scene_volume)), key=lambda p: order.index(p[0]))
+        )
+    return table
+
+
+def _renderer_dial_lines(settings: config.Settings) -> list[str]:
+    """The ``[renderer]`` lines of the dials added with schema 7: each only off its default.
+
+    Not one that does nothing as things are set: the ``--auto-mode`` trigger
+    while videos play when hidden, pausing only for the active window while
+    scenes never pause.
+    """
+    lines: list[str] = []
+    for dial in config.DIAL_SETTINGS:
+        if dial.released:
+            continue
+        if dial.setting == "video_hidden_trigger" and settings.video_when_hidden == "play":
+            continue
+        if dial.setting == "scene_pause_only_active" and not settings.scene_pause_when_covered:
+            continue
+        value = getattr(settings, dial.setting)
+        if value != dial.default:
+            lines.append(f"{dial.setting} = {dials.toml_value(value)}")
+    return lines
 
 
 def _scene_properties(properties: Sequence[tuple[str, str]]) -> str | None:
@@ -1636,6 +1750,9 @@ def _validate_settings_wire(settings: config.Settings) -> None:
         raise RuntimeConfigError("scene clamp mode is not supported by the runtime")
     if settings.display_mode not in config.DISPLAY_MODES:
         raise RuntimeConfigError("display mode is not supported by the runtime")
+    for dial in config.DIAL_SETTINGS:
+        if dial.coerce(getattr(settings, dial.setting)) is None:
+            raise RuntimeConfigError(f"{dial.setting} must be {config.describe_dial(dial)}")
     _bounded_text(
         settings.active_playlist,
         label="active playlist setting",
@@ -1680,37 +1797,69 @@ def runtime_applies_overrides(status: object) -> bool:
     return isinstance(supported, list) and OVERRIDES_SCHEMA_VERSION in supported
 
 
-def render(settings: config.Settings, session: Session, *, presets: bool = True) -> str:
+def render(
+    settings: config.Settings,
+    session: Session,
+    *,
+    presets: bool = True,
+    renderer_dials: bool = True,
+) -> str:
     """Return the TOML with every currently executable decision resolved.
 
     ``presets``: whether Wallpaper Engine presets are compiled (see
     `presets_supported`); without them the document never needs schema 6.
+    ``renderer_dials``: whether the renderer dials are (`dials_supported`);
+    without them it never needs schema 7.
     """
-    return _compile(settings, session, presets=presets).document
+    return _compile(settings, session, presets=presets, renderer_dials=renderer_dials).document
 
 
-def compiled(settings: config.Settings, session: Session, *, presets: bool = True) -> Compiled:
+def compiled(
+    settings: config.Settings,
+    session: Session,
+    *,
+    presets: bool = True,
+    renderer_dials: bool = True,
+) -> Compiled:
     """Both documents and what they were built without (`LeftOut`); nothing is written."""
-    return _compile(settings, session, presets=presets)
+    return _compile(settings, session, presets=presets, renderer_dials=renderer_dials)
+
+
+def dials_supported(status: object) -> bool:
+    """Whether the runtime that answered ``status`` reads the dials (`DIALS_SCHEMA_VERSION`).
+
+    `presets_supported`'s twin: `publish_changes` leaves the dials out
+    exactly when this is false.
+    """
+    return _lists_schema(status, DIALS_SCHEMA_VERSION)
 
 
 def compiled_as_published(
     settings: config.Settings, session: Session, status: object, generation: str
 ) -> Compiled:
-    """The compile whose document the service holds (``generation``), with or without presets.
+    """The compile whose document the service holds (``generation``), of those publishing makes.
 
-    Publishing leaves presets out unless the service lists schema 6 *and* its
-    loaded units are verified (`_presets_publishable`), while ``status``
-    only shows the first. A caller comparing generations (the health sync)
-    therefore accepts either; when neither matches, the one ``status`` calls
-    for is returned and the caller treats the stores as having moved on.
+    Publishing leaves the dials out unless the service lists schema 7 *and*
+    its loaded units are verified, then presets unless it lists 6 and they
+    are (`_fitted`), while ``status`` only shows the lists. A caller comparing
+    generations (the health sync) therefore accepts any of them: everything,
+    without the dials, without both, and the one ``status`` calls for. When
+    none matches, that last one is returned and the caller treats the stores
+    as having moved on.
     """
-    first = presets_supported(status)
-    built = _compile(settings, session, presets=first)
-    if document_generation(built.document) == generation:
-        return built
-    other = _compile(settings, session, presets=not first)
-    return other if document_generation(other.document) == generation else built
+    asked = (presets_supported(status), dials_supported(status))
+    first: Compiled | None = None
+    tried: set[tuple[bool, bool]] = set()
+    for presets, renderer_dials in (asked, (True, True), (True, False), (False, False)):
+        if (presets, renderer_dials) in tried:
+            continue
+        tried.add((presets, renderer_dials))
+        built = _compile(settings, session, presets=presets, renderer_dials=renderer_dials)
+        if document_generation(built.document) == generation:
+            return built
+        first = built if first is None else first
+    assert first is not None
+    return first
 
 
 def presets_supported(status: object) -> bool:
@@ -1720,10 +1869,14 @@ def presets_supported(status: object) -> bool:
     publisher would have published for that service (the health sync compares
     generations): `publish_changes` leaves presets out exactly when this is false.
     """
+    return _lists_schema(status, PRESET_SCHEMA_VERSION)
+
+
+def _lists_schema(status: object, schema: int) -> bool:
     if not isinstance(status, Mapping) or status.get("status_version") != 2:
         return False
     supported = status.get("supported_config_schemas")
-    return isinstance(supported, list) and PRESET_SCHEMA_VERSION in [
+    return isinstance(supported, list) and schema in [
         version for version in supported if type(version) is int
     ]
 
@@ -1831,7 +1984,13 @@ def _is_preset(item: MediaItem) -> bool:
     return item.kind is Kind.SCENE and bool(item.scene_base or item.scene_properties)
 
 
-def _compile(settings: config.Settings, session: Session, *, presets: bool = True) -> Compiled:
+def _compile(
+    settings: config.Settings,
+    session: Session,
+    *,
+    presets: bool = True,
+    renderer_dials: bool = True,
+) -> Compiled:
     """Both generated documents, ``runtime.toml`` and its optional overrides, and what
     they were built without.
 
@@ -1891,6 +2050,8 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
     # playlist and said once each, so everything else keeps publishing.
     presets_left_out: dict[str, LeftOut] = {}
     allow_web = settings.allow_web_wallpapers
+    # Wallpapers whose own dials (or values) were left out for an older service.
+    withheld: set[str] = set()
 
     def entry_lines(item: MediaItem, entry_id: str) -> tuple[str, ...] | None:
         if not presets and _is_preset(item) and not workshop.web_off(item, allow_web):
@@ -1902,7 +2063,16 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
                     LeftOut(PRESET_OWNER, item.scene, item.name, "", NEEDS_NEWER_SERVICE),
                 )
             return None
-        return _resolved_entry(item, session, entry_id, allow_web=allow_web)
+        return _resolved_entry(
+            item,
+            session,
+            entry_id,
+            allow_web=allow_web,
+            settings=settings,
+            presets=presets,
+            renderer_dials=renderer_dials,
+            withheld=withheld,
+        )
 
     fallback_entries: list[tuple[str, ...]] = []
     for item in fallback_items:
@@ -2067,8 +2237,22 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
         for entry in entries
         for line in entry
     )
+    dial_lines = _renderer_dial_lines(settings)
+    if dial_lines and not renderer_dials:
+        withheld.add("")
+        dial_lines = []
+    if withheld:
+        left_out.append(LeftOut(DIALS_OWNER, "", "", "", NEEDS_NEWER_SERVICE))
+    carries_dials = bool(dial_lines) or any(
+        line.startswith(("video = ", "scene = "))
+        for _identifier, _name, entries in playlists
+        for entry in entries
+        for line in entry
+    )
     schema_version = (
-        PRESET_SCHEMA_VERSION
+        DIALS_SCHEMA_VERSION
+        if carries_dials
+        else PRESET_SCHEMA_VERSION
         if carries_presets
         else BATTERY_SCHEMA_VERSION
         if settings.stop_animations_on_battery
@@ -2100,16 +2284,17 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
         f"video_muted = {str(settings.video_muted).lower()}",
         f"video_volume = {settings.video_volume}",
         f"scene_fps = {settings.scene_fps}",
-        # The exposed controls are explicitly video controls and mpv can
-        # retune them live. linux-wallpaperengine only accepts audio at launch;
-        # coupling it here made every slider step restart a scene while the UI
-        # claimed it was changing a video. Scenes stay safely silent until they
-        # receive their own deliberate controls.
-        "scene_muted = true",
-        "scene_volume = 0",
-        "scene_pause_when_covered = true",
+        # A scene's own sound, apart from a video's: linux-wallpaperengine
+        # takes audio at launch only, so coupling the two made every video
+        # slider step restart a scene. Silent writes a volume of 0, as every
+        # document did before scenes had a sound setting, so an untouched
+        # profile keeps its bytes (`_own_scene_dials` for one that sounds).
+        f"scene_muted = {str(settings.scene_muted).lower()}",
+        f"scene_volume = {0 if settings.scene_muted else settings.scene_volume}",
+        f"scene_pause_when_covered = {str(settings.scene_pause_when_covered).lower()}",
         f"scene_scaling = {_quote(settings.scene_scaling)}",
         f"scene_clamp = {_quote(settings.scene_clamp)}",
+        *dial_lines,
     ]
 
     for playlist_id, name, entries in playlists:
@@ -2258,9 +2443,7 @@ def write(settings: config.Settings, session: Session, path: Path | None = None)
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
-        built = _compile(settings, session)
-        if not _presets_publishable(built.document, target):
-            built = _compile(settings, session, presets=False)
+        built = _fitted(settings, session, target)
         document, overrides = built.document, built.overrides
         previous_overrides = _read_overrides(target)
         _require_publishable(document, target)
@@ -2305,8 +2488,8 @@ def publish_changes(
             raise RuntimeConfigError(f"cannot read {target}: {error}") from error
         # Asked only when the document would change: an unchanged one was
         # already judged publishable when it was written.
-        if current != built.document and not _presets_publishable(built.document, target):
-            built = _compile(settings, session, presets=False)
+        if current != built.document:
+            built = _fitted(settings, session, target, built)
         document, overrides = built.document, built.overrides
         current_overrides = _read_overrides(target)
         document_changed = current != document
@@ -2400,20 +2583,43 @@ def _publish(
         ) from not_durable[-1]
 
 
-def _presets_publishable(document: str, target: Path) -> bool:
-    """Whether ``document``'s presets may go to the live service, or are to be left out.
+def _fitted(
+    settings: config.Settings,
+    session: Session,
+    target: Path,
+    built: Compiled | None = None,
+) -> Compiled:
+    """The document for the live service: all of it, or as much as that service reads.
 
-    A document without presets has nothing to ask. One with them is schema 6,
-    which a service that predates presets refuses whole (its
-    ``deny_unknown_fields``), and which `runtime_compatibility.require_schema`
-    then cannot confirm: the presets are left out and the rest is published.
+    Schema 7 (the dials) and 6 (presets) are written only for what needs
+    them, and a service that predates one refuses it whole (its
+    ``deny_unknown_fields``). So one `runtime_compatibility.require_schema`
+    can't confirm gets the document without the dials; then, if it can't
+    confirm 6 either, without presets too (`LeftOut` says each). What
+    `presets_supported` and `dials_supported` compile from a status, exactly.
+    """
+    built = built if built is not None else _compile(settings, session)
+    if _schema_publishable(built.document, target):
+        return built
+    built = _compile(settings, session, renderer_dials=False)
+    if _schema_publishable(built.document, target):
+        return built
+    return _compile(settings, session, presets=False, renderer_dials=False)
+
+
+def _schema_publishable(document: str, target: Path) -> bool:
+    """Whether ``document`` may go to the live service as it is, or must leave something out.
+
+    Asked only of a document that needs presets or the dials, and only for
+    the live path: 4 and 5 are `_require_publishable`'s to refuse, as before.
     """
     if target.absolute() != paths.runtime_config_path().absolute():
         return True
-    if tomllib.loads(document)["schema_version"] != PRESET_SCHEMA_VERSION:
+    schema = tomllib.loads(document)["schema_version"]
+    if schema < PRESET_SCHEMA_VERSION:
         return True
     try:
-        runtime_compatibility.require_schema(PRESET_SCHEMA_VERSION)
+        runtime_compatibility.require_schema(schema)
     except runtime_compatibility.RuntimeCompatibilityError:
         return False
     return True

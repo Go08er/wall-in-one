@@ -737,8 +737,8 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                     f"{installed_generation}; reload the runtime and retry; "
                     "no health marker was written"
                 )
-            # What was published for this service: without presets when it
-            # doesn't read them or its units can't be verified
+            # What was published for this service: without presets or the
+            # dials when it doesn't read them or its units can't be verified
             # (`runtime_config.publish_changes`).
             built = runtime_config.compiled_as_published(
                 settings, session, status, status_generation

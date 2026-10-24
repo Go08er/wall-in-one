@@ -482,6 +482,46 @@ def test_the_applier_never_hands_over_what_cant_play(
     assert shown == [], "not even its still: nothing about it changes the screen"
 
 
+def test_the_applier_never_counts_its_own_engine_as_somebody_elses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Scene to scene: the engine it started is stopped before anyone else's is looked for."""
+    monkeypatch.setattr("wall_in_one.theme.noctalia.set_wallpaper", lambda *a, **k: None)
+    from wall_in_one.wallpaper.applier import Applier
+
+    class Engine:
+        layer = "background"
+        fps = 30
+        output = ""
+
+        def __init__(self) -> None:
+            self.running = False
+            self.started: list[str] = []
+
+        def start(self, scene: str, properties: object = ()) -> None:
+            self.running = True
+            self.started.append(scene)
+
+        def stop(self) -> None:
+            self.running = False
+
+    engine = Engine()
+    asked: list[bool] = []
+
+    def elsewhere(_output: str) -> tuple[int, ...]:
+        # A /proc scan sees this app's own engine too while it runs.
+        asked.append(engine.running)
+        return (4242,) if engine.running else ()
+
+    monkeypatch.setattr("wall_in_one.wallpaper.scenes.running_elsewhere", elsewhere)
+    applier = Applier(_QuietRenderer(), "eDP-1", scene_renderer=engine, own_scene_renderer=True)  # type: ignore[arg-type]
+    applier.apply(scene_item("1", still=tmp_path / "a.png"), dynamics_enabled=True)
+    applier.apply(scene_item("2", still=tmp_path / "b.png"), dynamics_enabled=True)
+
+    assert engine.started == ["1", "2"]
+    assert asked == [False, False]
+
+
 class _QuietRenderer:
     """Stands in for mpvpaper, which a scene test has no business starting."""
 

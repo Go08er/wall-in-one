@@ -954,9 +954,12 @@ def test_switching_from_a_scene_to_a_video_stops_the_engine(
     applier, video, scene = both
     applier.apply(_scene(tmp_path), dynamics_enabled=True)
     assert scene.started == ["1647046763"]
+    # Starting a scene stops the applier's own engine first (never counted as
+    # someone else's); what matters here is the stop the switch makes.
+    before = scene.stops
 
     applier.apply(_video(tmp_path), dynamics_enabled=True)
-    assert scene.stops == 1
+    assert scene.stops == before + 1
     assert scene.started == []
     assert video.started == [tmp_path / "clip.mp4"]
 

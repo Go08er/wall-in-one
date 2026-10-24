@@ -178,6 +178,10 @@ class Applier:
                 f"{item.name} is a Wallpaper Engine scene, and this app is not set to drive "
                 "linux-wallpaperengine. Turn on 'own the scene renderer' in Settings."
             )
+        # Its own engine first: `running_elsewhere` looks at every engine
+        # holding the output, this app's included, and would refuse a switch
+        # from one scene to the next as if somebody else held the screen.
+        self._scenes.stop()
         held = scenes.running_elsewhere(self.output)
         if held:
             raise ApplyError(

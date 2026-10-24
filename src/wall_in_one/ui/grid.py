@@ -152,6 +152,13 @@ class WallpaperTile(Gtk.Box):
         self._health_badge.set_visible(False)
         self._borked_reason: str | None = None
         badges.append(self._health_badge)
+        #: Why the wallpaper service skips it in the configuration it holds
+        #: (status ``refused``): not a taboo, and nothing is saved; the
+        #: service asks again after its next reload.
+        self._refused_badge = _badge("Can\u2019t play here")
+        self._refused_badge.add_css_class("error")
+        self._refused_badge.set_visible(False)
+        badges.append(self._refused_badge)
         self._frame.add_overlay(badges)
 
         caption = Gtk.Label(label=item.name)
@@ -246,6 +253,18 @@ class WallpaperTile(Gtk.Box):
             self._frame.set_tooltip_text(
                 "Playback disabled · left-click for details and removal options"
             )
+
+    def set_refused(self, reason: str | None) -> None:
+        """Show that the wallpaper service skips it, and why; None when it doesn't.
+
+        Not shown beside the badges that already say it never plays here or
+        that playback is disabled.
+        """
+        shown = reason is not None and self._never is None and self._borked_reason is None
+        self._refused_badge.set_visible(shown)
+        self._refused_badge.set_tooltip_text(
+            f"The wallpaper service skips it: {reason}" if shown else None
+        )
 
     def set_favourite(self, favourite: bool) -> None:
         """Show whether this one is starred. Never reads as a click."""
@@ -364,6 +383,8 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         #: filter and the tiles cannot disagree within one pass.
         self._favourites: frozenset[Path] = frozenset()
         self._borked: dict[Path, str] = {}
+        #: What the wallpaper service refused, by item (`WallpaperTile.set_refused`).
+        self._refused: dict[Path, str] = {}
         #: ``allow_web_wallpapers``, which decides whether a web page's tile can play.
         self._allow_web = False
         self._tiles: dict[Path, WallpaperTile] = {}
@@ -509,6 +530,21 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             tile = self._tiles.get(path)
             if tile is not None:
                 tile.set_borked(self._borked.get(path))
+                tile.set_refused(self._refused.get(path))
+
+    def set_refused(self, records: dict[Path, str]) -> None:
+        """Mark what the wallpaper service skips, without rebuilding any tile."""
+        changed = self._refused.keys() ^ records.keys()
+        changed.update(
+            path
+            for path in self._refused.keys() & records.keys()
+            if self._refused[path] != records[path]
+        )
+        self._refused = dict(records)
+        for path in changed:
+            tile = self._tiles.get(path)
+            if tile is not None:
+                tile.set_refused(self._refused.get(path))
 
     def set_apply_targeting(self, independent: bool) -> None:
         self._independent = independent
@@ -576,6 +612,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             tile.set_apply_targeting(self._independent)
             tile.set_favourite(item.path in self._favourites)
             tile.set_borked(self._borked.get(item.path))
+            tile.set_refused(self._refused.get(item.path))
             tile.set_current(item.path in self._current)
             self._tiles[item.path] = tile
             self._flow.append(tile)

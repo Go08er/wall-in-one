@@ -366,6 +366,8 @@ class Inspector(Gtk.Box):
             box.append(self._problem(wallpaper))
         elif wallpaper.never_plays:
             box.append(self._never_plays(wallpaper))
+        elif wallpaper.refused_here:
+            box.append(self._refused_here(wallpaper))
         box.append(self._actions(wallpaper))
         if wallpaper.is_moving and self._editing is not None:
             # A plain image is its own still; only moving wallpapers need one.
@@ -439,6 +441,25 @@ class Inspector(Gtk.Box):
             setting.connect("clicked", lambda *_: self.state.navigate(f"settings:{target}"))
             self.setting_button = setting
             card.append(setting)
+        return card
+
+    def _refused_here(self, wallpaper: WallpaperView) -> Gtk.Box:
+        """Why the wallpaper service skips it now: the service's own words."""
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.add_css_class("problem-card")
+        top = Gtk.Box(spacing=8)
+        top.append(Gtk.Image.new_from_icon_name("action-unavailable-symbolic"))
+        heading = Gtk.Label(label="Can\u2019t play here", xalign=0)
+        heading.add_css_class("heading")
+        top.append(heading)
+        card.append(top)
+        card.append(widgets.dim(wallpaper.refused_here))
+        card.append(
+            widgets.dim(
+                "Playback skips it to the next wallpaper. The service checks again "
+                "when its configuration is next published."
+            )
+        )
         return card
 
     def _problem(self, wallpaper: WallpaperView) -> Gtk.Box:

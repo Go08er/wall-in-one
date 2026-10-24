@@ -190,6 +190,10 @@ class LibraryWallpaper:
     tags: tuple[str, ...] = ()
     unplayable: str = ""
     never_plays: bool = False
+    #: Why the wallpaper service skips it in the configuration it holds now
+    #: (status ``refused``), or empty. Never saved: it is the service's answer
+    #: until its next reload.
+    refused_here: str = ""
     kind_detail: str = ""
     kind_note: str = ""
     settings_target: str = ""
@@ -269,6 +273,7 @@ def wallpaper_view(
     still_missing: bool = False,
     unplayable: str = "",
     allow_web: bool = False,
+    refused_here: str = "",
 ) -> LibraryWallpaper:
     """What the new interface shows of ``item``, from the stores alone.
 
@@ -304,6 +309,7 @@ def wallpaper_view(
         still_note=_still_note(item, pairing, still_missing),
         unplayable="" if health.is_borked else unplayable,
         never_plays=bool(workshop.why_not_played(item, allow_web)),
+        refused_here="" if health.is_borked else refused_here,
         kind_detail=item.workshop_detail,
         kind_note=item.scene_note,
         settings_target=WEB_SETTING if workshop.web_off(item, allow_web) else "",
@@ -364,6 +370,9 @@ class RealAppState(GObject.Object):
         self._scanning = False
         #: ``allow_web_wallpapers`` as the views were last built for it.
         self._web_allowed = False
+        #: What the wallpaper service refused, by Workshop id, as the views
+        #: were last built for it (status ``refused``).
+        self._refused: dict[str, str] = {}
         self._wallpapers: tuple[LibraryWallpaper, ...] = ()
         self._index: dict[str, LibraryWallpaper] = {}
         self._playlists: tuple[LibraryPlaylist, ...] = ()
@@ -476,7 +485,33 @@ class RealAppState(GObject.Object):
             still_missing=missing,
             unplayable="" if can.compiles else can.reason,
             allow_web=session.settings.allow_web_wallpapers,
+            refused_here=self._refused_reason(item),
         )
+
+    def _refused_reason(self, item: MediaItem) -> str:
+        """Why the wallpaper service skips ``item``, from its latest status; or empty."""
+        if item.kind is not Kind.SCENE:
+            return ""
+        # By the item its entries render: a preset's base (`refused_paths`).
+        return self._refused.get(item.scene_base or item.scene, "")
+
+    def _adopt_refused(self, truth: runtime_truth.RuntimeTruth | None) -> bool:
+        """Mark what the service refused on the views it changes; True if any changed."""
+        refused = {one.scene_id: one.reason for one in truth.refused} if truth is not None else {}
+        if refused == self._refused:
+            return False
+        self._refused = refused
+        views = tuple(
+            replace(view, refused_here=self._refused_reason(view.item))
+            if not view.problem
+            else view
+            for view in self._wallpapers
+        )
+        if views == self._wallpapers:
+            return False
+        self._wallpapers = views
+        self._index = {view.id: view for view in views}
+        return True
 
     def _indexed_stills(self) -> Callable[[], frozenset[Path]]:
         """Every still image the latest scan found, worked out once and only if asked."""
@@ -584,6 +619,8 @@ class RealAppState(GObject.Object):
         if self._scope != "all" and self._scope not in {d.connector for d in displays}:
             self._scope = "all"
         topics: list[str] = []
+        if self._adopt_refused(truth):
+            topics.append("library")
         mode = self.display_mode
         if displays != self._displays or mode != self._mode:
             # A mode change alone changes which displays stand on their own.

@@ -424,6 +424,11 @@ class WallpaperCard(Gtk.Box):
             never = pill("Can\u2019t play", "action-unavailable-symbolic", "warning")
             never.set_tooltip_text(f"Not played here: {wallpaper.unplayable}")
             top.append(never)
+        elif wallpaper.refused_here:
+            # The service skips it in the configuration it holds: say why.
+            refused = pill("Can\u2019t play here", "action-unavailable-symbolic", "warning")
+            refused.set_tooltip_text(f"The wallpaper service skips it: {wallpaper.refused_here}")
+            top.append(refused)
         elif wallpaper.unplayable:
             waiting = pill("No still", "dialog-warning-symbolic", "warning")
             waiting.set_tooltip_text(

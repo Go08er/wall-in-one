@@ -755,6 +755,10 @@ class MainWindow(Adw.ApplicationWindow):
             current = reported.current
             playing = reported.playlist
         self._grid.set_current_many(current)
+        # What the service refused in the configuration it holds (status
+        # `refused`): marked, never saved as a playback warning.
+        refused, refused_omitted = runtime_truth.refused_from_status(self._runtime_media_status)
+        self._grid.set_refused(runtime_truth.refused_paths(refused, library.items))
         summary = (
             f"{len(library)} media · playing {playing} "
             f"({len(library.videos)} video, {len(library.stills)} still)"
@@ -763,6 +767,8 @@ class MainWindow(Adw.ApplicationWindow):
             summary += f" - {len(library.skipped)} skipped"
         if self._borked_count:
             summary += f" · {self._borked_count} with playback disabled"
+        if refused:
+            summary += f" · {len(refused) + refused_omitted} can\u2019t play here"
         self._summary = summary
         self._update_subtitle()
 

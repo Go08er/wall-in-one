@@ -151,6 +151,13 @@ class WallpaperView(Protocol):
     @property
     def never_plays(self) -> bool: ...
 
+    #: Why the wallpaper service skips it in the configuration it holds now
+    #: (a Wallpaper Engine item it won't start: one on another Steam library,
+    #: say), or empty. Not a playback problem and never saved: the service
+    #: asks again after its next reload.
+    @property
+    def refused_here(self) -> str: ...
+
     #: For a Wallpaper Engine item shown as a scene that isn't one, its own
     #: type (``web``, ``preset``, ``application``...), shown beside the kind.
     #: Empty otherwise.

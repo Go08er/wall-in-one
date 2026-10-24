@@ -5062,7 +5062,15 @@ class Application(Adw.Application):
                     or not isinstance(status_generation, str)
                     or Path(status_path) != expected_path
                     or runtime_config.read_config_generation(expected_path) != status_generation
-                    or runtime_config.document_generation(runtime_config.render(settings, snapshot))
+                    or runtime_config.document_generation(
+                        # What was published for this service: without
+                        # presets when it doesn't read them.
+                        runtime_config.render(
+                            settings,
+                            snapshot,
+                            presets=runtime_config.presets_supported(status),
+                        )
+                    )
                     != status_generation
                 ):
                     return _RuntimeHealthResult(request)

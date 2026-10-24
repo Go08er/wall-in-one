@@ -706,7 +706,11 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                     f"{installed_generation}; reload the runtime and retry; "
                     "no health marker was written"
                 )
-            built = runtime_config.compiled(settings, session)
+            # What was published for this service: without presets when it
+            # doesn't read them (`runtime_config.publish_changes`).
+            built = runtime_config.compiled(
+                settings, session, presets=runtime_config.presets_supported(status)
+            )
             # Said once here: marking wallpapers as skipped below doesn't
             # change what compiles, so the later publication leaves out the same.
             _warn_left_out(built.left_out)

@@ -776,6 +776,7 @@ fn a_preset_renders_its_base_with_each_property_as_arguments_of_its_own() {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let document = config(&noctalia, Path::new("/bin/true"), true)
+        .replace("schema_version = 4", "schema_version = 6")
         .replace(
             "linux_wallpaperengine_program = \"/bin/true\"",
             &format!("linux_wallpaperengine_program = {engine:?}"),
@@ -2531,7 +2532,7 @@ fn independent_apply_stages_stills_theme_palette_then_renderers() {
     assert_eq!(snapshot["status_version"], 2);
     assert_eq!(
         snapshot["supported_config_schemas"],
-        serde_json::json!([4, 5])
+        serde_json::json!([4, 5, 6])
     );
     assert_eq!(snapshot["runtime_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot["install_kind"], wall_in_one_service::INSTALL_KIND);
@@ -7808,7 +7809,7 @@ fn display_precedence_with_the_flag_off_is_exactly_todays_order() {
     assert_eq!(rule_status(&expected, "global-now")["selected"], true);
     assert_eq!(
         expected["supported_config_schemas"],
-        serde_json::json!([4, 5])
+        serde_json::json!([4, 5, 6])
     );
     assert_eq!(
         expected["supported_override_schemas"],

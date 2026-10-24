@@ -3,7 +3,7 @@
 `wall-in-one-service` reads one input: a fully resolved TOML document written
 by the Python application, plus, from 0.2.0, an optional sibling
 [`runtime-overrides.toml`](#per-playlist-rotation-and-display-precedence-runtime-overridestoml).
-Schemas `4` and `5` are intentionally strict. An
+Schemas `4`, `5` and `6` are intentionally strict. An
 unknown version, unknown field, relative path, dangling playlist reference, or
 kind-specific entry missing its motion source makes the service refuse to
 start. It never falls back to the application's database or library files.
@@ -29,7 +29,7 @@ schema number would instead have sent every save through the live-service
 check below, refusing all of them until the restart. See
 [display discovery](display-discovery.md#runtimetoml).
 
-The service advertises `supported_config_schemas = [4, 5]` in status version 2.
+The service advertises `supported_config_schemas = [4, 5, 6]` in status version 2.
 It also reports `runtime_version` and `runtime_executable` so update inspection
 can distinguish the responding executable from the package selected on disk.
 Executable identity does not by itself acknowledge the intended configuration;
@@ -182,12 +182,20 @@ The service passes each property as `--set-property` and `NAME=VALUE`, two
 arguments of their own, in name order. It refuses a document with more than
 512 properties on an entry, a name outside `[A-Za-z0-9_][A-Za-z0-9_-]{0,63}`,
 a value over 256 bytes or with control characters, a non-numeric
-`scene_base`, or either key on a still or video. They are additive and
-written only for a preset, so a document without one is byte for byte what
-0.4.0 writes and reads, with no schema change. A 0.4.0 service given a
-document with a preset refuses it as an unknown field and keeps its last
-configuration until it is restarted after the update; see
-[Wallpaper Engine items](wallpaper-engine.md#carrying-it-to-the-service-additive-optional-fields).
+`scene_base`, or either key on a still or video, or in a document below
+schema 6.
+
+A document with a preset is **schema 6**, and only such a document: every
+other one keeps schema 4 (or 5 with the battery option), byte for byte what
+0.4.0 writes and reads. Schema 6 carries everything schema 5 does. A 0.4.0
+service refuses a preset document whole (an unknown field), so before
+publishing one the app asks the running service, as it does for schema 5;
+when it doesn't list 6 in `supported_config_schemas` (or can't be asked), the
+document is published **without the presets**, and the app says once that
+they play after the service is restarted. Everything else keeps updating. A
+service that isn't running gets the document with them, as an offline
+preparation does for schema 5. See
+[Wallpaper Engine items](wallpaper-engine.md#carrying-it-to-the-service-additive-optional-fields-schema-6).
 
 `config_generation` is a 64-character lowercase SHA-256 token. The Python
 compiler hashes its canonical semantic body before inserting this field, so

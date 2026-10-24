@@ -57,10 +57,10 @@ fn override_fields_are_never_runtime_toml_keys() {
             assert!(error.contains("unknown field"), "{schema} {key}: {error}");
         }
     }
-    let error = Config::from_bytes(document(6).into_bytes())
+    let error = Config::from_bytes(document(7).into_bytes())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("expected 4 or 5"), "{error}");
+    assert!(error.contains("expected 4, 5 or 6"), "{error}");
 }
 
 fn config_directory(label: &str) -> PathBuf {
@@ -500,14 +500,48 @@ fn entry_taboo_metadata_is_optional_bounded_and_backwards_compatible() {
 }
 
 /// `document` with a Wallpaper Engine preset in a playlist of its own:
-/// `extra` goes after its `scene_id`.
+/// `extra` goes after its `scene_id`. Schema 6, the one presets need.
 fn with_preset(extra: &str) -> String {
+    with_preset_in(6, extra)
+}
+
+fn with_preset_in(schema: u32, extra: &str) -> String {
     format!(
         "{}\n[[playlists]]\nid = \"presets\"\nname = \"Presets\"\n\
          [[playlists.entries]]\nid = \"y2k\"\nkind = \"scene\"\nstill = \"/tmp/y2k.png\"\n\
          scene_id = \"2946165131\"\n{extra}\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n",
-        document(4)
+        document(schema)
     )
+}
+
+#[test]
+fn a_preset_needs_schema_six_and_schema_six_carries_everything_five_does() {
+    for schema in [4, 5] {
+        for extra in [
+            "scene_base = \"2777242023\"",
+            "properties = { bloom = \"true\" }",
+        ] {
+            let message = refusal(&with_preset_in(schema, extra));
+            assert!(
+                message.contains("require schema_version 6"),
+                "{schema} {extra}: {message}"
+            );
+        }
+        // Without either key, a scene entry is what schemas 4 and 5 always held.
+        let plain: Config = toml::from_str(&with_preset_in(schema, "")).unwrap();
+        plain.validate().unwrap();
+    }
+    let battery: Config = toml::from_str(&with_preset("scene_base = \"2777242023\"").replace(
+        "theme_source_connector = \"\"\n",
+        "theme_source_connector = \"\"\nstop_animations_on_battery = true\n",
+    ))
+    .unwrap();
+    battery.validate().unwrap();
+    assert!(battery.settings.stop_animations_on_battery);
+    assert_eq!(
+        wall_in_one_service::config::SUPPORTED_SCHEMA_VERSIONS,
+        &[4, 5, 6]
+    );
 }
 
 fn refusal(document: &str) -> String {

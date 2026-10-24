@@ -9,7 +9,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 5;
-pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[4, SCHEMA_VERSION];
+/// A document with a Wallpaper Engine preset entry (`scene_base` or
+/// `properties`). The app writes it only then, so a document without one keeps
+/// schema 4 or 5 and stays what a service that predates presets reads; the app
+/// asks the live service first (`supported_config_schemas`) and leaves presets
+/// out for one without it (docs/wallpaper-engine.md). Schema 6 carries
+/// everything schema 5 does.
+pub const PRESET_SCHEMA_VERSION: u32 = 6;
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[4, SCHEMA_VERSION, PRESET_SCHEMA_VERSION];
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The optional sibling of `runtime.toml` that carries per-playlist rotation
@@ -677,7 +684,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !SUPPORTED_SCHEMA_VERSIONS.contains(&self.schema_version) {
             return invalid(format!(
-                "schema_version {} is unsupported; expected 4 or {SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
+                "schema_version {} is unsupported; expected 4, {SCHEMA_VERSION} or {PRESET_SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
                 self.schema_version
             ));
         }
@@ -802,6 +809,13 @@ impl Config {
                     && (entry.scene_base.is_some() || !entry.properties.is_empty())
                 {
                     return invalid("only a scene entry may carry scene_base or properties");
+                }
+                if self.schema_version < PRESET_SCHEMA_VERSION
+                    && (entry.scene_base.is_some() || !entry.properties.is_empty())
+                {
+                    return invalid(format!(
+                        "scene_base and properties require schema_version {PRESET_SCHEMA_VERSION}"
+                    ));
                 }
                 if let Some(base) = &entry.scene_base
                     && !workshop_id(base)

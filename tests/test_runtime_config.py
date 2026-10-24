@@ -1417,3 +1417,132 @@ def test_executable_wallpaper_engine_items_never_reach_a_renderer(tmp_path: Path
 
     assert {entry.get("scene_id") for entry in entries} == {"300"}
     assert not any(entry.get("scene_base") == "100" for entry in entries)
+
+
+# -- presets need schema 6, and an older live service gets the rest (review of r11, 2) --
+
+
+def _live_service(monkeypatch: pytest.MonkeyPatch, schemas: list[int]) -> None:
+    """The wallpaper service answering status, reading ``schemas``."""
+    from wall_in_one.control import client
+    from wall_in_one.control.protocol import Response
+
+    status = {"status_version": 2, "supported_config_schemas": schemas}
+
+    def send(verb: str, *, timeout: float) -> Response:
+        assert verb == "status"
+        return Response(ok=True, message=json.dumps(status))
+
+    monkeypatch.setattr(client, "send_runtime", send)
+
+
+def test_only_a_document_with_a_preset_is_schema_6(tmp_path: Path) -> None:
+    settings, session, _items = _workshop_session(tmp_path)
+    assert tomllib.loads(runtime_config.render(settings, session))["schema_version"] == 4
+    battery = replace(settings, stop_animations_on_battery=True)
+    assert tomllib.loads(runtime_config.render(battery, session))["schema_version"] == 5
+
+    settings, session, _items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+    assert tomllib.loads(runtime_config.render(settings, session))["schema_version"] == 6
+    both = tomllib.loads(
+        runtime_config.render(replace(settings, stop_animations_on_battery=True), session)
+    )
+    assert both["schema_version"] == 6
+    assert both["settings"]["stop_animations_on_battery"] is True
+    without = runtime_config.render(settings, session, presets=False)
+    assert tomllib.loads(without)["schema_version"] == 4
+    assert "scene_base" not in without and "properties = " not in without
+
+
+@pytest.mark.parametrize("writer", ("publish_changes", "write"))
+def test_an_older_live_service_gets_everything_but_the_presets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """0.4.0 refuses a document with `properties` whole; it gets one without, never nothing."""
+    from wall_in_one import paths
+
+    settings, session, _items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+    _live_service(monkeypatch, [4, 5])
+
+    if writer == "write":
+        runtime_config.write(settings, session)
+        left_out = runtime_config.compiled(settings, session, presets=False).left_out
+    else:
+        left_out = runtime_config.publish_changes(settings, session).left_out
+
+    document = paths.runtime_config_path().read_text(encoding="utf-8")
+    assert tomllib.loads(document)["schema_version"] == 4
+    assert "scene_base" not in document and "properties = " not in document
+    assert {entry.get("scene_id") for entry in _entries(document)} == {
+        None,
+        "1647046763",
+        "2777242023",
+    }, "everything else is published"
+    assert left_out == (
+        runtime_config.LeftOut(
+            runtime_config.PRESET_OWNER,
+            "2946165131",
+            "Y2K Matrix",
+            "",
+            runtime_config.NEEDS_NEWER_SERVICE,
+        ),
+    )
+    assert runtime_config.left_out_notice(left_out) == (
+        "The Wallpaper Engine preset \u201cY2K Matrix\u201d isn\u2019t played until the "
+        "wallpaper service is restarted after the update: the one running doesn\u2019t read "
+        "presets."
+    )
+    assert "restart it to play presets" in left_out[0].warning()
+
+
+def test_presets_left_out_are_said_in_one_sentence() -> None:
+    presets = [
+        runtime_config.LeftOut(
+            runtime_config.PRESET_OWNER, workshop_id, title, "", runtime_config.NEEDS_NEWER_SERVICE
+        )
+        for workshop_id, title in (("1", "A"), ("2", "B"))
+    ]
+    assert runtime_config.left_out_notice(presets) == (
+        "2 Wallpaper Engine presets aren\u2019t played until the wallpaper service is "
+        "restarted after the update: the one running doesn\u2019t read presets."
+    )
+
+
+def test_a_live_service_that_reads_presets_gets_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wall_in_one import paths
+
+    settings, session, _items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+    _live_service(monkeypatch, [4, 5, 6])
+
+    published = runtime_config.publish_changes(settings, session)
+
+    document = paths.runtime_config_path().read_text(encoding="utf-8")
+    assert tomllib.loads(document)["schema_version"] == 6
+    assert 'scene_base = "2777242023"' in document
+    assert published.left_out == ()
+
+
+def test_the_health_sync_compiles_what_was_published_for_its_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its generation check must not mistake a document published without presets for stale."""
+    from wall_in_one import paths
+
+    settings, session, _items = _workshop_session(tmp_path, *_preset_items(tmp_path))
+    for schemas in ([4, 5], [4, 5, 6]):
+        _live_service(monkeypatch, schemas)
+        runtime_config.publish_changes(settings, session)
+        status = {"status_version": 2, "supported_config_schemas": schemas}
+        rebuilt = runtime_config.render(
+            settings, session, presets=runtime_config.presets_supported(status)
+        )
+        assert runtime_config.document_generation(rebuilt) == (
+            runtime_config.read_config_generation(paths.runtime_config_path())
+        ), schemas
+    assert not runtime_config.presets_supported({"status_version": 2})
+    assert not runtime_config.presets_supported(
+        {"status_version": 2, "supported_config_schemas": ["6"]}
+    )
+    assert not runtime_config.presets_supported(None)

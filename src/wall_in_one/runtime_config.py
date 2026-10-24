@@ -34,6 +34,12 @@ from wall_in_one.wallpaper import scenes
 
 SCHEMA_VERSION: Final = 4
 BATTERY_SCHEMA_VERSION: Final = 5
+#: A document with a Wallpaper Engine preset entry (``scene_base`` or
+#: ``properties``), written only then: every other document keeps 4 or 5. It
+#: carries everything 5 does. A live service that doesn't list it gets the
+#: document without the presets (`LeftOut`, `PRESET_OWNER`), never a refusal
+#: of the whole save (docs/wallpaper-engine.md).
+PRESET_SCHEMA_VERSION: Final = 6
 
 #: Per-playlist interval/shuffle and a display's own playlist beating global
 #: schedule rules live beside ``runtime.toml`` in this file, never in it, so
@@ -102,10 +108,17 @@ DOES_NOT_EXIST: Final = "doesn't exist"
 #: (it is empty, or every wallpaper in it is missing or has no still yet).
 NOTHING_TO_PLAY: Final = "has nothing to play"
 
+#: `LeftOut.why` for a Wallpaper Engine preset: the live wallpaper service
+#: has not confirmed it reads `PRESET_SCHEMA_VERSION`.
+NEEDS_NEWER_SERVICE: Final = "needs a newer wallpaper service"
+
 #: `LeftOut.owner`: whose reference it is.
 DEFAULT_OWNER: Final = "default"
 SCHEDULE_OWNER: Final = "schedule"
 DISPLAY_OWNER: Final = "display"
+#: Not a reference but a wallpaper: a preset left out of every playlist, its
+#: Workshop id in ``owner_id`` and its title in ``reference``.
+PRESET_OWNER: Final = "preset"
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -138,8 +151,19 @@ class LeftOut:
     def sentence(self, rules: int = 1) -> str:
         """What was left out and what happens instead, for a person.
 
-        ``rules``: how many schedule rules this one sentence speaks for.
+        ``rules``: how many schedule rules (or presets) this one sentence speaks for.
         """
+        if self.owner == PRESET_OWNER:
+            if rules == 1:
+                return (
+                    f"The Wallpaper Engine preset \u201c{self.reference}\u201d isn\u2019t played "
+                    "until the wallpaper service is restarted after the update: the one "
+                    "running doesn\u2019t read presets."
+                )
+            return (
+                f"{rules} Wallpaper Engine presets aren\u2019t played until the wallpaper "
+                "service is restarted after the update: the one running doesn\u2019t read presets."
+            )
         missing = self.why == DOES_NOT_EXIST
         if self.owner == DISPLAY_OWNER:
             own = (
@@ -166,6 +190,12 @@ class LeftOut:
 
     def warning(self) -> str:
         """The same for an unattended command's ``warning:`` line: ids, and where it is saved."""
+        if self.owner == PRESET_OWNER:
+            return (
+                f"Wallpaper Engine preset {self.reference!r} ({self.owner_id}) is left out: "
+                f"the running wallpaper service has not confirmed schema_version "
+                f"{PRESET_SCHEMA_VERSION}; restart it to play presets"
+            )
         named = (
             f"a playlist that doesn't exist ({self.reference!r})"
             if self.why == DOES_NOT_EXIST
@@ -185,7 +215,7 @@ class LeftOut:
 
 
 #: The order a notice speaks in: the default, the rules, then the displays.
-_NOTICE_ORDER: Final = (DEFAULT_OWNER, SCHEDULE_OWNER, DISPLAY_OWNER)
+_NOTICE_ORDER: Final = (DEFAULT_OWNER, SCHEDULE_OWNER, DISPLAY_OWNER, PRESET_OWNER)
 
 
 def left_out_notice(left_out: Iterable[LeftOut]) -> str:
@@ -197,8 +227,10 @@ def left_out_notice(left_out: Iterable[LeftOut]) -> str:
     """
     said: dict[tuple[int, str, str, str, str], tuple[LeftOut, int]] = {}
     for one in set(left_out):
-        whose = "" if one.owner == SCHEDULE_OWNER else one.owner_id
-        key = (_NOTICE_ORDER.index(one.owner), whose, one.reference, one.playlist, one.why)
+        # Rules naming one playlist share a sentence, and so do all presets.
+        whose = "" if one.owner in (SCHEDULE_OWNER, PRESET_OWNER) else one.owner_id
+        reference = "" if one.owner == PRESET_OWNER else one.reference
+        key = (_NOTICE_ORDER.index(one.owner), whose, reference, one.playlist, one.why)
         said[key] = (one, said[key][1] + 1 if key in said else 1)
     return " ".join(one.sentence(count) for _key, (one, count) in sorted(said.items()))
 
@@ -1564,14 +1596,33 @@ def runtime_applies_overrides(status: object) -> bool:
     return isinstance(supported, list) and OVERRIDES_SCHEMA_VERSION in supported
 
 
-def render(settings: config.Settings, session: Session) -> str:
-    """Return schema-4 TOML with every currently executable decision resolved."""
-    return _compile(settings, session).document
+def render(settings: config.Settings, session: Session, *, presets: bool = True) -> str:
+    """Return the TOML with every currently executable decision resolved.
+
+    ``presets``: whether Wallpaper Engine presets are compiled (see
+    `presets_supported`); without them the document never needs schema 6.
+    """
+    return _compile(settings, session, presets=presets).document
 
 
-def compiled(settings: config.Settings, session: Session) -> Compiled:
+def compiled(settings: config.Settings, session: Session, *, presets: bool = True) -> Compiled:
     """Both documents and what they were built without (`LeftOut`); nothing is written."""
-    return _compile(settings, session)
+    return _compile(settings, session, presets=presets)
+
+
+def presets_supported(status: object) -> bool:
+    """Whether the runtime that answered ``status`` reads presets (`PRESET_SCHEMA_VERSION`).
+
+    For a caller that already holds the live status and must compile what the
+    publisher would have published for that service (the health sync compares
+    generations): `publish_changes` leaves presets out exactly when this is false.
+    """
+    if not isinstance(status, Mapping) or status.get("status_version") != 2:
+        return False
+    supported = status.get("supported_config_schemas")
+    return isinstance(supported, list) and PRESET_SCHEMA_VERSION in [
+        version for version in supported if type(version) is int
+    ]
 
 
 def render_overrides(settings: config.Settings, session: Session) -> str | None:
@@ -1672,7 +1723,12 @@ def _owner_phrase(owner: str, owner_id: str) -> str:
     return "the default"
 
 
-def _compile(settings: config.Settings, session: Session) -> Compiled:
+def _is_preset(item: MediaItem) -> bool:
+    """Whether ``item`` would be compiled with a preset's ``scene_base``/``properties``."""
+    return item.kind is Kind.SCENE and bool(item.scene_base or item.scene_properties)
+
+
+def _compile(settings: config.Settings, session: Session, *, presets: bool = True) -> Compiled:
     """Both generated documents, ``runtime.toml`` and its optional overrides, and what
     they were built without.
 
@@ -1728,9 +1784,23 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
             fallback_items = starred
             fallback_narrowed = True
 
+    # Presets the live service hasn't confirmed it reads: left out of every
+    # playlist and said once each, so everything else keeps publishing.
+    presets_left_out: dict[str, LeftOut] = {}
+
+    def entry_lines(item: MediaItem, entry_id: str) -> tuple[str, ...] | None:
+        if not presets and _is_preset(item):
+            if item.unplayable is None:
+                presets_left_out.setdefault(
+                    item.scene,
+                    LeftOut(PRESET_OWNER, item.scene, item.name, "", NEEDS_NEWER_SERVICE),
+                )
+            return None
+        return _resolved_entry(item, session, entry_id)
+
     fallback_entries: list[tuple[str, ...]] = []
     for item in fallback_items:
-        compiled_lines = _resolved_entry(item, session, entry_id_for_source(item.path))
+        compiled_lines = entry_lines(item, entry_id_for_source(item.path))
         if compiled_lines is not None:
             fallback_entries.append(compiled_lines)
     playlists.append((FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, tuple(fallback_entries)))
@@ -1766,7 +1836,7 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
             found_item = known.get(authored_entry.path)
             if found_item is None:
                 continue
-            compiled = _resolved_entry(found_item, session, authored_entry.id)
+            compiled = entry_lines(found_item, authored_entry.id)
             if compiled is not None:
                 resolved.append(compiled)
         if not resolved:
@@ -1870,8 +1940,19 @@ def _compile(settings: config.Settings, session: Session) -> Compiled:
     if default == FALLBACK_PLAYLIST_ID:
         implicit_default = True
         require_known_fallback()
+    left_out.extend(presets_left_out.values())
+    carries_presets = any(
+        line.startswith(("scene_base = ", "properties = "))
+        for _identifier, _name, entries in playlists
+        for entry in entries
+        for line in entry
+    )
     schema_version = (
-        BATTERY_SCHEMA_VERSION if settings.stop_animations_on_battery else SCHEMA_VERSION
+        PRESET_SCHEMA_VERSION
+        if carries_presets
+        else BATTERY_SCHEMA_VERSION
+        if settings.stop_animations_on_battery
+        else SCHEMA_VERSION
     )
     lines = [
         "# Generated by Wall-in-One. Edit the library in the app, not this file.",
@@ -2058,6 +2139,8 @@ def write(settings: config.Settings, session: Session, path: Path | None = None)
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
         built = _compile(settings, session)
+        if not _presets_publishable(built.document, target):
+            built = _compile(settings, session, presets=False)
         document, overrides = built.document, built.overrides
         previous_overrides = _read_overrides(target)
         _require_publishable(document, target)
@@ -2096,11 +2179,15 @@ def publish_changes(
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
         built = _compile(settings, session)
-        document, overrides = built.document, built.overrides
         try:
             current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
         except (OSError, UnicodeDecodeError) as error:
             raise RuntimeConfigError(f"cannot read {target}: {error}") from error
+        # Asked only when the document would change: an unchanged one was
+        # already judged publishable when it was written.
+        if current != built.document and not _presets_publishable(built.document, target):
+            built = _compile(settings, session, presets=False)
+        document, overrides = built.document, built.overrides
         current_overrides = _read_overrides(target)
         document_changed = current != document
         overrides_changed = current_overrides != overrides and not overrides_from_a_newer_build(
@@ -2191,6 +2278,25 @@ def _publish(
             tuple(path for uncertain in not_durable for path in uncertain.published),
             not_durable[-1].error,
         ) from not_durable[-1]
+
+
+def _presets_publishable(document: str, target: Path) -> bool:
+    """Whether ``document``'s presets may go to the live service, or are to be left out.
+
+    A document without presets has nothing to ask. One with them is schema 6,
+    which a service that predates presets refuses whole (its
+    ``deny_unknown_fields``), and which `runtime_compatibility.require_schema`
+    then cannot confirm: the presets are left out and the rest is published.
+    """
+    if target.absolute() != paths.runtime_config_path().absolute():
+        return True
+    if tomllib.loads(document)["schema_version"] != PRESET_SCHEMA_VERSION:
+        return True
+    try:
+        runtime_compatibility.require_schema(PRESET_SCHEMA_VERSION)
+    except runtime_compatibility.RuntimeCompatibilityError:
+        return False
+    return True
 
 
 def _require_publishable(document: str, target: Path) -> None:

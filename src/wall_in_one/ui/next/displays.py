@@ -610,6 +610,11 @@ class DisplaysPage(Page):
             self.plays_row.set_subtitle(text + (f" until {route.until}" if route.until else ""))
         elif route.route == "pick":
             self.plays_row.set_subtitle("Not in use now · your pick is showing")
+        elif route.stand_in_for and not assigned:
+            # The default was refused throughout: another plays instead.
+            self.plays_row.set_subtitle(
+                f"Can\u2019t play here · \u201c{route.playlist}\u201d plays in its place"
+            )
         else:
             self.plays_row.set_subtitle("In use now" if not assigned else "")
 

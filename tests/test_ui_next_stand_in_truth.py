@@ -419,3 +419,89 @@ def test_n7_the_state_keeps_the_omitted_count_and_tolerates_its_absence() -> Non
     assert adopt(base) == (False, 0)
     # Only the count moved: the Library must hear of it.
     assert adopt({**base, "refused": [], "refused_omitted": 2})[0] is True
+
+
+# ---------------------------------------------- Displays: pick and rule stand-ins ---
+
+
+def _routed(source: str, *, stood: bool) -> str:
+    status = _independent_default_refused()
+    status["displays"][0].update(route_source=source)
+    if not stood:
+        status.pop("stand_in_for")
+        status["displays"][0].pop("stand_in_for")
+        status["displays"][0].update(playlist="pages", playlist_id="pages")
+    return _displays_rows(status)[0]
+
+
+def test_displays_a_pick_that_stood_in_says_it_cant_play() -> None:
+    plays = _routed("manual", stood=True)
+    assert plays == "Not in use now · " + runtime_truth.stand_in_sentence("pages", "all-media")
+
+
+def test_displays_a_rule_that_stood_in_says_it_cant_play() -> None:
+    plays = _routed("schedule", stood=True)
+    assert plays.startswith("Not in use now · ")
+    assert runtime_truth.stand_in_sentence("pages", "all-media") in plays
+
+
+def test_displays_control_a_pick_and_a_rule_that_play_are_said_as_before() -> None:
+    assert _routed("manual", stood=False) == "Not in use now · your pick is showing"
+    assert _routed("schedule", stood=False).endswith("is scheduled")
+
+
+# ----------------------------- the classic count follows the web-allowed setting ---
+
+
+def _toggled(first: bool, then: bool) -> tuple[str, str]:
+    from wall_in_one.ui.grid import WallpaperGrid
+    from wall_in_one.ui.thumbnails import ThumbnailLoader
+    from wall_in_one.ui.window import MainWindow
+
+    class Loader(ThumbnailLoader):
+        def request(self, item: MediaItem, callback: Any) -> None:
+            del item, callback
+
+    items = (_scene("2777242023", web=True),)
+    grid = WallpaperGrid(Loader(max_workers=1), lambda _item: None)
+    grid.set_web_allowed(first)
+    grid.populate(items)
+    fake = MagicMock()
+    fake._grid = grid
+    fake._runtime_media_status = {**_status("pick-refused"), "refused": [WEB]}
+    fake._borked_count = 0
+    fake._summary = ""
+    fake._settings = SimpleNamespace(allow_web_wallpapers=first, roots=())
+    fake._management_session = SimpleNamespace(
+        library=_Library(items),
+        playlists=SimpleNamespace(all=lambda: (), get=lambda _pid: None),
+        active_playlist=lambda: "",
+        cursor=None,
+    )
+    fake._session_playing_label = MainWindow._session_playing_label
+    fake._show_media_playback = lambda session: MainWindow._show_media_playback(fake, session)
+    MainWindow._show_media_playback(fake, fake._management_session)
+    before = fake._summary
+    new = SimpleNamespace(
+        allow_web_wallpapers=then,
+        display_mode="mirrored",
+        roots=(),
+    )
+    MainWindow.apply_settings(fake, new)  # type: ignore[arg-type]
+    return before, fake._summary
+
+
+def test_a_web_toggle_recounts_the_summary() -> None:
+    before, after = _toggled(False, True)
+    assert _said(before) == 0  # web off: the tile says so, and isn't counted
+    assert _said(after) == 1, after  # web on: the tile is marked "Can't play here"
+
+
+def test_a_web_toggle_off_recounts_the_summary() -> None:
+    before, after = _toggled(True, False)
+    assert _said(before) == 1 and _said(after) == 0, (before, after)
+
+
+def test_control_an_unchanged_web_setting_leaves_the_summary() -> None:
+    before, after = _toggled(True, True)
+    assert _said(before) == _said(after) == 1

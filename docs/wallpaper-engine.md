@@ -121,7 +121,9 @@ in both interfaces' kind badges; the category keeps its name, so the classic
 | `application` (or a preset of one) | Scene · application, unsupported | never, whatever the engine supports |
 | any other type, or none (or a preset of one) | Scene · its type, unsupported | never |
 | `scene`/`web` whose file isn't what its type names | Scene · its type, unsupported | never |
-| a supported type missing what the engine requires (`title`, `file`) | Scene · its type, unplayable | never |
+| a supported type missing what the engine requires (`title`, `file`), or a `file` padded with spaces | Scene · its type, unplayable | never |
+| a type the engine wouldn't read as written (`" scene"`, a long-s "ſcene") | Scene · unknown, unsupported | never |
+| preset of a `video` whose file is gone or is a link | Scene · preset, "needs its base" | never |
 
 An item that can't play is never handed to linux-wallpaperengine, by the
 service, the app's own applier or a still capture: the compiler leaves it out
@@ -206,11 +208,13 @@ same scan):
   never starts with `-`, so the argument can't read as an option;
 - `bool`: a JSON boolean, written `true`/`false`;
 - `slider`: a finite JSON number (not a boolean) within ±1e9, written as an
-  integer or a decimal;
+  integer or a decimal; an integer is judged as one (JSON allows any number
+  of digits), and a non-zero value below the smallest normal float, which
+  `std::stof` refuses (`1e-38` does, `1.2e-38` doesn't), is written as 0;
 - `color`: three or four finite numbers in 0-1, written as fixed decimals
   (`0.501961 1.000000 0.000000`);
 - `combo`: a string or integral number that is one of the base's option
-  values;
+  values, a number within 32 bits (the engine reads it as an `int`);
 - every other type, `null`, and anything else is left out;
 - at most 512 properties, each value at most 256 bytes with no control
   characters. A preset with more is listed but not played, and says why.
@@ -273,8 +277,10 @@ still at all.
 Nothing that is a Wallpaper Engine item is dropped any more, a missing-file
 video apart (above). What the scan can't list at all is said with the scan's
 other notes (the classic subtitle, the new interface's count tooltip): a
-Workshop folder with no `project.json`, or one that isn't readable JSON.
-Those notes use a new kind of unseen place, "not a wallpaper", which, like an
+Workshop folder with no `project.json`, one that isn't readable JSON, one
+whose reading raised something nothing foresaw ("its project.json could not
+be read": one item never stops the scan), and one whose name isn't an ASCII
+Workshop id (`str.isdigit` would take "١٢٣"). Those notes use a new kind of unseen place, "not a wallpaper", which, like an
 absent library folder, means "looked, and nothing usable is there": a
 Workshop folder Steam is still writing must not make the compiler refuse over
 "couldn't look".

@@ -293,8 +293,9 @@ interface that line leads to the setting.
 Steam adds items whenever it likes. The Scenes and Videos views (classic:
 Videos and scenes) have **Check Wallpaper Engine for new wallpapers**, which
 rescans the library, exactly as `F5` does. A Workshop folder with no
-`project.json`, or one that can't be read as Wallpaper Engine's, is named with
-the scan's other notes (the count's tooltip; classic: the subtitle).
+`project.json`, one that can't be read as Wallpaper Engine's, or one whose
+name isn't a Workshop id is named with the scan's other notes (the count's
+tooltip; classic: the subtitle); one such folder never stops the scan.
 
 How each type is decided, and why, is in
 [Wallpaper Engine items](wallpaper-engine.md).

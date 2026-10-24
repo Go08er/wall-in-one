@@ -443,7 +443,7 @@ def workshop_items(
     by_id = {item.id: item for item in installed}
     for item in installed:
         entry = item.entry
-        if item.kind == "video" and entry is None:
+        if item.is_video_type and entry is None:
             # As before: a video whose file is gone (or one this app won't
             # open) is not listed. Deleting a Workshop video's file is how
             # it leaves the library, and the dry run of that delete

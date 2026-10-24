@@ -197,6 +197,11 @@ class WorkshopItem:
     #: For a preset (`kind` is `PRESET`): the Workshop id of the wallpaper it
     #: is a preset of, or empty when it names none that can be trusted.
     dependency: str = ""
+    #: Whether `type`, stripped and case-folded, says `video`: the lenient
+    #: reading mpvpaper's videos have always had (a Workshop video playing
+    #: through mpvpaper isn't judged as the engine judges its own types).
+    #: `kind` is the engine-strict one, for what is handed to the engine.
+    declared_video: bool = False
     #: A preset's own values, as JSON gave them, under names the service
     #: would accept. Translated against its base by `preset_properties`.
     preset: tuple[tuple[str, bool | int | float | str], ...] = ()
@@ -205,7 +210,13 @@ class WorkshopItem:
 
     @property
     def is_video(self) -> bool:
-        return self.kind == "video" and self.entry is not None
+        """A video mpvpaper plays (its file is there): never judged as the engine's types are."""
+        return self.is_video_type and self.entry is not None
+
+    @property
+    def is_video_type(self) -> bool:
+        """It says `video` (leniently, `declared_video`) and isn't a preset."""
+        return (self.declared_video or self.kind == "video") and self.kind != PRESET
 
     @property
     def still_preview(self) -> Path | None:
@@ -386,6 +397,7 @@ def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem 
             else _type_word(kind)
         ),
         declared_type=_type_word(kind) if isinstance(kind, str) else "",
+        declared_video=isinstance(kind, str) and kind.strip().casefold() == "video",
         title=title.strip() if isinstance(title, str) and title.strip() else directory.name,
         entry=entry,
         preview=preview,
@@ -818,6 +830,16 @@ def _beside(directory: Path, name: object, on_unseen: OnUnseen | None = None) ->
     return candidate if stat.S_ISREG(info.st_mode) else None
 
 
+def _collecting() -> tuple[list[tuple[Path, UnseenKind, str]], OnUnseen]:
+    """A list and the `OnUnseen` that fills it, to judge what was said before saying it."""
+    heard: list[tuple[Path, UnseenKind, str]] = []
+
+    def hear(place: Path, kind: UnseenKind, why: str) -> None:
+        heard.append((place, kind, why))
+
+    return heard, hear
+
+
 def scan(
     extra_roots: Sequence[Path] = (),
     *,
@@ -866,8 +888,19 @@ def scan_content_directories(
             if not is_workshop_id(directory.name):
                 # Steam names every item's folder by its Workshop id, in ASCII
                 # digits; `str.isdigit` would also take "١٢٣". The id reaches
-                # the renderer's command line, so anything else isn't listed.
+                # the engine's command line, so no such folder is handed to
+                # it. A video goes to mpvpaper by its file, as it always did,
+                # so one in such a folder is still listed.
+                heard, hear = _collecting()
+                item = _read_project(directory, hear)
+                if item is not None and item.is_video:
+                    if item.id not in found:
+                        found[item.id] = item
+                    continue
                 if on_unseen is not None:
+                    for place, kind, why in heard:
+                        if kind.could_not_look:
+                            on_unseen(place, kind, why)
                     on_unseen(directory, UnseenKind.NOT_A_WALLPAPER, NOT_AN_ID)
                 continue
             item = _read_project(directory, on_unseen)

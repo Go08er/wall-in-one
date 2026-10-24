@@ -111,7 +111,7 @@ in both interfaces' kind badges; the category keeps its name, so the classic
 
 | Item | Listed as | Plays |
 |---|---|---|
-| `video` with its file | Video | mpvpaper, as before |
+| `video` with its file (the type read leniently, stripped and case-folded, and in a folder of any name) | Video | mpvpaper, as before |
 | `video` whose file is gone, or one the app won't open | not listed, as before | – |
 | `scene` naming a `.json` | Scene | `--bg <id>` |
 | `web` naming a `.html`/`.htm` | Scene · web | `--bg <id>`, only with Allow web wallpapers on (off by default) |
@@ -122,7 +122,7 @@ in both interfaces' kind badges; the category keeps its name, so the classic
 | any other type, or none (or a preset of one) | Scene · its type, unsupported | never |
 | `scene`/`web` whose file isn't what its type names | Scene · its type, unsupported | never |
 | a supported type missing what the engine requires (`title`, `file`), or a `file` padded with spaces | Scene · its type, unplayable | never |
-| a type the engine wouldn't read as written (`" scene"`, a long-s "ſcene") | Scene · unknown, unsupported | never |
+| a type the engine wouldn't read as written (`" scene"`, a long-s "ſcene"), other than a video's | Scene · unknown, unsupported | never |
 | preset of a `video` whose file is gone or is a link | Scene · preset, "needs its base" | never |
 
 An item that can't play is never handed to linux-wallpaperengine, by the
@@ -283,10 +283,14 @@ other notes (the classic subtitle, the new interface's count tooltip): a
 Workshop folder with no `project.json`, one that isn't readable JSON, one
 whose reading raised something nothing foresaw ("its project.json could not
 be read": one item never stops the scan), and one whose name isn't an ASCII
-Workshop id (`str.isdigit` would take "١٢٣"). Those notes use a new kind of unseen place, "not a wallpaper", which, like an
-absent library folder, means "looked, and nothing usable is there": a
-Workshop folder Steam is still writing must not make the compiler refuse over
-"couldn't look".
+Workshop id (`str.isdigit` would take "١٢٣"), unless it holds a video, which
+mpvpaper plays by its file, so neither the engine's type and file rules nor
+the id rule apply to it. Those notes use a new kind of unseen place, "not a
+wallpaper", which, like an absent library folder, means "looked, and nothing
+usable is there": a Workshop folder Steam is still writing must not make the
+compiler refuse over "couldn't look", and such a note is kept in `unseen`
+and out of `Library.skipped` (the upgrade and the capture cleanup wait only
+for what couldn't be looked at).
 
 The interfaces keep their category names: the new interface's **Scenes** tab
 and the classic **Videos and scenes** filter now also hold web wallpapers,

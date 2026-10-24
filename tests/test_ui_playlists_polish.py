@@ -794,14 +794,17 @@ def test_turning_web_off_clears_the_picture_of_every_row_that_holds_web(
     its picture dropped from the source cards but kept in the playlist's rows.
     """
     item = MediaItem(
-        path=Path("/test-media") / "scene.png", kind=Kind.STILL, size=1, mtime=1,
+        path=Path("/test-media") / "scene.png",
+        kind=Kind.STILL,
+        size=1,
+        mtime=1,
         web_files=web_files,
     )
     app, page = make_editor(count=1, entries=1, items=(item,))
     assert page._entry_items and all(held is not None for held in page._entry_items.values())
     cleared: list[MediaItem] = []
     row = next(iter(page._entry_rows.values()))
-    row.show_thumbnail = lambda held, texture: cleared.append(held)  # type: ignore[method-assign]
-    app.settings = config.Settings(allow_web_wallpapers=False)  # type: ignore[attr-defined]
+    row.show_thumbnail = lambda held, texture: cleared.append(held)
+    app.settings = config.Settings(allow_web_wallpapers=False)
     page.web_wallpapers_changed()
     assert (item in cleared) is web_files

@@ -308,9 +308,7 @@ def test_a_dials_reset_after_a_rebuild_is_the_last_word(
 def test_a_removed_wallpaper_gets_no_record_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    session, _application, page, root, video, holder = _open(
-        tmp_path, monkeypatch, app=GuardedApp
-    )
+    session, _application, page, root, video, holder = _open(tmp_path, monkeypatch, app=GuardedApp)
     page.edit(session, video)
     speed = page.renderer_rows["dial:video:speed"]
     assert isinstance(speed, Adw.SpinRow)
@@ -327,9 +325,7 @@ def test_a_removed_wallpaper_gets_no_record_back(
 def test_a_removed_wallpaper_is_not_reported_as_a_failed_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    session, application, page, root, video, holder = _open(
-        tmp_path, monkeypatch, app=GuardedApp
-    )
+    session, application, page, root, video, holder = _open(tmp_path, monkeypatch, app=GuardedApp)
     page.edit(session, video)
     speed = page.renderer_rows["dial:video:speed"]
     assert isinstance(speed, Adw.SpinRow)
@@ -373,4 +369,3 @@ def test_a_reset_of_one_wallpaper_leaves_the_pending_number_of_another(
     root.destroy()
     assert own_a.dial("video", "speed") == 1.5, (own_a, own_b)
     assert not own_b, own_b
-

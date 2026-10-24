@@ -1,0 +1,44 @@
+schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+default_playlist = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBIG"
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = true
+display_mode = "mirrored"
+theme_source_connector = ""
+[renderer]
+noctalia_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = true
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 100
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+[[playlists]]
+id = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBIG"
+name = "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"
+[[playlists.entries]]
+id = "e"
+kind = "scene"
+scene_id = "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+still = "/ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+palette = { kind = "keep", mode = "keep" }
+[[playlists]]
+id = "pad"
+name = "ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+[[playlists.entries]]
+id = "f"
+kind = "still"
+still = "/f.png"
+palette = { kind = "keep", mode = "keep" }

@@ -1193,3 +1193,29 @@ fn allow_web_wallpapers_needs_schema_eight_and_is_off_when_absent() {
             .allow_web_wallpapers
     );
 }
+
+// -- r13c: the status budget counts what status says of a refused entry ---------------------
+
+#[test]
+fn the_status_budget_counts_a_stand_ins_asked_for_playlist_and_the_refused_list() {
+    // fixtures/status-budget: a document with a Wallpaper Engine entry whose status just fits
+    // one reply once every row may name the playlist it asked for (`stand_in_for`) and status
+    // lists what the service refused (`refused`), and the same a byte over. The app's mirror
+    // (`runtime_config._validate_status_budget`, tests/test_runtime_config.py) reads the same
+    // pair: the two budgets agree at the edge. The pair is in this crate because the package
+    // builds from `service/` alone.
+    let fits = include_str!("fixtures/status-budget/fits.toml");
+    let over = include_str!("fixtures/status-budget/over.toml");
+    Config::from_bytes(fits.as_bytes().to_vec()).unwrap();
+    let error = Config::from_bytes(over.as_bytes().to_vec())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("protocol response limit"), "{error}");
+    // Without its Wallpaper Engine entry nothing can be refused, and neither is counted.
+    let stills = over.replace(
+        &format!("kind = \"scene\"\nscene_id = \"{}\"\n", "1".repeat(200)),
+        "kind = \"still\"\n",
+    );
+    assert_ne!(stills, over);
+    Config::from_bytes(stills.into_bytes()).unwrap();
+}

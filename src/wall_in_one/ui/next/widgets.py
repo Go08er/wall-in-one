@@ -332,7 +332,11 @@ def kind_badge(wallpaper: WallpaperView) -> Gtk.Box:
     text = kind_text(wallpaper.kind, wallpaper.kind_detail)
     if wallpaper.kind == "video" and wallpaper.duration:
         text = f"{text} · {wallpaper.duration}"
-    return pill(text, KIND_ICON.get(wallpaper.kind), "on-image")
+    badge = pill(text, KIND_ICON.get(wallpaper.kind), "on-image")
+    if wallpaper.kind_note:
+        # A preset of a web wallpaper: it says what is really on screen.
+        badge.set_tooltip_text(f"{wallpaper.name} {wallpaper.kind_note}")
+    return badge
 
 
 # ---------------------------------------------------------------------------

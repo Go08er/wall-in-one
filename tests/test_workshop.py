@@ -237,13 +237,18 @@ def test_the_item_cap_is_said(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 
 def _web(content: Path, workshop_id: str = "2777242023") -> Path:
+    return _base(content, "web", workshop_id)
+
+
+def _base(content: Path, kind: str = "scene", workshop_id: str = "2777242023") -> Path:
+    """A wallpaper with typed properties for a preset to set: a scene, or a web page."""
     directory = _install(
         content,
         workshop_id,
         {
-            "type": "web",
+            "type": kind,
             "title": "Electric Eye",
-            "file": "index.html",
+            "file": "index.html" if kind == "web" else "scene.json",
             "preview": "preview.jpg",
             "general": {
                 "properties": {
@@ -267,7 +272,7 @@ def _web(content: Path, workshop_id: str = "2777242023") -> Path:
                 }
             },
         },
-        file="index.html",
+        file="index.html" if kind == "web" else "",
     )
     (directory / "preview.jpg").write_bytes(b"\xff\xd8\xff")
     return directory
@@ -312,7 +317,7 @@ def test_a_web_wallpaper_is_listed_as_a_scene_the_engine_plays(tmp_path: Path) -
 
 def test_a_preset_is_its_own_item_playing_its_base_with_its_values(tmp_path: Path) -> None:
     content = _content(tmp_path)
-    _web(content)
+    _base(content)
     preset = _preset(
         content,
         {
@@ -378,7 +383,7 @@ def test_a_value_the_engine_would_refuse_is_left_out(
     tmp_path: Path, name: str, value: object
 ) -> None:
     content = _content(tmp_path)
-    _web(content)
+    _base(content)
     _preset(content, {name: value})
 
     item = _listed(tmp_path)["2946165131"]
@@ -414,7 +419,7 @@ def test_a_preset_that_names_no_base_is_listed_needing_one(
 
 def test_a_numeric_dependency_names_its_base_too(tmp_path: Path) -> None:
     content = _content(tmp_path)
-    _web(content)
+    _base(content)
     _preset(content, {"arcs": True}, dependency=2777242023)
 
     item = _listed(tmp_path)["2946165131"]
@@ -554,7 +559,7 @@ def test_a_preset_with_more_values_than_are_passed_on_is_not_played(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     content = _content(tmp_path)
-    _web(content)
+    _base(content)
     _preset(content, {"arcs": True, "arcsGeneralRadius": 1, "theme": "dark"})
     monkeypatch.setattr(workshop, "MAX_PROPERTIES", 2)
 
@@ -729,3 +734,21 @@ def test_whatever_reading_one_item_raises_is_said_and_the_rest_are_listed(
     assert said == [
         (broken, UnseenKind.NOT_A_WALLPAPER, "its project.json could not be read (RuntimeError)")
     ]
+
+
+# -- a preset of a web wallpaper plays as its base (review of r11, finding 3) -----
+
+
+def test_a_preset_of_a_web_wallpaper_plays_as_its_base_and_says_so(tmp_path: Path) -> None:
+    """linux-wallpaperengine hands a page no properties: nothing is passed, and it says so."""
+    content = _content(tmp_path)
+    web = _web(content)
+    preset = _preset(content, {"arcs": False, "arcsGeneralRadius": 350})
+
+    item = _listed(tmp_path)["2946165131"]
+
+    assert item.unplayable is None and item.scene_base == "2777242023"
+    assert item.scene_properties == (), "none: the page would never see them"
+    assert item.scene_note == "plays as Electric Eye; its settings aren\u2019t applied"
+    assert item.preview == web / "preview.jpg", "its still and colours match the screen"
+    assert item.title == "Y2K Matrix" and item.path == preset

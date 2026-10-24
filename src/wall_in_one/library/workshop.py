@@ -577,6 +577,11 @@ class Playback:
     properties: tuple[tuple[str, str], ...] = ()
     unplayable: Unplayable | None = None
     reason: str = ""
+    #: What it plays, when that isn't what it shows: a preset of a web
+    #: wallpaper plays its base's look ("plays as Electric Eye; ...").
+    note: str = ""
+    #: The picture its still and colours come from, when not its own preview.
+    preview: Path | None = None
 
 
 def _type_phrase(kind: str) -> str:
@@ -658,6 +663,16 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
             base=base.id,
             unplayable=refused.unplayable,
             reason=f"it is a preset of {base.title}, which can\u2019t play: {refused.reason}",
+        )
+    if base.kind == "web":
+        # linux-wallpaperengine hands a page no properties (nothing calls into
+        # it: CWeb.cpp only loads the URL), so the screen shows the base as it
+        # is. Say so, pass nothing, and take the still and colours from the
+        # base's own preview so they match what is on screen.
+        return Playback(
+            base=base.id,
+            note=f"plays as {base.title}; its settings aren\u2019t applied",
+            preview=base.preview or item.preview,
         )
     properties = preset_properties(item, base)
     if len(properties) > MAX_PROPERTIES:

@@ -118,7 +118,11 @@ class WallpaperTile(Gtk.Box):
             # without help. A Wallpaper Engine item says its own type too.
             what = kind_text(item.kind.value, item.workshop_detail)
             plain_badge = item.paired_still or self._never is not None
-            badges.append(_badge(what if plain_badge else f"{what} (no still)"))
+            kind_badge = _badge(what if plain_badge else f"{what} (no still)")
+            if item.scene_note:
+                # A preset of a web wallpaper: what is really on screen.
+                kind_badge.set_tooltip_text(f"{item.name} {item.scene_note}")
+            badges.append(kind_badge)
         if item.ownership is Ownership.MANAGED:
             badges.append(_badge(item.provider))
         if self._never is not None:

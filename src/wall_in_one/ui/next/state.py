@@ -154,6 +154,12 @@ class WallpaperView(Protocol):
     @property
     def kind_detail(self) -> str: ...
 
+    #: What it plays, when that isn't what it shows: a Wallpaper Engine preset
+    #: of a web wallpaper "plays as Electric Eye; its settings aren't applied".
+    #: Empty otherwise.
+    @property
+    def kind_note(self) -> str: ...
+
     @property
     def tags(self) -> tuple[str, ...]: ...
 

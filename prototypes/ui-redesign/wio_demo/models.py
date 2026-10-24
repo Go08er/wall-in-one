@@ -40,6 +40,7 @@ class Wallpaper:
     unplayable: str = ""  # why playback can't use it yet (no still), if so
     never_plays: bool = False  # a Wallpaper Engine item nothing here runs
     kind_detail: str = ""  # a Wallpaper Engine item's own type, when not a scene
+    kind_note: str = ""  # what a Wallpaper Engine preset plays, when not itself
 
     @property
     def key(self) -> ArtKey:

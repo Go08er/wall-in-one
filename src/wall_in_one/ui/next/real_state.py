@@ -191,6 +191,7 @@ class LibraryWallpaper:
     unplayable: str = ""
     never_plays: bool = False
     kind_detail: str = ""
+    kind_note: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +301,7 @@ def wallpaper_view(
         unplayable="" if health.is_borked else unplayable,
         never_plays=item.unplayable is not None,
         kind_detail=item.workshop_detail,
+        kind_note=item.scene_note,
     )
 
 

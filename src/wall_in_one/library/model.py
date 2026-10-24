@@ -142,6 +142,10 @@ class MediaItem:
     #: A preset's property values, by name in name order, already checked
     #: against the base's own declarations (`library.workshop`).
     scene_properties: tuple[tuple[str, str], ...] = ()
+    #: What it plays, when that isn't what its title says: a preset of a web
+    #: wallpaper "plays as Electric Eye; its settings aren't applied". Empty
+    #: otherwise.
+    scene_note: str = ""
     #: Why it can never play as it is, or ``None``; ``unplayable_reason`` says
     #: it for a person.
     unplayable: Unplayable | None = None

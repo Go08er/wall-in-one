@@ -333,6 +333,10 @@ class Inspector(Gtk.Box):
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         titles.append(title)
         titles.append(widgets.dim(" · ".join(meta_bits)))
+        if wallpaper.kind_note:
+            # "Plays as Electric Eye; its settings aren't applied."
+            note = wallpaper.kind_note
+            titles.append(widgets.dim(f"{note[:1].upper()}{note[1:]}."))
         box.append(titles)
 
         if wallpaper.problem:

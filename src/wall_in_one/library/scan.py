@@ -496,10 +496,11 @@ def workshop_items(
                     provider=WORKSHOP_PROVIDER,
                     scene=item.id,
                     title=item.title,
-                    preview=item.preview,
+                    preview=plays.preview or item.preview,
                     workshop_type=item.kind,
                     scene_base=plays.base,
                     scene_properties=plays.properties,
+                    scene_note=plays.note,
                     unplayable=plays.unplayable,
                     unplayable_reason=plays.reason,
                 )

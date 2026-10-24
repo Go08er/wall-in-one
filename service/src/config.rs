@@ -24,11 +24,18 @@ pub const PRESET_SCHEMA_VERSION: u32 = 6;
 /// the dials (docs/renderer-settings.md). Written only then, and asked for
 /// first, like 5 and 6. Carries everything 6 does.
 pub const DIALS_SCHEMA_VERSION: u32 = 7;
+/// A document with a playlist that plays nothing (`entries = []` with its
+/// `nothing_to_play` reason), or with `allow_web_wallpapers` in `[settings]`
+/// (docs/runtime-config.md). Written only then, and asked for first, like 6
+/// and 7. Carries everything 7 does. Below it a playlist with no entries is
+/// refused, as every earlier service refuses it.
+pub const NOTHING_TO_PLAY_SCHEMA_VERSION: u32 = 8;
 pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[
     4,
     SCHEMA_VERSION,
     PRESET_SCHEMA_VERSION,
     DIALS_SCHEMA_VERSION,
+    NOTHING_TO_PLAY_SCHEMA_VERSION,
 ];
 pub const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -60,6 +67,13 @@ pub const MAX_PATH_BYTES: usize = 4096;
 const CONFIG_GENERATION_HEX_BYTES: usize = 64;
 const MAX_TABOO_REASON_BYTES: usize = 512;
 const MAX_TABOO_SOURCE_BYTES: usize = 64;
+/// The longest reason a playlist that plays nothing may give. Status repeats
+/// it on every display row (`nothing_to_play` and `entry_name`), so it is
+/// short and counted in the status budget.
+pub const MAX_NOTHING_TO_PLAY_BYTES: usize = 128;
+/// What a display that plays nothing is called in status (`entry_name`),
+/// before its reason: the name the companion shows for what is on screen.
+pub const NOTHING_TO_PLAY_LABEL: &str = "Nothing to play: ";
 /// A Wallpaper Engine preset's property values, as the app compiles them
 /// (`wall_in_one.library.workshop`). Each becomes one `--set-property`
 /// argument, so these bound the renderer's command line as well as the
@@ -140,6 +154,12 @@ pub struct Settings {
     pub stop_animations_on_battery: bool,
     pub display_mode: DisplayMode,
     pub theme_source_connector: String,
+    /// Whether a Wallpaper Engine web page may play (schema 8). Absent means
+    /// not allowed: before linux-wallpaperengine is started for a scene, the
+    /// service then reads the item's `project.json` and refuses a web page,
+    /// or one whose type it can't read (`crate::workshop`).
+    #[serde(default)]
+    pub allow_web_wallpapers: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -305,7 +325,27 @@ pub struct Playlist {
     /// `shuffle on|off` override still wins.
     #[serde(skip)]
     pub shuffle: Option<bool>,
+    /// Why this playlist plays nothing, for a playlist with no entries
+    /// (schema 8): a display it is on shows nothing, and status says this.
+    /// Required exactly when `entries` is empty.
+    #[serde(default)]
+    pub nothing_to_play: Option<String>,
+    /// Empty only at schema 8, with `nothing_to_play`. A document without
+    /// the key reads as empty, so the shape 0.4.0 wrote for an empty All
+    /// media is refused by name below rather than as a parse error.
+    #[serde(default)]
     pub entries: Vec<Entry>,
+}
+
+impl Playlist {
+    /// The reason this playlist plays nothing, when it has no entries.
+    pub fn nothing_to_play(&self) -> Option<&str> {
+        if self.entries.is_empty() {
+            self.nothing_to_play.as_deref()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -746,12 +786,19 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !SUPPORTED_SCHEMA_VERSIONS.contains(&self.schema_version) {
             return invalid(format!(
-                "schema_version {} is unsupported; expected 4, {SCHEMA_VERSION}, {PRESET_SCHEMA_VERSION} or {DIALS_SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
+                "schema_version {} is unsupported; expected 4, {SCHEMA_VERSION}, {PRESET_SCHEMA_VERSION}, {DIALS_SCHEMA_VERSION} or {NOTHING_TO_PLAY_SCHEMA_VERSION}; regenerate it with `wall-in-one --write-config` or restart the packaged wall-in-one.service",
                 self.schema_version
             ));
         }
         if self.schema_version == 4 && self.settings.stop_animations_on_battery {
             return invalid("stop_animations_on_battery requires schema_version 5");
+        }
+        if self.schema_version < NOTHING_TO_PLAY_SCHEMA_VERSION
+            && self.settings.allow_web_wallpapers
+        {
+            return invalid(format!(
+                "allow_web_wallpapers requires schema_version {NOTHING_TO_PLAY_SCHEMA_VERSION}"
+            ));
         }
         if self.config_generation.len() != CONFIG_GENERATION_HEX_BYTES
             || !self
@@ -843,6 +890,31 @@ impl Config {
                     "duplicate playlist name {:?} when compared without case",
                     playlist.name
                 ));
+            }
+            match (playlist.entries.is_empty(), &playlist.nothing_to_play) {
+                (false, None) => {}
+                (true, _) if self.schema_version < NOTHING_TO_PLAY_SCHEMA_VERSION => {
+                    return invalid(format!(
+                        "playlist {:?} has no entries; a playlist that plays nothing requires \
+                         schema_version {NOTHING_TO_PLAY_SCHEMA_VERSION} and its nothing_to_play reason",
+                        playlist.name
+                    ));
+                }
+                (true, None) => {
+                    return invalid(format!(
+                        "playlist {:?} has no entries and no nothing_to_play reason",
+                        playlist.name
+                    ));
+                }
+                (true, Some(reason)) => {
+                    bounded_nonempty("nothing_to_play reason", reason, MAX_NOTHING_TO_PLAY_BYTES)?
+                }
+                (false, Some(_)) => {
+                    return invalid(format!(
+                        "playlist {:?} has entries, so it can't carry nothing_to_play",
+                        playlist.name
+                    ));
+                }
             }
             if playlist.entries.len() > MAX_ENTRIES_PER_PLAYLIST {
                 return invalid(format!(
@@ -1044,6 +1116,16 @@ impl Config {
             for entry in &playlist.entries {
                 largest_entry =
                     largest_entry.max(entry.id.len().saturating_add(path_bytes(&entry.still)));
+            }
+            // A display that plays nothing carries the reason twice in place
+            // of an entry: as `nothing_to_play` and in its `entry_name`.
+            if let Some(reason) = playlist.nothing_to_play() {
+                largest_entry = largest_entry.max(
+                    reason
+                        .len()
+                        .saturating_mul(2)
+                        .saturating_add(NOTHING_TO_PLAY_LABEL.len()),
+                );
             }
         }
         for rule in &self.schedules {

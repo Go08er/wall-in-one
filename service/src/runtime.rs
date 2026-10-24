@@ -1,6 +1,7 @@
 use crate::config::{
-    Config, DisplayAssignment, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES, Playlist,
-    SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
+    Config, DisplayAssignment, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES,
+    NOTHING_TO_PLAY_LABEL, Playlist, SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS,
+    ScheduleRule,
 };
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
@@ -174,6 +175,10 @@ pub struct Status<'a> {
     /// left empty, then the rows are left out. See
     /// docs/missing-components.md.
     pub missing_renderers: Vec<MissingRendererStatus>,
+    /// Why nothing plays, when every connected display plays nothing (the
+    /// document's `nothing_to_play`, schema 8); null otherwise. Each display
+    /// row says it for itself too. Added in 0.4.1.
+    pub nothing_to_play: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -310,9 +315,24 @@ pub struct DisplayStatus<'a> {
     pub renderer_failed: bool,
     pub last_error: String,
     pub automatic_retry: Option<AutomaticRetryStatus<'a>>,
+    /// Why this display plays nothing: its playlist has no entries (schema
+    /// 8). `entry_id`, `kind` and `still` are then empty, nothing of the
+    /// service's is on it, and it has no rotation countdown. Null while
+    /// something plays. Added in 0.4.1.
+    pub nothing_to_play: Option<&'a str>,
+    /// The name of what is on screen, for a display that plays nothing:
+    /// "Nothing to play: <reason>", which the companion shows as the
+    /// display's title. Null otherwise (the companion then names a wallpaper
+    /// after its still). Added in 0.4.1.
+    pub entry_name: Option<String>,
     /// When and why this display's wallpaper next changes on its own.
     #[serde(flatten)]
     pub timing: DisplayTiming,
+}
+
+/// `entry_name` for a display that plays nothing for `reason`.
+fn nothing_name(reason: Option<&str>) -> Option<String> {
+    reason.map(|reason| format!("{NOTHING_TO_PLAY_LABEL}{reason}"))
 }
 
 /// When a display's automatic route and rotation next move. Appended to each
@@ -344,6 +364,15 @@ const WALL_CLOCK_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 impl DisplayTiming {
+    /// The same, without a rotation countdown: a display that plays nothing
+    /// has nothing to rotate to. A schedule change still is one.
+    fn without_rotation(mut self) -> Self {
+        self.next_cycle_at = None;
+        self.next_cycle_in_s = None;
+        self.next_change_in_s = None;
+        self
+    }
+
     /// `reference` is the real instant the reply describes, from which an
     /// elapsed rotation countdown is projected into `zone`.
     fn new<Tz: TimeZone>(
@@ -832,11 +861,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .start_motion_only(&target.entry, &target.output, &self.config.settings);
             let missing = result
                 .is_ok()
-                .then(|| self.driver.motion_missing(&target.output))
+                .then(|| {
+                    self.driver
+                        .motion_missing(&target.output)
+                        .map(|missing| missing_renderer_diagnostic(&missing))
+                        .or_else(|| self.driver.motion_refused(&target.output))
+                })
                 .flatten();
-            if let Some(missing) = missing {
+            if let Some(diagnostic) = missing {
                 // Still up, as before the restriction; say why it stays.
-                let diagnostic = missing_renderer_diagnostic(&missing);
                 self.power_released_outputs.remove(&target.output);
                 if let Some(route) = self.routes.get_mut(&target.output) {
                     route.renderer_failed = true;
@@ -1114,7 +1147,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .map(str::trim)
                 .filter(|reference| !reference.is_empty())
                 .and_then(|reference| self.config.playlist(reference))
-                .is_some_and(|playlist| self.playlist_has_usable_entry(&playlist.id)),
+                .is_some_and(|playlist| self.playlist_selectable(&playlist.id)),
             "shuffle" => Self::runtime_boolean_override(
                 request.argument.as_deref(),
                 "shuffle on|off|default",
@@ -1133,7 +1166,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             !playlists.is_empty()
                                 && playlists
                                     .iter()
-                                    .all(|playlist| self.playlist_has_usable_entry(playlist))
+                                    .all(|playlist| self.playlist_selectable(playlist))
                         })
             }
             "play" => {
@@ -1248,8 +1281,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let mut candidate_available = true;
                 if playlist_changed {
                     self.active_playlist = wanted.clone();
-                    candidate_available =
-                        self.reset_cursor_automatic(&self.active_playlist.clone());
+                    candidate_available = self
+                        .reset_cursor_automatic(&self.active_playlist.clone())
+                        || self.nothing_reason(&wanted).is_some();
                 }
                 if candidate_available {
                     let candidate = self.selection_state();
@@ -1347,7 +1381,10 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !moved {
             self.restore_selection(&baseline);
             self.last_cycle = now;
-            self.last_error = "every entry in the active playlist is taboo this session".into();
+            // Nothing to play is not a fault: there is just nothing to move to.
+            if self.mirrored_nothing_reason().is_none() {
+                self.last_error = "every entry in the active playlist is taboo this session".into();
+            }
             return;
         }
         let candidate = self.selection_state();
@@ -1413,12 +1450,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 || route.source != source
                 || route.schedule_rule_id != rule_id;
             if schedule_changed && manual.is_none() {
-                let usable = self.config.playlist(&wanted).is_some_and(|playlist| {
-                    playlist
-                        .entries
-                        .iter()
-                        .any(|entry| !self.is_taboo(&playlist.id, &entry.id))
-                });
+                let usable = self.playlist_selectable(&wanted);
                 if !usable {
                     let route = self.routes.get_mut(connector).expect("route exists");
                     route.last_error = format!(
@@ -1473,6 +1505,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                     let candidate = self.routes[connector].clone();
                     self.routes.insert(connector.clone(), before.clone());
                     self.start_route_automatic(connector.clone(), before, candidate, "cycle", now);
+                } else if self.route_nothing_reason(connector).is_some() {
+                    // Nothing to move to on a route that plays nothing.
+                    self.routes
+                        .get_mut(connector)
+                        .expect("route exists")
+                        .last_cycle = now;
                 } else {
                     let route = self.routes.get_mut(connector).expect("route exists");
                     route.last_cycle = now;
@@ -2065,6 +2103,51 @@ impl<D: WallpaperDriver> Runtime<D> {
         })
     }
 
+    /// Why `reference`'s playlist plays nothing (schema 8: no entries, and
+    /// its reason), or None when it has something to play.
+    fn nothing_reason(&self, reference: &str) -> Option<&str> {
+        self.config
+            .playlist(reference)
+            .and_then(Playlist::nothing_to_play)
+    }
+
+    /// Whether a command may choose `playlist_id`: something in it can play,
+    /// or it plays nothing on purpose (a display on it then shows nothing).
+    /// A playlist whose every entry is taboo is still refused.
+    fn playlist_selectable(&self, playlist_id: &str) -> bool {
+        self.playlist_has_usable_entry(playlist_id) || self.nothing_reason(playlist_id).is_some()
+    }
+
+    /// The reason, when every effective mirrored playlist plays nothing.
+    fn mirrored_nothing_reason(&self) -> Option<&str> {
+        let effective = self.effective_playlist_ids();
+        let mut reason = None;
+        for playlist in &effective {
+            let own = self.nothing_reason(playlist)?;
+            reason.get_or_insert(own);
+        }
+        reason
+    }
+
+    /// Why one independent display route plays nothing, or None.
+    fn route_nothing_reason(&self, connector: &str) -> Option<&str> {
+        let route = self.routes.get(connector)?;
+        self.nothing_reason(&route.active_playlist)
+    }
+
+    /// The reason, when every one of `connectors` plays nothing.
+    fn routes_nothing_reason<'c>(
+        &self,
+        connectors: impl IntoIterator<Item = &'c String>,
+    ) -> Option<&str> {
+        let mut reason = None;
+        for connector in connectors {
+            let own = self.route_nothing_reason(connector)?;
+            reason.get_or_insert(own);
+        }
+        reason
+    }
+
     fn taboo_playlist_error(&self, playlist_id: &str) -> String {
         let name = self
             .config
@@ -2234,6 +2317,15 @@ impl<D: WallpaperDriver> Runtime<D> {
             .ok_or_else(|| format!("display route playlist {playlist_id:?} is missing"))?;
         let entries = playlist.entries.len();
         if entries == 0 {
+            if playlist.nothing_to_play().is_some() {
+                // A route that plays nothing: no position to hold.
+                return Ok(PlaylistCursor {
+                    order: Vec::new(),
+                    position: 0,
+                    history: Vec::new(),
+                    forward: Vec::new(),
+                });
+            }
             return Err(format!("display route playlist {playlist_id:?} is empty"));
         }
         let current = current_entry
@@ -2631,9 +2723,19 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let targets = self.current_targets(&self.target_outputs);
         let outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
+        // Every renderer of ours on an output without a target stops here,
+        // a display that plays nothing included.
         self.driver.retain_outputs(&outputs);
         self.last_apply_failures.clear();
         if targets.is_empty() {
+            if let Some(reason) = self.mirrored_nothing_reason().map(str::to_owned) {
+                // Nothing to play is a state, not a failure: the displays show
+                // nothing of ours, and status says why (`nothing_to_play`).
+                self.supersede_startup_apply();
+                self.last_error.clear();
+                self.renderer_failed = false;
+                return Ok(format!("nothing to play: {reason}"));
+            }
             return self.fail("active display playlists are empty");
         }
         let played = targets[0].entry.id.clone();
@@ -2654,6 +2756,15 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             match self.driver.apply(&target.entry, &target.output, &settings) {
                 Ok(()) => {
+                    // A web page while web wallpapers are off: its still is
+                    // up, the engine was not started, and this says why.
+                    if let Some(refusal) = self.driver.motion_refused(&target.output) {
+                        static_fallbacks.push(if target.output.is_empty() {
+                            refusal
+                        } else {
+                            format!("{}: {refusal}", target.output)
+                        });
+                    }
                     // The renderer program is not there: the still is up and
                     // the entry is fine, so this is said like a taboo's still,
                     // never recorded against the entry.
@@ -2808,9 +2919,14 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn apply_independent_in_batch(&mut self, selected: &HashSet<String>) -> Result<String, String> {
         let targets = self.current_targets(&self.target_outputs);
-        if targets.is_empty() {
+        let plays_nothing = self
+            .target_outputs
+            .iter()
+            .any(|connector| self.route_nothing_reason(connector).is_some());
+        if targets.is_empty() && !plays_nothing {
             return self.fail("active display playlists are empty");
         }
+        // A route that plays nothing has no target, so its renderer stops.
         let all_outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
         self.driver.retain_outputs(&all_outputs);
         let mut targets: Vec<Target> = targets
@@ -2818,7 +2934,22 @@ impl<D: WallpaperDriver> Runtime<D> {
             .filter(|target| selected.contains(&target.output))
             .collect();
         if targets.is_empty() {
-            return self.fail("none of the selected display routes has a playable entry");
+            let Some(reason) = self.routes_nothing_reason(selected).map(str::to_owned) else {
+                return self.fail("none of the selected display routes has a playable entry");
+            };
+            for connector in selected {
+                self.driver.stop_output_renderer(connector);
+                if let Some(route) = self.routes.get_mut(connector) {
+                    route.last_error.clear();
+                    route.renderer_failed = false;
+                }
+            }
+            self.refresh_independent_last_error();
+            self.supersede_startup_apply();
+            return Ok(format!(
+                "nothing to play on {} display route(s): {reason}",
+                selected.len()
+            ));
         }
         for output in selected {
             self.driver.stop_output_renderer(output);
@@ -2909,6 +3040,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                 // Its still stays up; the entry is not at fault (see above).
                 static_fallbacks
                     .insert(target.output.clone(), missing_renderer_diagnostic(&missing));
+                continue;
+            }
+            if let Some(refusal) = self.driver.motion_refused(&target.output) {
+                // A web page while web wallpapers are off (see above).
+                static_fallbacks.insert(target.output.clone(), refusal);
                 continue;
             }
             if playback == PlaybackState::Paused
@@ -3141,7 +3277,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .playlist(reference)
                     .ok_or_else(|| format!("no such playlist {reference:?}"))?;
                 let playlist_id = playlist.id.clone();
-                if !self.playlist_has_usable_entry(&playlist_id) {
+                if !self.playlist_selectable(&playlist_id) {
                     return Err(self.taboo_playlist_error(&playlist_id));
                 }
                 self.cancel_route_retries(&connectors);
@@ -3189,7 +3325,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let mut decisions = HashMap::new();
                 for connector in &connectors {
                     let decision = self.route_decision(connector, None, self.current_time)?;
-                    if !self.playlist_has_usable_entry(&decision.0) {
+                    if !self.playlist_selectable(&decision.0) {
                         return Err(format!(
                             "{connector}: {}",
                             self.taboo_playlist_error(&decision.0)
@@ -3263,7 +3399,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                 Self::independent_no_argument(request, "play")?;
                 self.refuse_taboo_routes(&connectors)?;
                 self.cancel_route_retries(&connectors);
-                self.independent_play(&connectors)
+                let played = self.independent_play(&connectors)?;
+                Ok(match self.routes_nothing_reason(&connectors) {
+                    Some(reason) => format!("nothing to play: {reason}"),
+                    None => played,
+                })
             }
             "pause" => {
                 Self::independent_no_argument(request, "pause")?;
@@ -3284,7 +3424,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                     self.cancel_route_retries(&connectors);
                     self.independent_play(&connectors)?;
                 }
-                Ok("toggled selected display routes".into())
+                Ok(match self.routes_nothing_reason(&connectors) {
+                    Some(reason) => format!("nothing to play: {reason}"),
+                    None => "toggled selected display routes".into(),
+                })
             }
             "stop" => {
                 Self::independent_no_argument(request, "stop")?;
@@ -3383,6 +3526,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
                 if changed.is_empty() {
                     self.restore_independent_selection(&snapshot);
+                    if let Some(reason) = self.routes_nothing_reason(&connectors) {
+                        return Err(format!("nothing to play: {reason}"));
+                    }
                     return Err(if request.verb == "previous" {
                         "no previous playback history"
                     } else {
@@ -3748,7 +3894,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .playlist(reference)
             .ok_or_else(|| format!("no such playlist {reference:?}"))?;
         let playlist_id = playlist.id.clone();
-        if !self.playlist_has_usable_entry(&playlist_id) {
+        if !self.playlist_selectable(&playlist_id) {
             return self.fail(self.taboo_playlist_error(&playlist_id));
         }
         let baseline = self.selection_state();
@@ -3756,7 +3902,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.manual_playlist = Some(playlist_id.clone());
         self.active_playlist = playlist_id.clone();
         self.schedule_overrode_default = false;
-        if !self.reset_cursor_automatic(&playlist_id) {
+        if !self.reset_cursor_automatic(&playlist_id) && self.nothing_reason(&playlist_id).is_none()
+        {
             self.manual_playlist = previous_manual;
             self.restore_selection(&baseline);
             return self.fail(self.taboo_playlist_error(&playlist_id));
@@ -3811,7 +3958,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let (playlist_id, overrode, effective) = self.scheduled_selection(at)?;
         if let Some(blocked) = effective
             .iter()
-            .find(|playlist| !self.playlist_has_usable_entry(playlist))
+            .find(|playlist| !self.playlist_selectable(playlist))
         {
             return self.fail(self.taboo_playlist_error(blocked));
         }
@@ -3820,7 +3967,9 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.schedule_overrode_default = overrode;
         self.active_playlist.clone_from(&playlist_id);
         for effective_playlist in &effective {
-            if !self.reset_cursor_automatic(effective_playlist) {
+            if !self.reset_cursor_automatic(effective_playlist)
+                && self.nothing_reason(effective_playlist).is_none()
+            {
                 self.manual_playlist = previous_manual;
                 self.restore_selection(&baseline);
                 return self.fail(self.taboo_playlist_error(effective_playlist));
@@ -3971,6 +4120,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.last_cycle = Instant::now();
             }
         }
+        if let Some(reason) = self.mirrored_nothing_reason() {
+            // Play has nothing to start: the document names nothing here.
+            return Ok(format!("nothing to play: {reason}"));
+        }
         Ok(if self.animations_inhibited() {
             "play requested; animations stopped on battery"
         } else {
@@ -4035,6 +4188,10 @@ impl<D: WallpaperDriver> Runtime<D> {
             };
         }
         if !moved {
+            if let Some(reason) = self.mirrored_nothing_reason() {
+                // Not a fault to keep in `last_error`: there is nothing here.
+                return Err(format!("nothing to play: {reason}"));
+            }
             return self.fail(if delta < 0 {
                 "no previous playback history"
             } else {
@@ -4054,6 +4211,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             moved |= self.move_cursor_random(&playlist);
         }
         if !moved {
+            if let Some(reason) = self.mirrored_nothing_reason() {
+                return Err(format!("nothing to play: {reason}"));
+            }
             return self.fail("active display playlists are empty or taboo");
         }
         let result = self.apply_current();
@@ -4126,12 +4286,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         let dynamics_changed =
             next.settings.dynamics_enabled != self.config.settings.dynamics_enabled;
         let displays_changed = next.displays != self.config.displays;
+        // Whether a web page may start is decided when its engine starts, so
+        // a change of it starts every display again (`crate::workshop`).
+        let web_policy_changed =
+            next.settings.allow_web_wallpapers != self.config.settings.allow_web_wallpapers;
         let nondurable_findings = self.snapshot_nondurable_findings();
 
         // Adopt the candidate only in memory until every required driver change
         // succeeds. A valid TOML document can still be unplayable (for example,
-        // an empty active playlist or media deleted after compilation), so a
-        // decoded config is not yet the new last-known-good generation.
+        // media deleted after compilation), so a decoded config is not yet the
+        // new last-known-good generation. An empty playlist is not that: below
+        // schema 8 the load refuses it, and at 8 it plays nothing on purpose.
         let old_config = std::mem::replace(&mut self.config, next);
         let old_manual_playlist = std::mem::replace(&mut self.manual_playlist, next_manual);
         let old_active_playlist = std::mem::replace(&mut self.active_playlist, next_active);
@@ -4230,7 +4395,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             || snapshot.schedule_overrode_default != self.schedule_overrode_default
             || targets_changed;
         let independent_apply_outputs: HashSet<String> = if self.is_independent() {
-            if mode_changed || renderer_changed || dynamics_changed {
+            if mode_changed || renderer_changed || dynamics_changed || web_policy_changed {
                 self.target_outputs.iter().cloned().collect()
             } else {
                 changed_outputs
@@ -4266,6 +4431,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             mode_changed
                 || renderer_changed
                 || dynamics_changed
+                || web_policy_changed
                 || targets_changed
                 || !recovered.is_empty()
         };
@@ -5022,8 +5188,13 @@ impl<D: WallpaperDriver> Runtime<D> {
         let mut displays = Vec::new();
         let mut entry_taboo = false;
         if self.config.displays.is_empty() {
-            if let Some(entry) = entry {
-                let display_entry_taboo = self.is_taboo(&active_playlist.id, &entry.id);
+            let nothing = entry
+                .is_none()
+                .then(|| self.nothing_reason(&active_playlist.id))
+                .flatten();
+            if entry.is_some() || nothing.is_some() {
+                let display_entry_taboo =
+                    entry.is_some_and(|entry| self.is_taboo(&active_playlist.id, &entry.id));
                 entry_taboo |= display_entry_taboo;
                 let assigned = self
                     .config
@@ -5037,10 +5208,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                     assigned_playlist: &assigned.name,
                     playlist_id: &active_playlist.id,
                     playlist: &active_playlist.name,
-                    entry_id: &entry.id,
+                    entry_id: entry.map_or("", |entry| entry.id.as_str()),
                     entry_taboo: display_entry_taboo,
-                    kind: entry_kind(entry.kind),
-                    still: entry.still.display().to_string(),
+                    kind: entry.map_or("", |entry| entry_kind(entry.kind)),
+                    still: entry
+                        .map_or_else(String::new, |entry| entry.still.display().to_string()),
                     motion_active: self.driver.motion_active(""),
                     route_source: if self.manual_playlist.is_some() {
                         "manual"
@@ -5079,7 +5251,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                             reason: pending.reason,
                         }
                     }),
-                    timing: self.mirrored_timing(None, true, &moment, &mut budget),
+                    nothing_to_play: nothing,
+                    entry_name: nothing_name(nothing),
+                    timing: {
+                        let timing = self.mirrored_timing(None, true, &moment, &mut budget);
+                        if nothing.is_some() {
+                            timing.without_rotation()
+                        } else {
+                            timing
+                        }
+                    },
                 });
             }
         } else {
@@ -5117,8 +5298,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .config
                     .playlist(reference)
                     .ok_or_else(|| format!("display {output} names a missing playlist"))?;
-                if let Some(entry) = self.current_entry_for(&effective.id) {
-                    let display_entry_taboo = self.is_taboo(&effective.id, &entry.id);
+                let entry = self.current_entry_for(&effective.id);
+                let nothing = entry
+                    .is_none()
+                    .then(|| effective.nothing_to_play())
+                    .flatten();
+                if entry.is_some() || nothing.is_some() {
+                    let display_entry_taboo =
+                        entry.is_some_and(|entry| self.is_taboo(&effective.id, &entry.id));
                     if self.target_outputs.iter().any(|target| target == output) {
                         entry_taboo |= display_entry_taboo;
                     }
@@ -5134,10 +5321,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                         assigned_playlist: &assigned.name,
                         playlist_id: &effective.id,
                         playlist: &effective.name,
-                        entry_id: &entry.id,
+                        entry_id: entry.map_or("", |entry| entry.id.as_str()),
                         entry_taboo: display_entry_taboo,
-                        kind: entry_kind(entry.kind),
-                        still: entry.still.display().to_string(),
+                        kind: entry.map_or("", |entry| entry_kind(entry.kind)),
+                        still: entry
+                            .map_or_else(String::new, |entry| entry.still.display().to_string()),
                         motion_active: self.target_outputs.iter().any(|target| target == output)
                             && self.driver.motion_active(output),
                         route_source: if self.manual_playlist.is_some() {
@@ -5179,12 +5367,21 @@ impl<D: WallpaperDriver> Runtime<D> {
                                 reason: pending.reason,
                             }
                         }),
-                        timing: self.mirrored_timing(
-                            explicit,
-                            self.target_outputs.iter().any(|target| target == output),
-                            &moment,
-                            &mut budget,
-                        ),
+                        nothing_to_play: nothing,
+                        entry_name: nothing_name(nothing),
+                        timing: {
+                            let timing = self.mirrored_timing(
+                                explicit,
+                                self.target_outputs.iter().any(|target| target == output),
+                                &moment,
+                                &mut budget,
+                            );
+                            if nothing.is_some() {
+                                timing.without_rotation()
+                            } else {
+                                timing
+                            }
+                        },
                     });
                 }
             }
@@ -5284,6 +5481,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 &[]
             },
             missing_renderers: self.missing_rows(missing),
+            nothing_to_play: self.mirrored_nothing_reason(),
         })
         .map_err(|error| error.to_string())
     }
@@ -5298,7 +5496,16 @@ impl<D: WallpaperDriver> Runtime<D> {
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let live_targets = self.current_targets(&self.target_outputs);
-        if live_targets.is_empty() {
+        // Connected routes that play nothing (schema 8) have no target.
+        let live_nothing: Vec<&str> = self
+            .target_outputs
+            .iter()
+            .filter(|connector| self.route_nothing_reason(connector).is_some())
+            .filter_map(|connector| self.routes.get(connector))
+            .filter_map(|route| self.config.playlist(&route.active_playlist))
+            .map(|playlist| playlist.id.as_str())
+            .collect();
+        if live_targets.is_empty() && live_nothing.is_empty() {
             return Err("active display playlists are empty".into());
         }
         let mut inventory_outputs = self.target_outputs.clone();
@@ -5311,24 +5518,22 @@ impl<D: WallpaperDriver> Runtime<D> {
         inventory_outputs.sort();
         inventory_outputs.dedup();
         let targets = self.current_targets(&inventory_outputs);
-        let summary_playlist = live_targets
-            .first()
-            .and_then(|first| {
-                live_targets
-                    .iter()
-                    .all(|target| target.playlist_id == first.playlist_id)
-                    .then_some(first.playlist_id.as_str())
-            })
-            .and_then(|playlist| self.config.playlist(playlist));
-        let summary_entry = live_targets.first().filter(|first| {
-            live_targets.iter().all(|target| {
-                target.playlist_id == first.playlist_id && target.entry.id == first.entry.id
-            })
-        });
-        let active_ids: HashSet<&str> = live_targets
+        let live_playlists: Vec<&str> = live_targets
             .iter()
             .map(|target| target.playlist_id.as_str())
+            .chain(live_nothing.iter().copied())
             .collect();
+        let summary_playlist = live_playlists
+            .first()
+            .filter(|first| live_playlists.iter().all(|playlist| playlist == *first))
+            .and_then(|playlist| self.config.playlist(playlist));
+        let summary_entry = live_targets.first().filter(|first| {
+            live_nothing.is_empty()
+                && live_targets.iter().all(|target| {
+                    target.playlist_id == first.playlist_id && target.entry.id == first.entry.id
+                })
+        });
+        let active_ids: HashSet<&str> = live_playlists.iter().copied().collect();
         let entry_taboo = live_targets
             .iter()
             .any(|target| self.is_taboo(&target.playlist_id, &target.entry.id));
@@ -5431,20 +5636,31 @@ impl<D: WallpaperDriver> Runtime<D> {
             .collect::<Result<Vec<_>, String>>()?;
 
         let mut displays = Vec::new();
-        for target in &targets {
+        for output in &inventory_outputs {
+            let entry = targets
+                .iter()
+                .find(|target| &target.output == output)
+                .map(|target| &target.entry);
+            let nothing = entry
+                .is_none()
+                .then(|| self.route_nothing_reason(output))
+                .flatten();
+            if entry.is_none() && nothing.is_none() {
+                continue;
+            }
             let route = self
                 .routes
-                .get(&target.output)
-                .ok_or_else(|| format!("display route {:?} is missing", target.output))?;
+                .get(output)
+                .ok_or_else(|| format!("display route {output:?} is missing"))?;
             let effective = self
                 .config
                 .playlist(&route.active_playlist)
-                .ok_or_else(|| format!("display {} names a missing playlist", target.output))?;
+                .ok_or_else(|| format!("display {output} names a missing playlist"))?;
             let explicit = self
                 .config
                 .displays
                 .iter()
-                .find(|assignment| assignment.connector == target.output);
+                .find(|assignment| &assignment.connector == output);
             let assigned = self
                 .config
                 .playlist(
@@ -5452,10 +5668,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                         assignment.playlist.as_str()
                     }),
                 )
-                .ok_or_else(|| format!("display {} assignment is missing", target.output))?;
+                .ok_or_else(|| format!("display {output} assignment is missing"))?;
             displays.push(DisplayStatus {
-                connector: &target.output,
-                connected: self.target_outputs.contains(&target.output),
+                connector: output,
+                connected: self.target_outputs.contains(output),
                 assignment_source: if explicit.is_some() {
                     "explicit"
                 } else {
@@ -5465,12 +5681,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 assigned_playlist: &assigned.name,
                 playlist_id: &effective.id,
                 playlist: &effective.name,
-                entry_id: &target.entry.id,
-                entry_taboo: self.is_taboo(&effective.id, &target.entry.id),
-                kind: entry_kind(target.entry.kind),
-                still: target.entry.still.display().to_string(),
-                motion_active: self.target_outputs.contains(&target.output)
-                    && self.driver.motion_active(&target.output),
+                entry_id: entry.map_or("", |entry| entry.id.as_str()),
+                entry_taboo: entry.is_some_and(|entry| self.is_taboo(&effective.id, &entry.id)),
+                kind: entry.map_or("", |entry| entry_kind(entry.kind)),
+                still: entry.map_or_else(String::new, |entry| entry.still.display().to_string()),
+                motion_active: self.target_outputs.contains(output)
+                    && self.driver.motion_active(output),
                 route_source: route.source.as_str(),
                 manual_override: route.manual_playlist.is_some(),
                 schedule_rule_id: route.schedule_rule_id.as_deref(),
@@ -5493,23 +5709,32 @@ impl<D: WallpaperDriver> Runtime<D> {
                 },
                 cycle_interval_seconds: self
                     .playlist_cycle_interval_seconds(&route.active_playlist),
-                beats_global_rules: self.beats_global_rules(&target.output),
+                beats_global_rules: self.beats_global_rules(output),
                 renderer_failed: route.renderer_failed,
                 last_error: truncate_middle(&route.last_error, MAX_DISPLAY_ERROR_BYTES),
-                automatic_retry: self.pending_routes.get(&target.output).map(|pending| {
+                automatic_retry: self.pending_routes.get(output).map(|pending| {
                     AutomaticRetryStatus {
                         attempt: pending.attempts,
                         maximum_attempts: AUTOMATIC_APPLY_ATTEMPTS,
                         reason: pending.reason,
                     }
                 }),
-                timing: self.route_timing(
-                    &target.output,
-                    route,
-                    self.target_outputs.contains(&target.output),
-                    &moment,
-                    &mut budget,
-                ),
+                nothing_to_play: nothing,
+                entry_name: nothing_name(nothing),
+                timing: {
+                    let timing = self.route_timing(
+                        output,
+                        route,
+                        self.target_outputs.contains(output),
+                        &moment,
+                        &mut budget,
+                    );
+                    if nothing.is_some() {
+                        timing.without_rotation()
+                    } else {
+                        timing
+                    }
+                },
             });
         }
         let route_states: Vec<&DisplayRoute> = self
@@ -5671,6 +5896,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 &[]
             },
             missing_renderers: self.missing_rows(missing),
+            nothing_to_play: self.routes_nothing_reason(&self.target_outputs),
         })
         .map_err(|error| error.to_string())
     }

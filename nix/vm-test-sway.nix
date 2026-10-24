@@ -70,6 +70,18 @@ let
     palette = { kind = "keep", mode = "keep" }
   '';
 
+  # Where linux-wallpaperengine finds that scene, and what its type is. The
+  # service reads it before it starts the engine while web wallpapers aren't
+  # allowed (docs/wallpaper-engine.md), as in this document: a scene starts.
+  sceneFolder = "${home}/.local/share/Steam/steamapps/workshop/content/431960/2910000004";
+  sceneProject = pkgs.writeText "wall-in-one-vm-scene-project.json" (
+    builtins.toJSON {
+      type = "scene";
+      title = "Colour bars";
+      file = "scene.json";
+    }
+  );
+
   # Independent mode: each display its own route. It needs a colour source,
   # which HEADLESS-1, never switched off, is.
   independentSettings = pkgs.writeText "wall-in-one-vm-independent.toml" ''
@@ -371,6 +383,8 @@ pkgs.testers.runNixOSTest {
             "-e 's|^linux_wallpaperengine_program = .*|linux_wallpaperengine_program = \"${fakeScene}\"|' "
             "${runtimeDocument}"
         ))
+        machine.succeed(as_user("mkdir -p ${sceneFolder}"))
+        machine.succeed(as_user("cp ${sceneProject} ${sceneFolder}/project.json"))
         machine.succeed(as_user(
             "sh -c 'cat ${runtimeDocument} ${scenePlaylist} > ${runtimeDocument}.vm "
             "&& mv ${runtimeDocument}.vm ${runtimeDocument}'"

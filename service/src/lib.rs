@@ -12,6 +12,7 @@ pub mod protocol;
 pub mod renderer;
 pub mod runtime;
 pub mod schedule;
+pub mod workshop;
 
 /// The install kinds a build can be, in the order `docs/packaging.md` lists
 /// them: this flake's packages, a distribution package built from source,

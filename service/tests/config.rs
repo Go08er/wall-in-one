@@ -57,10 +57,12 @@ fn override_fields_are_never_runtime_toml_keys() {
             assert!(error.contains("unknown field"), "{schema} {key}: {error}");
         }
     }
-    let error = Config::from_bytes(document(8).into_bytes())
+    // Schema 8 (a playlist that plays nothing, `allow_web_wallpapers`) is the
+    // newest this build reads; the next one is refused by name.
+    let error = Config::from_bytes(document(9).into_bytes())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("expected 4, 5, 6 or 7"), "{error}");
+    assert!(error.contains("expected 4, 5, 6, 7 or 8"), "{error}");
 }
 
 fn config_directory(label: &str) -> PathBuf {
@@ -540,7 +542,7 @@ fn a_preset_needs_schema_six_and_schema_six_carries_everything_five_does() {
     assert!(battery.settings.stop_animations_on_battery);
     assert_eq!(
         wall_in_one_service::config::SUPPORTED_SCHEMA_VERSIONS,
-        &[4, 5, 6, 7]
+        &[4, 5, 6, 7, 8]
     );
 }
 
@@ -1029,6 +1031,7 @@ fn ambiguous_playlist_identity_is_refused() {
         name: "day".into(),
         cycle_interval_seconds: None,
         shuffle: None,
+        nothing_to_play: None,
         entries: base.playlists[0].entries.clone(),
     });
     let error = folded.validate().unwrap_err().to_string();
@@ -1040,6 +1043,7 @@ fn ambiguous_playlist_identity_is_refused() {
         name: "Other".into(),
         cycle_interval_seconds: None,
         shuffle: None,
+        nothing_to_play: None,
         entries: crossed.playlists[0].entries.clone(),
     });
     let error = crossed.validate().unwrap_err().to_string();

@@ -4,6 +4,7 @@ use crate::config::{
 };
 use crate::dials;
 use crate::outputs::{Output, OutputSource, WaylandOutputs};
+use crate::workshop;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -307,6 +308,14 @@ pub trait WallpaperDriver: Send {
     fn motion_missing(&self, _output: &str) -> Option<MissingRenderer> {
         None
     }
+    /// Why `output`'s last motion start did not start its renderer although
+    /// it could have: a Wallpaper Engine item that is a web page, or whose
+    /// type can't be read, while the document doesn't allow web wallpapers
+    /// (`crate::workshop`). The still stays, as for a missing program. Gone
+    /// once the output is stopped or applied again.
+    fn motion_refused(&self, _output: &str) -> Option<String> {
+        None
+    }
     /// For a reload that does not change the renderer settings: forget each
     /// missing program whose path is now an executable file, and return the
     /// outputs showing a still because of it, which the reload applies again.
@@ -499,13 +508,15 @@ impl MissingRenderer {
 enum StartError {
     Missing(std::io::Error),
     Failed(String),
+    /// Not started on purpose (`crate::workshop`); the still stays.
+    Refused(String),
 }
 
 impl StartError {
     fn into_message(self, program: &str) -> String {
         match self {
             Self::Missing(error) => format!("cannot start {program}: {error}"),
-            Self::Failed(message) => message,
+            Self::Failed(message) | Self::Refused(message) => message,
         }
     }
 }
@@ -1017,6 +1028,12 @@ pub struct SystemDriver {
     /// The outputs (by `key`) that show their still because their renderer
     /// is missing: the output as the runtime names it, and what was missing.
     missing_motion: HashMap<String, (String, MissingRenderer)>,
+    /// The outputs (by `key`) whose scene was not started because web
+    /// wallpapers aren't allowed and its item is, or may be, a web page.
+    refused_motion: HashMap<String, String>,
+    /// The home folder linux-wallpaperengine resolves an item id against
+    /// (`workshop::engine_home`), for reading an item's type first.
+    workshop_home: Option<PathBuf>,
 }
 
 struct ActiveVideo {
@@ -1174,7 +1191,16 @@ impl SystemDriver {
             animations_inhibited: false,
             missing: [None, None],
             missing_motion: HashMap::new(),
+            refused_motion: HashMap::new(),
+            workshop_home: workshop::engine_home(),
         }
+    }
+
+    /// The same driver, reading Workshop items' types under `home` instead
+    /// of `HOME` (`workshop::refusal_without_web`). For tests.
+    pub fn with_workshop_home(mut self, home: Option<PathBuf>) -> Self {
+        self.workshop_home = home;
+        self
     }
 
     fn key(output: &str) -> String {
@@ -1188,6 +1214,7 @@ impl SystemDriver {
     fn stop_output(&mut self, output: &str) {
         let key = Self::key(output);
         self.missing_motion.remove(&key);
+        self.refused_motion.remove(&key);
         if let Some(mut video) = self.videos.remove(&key) {
             video.renderer.stop();
         }
@@ -1321,7 +1348,12 @@ impl SystemDriver {
         command.arg("--bg").arg(scene);
     }
 
-    fn start_scene(&mut self, entry: &Entry, output: &str) -> Result<(), StartError> {
+    fn start_scene(
+        &mut self,
+        entry: &Entry,
+        output: &str,
+        allow_web: bool,
+    ) -> Result<(), StartError> {
         if !self.settings.own_scene_renderer {
             return Err(StartError::Failed(
                 "scene renderer ownership is disabled; paired still remains applied".into(),
@@ -1332,6 +1364,14 @@ impl SystemDriver {
         let scene = entry
             .rendered_scene()
             .ok_or_else(|| StartError::Failed("scene entry has no scene id".into()))?;
+        // The one place the engine is started: whatever asked for it, a web
+        // page doesn't start here unless the document allows web wallpapers.
+        if !allow_web
+            && let Some(refusal) =
+                workshop::refusal_without_web(self.workshop_home.as_deref(), scene)
+        {
+            return Err(StartError::Refused(refusal));
+        }
         // Its own dials over the defaults (docs/renderer-settings.md).
         let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
@@ -1410,10 +1450,14 @@ impl SystemDriver {
                 }
                 (0, started)
             }
-            EntryKind::Scene => (1, self.start_scene(entry, output)),
+            EntryKind::Scene => (
+                1,
+                self.start_scene(entry, output, runtime.allow_web_wallpapers),
+            ),
         };
         match started {
             Ok(()) => {
+                self.refused_motion.remove(&Self::key(output));
                 // The program is there: whatever an earlier spawn said. One
                 // recorded as unable to run (a library its loader could not
                 // find) starts just as well and exits 127 a moment later, so
@@ -1437,6 +1481,12 @@ impl SystemDriver {
                     &error,
                 );
                 self.record_missing(index, output, record);
+                Ok(())
+            }
+            Err(StartError::Refused(refusal)) => {
+                // Not the entry's failure and not a missing program: its
+                // still is up and stays, and the runtime says why.
+                self.refused_motion.insert(Self::key(output), refusal);
                 Ok(())
             }
             Err(StartError::Failed(message)) => Err(message),
@@ -1584,6 +1634,7 @@ impl WallpaperDriver for SystemDriver {
         // drops the mark of a missing renderer with its still, so a reload
         // that finds the program never applies again for it.
         self.missing_motion.retain(|key, _| wanted.contains(key));
+        self.refused_motion.retain(|key, _| wanted.contains(key));
         let stale: HashSet<String> = self
             .videos
             .keys()
@@ -1843,6 +1894,10 @@ impl WallpaperDriver for SystemDriver {
             .map(|(_, record)| record.clone())
     }
 
+    fn motion_refused(&self, output: &str) -> Option<String> {
+        self.refused_motion.get(&Self::key(output)).cloned()
+    }
+
     fn recheck_missing_renderers(&mut self) -> Vec<String> {
         let mut outputs = Vec::new();
         for (index, program) in RENDERER_PROGRAMS.iter().enumerate() {
@@ -1880,6 +1935,7 @@ impl WallpaperDriver for SystemDriver {
 
     fn stop(&mut self) {
         self.missing_motion.clear();
+        self.refused_motion.clear();
         for (_, mut video) in self.videos.drain() {
             video.renderer.stop();
         }

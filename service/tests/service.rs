@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use support::compositor::{FakeCompositor, FakeHead, FakeOutput, Layout, WedgedCompositor};
@@ -60,13 +60,52 @@ fn directory(label: &str) -> PathBuf {
     path
 }
 
+/// The Workshop ids these tests start as scenes.
+const TEST_SCENE_IDS: &[&str] = &[
+    "12",
+    "777",
+    "12345",
+    "12346",
+    "12347",
+    "67890",
+    "2777242023",
+    "2910000004",
+    "2946165131",
+];
+
+/// A home folder where linux-wallpaperengine finds each of `TEST_SCENE_IDS`,
+/// each a `scene`. While a document doesn't allow web wallpapers (every
+/// document here but the web tests'), the service reads an item's type there
+/// before it starts the engine (`workshop::refusal_without_web`), so these
+/// tests' scenes start as a real scene does.
+fn scene_home() -> PathBuf {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = directory("scene-home");
+        for id in TEST_SCENE_IDS {
+            let item = home
+                .join(".local/share/Steam/steamapps/workshop/content/431960")
+                .join(id);
+            fs::create_dir_all(&item).unwrap();
+            fs::write(
+                item.join("project.json"),
+                r#"{"type":"scene","title":"Test scene","file":"scene.json"}"#,
+            )
+            .unwrap();
+        }
+        home
+    })
+    .clone()
+}
+
 /// The service binary, unable to reach a desktop's compositor: a test that
-/// wants one gives it `WAYLAND_DISPLAY` itself.
+/// wants one gives it `WAYLAND_DISPLAY` itself. Its home is `scene_home`.
 fn service_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_wall-in-one-service"));
     command
         .env_remove("WAYLAND_DISPLAY")
-        .env_remove("WAYLAND_SOCKET");
+        .env_remove("WAYLAND_SOCKET")
+        .env("HOME", scene_home());
     command
 }
 
@@ -131,7 +170,8 @@ fn driver_with(
         settings,
         Path::new("/wall-in-one-runtime.sock"),
         Box::new(source),
-    );
+    )
+    .with_workshop_home(Some(scene_home()));
     (driver, asked)
 }
 
@@ -145,6 +185,7 @@ fn offline_driver(settings: RendererSettings) -> SystemDriver {
             asked: Arc::new(AtomicUsize::new(0)),
         }),
     )
+    .with_workshop_home(Some(scene_home()))
 }
 
 fn config(noctalia: &Path, mpvpaper: &Path, own_scene: bool) -> String {
@@ -1118,7 +1159,8 @@ fn switchable_runtime(
         parsed.renderer.clone(),
         Path::new("/wall-in-one-runtime.sock"),
         Box::new(source.clone()),
-    );
+    )
+    .with_workshop_home(Some(scene_home()));
     let at = NaiveDate::from_ymd_opt(2026, 8, 3)
         .unwrap()
         .and_hms_opt(12, 0, 0)
@@ -1460,7 +1502,8 @@ fn a_failed_question_keeps_the_last_published_snapshot() {
         parsed.renderer.clone(),
         Path::new("/wall-in-one-runtime.sock"),
         Box::new(source.clone()),
-    );
+    )
+    .with_workshop_home(Some(scene_home()));
     driver.connected_outputs().unwrap();
     let published = driver.published_outputs().to_vec();
     assert_eq!(published.len(), 2);
@@ -2709,7 +2752,7 @@ fn independent_apply_stages_stills_theme_palette_then_renderers() {
     assert_eq!(snapshot["status_version"], 2);
     assert_eq!(
         snapshot["supported_config_schemas"],
-        serde_json::json!([4, 5, 6, 7])
+        serde_json::json!([4, 5, 6, 7, 8])
     );
     assert_eq!(snapshot["runtime_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot["install_kind"], wall_in_one_service::INSTALL_KIND);
@@ -5577,9 +5620,20 @@ fn target_reconciliation_removes_disconnected_all_and_empty_renderers() {
         &base[..entries_start],
         &base[night_start..]
     );
+    // Deliberately changed with schema 8 (r13): an empty playlist below 8 is
+    // what 0.4.0's compiler wrote by mistake for an empty All media, never an
+    // intention, so the load now refuses it by name (before, the apply did,
+    // with "previous configuration restored"). Either way the reload is
+    // refused and the previous configuration keeps playing, as asserted
+    // below. At schema 8 the same playlist, with its reason, plays nothing:
+    // `a_playlist_that_plays_nothing_is_a_state_play_and_toggle_cant_leave`.
     fs::write(&config_path, empty_day).unwrap();
-    let emptied = Config::load(&config_path).unwrap();
-    assert!(emptied.playlist("day").unwrap().entries.is_empty());
+    let refused = Config::load(&config_path).unwrap_err().to_string();
+    assert!(
+        refused.contains("playlist \"Day\" has no entries")
+            && refused.contains("requires schema_version 8"),
+        "{refused}"
+    );
     let before_rejected_reload = status(&mut runtime, at);
     let reply = runtime.handle(
         wall_in_one_service::protocol::Request {
@@ -5589,7 +5643,11 @@ fn target_reconciliation_removes_disconnected_all_and_empty_renderers() {
         at,
     );
     assert!(!reply.ok);
-    assert!(reply.message.contains("previous configuration restored"));
+    assert!(
+        reply.message.contains("has no entries"),
+        "{}",
+        reply.message
+    );
     let after_rejected_reload = status(&mut runtime, at);
     assert_eq!(after_rejected_reload["playlist_id"], "day");
     assert_eq!(
@@ -8076,7 +8134,7 @@ fn display_precedence_with_the_flag_off_is_exactly_todays_order() {
     assert_eq!(rule_status(&expected, "global-now")["selected"], true);
     assert_eq!(
         expected["supported_config_schemas"],
-        serde_json::json!([4, 5, 6, 7])
+        serde_json::json!([4, 5, 6, 7, 8])
     );
     assert_eq!(
         expected["supported_override_schemas"],
@@ -8608,6 +8666,10 @@ const ADDED_DISPLAY_KEYS: &[&str] = &[
     "next_cycle_in_s",
     "until",
     "next_change_in_s",
+    // 0.4.1: a display that plays nothing (schema 8) says why. Null on every
+    // row of the recorded samples, which all play something.
+    "nothing_to_play",
+    "entry_name",
 ];
 
 /// Top-level keys added after the shape fixture was recorded: the compositor's
@@ -8619,7 +8681,7 @@ const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs", "missing_renderers"];
 /// Top-level string keys added after the shape fixture was recorded: the
 /// build's install kind (0.4.0), which also differs between a `cargo test`
 /// (`source`) and the packaged build (`nix`).
-const ADDED_TOP_LEVEL_STRINGS: &[&str] = &["install_kind"];
+const ADDED_TOP_LEVEL_STRINGS: &[&str] = &["install_kind", "nothing_to_play"];
 
 /// `"key":"value"` with the value replaced, for fields that differ per process
 /// or per build. A missing key is left alone; a `null` value is kept.
@@ -8792,9 +8854,11 @@ fn older_status_fields_stay_byte_identical() {
             .unwrap()
             .len();
         for key in ADDED_DISPLAY_KEYS {
+            // `nothing_to_play` is also a top-level key.
+            let top_level = usize::from(ADDED_TOP_LEVEL_STRINGS.contains(key));
             assert_eq!(
                 text.matches(&format!(",\"{key}\":")).count(),
-                rows,
+                rows + top_level,
                 "{label}: every display row carries {key}"
             );
         }
@@ -9617,7 +9681,8 @@ fn missing_renderer_runtime_over(
         parsed.renderer.clone(),
         Path::new("/wall-in-one-runtime.sock"),
         Box::new(source.clone()),
-    );
+    )
+    .with_workshop_home(Some(scene_home()));
     (
         Runtime::new(config_path, parsed, driver, noon()).unwrap(),
         log,
@@ -10523,7 +10588,9 @@ fn a_command_onto_a_wallpaper_whose_renderer_is_missing_says_only_its_still_show
 #[test]
 fn a_reload_refused_for_a_display_says_which_and_keeps_the_configuration() {
     // Review probe A6: a detached display assigned a playlist with nothing
-    // in it. The reload is refused, in the words every reload refusal uses.
+    // in it. The reload is refused, and the configuration kept. Since schema
+    // 8 a playlist with no entries plays nothing on purpose, with its reason;
+    // below 8 it is still refused, now by the load, which names it.
     let root = directory("reload-refused-detached");
     let mpvpaper = root.join("absent-mpvpaper");
     let engine = root.join("absent-linux-wallpaperengine");
@@ -10549,11 +10616,8 @@ fn a_reload_refused_for_a_display_says_which_and_keeps_the_configuration() {
     assert!(
         response
             .message
-            .starts_with("reload rejected: display HDMI-A-1: ")
-            && response.message.contains("\"later\" is empty")
-            && response
-                .message
-                .ends_with("; previous configuration restored"),
+            .contains("playlist \"Later\" has no entries")
+            && response.message.contains("requires schema_version 8"),
         "{}",
         response.message
     );

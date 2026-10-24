@@ -622,6 +622,18 @@ def test_the_status_budget_agrees_with_the_services_at_the_edge() -> None:
             runtime_config._validate_status_budget(document)
 
 
+@pytest.mark.parametrize("name", ["0.4.0-long-still.toml", "0.4.0-emoji-name.toml"])
+def test_a_near_ceiling_document_0_4_0_published_still_compiles(name: str) -> None:
+    """r13c B1: what 0.4.0's compiler wrote near the limit passes this budget too.
+
+    The service's ``tests/config.rs`` loads the same two (review r13c's q1
+    probe: a still at a 1,070-byte path, and a playlist named with 110
+    four-byte characters). At 3433e14 both were refused, here and in the
+    service, so the unit's start check stopped it.
+    """
+    runtime_config._validate_status_budget((_BUDGET_EDGE / name).read_text())
+
+
 def test_status_budget_failure_never_replaces_last_known_good(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

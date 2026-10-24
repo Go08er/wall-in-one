@@ -1233,3 +1233,34 @@ fn the_status_budget_is_the_same_with_or_without_a_wallpaper_engine_entry() {
         .to_string();
     assert!(error.contains("protocol response limit"), "{error}");
 }
+
+#[test]
+fn a_near_ceiling_document_0_4_0_published_still_loads() {
+    // What 0.4.0's own compiler (d159a20's `publish_changes`) wrote for two libraries near the
+    // limit, from review r13c's q1 probe: one Workshop scene and a still at a 1,070-byte path
+    // (status bound 1,037,704), and a playlist named with 110 four-byte characters beside 120
+    // others (1,028,740). Only the probe's sandbox prefix differs, by a neutral one of the same
+    // length. 0.4.0's and b3d1398's services load both; 3433e14's refused both.
+    for (name, document) in [
+        (
+            "long still",
+            include_str!("fixtures/status-budget/0.4.0-long-still.toml"),
+        ),
+        (
+            "emoji name",
+            include_str!("fixtures/status-budget/0.4.0-emoji-name.toml"),
+        ),
+    ] {
+        let config = Config::from_bytes(document.as_bytes().to_vec())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(config.schema_version, 4, "{name}");
+        assert!(
+            config
+                .playlists
+                .iter()
+                .flat_map(|playlist| &playlist.entries)
+                .any(|entry| entry.scene_id.is_some()),
+            "{name}: has a Wallpaper Engine entry"
+        );
+    }
+}

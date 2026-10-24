@@ -13240,3 +13240,220 @@ fn a_shuffled_walk_from_a_random_jump_past_refused_entries_is_one_pass_too() {
         state.inhibition_sets
     );
 }
+
+// -- r13d B1: what status says of a refused entry is fitted to the reply, not budgeted --------
+//
+// Review r13c B1: 3433e14 charged `stand_in_for` and `refused` to the document's status budget,
+// so a near-ceiling document 0.4.0 published, which b3d1398 loads, was refused by the unit's
+// start check, and nothing played. The budget is 0.4.0's again, and the two are fitted when the
+// reply is built: they give way before anything a 0.4.0 reply carries (`Runtime::status_reply`).
+
+/// `status_ceiling_document`, mirrored and with motion on, beside a twin of BIG, ASK: its
+/// `refused` scenes instead of BIG's still, and an id and a name exactly as long and as full of
+/// quotes as BIG's. `taboo` of its 64 taboo playlists keep their record.
+fn refusal_ceiling_document(refused: usize, taboo: usize) -> String {
+    let quotes = |count: usize| "\\\"".repeat(count);
+    let mut ask = format!(
+        "[[playlists]]\nid = \"{}ASK\"\nname = \"{}Ask\"\n",
+        quotes(210),
+        quotes(117)
+    );
+    for index in 0..refused {
+        ask.push_str(&format!(
+            "[[playlists.entries]]\nid = \"{}{index:03}\"\nkind = \"scene\"\n\
+             scene_id = \"{}\"\nstill = \"/tmp/s.png\"\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            quotes(240),
+            3_000_000_000_u64 + index as u64,
+        ));
+    }
+    let mut document = status_ceiling_document()
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "display_mode = \"independent\"",
+            "display_mode = \"mirrored\"",
+        )
+        .replacen(
+            "[[playlists]]\nid = \"t00",
+            &format!("{ask}[[playlists]]\nid = \"t00"),
+            1,
+        );
+    for index in taboo..64 {
+        let record = format!(
+            "taboo = {{ reason = \"{}\", source = \"{}\" }}\n",
+            quotes(512),
+            quotes(64)
+        );
+        let at = document
+            .find(&format!("[[playlists]]\nid = \"t{index:02}"))
+            .unwrap();
+        let start = at + document[at..].find(&record).unwrap();
+        document.replace_range(start..start + record.len(), "");
+    }
+    document
+}
+
+/// The status of `refusal_ceiling_document(refused, taboo)` after a pick of BIG or ASK (`pick`),
+/// with 64 published monitors and both renderers missing at the longest path; the driver
+/// refuses every one of ASK's scenes. The snapshot, and its size on the wire.
+fn refusal_ceiling_status(pick: &str, refused: usize, taboo: usize) -> (serde_json::Value, usize) {
+    let monitors: Vec<Output> = (0..64)
+        .map(|index| Output {
+            name: format!("DP-{index}"),
+            enabled: true,
+            make: "Dell Inc.".into(),
+            model: "DELL U2720Q".into(),
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+            mode_width: 3840,
+            mode_height: 2160,
+            refresh_millihz: Some(59_997),
+            physical_width_mm: 597,
+            physical_height_mm: 336,
+            ..Output::default()
+        })
+        .collect();
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(Box::leak(monitors.into_boxed_slice())));
+    let at = noon();
+    let parsed = Config::from_bytes(refusal_ceiling_document(refused, taboo).into_bytes()).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(
+            (0..64)
+                .map(|index| format!("{}L{index:02}", "\"".repeat(253)))
+                .collect(),
+        ),
+        missing_renderers: longest_missing_renderers(),
+        refuse_when_asked: (0..refused)
+            .map(|index| format!("{}{index:03}", "\"".repeat(240)))
+            .collect(),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.tick(at, Instant::now());
+    let picked = format!("{}{pick}", "\"".repeat(210));
+    let reply = runtime_command(&mut runtime, at, "playlist-use", Some(&picked));
+    assert!(reply.ok, "{}", reply.message);
+    let response = runtime_command(&mut runtime, at, "status", None);
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(&[]));
+    assert!(response.ok, "{}", response.message);
+    let mut encoded = Vec::new();
+    write_response(&mut encoded, &response).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    assert_eq!(snapshot["displays"].as_array().unwrap().len(), 128);
+    assert_eq!(snapshot["playlists"].as_array().unwrap().len(), 66);
+    (snapshot, encoded.len())
+}
+
+/// The rows, and the summary, that name the playlist a stand-in plays for.
+fn stand_ins(snapshot: &serde_json::Value) -> usize {
+    snapshot["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(std::iter::once(snapshot))
+        .filter(|row| row.get("stand_in_for").is_some())
+        .count()
+}
+
+/// What a 0.4.0 reply carries that a status at the ceiling may cut.
+const CUT_AT_THE_CEILING: [&str; 4] = [
+    "taboo_entries",
+    "taboo_entries_omitted",
+    "outputs",
+    "missing_renderers",
+];
+
+#[test]
+fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
+    // 20 of ASK's scenes are refused, so BIG stands in on all 128 rows and the summary. With 64
+    // taboo records, a 0.4.0 reply already leaves out `outputs`, `missing_renderers`' paths and
+    // three records; with 32 it is whole. Either way the 0.4.1 fields get no room: what was
+    // cut, and what wasn't, is exactly what the same status without them cuts (a pick of BIG).
+    for taboo in [64, 32] {
+        let (plain, _) = refusal_ceiling_status("BIG", 20, taboo);
+        let (shown, encoded) = refusal_ceiling_status("ASK", 20, taboo);
+        assert!(encoded <= MAX_RESPONSE_BYTES, "{taboo}: {encoded} bytes");
+        assert_eq!(stand_ins(&plain), 0);
+        for row in shown["displays"].as_array().unwrap() {
+            assert_eq!(row["playlist_id"], plain["playlist_id"], "{taboo}");
+            assert_eq!(row["entry_id"], plain["displays"][0]["entry_id"], "{taboo}");
+        }
+        for key in CUT_AT_THE_CEILING {
+            assert_eq!(
+                shown[key], plain[key],
+                "{taboo}: the 0.4.1 fields pushed {key} out"
+            );
+        }
+        assert_eq!(stand_ins(&shown), 0, "{taboo}");
+        assert_eq!(shown["refused"], serde_json::json!([]), "{taboo}");
+        assert_eq!(
+            shown["refused_omitted"], 20,
+            "{taboo}: every refused item is counted"
+        );
+    }
+    let (at_64, _) = refusal_ceiling_status("BIG", 20, 64);
+    assert_eq!(
+        at_64["taboo_entries_omitted"], 3,
+        "the ceiling cuts 0.4.0's fields"
+    );
+    assert_eq!(at_64["outputs"], serde_json::json!([]));
+    let (at_32, _) = refusal_ceiling_status("BIG", 20, 32);
+    assert_eq!(at_32["taboo_entries_omitted"], 0, "a whole 0.4.0 reply");
+    assert_eq!(at_32["outputs"].as_array().unwrap().len(), 64);
+}
+
+#[test]
+fn at_the_limit_refused_rows_go_before_the_stand_ins_and_each_is_counted() {
+    // With 28 taboo records, everything 0.4.0 carries fits, and every `stand_in_for`, but not
+    // 16 `refused` rows: the last listed go, and `refused_omitted` counts them.
+    let (shown, encoded) = refusal_ceiling_status("ASK", 20, 28);
+    assert!(encoded <= MAX_RESPONSE_BYTES, "{encoded} bytes");
+    assert_eq!(shown["taboo_entries"].as_array().unwrap().len(), 28);
+    assert_eq!(shown["taboo_entries_omitted"], 0);
+    assert_eq!(shown["outputs"].as_array().unwrap().len(), 64);
+    assert!(
+        shown["missing_renderers"][0]["path"]
+            .as_str()
+            .unwrap()
+            .contains("[truncated]"),
+        "{}",
+        shown["missing_renderers"]
+    );
+    let ask = format!("{}ASK", "\"".repeat(210));
+    assert_eq!(stand_ins(&shown), 129);
+    assert_eq!(shown["stand_in_for"], ask.as_str());
+    for row in shown["displays"].as_array().unwrap() {
+        assert_eq!(row["stand_in_for"], ask.as_str());
+    }
+    let listed = shown["refused"].as_array().unwrap();
+    assert!(
+        (1..16).contains(&listed.len()),
+        "{} rows: not at the limit",
+        listed.len()
+    );
+    // The first learned, in order.
+    for (index, row) in listed.iter().enumerate() {
+        assert_eq!(
+            row["scene_id"],
+            (3_000_000_000_u64 + index as u64).to_string()
+        );
+        assert!(row["reason"].as_str().unwrap().len() <= 256);
+    }
+    assert_eq!(
+        listed.len() as u64 + shown["refused_omitted"].as_u64().unwrap(),
+        20
+    );
+    // Only as many as needed went: one more row (about 1.1 KB on the wire) would not fit.
+    assert!(
+        MAX_RESPONSE_BYTES - encoded < 1_200,
+        "left out more than needed: {encoded} bytes"
+    );
+}

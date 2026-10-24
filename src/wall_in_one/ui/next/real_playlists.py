@@ -77,6 +77,7 @@ from wall_in_one.library.model import MediaItem
 from wall_in_one.library.schedules import Rule
 from wall_in_one.runtime_config import Playability
 from wall_in_one.session import QUICK_CHOICE_ID, Session
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next.catalog import quoted
 from wall_in_one.ui.next.playlists_state import (
     EDITS_TOPIC,
@@ -444,9 +445,27 @@ class RealPlaylists:
             # A version-1 runtime: one answer for every display.
             if truth.playlist_id != pid:
                 return "", False, ()
+            if truth.stand_in_for:
+                # It stands in for what was asked for: not the pick, not scheduled.
+                return (
+                    runtime_truth.stand_in_sentence(truth.stand_in_for_name, truth.playlist),
+                    False,
+                    (),
+                )
             why = "your pick" if truth.is_manual else "from schedule"
             return f"On screen now · {why}", truth.is_manual, ()
         showing = [display for display in rows if display.playlist_id == pid]
+        # A display that shows it only because the service refused what was asked
+        # for isn't showing it by pick or by schedule.
+        stood = [display for display in showing if display.stand_in_for]
+        showing = [display for display in showing if not display.stand_in_for]
+        if stood and not showing:
+            asked = dict.fromkeys(display.stand_in_for_name for display in stood)
+            return (
+                runtime_truth.stand_in_sentence(" and ".join(asked), stood[0].playlist),
+                False,
+                (),
+            )
         if not showing:
             # Asked for, but the service refused every entry of it: another
             # playlist stands in.
@@ -471,7 +490,10 @@ class RealPlaylists:
         entries = tuple(
             (display.entry_id, display.connector) for display in showing if display.entry_id
         )
-        return (f"{where} · {why}" if why else where), playing, entries
+        text = f"{where} · {why}" if why else where
+        if stood:
+            text += f" \u00b7 stands in on {' and '.join(display.connector for display in stood)}"
+        return text, playing, entries
 
     def _rotation_note(self) -> str:
         view = self._backend.status_model.view

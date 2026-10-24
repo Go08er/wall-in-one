@@ -254,14 +254,17 @@ presets left out (both checked against the installed 0.4.0 binary).
 So the app follows the battery option's precedent (`require_schema`): before
 publishing a schema-6 document to the live path it asks the running service
 for `supported_config_schemas`. When 6 isn't there, or the service can't be
-asked, the document is compiled again **without the presets**, which are
-said once as left out ("The Wallpaper Engine preset "…" isn't played until
-the wallpaper service is restarted after the update"), and everything else
+asked, or its loaded units can't be verified as current, the document is
+compiled again **without the presets**, which are said once as left out
+("The Wallpaper Engine preset "…" isn't played until the wallpaper service is
+confirmed to read presets: restart it after an update, and make sure its
+installed units are current"), and everything else
 is published as usual: one older service never stops the library updating.
 A service that isn't running gets the presets, as an offline preparation
-does for schema 5. The health sync compiles with the same choice
-(`runtime_config.presets_supported`, from the status it holds), so its
-generation check matches what was published.
+does for schema 5. The health sync accepts the service's generation when it
+matches either compile, with or without the presets
+(`runtime_config.compiled_as_published`), because the status shows the
+schemas but not whether the units were verified.
 
 ### Stills
 

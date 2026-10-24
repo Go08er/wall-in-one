@@ -738,9 +738,10 @@ def _sync_runtime_health(*, reload_runtime: bool = True) -> int:
                     "no health marker was written"
                 )
             # What was published for this service: without presets when it
-            # doesn't read them (`runtime_config.publish_changes`).
-            built = runtime_config.compiled(
-                settings, session, presets=runtime_config.presets_supported(status)
+            # doesn't read them or its units can't be verified
+            # (`runtime_config.publish_changes`).
+            built = runtime_config.compiled_as_published(
+                settings, session, status, status_generation
             )
             # Said once here: marking wallpapers as skipped below doesn't
             # change what compiles, so the later publication leaves out the same.

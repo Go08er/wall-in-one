@@ -1490,10 +1490,10 @@ def test_an_older_live_service_gets_everything_but_the_presets(
     )
     assert runtime_config.left_out_notice(left_out) == (
         "The Wallpaper Engine preset \u201cY2K Matrix\u201d isn\u2019t played until the "
-        "wallpaper service is restarted after the update: the one running doesn\u2019t read "
-        "presets."
+        "wallpaper service is confirmed to read presets: restart it after an update, and "
+        "make sure its installed units are current."
     )
-    assert "restart it to play presets" in left_out[0].warning()
+    assert "restart it after an update" in left_out[0].warning()
 
 
 def test_presets_left_out_are_said_in_one_sentence() -> None:
@@ -1505,7 +1505,8 @@ def test_presets_left_out_are_said_in_one_sentence() -> None:
     ]
     assert runtime_config.left_out_notice(presets) == (
         "2 Wallpaper Engine presets aren\u2019t played until the wallpaper service is "
-        "restarted after the update: the one running doesn\u2019t read presets."
+        "confirmed to read presets: restart it after an update, and make sure its "
+        "installed units are current."
     )
 
 

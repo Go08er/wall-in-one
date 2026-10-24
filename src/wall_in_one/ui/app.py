@@ -5110,12 +5110,11 @@ class Application(Adw.Application):
                     or runtime_config.read_config_generation(expected_path) != status_generation
                     or runtime_config.document_generation(
                         # What was published for this service: without
-                        # presets when it doesn't read them.
-                        runtime_config.render(
-                            settings,
-                            snapshot,
-                            presets=runtime_config.presets_supported(status),
-                        )
+                        # presets when it doesn't read them or its units
+                        # can't be verified.
+                        runtime_config.compiled_as_published(
+                            settings, snapshot, status, status_generation
+                        ).document
                     )
                     != status_generation
                 ):

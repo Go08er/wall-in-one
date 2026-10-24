@@ -111,6 +111,14 @@ NOTHING_TO_PLAY: Final = "has nothing to play"
 #: `LeftOut.why` for a Wallpaper Engine preset: the live wallpaper service
 #: has not confirmed it reads `PRESET_SCHEMA_VERSION`.
 NEEDS_NEWER_SERVICE: Final = "needs a newer wallpaper service"
+#: What a preset waits for. Two things keep a service from being confirmed
+#: (`runtime_compatibility.require_schema`): one that predates presets and
+#: was not restarted after the update, and installed units that can't be
+#: verified as current.
+PRESETS_UNCONFIRMED: Final = (
+    "the wallpaper service is confirmed to read presets: restart it after an update, "
+    "and make sure its installed units are current."
+)
 
 #: `LeftOut.owner`: whose reference it is.
 DEFAULT_OWNER: Final = "default"
@@ -157,12 +165,10 @@ class LeftOut:
             if rules == 1:
                 return (
                     f"The Wallpaper Engine preset \u201c{self.reference}\u201d isn\u2019t played "
-                    "until the wallpaper service is restarted after the update: the one "
-                    "running doesn\u2019t read presets."
+                    f"until {PRESETS_UNCONFIRMED}"
                 )
             return (
-                f"{rules} Wallpaper Engine presets aren\u2019t played until the wallpaper "
-                "service is restarted after the update: the one running doesn\u2019t read presets."
+                f"{rules} Wallpaper Engine presets aren\u2019t played until {PRESETS_UNCONFIRMED}"
             )
         missing = self.why == DOES_NOT_EXIST
         presets = self.why == NEEDS_NEWER_SERVICE
@@ -206,7 +212,8 @@ class LeftOut:
             return (
                 f"Wallpaper Engine preset {self.reference!r} ({self.owner_id}) is left out: "
                 f"the running wallpaper service has not confirmed schema_version "
-                f"{PRESET_SCHEMA_VERSION}; restart it to play presets"
+                f"{PRESET_SCHEMA_VERSION}; restart it after an update, and check that its "
+                "installed units are current, to play presets"
             )
         named = (
             f"a playlist that doesn't exist ({self.reference!r})"
@@ -1685,6 +1692,25 @@ def render(settings: config.Settings, session: Session, *, presets: bool = True)
 def compiled(settings: config.Settings, session: Session, *, presets: bool = True) -> Compiled:
     """Both documents and what they were built without (`LeftOut`); nothing is written."""
     return _compile(settings, session, presets=presets)
+
+
+def compiled_as_published(
+    settings: config.Settings, session: Session, status: object, generation: str
+) -> Compiled:
+    """The compile whose document the service holds (``generation``), with or without presets.
+
+    Publishing leaves presets out unless the service lists schema 6 *and* its
+    loaded units are verified (`_presets_publishable`), while ``status``
+    only shows the first. A caller comparing generations (the health sync)
+    therefore accepts either; when neither matches, the one ``status`` calls
+    for is returned and the caller treats the stores as having moved on.
+    """
+    first = presets_supported(status)
+    built = _compile(settings, session, presets=first)
+    if document_generation(built.document) == generation:
+        return built
+    other = _compile(settings, session, presets=not first)
+    return other if document_generation(other.document) == generation else built
 
 
 def presets_supported(status: object) -> bool:

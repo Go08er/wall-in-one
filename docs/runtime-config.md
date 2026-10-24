@@ -192,9 +192,10 @@ other one keeps schema 4 (or 5 with the battery option), byte for byte what
 0.4.0 writes and reads. Schema 6 carries everything schema 5 does. A 0.4.0
 service refuses a preset document whole (an unknown field), so before
 publishing one the app asks the running service, as it does for schema 5;
-when it doesn't list 6 in `supported_config_schemas` (or can't be asked), the
-document is published **without the presets**, and the app says once that
-they play after the service is restarted. Everything else keeps updating. A
+when it doesn't list 6 in `supported_config_schemas` (or can't be asked, or
+its loaded units can't be verified as current), the document is published
+**without the presets**, and the app says once that they play after the
+service is restarted and its units are current. Everything else keeps updating. A
 service that isn't running gets the document with them, as an offline
 preparation does for schema 5. See
 [Wallpaper Engine items](wallpaper-engine.md#carrying-it-to-the-service-additive-optional-fields-schema-6).

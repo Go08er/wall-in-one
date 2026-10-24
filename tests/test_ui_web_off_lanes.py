@@ -49,6 +49,7 @@ def _turn_off(
     fail_compile: bool,
     refuse_reload: bool,
     schemas: list[int] | None = None,
+    playback: str = "stopped",
 ) -> tuple[Any, list[str], list[str]]:
     """Turn the setting off; what was sent to the service, and what the app said.
 
@@ -70,7 +71,13 @@ def _turn_off(
         sent.append(verb)
         if verb == "status" and schemas is not None:
             return Response.success(
-                json.dumps({"status_version": 2, "supported_config_schemas": schemas})
+                json.dumps(
+                    {
+                        "status_version": 2,
+                        "supported_config_schemas": schemas,
+                        "playback_state": playback,
+                    }
+                )
             )
         if verb == "reload" and refuse_reload and not _plays_nothing():
             return Response.failure("refused: a bound this service enforces")
@@ -155,7 +162,7 @@ def test_service_compile_fails(profiles: Any, monkeypatch: pytest.MonkeyPatch) -
         refuse_reload=False,
         schemas=READS_EIGHT,
     )
-    assert sent[:2] == ["stop", "status"] and "reload" in sent
+    assert sent[:2] == ["status", "stop"] and "reload" in sent
     assert not _names_page() and _plays_nothing()
     said = " ".join(reports)
     assert "can't be read" in said
@@ -223,7 +230,7 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
         refuse_reload=False,
         schemas=OLDER,
     )
-    assert sent == ["stop", "status", "quit"]
+    assert sent == ["status", "stop", "quit"]
     said = " ".join(reports) if service else profile.application.publication_problem
     assert "still plays Electric Eye" in said
     assert "It was stopped: it is older than this app" in said
@@ -306,6 +313,28 @@ def test_a_busy_compiler_lock_still_stops_the_page(
 
     monkeypatch.setattr(runtime_config, "compiler_lock", busy)
     said = application._web_off_guard()
-    assert sent == ["stop", "status"]
+    assert sent == ["status", "stop"]
     assert "still plays Electric Eye" in said and "Playback was stopped" in said
     assert _names_page(), "nothing was written without the lock"
+
+
+def test_play_is_put_back_once_nothing_to_play_is_loaded(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stop only bridges: once the service holds nothing to play, its Play intent returns.
+
+    So turning web wallpapers on again plays as before, not stills only. Nothing can
+    start from the document it now holds.
+    """
+    _profile, sent, _reports = _turn_off(
+        profiles,
+        monkeypatch,
+        service=False,
+        fail_compile=True,
+        refuse_reload=False,
+        schemas=READS_EIGHT,
+        playback="playing",
+    )
+    assert sent == ["status", "stop", "reload", "play"]
+    assert _plays_nothing()

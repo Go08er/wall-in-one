@@ -4362,18 +4362,25 @@ class Application(Adw.Application):
                 return ""
             what = self._held_web_words(titles, unchecked)
             try:
-                stopped = client.send_runtime("stop").ok
+                status_reply = client.send_runtime("status")
+                status = json.loads(status_reply.message) if status_reply.ok else None
             except client.NotRunningError:
                 # Nothing plays; the next start is guarded (ExecStartPre).
                 self._service_holds_what_is_on_disk()
                 return ""
-            except client.ControlError, OSError:
-                stopped = False
-            try:
-                status_reply = client.send_runtime("status")
-                status = json.loads(status_reply.message) if status_reply.ok else None
             except client.ControlError, OSError, ValueError, RecursionError:
                 status = None
+            # Whether it was playing: the stop below only bridges until the
+            # document that plays nothing is loaded, after which Play is put
+            # back, so that turning web wallpapers on again plays as before.
+            was_playing = isinstance(status, dict) and status.get("playback_state") == "playing"
+            try:
+                stopped = client.send_runtime("stop").ok
+            except client.NotRunningError:
+                self._service_holds_what_is_on_disk()
+                return ""
+            except client.ControlError, OSError:
+                stopped = False
             written = False
             if locked and runtime_config.nothing_to_play_supported(status):
                 try:
@@ -4400,6 +4407,10 @@ class Application(Adw.Application):
                 self._service_holds_what_is_on_disk()
                 with self._runtime_config_lock:
                     self._runtime_loaded_generation = self._runtime_document_generation
+                if was_playing:
+                    # Nothing can start now; Play only keeps the person's intent.
+                    with contextlib.suppress(client.ControlError, OSError):
+                        client.send_runtime("play")
                 return (
                     f"Allow web wallpapers is off, but the wallpaper service still {what}. "
                     "Playback was stopped, and the service now has nothing to play: web "

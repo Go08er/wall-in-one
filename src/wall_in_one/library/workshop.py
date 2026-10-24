@@ -411,10 +411,15 @@ def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem 
         # A preset has no type of its own: it is a set of values for another
         # item, its `dependency`.
         # A preset object alone doesn't make one: an item with a type of its
-        # own and no `dependency` is that type.
+        # own and no `dependency` is that type. Nor does it make one of an item
+        # that says `video`: 0.4.0 played it as that video (`video:<path>`, which
+        # its pairings and favourites are keyed by), and a real preset has no
+        # type at all.
         kind=(
             PRESET
-            if isinstance(preset, dict) and ("dependency" in document or not isinstance(kind, str))
+            if isinstance(preset, dict)
+            and not _says_video(kind)
+            and ("dependency" in document or not isinstance(kind, str))
             else _type_word(kind)
         ),
         declared_type=_type_word(kind) if isinstance(kind, str) else "",
@@ -456,6 +461,11 @@ def _why(error: OSError) -> str:
 
 #: ASCII upper case to lower, and nothing else: C's ``tolower``.
 _ASCII_LOWER: Final = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _says_video(kind: object) -> bool:
+    """Whether ``type`` says `video` as a Workshop video has always been read (`lenient_type`)."""
+    return isinstance(kind, str) and kind.strip().casefold() == "video"
 
 
 def _type_word(kind: object) -> str:

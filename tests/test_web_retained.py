@@ -89,7 +89,7 @@ def test_start_keeps_a_runtime_that_plays_no_web_page(
 
 
 def _kept_web_with_the_library_unreadable(damage: str) -> tuple[int, str]:
-    """Compile with web on, turn it off, damage Steam's side as `damage` says, run the unit's step."""
+    """Compile with web on, turn it off, damage Steam's side as `damage` says, run the step."""
     home = Path(os.environ["HOME"])
     root = _web_profile(home)
     steam = home / ".local/share/Steam"

@@ -99,8 +99,52 @@ def test_a_pending_number_is_not_written_back(
         yield "the settle time to pass", _after((dial_rows.SETTLE_MS + 400) / 1000)
         yield "the saves to finish", lambda: settled(application)
         own = _own(clip, Kind.VIDEO)
-        assert own.dial("video", "speed") is None, f"{how}: speed written back: {own}"
+        if how == "another wallpaper":
+            # Saved for the wallpaper it was entered for; never for the one shown now.
+            assert own.dial("video", "speed") == 1.5, f"{how}: speed lost: {own}"
+        else:
+            assert own.dial("video", "speed") is None, f"{how}: speed written back: {own}"
         assert not _own(other, Kind.VIDEO)
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+@pytest.mark.parametrize(
+    "gap", [0.3, 0.7], ids=["second-nudge-inside-first-settle", "control-after"]
+)
+def test_two_numbers_nudged_close_together_are_both_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gap: float
+) -> None:
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    folder = tmp_path / "wallpapers"
+    clip = folder / "clip.mp4"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"video")
+    clip.with_name("clip-still.png").write_bytes(b"placeholder image bytes")
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        state = window.state
+        yield "the first scan", lambda: settled(application) and state.has_wallpaper(str(clip))
+        page = library_page(window)
+        page.inspect(state.wallpaper(str(clip)))
+        speed = page.inspector.renderer_rows["dial:video:speed"]
+        assert isinstance(speed, Adw.SpinRow)
+        speed.set_value(1.5)
+        yield "the second nudge", _after(gap)
+        brightness = page.inspector.renderer_rows["dial:video:brightness"]
+        assert isinstance(brightness, Adw.SpinRow)
+        brightness.set_value(20)
+        yield "the settle time to pass", _after((dial_rows.SETTLE_MS + 900) / 1000)
+        yield "the saves to finish", lambda: settled(application)
+        own = _own(clip, Kind.VIDEO)
+        assert own.dial("video", "speed") == 1.5, f"speed lost: {own}"
+        assert own.dial("video", "brightness") == 20, f"brightness lost: {own}"
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)

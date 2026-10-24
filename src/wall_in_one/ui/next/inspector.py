@@ -677,7 +677,7 @@ class Inspector(Gtk.Box):
         Each says "Default (…)" until it has a value of its own, with a button
         that takes it back; the defaults are Settings' (docs/renderer-settings.md).
         """
-        self._settling.cancel()  # a number nudged on the pane being replaced writes nothing
+        self._settling.flush_soon()  # a number still waiting is saved for its own wallpaper
         settling = self._settling = dial_rows.Settling()
         shown = editing.wallpaper_dials(wallpaper.id)
         if not shown.renderer:

@@ -36,37 +36,61 @@ def _digits(step: float) -> int:
 
 
 class Settling:
-    """The pending settle timers of one pane's rows, to be cancelled together.
+    """The pending settle timers of one pane's rows.
 
-    A pane makes one per build and calls `cancel` when a reset of its own
-    applies (a number nudged a moment ago must not write itself back over
-    "Use defaults") and when it builds again.
+    A pane makes one per build. `cancel` is for a reset of its own ("Use
+    defaults" must not be written over by a number nudged a moment ago).
+    `flush` is for a pane that builds again: every number still waiting is
+    handed on now, to the wallpaper and dial it was entered for (the row's
+    callback is bound to those, not to what the pane shows later), so a save
+    that rebuilds the pane never loses the number nudged beside it.
     """
 
     def __init__(self) -> None:
-        self._cancels: list[Callable[[], None]] = []
+        self._rows: list[tuple[Callable[[], None], Callable[[], None]]] = []
 
-    def add(self, cancel: Callable[[], None]) -> None:
-        self._cancels.append(cancel)
+    def add(self, cancel: Callable[[], None], flush: Callable[[], None]) -> None:
+        self._rows.append((cancel, flush))
 
     def cancel(self) -> None:
-        for cancel in self._cancels:
+        for cancel, _flush in self._rows:
             cancel()
+
+    def flush(self) -> None:
+        for _cancel, flush in self._rows:
+            flush()
+
+    def flush_soon(self) -> None:
+        """`flush`, once the pane that is building has finished (a save may build it again)."""
+
+        def later() -> bool:
+            self.flush()
+            return GLib.SOURCE_REMOVE
+
+        GLib.idle_add(later)
 
 
 def _settled(
-    callback: Callable[[], None], row: Gtk.Widget, settling: Settling | None
+    callback: Callable[[], None], settling: Settling | None
 ) -> tuple[Callable[[], None], Callable[[], None]]:
     """``callback``, run once the calls to it have stopped for `SETTLE_MS`; and its cancel.
 
-    Cancelled too when ``row`` leaves its window: a pane that was built again,
-    or is showing another wallpaper, has no use for the old row's number.
+    The timer outlives its row (a pane built again, another wallpaper shown,
+    a window closed): the number is still the person's, and ``callback`` is
+    bound to the wallpaper and dial the row was made for, so it lands there.
+    A flush clears the timer before it runs the callback, so it cannot run
+    twice or recurse.
     """
     pending: list[int] = []
 
     def cancel() -> None:
         while pending:
             GLib.source_remove(pending.pop())
+
+    def flush() -> None:
+        if pending:
+            cancel()
+            callback()
 
     def fire() -> bool:
         pending.clear()
@@ -78,9 +102,8 @@ def _settled(
             GLib.source_remove(pending.pop())
         pending.append(GLib.timeout_add(SETTLE_MS, fire))
 
-    row.connect("notify::root", lambda widget, _p: cancel() if widget.get_root() is None else None)
     if settling is not None:
-        settling.add(cancel)
+        settling.add(cancel, flush)
     return call, cancel
 
 
@@ -196,7 +219,7 @@ def own_row(
 
     handler = hand_on
     if dial.kind in ("int", "float"):
-        handler, cancel = _settled(hand_on, row, settling)
+        handler, cancel = _settled(hand_on, settling)
         cancel_settling.append(cancel)
     row.connect(setting_signal(row), lambda *_arguments: handler())
     row.set_sensitive(view.available and not locked)
@@ -263,7 +286,7 @@ def property_row(
             digits=digits,
         )
         settled, cancel = _settled(
-            lambda: on_change(repr(round(spin.get_value(), max(digits, 2)))), spin, settling
+            lambda: on_change(repr(round(spin.get_value(), max(digits, 2)))), settling
         )
         cancel_settling.append(cancel)
         spin.connect("notify::value", lambda *_arguments: settled())

@@ -84,7 +84,7 @@ def test_use_defaults_is_the_last_word(
     assert not own, f"after Use defaults the wallpaper still has its own: {own}"
 
 
-def test_a_number_nudged_on_one_wallpaper_is_not_written_after_opening_another(
+def test_a_number_nudged_on_one_wallpaper_is_saved_for_it_and_not_for_the_next(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
@@ -113,4 +113,102 @@ def test_a_number_nudged_on_one_wallpaper_is_not_written_after_opening_another(
         for item in (first, second)
     ]
     root.destroy()
-    assert not any(owns), f"written after the pane moved on: {owns}"
+    # Flushed to the wallpaper it was entered for; never to the one shown now.
+    assert owns[0] is not None and owns[0].dial("video", "speed") == 1.5, owns
+    assert not owns[1], f"written to the wallpaper the pane moved on to: {owns}"
+
+
+@pytest.mark.parametrize(
+    "gap_ms", [300, 700], ids=["second-nudge-inside-first-settle", "control-after"]
+)
+def test_two_numbers_nudged_close_together_are_both_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gap_ms: int
+) -> None:
+    """Speed's save rebuilds the pane; brightness, nudged meanwhile, is saved too."""
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video = MediaItem(tmp_path / "clip.mp4", Kind.VIDEO, 1, 1, paired_still=tmp_path / "c.png")
+    library = Library(roots=(tmp_path,), items=(video,))
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: library,
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    root = Gtk.Window()
+    root.set_child(page)
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)
+    _drain(gap_ms)
+    brightness = page.renderer_rows["dial:video:brightness"]
+    assert isinstance(brightness, Adw.SpinRow)
+    brightness.set_value(20)
+    _drain(1500)
+    record = session.pairings.get(pairings.Identity.of(video))
+    own = dict(record.renderer.video) if record is not None else {}
+    root.destroy()
+    assert own.get("speed") == 1.5 and own.get("brightness") == 20, f"saved: {own}"
+
+
+def test_use_defaults_still_wins_over_every_pending_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video = MediaItem(tmp_path / "clip.mp4", Kind.VIDEO, 1, 1, paired_still=tmp_path / "c.png")
+    library = Library(roots=(tmp_path,), items=(video,))
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: library,
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    session.pairings.set_dial(video, "video", "deband", True)
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    root = Gtk.Window()
+    root.set_child(page)
+    page.edit(session, video)
+    for name, value in (("speed", 1.5), ("brightness", 20)):
+        row = page.renderer_rows[f"dial:video:{name}"]
+        assert isinstance(row, Adw.SpinRow)
+        row.set_value(value)
+    assert page.renderer_reset is not None
+    page.renderer_reset.emit("clicked")
+    _drain(dial_rows.SETTLE_MS + 600)
+    record = session.pairings.get(pairings.Identity.of(video))
+    own = record.renderer if record is not None else pairings.RendererOverrides()
+    root.destroy()
+    assert not own, f"a pending number outlived Use defaults: {own}"
+
+
+def test_a_number_nudged_just_before_the_window_goes_is_saved_for_its_wallpaper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video = MediaItem(tmp_path / "clip.mp4", Kind.VIDEO, 1, 1, paired_still=tmp_path / "c.png")
+    library = Library(roots=(tmp_path,), items=(video,))
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: library,
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    application = PairingApp(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    root = Gtk.Window()
+    root.set_child(page)
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)
+    _drain(100)
+    root.destroy()
+    _drain(dial_rows.SETTLE_MS + 600)
+    record = session.pairings.get(pairings.Identity.of(video))
+    assert record is not None and record.renderer.dial("video", "speed") == 1.5

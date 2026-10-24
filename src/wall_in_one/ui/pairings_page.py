@@ -1014,7 +1014,7 @@ class PairingsPage(Gtk.Box):
         own; "Reset this pairing" leaves them, and "Use defaults" is theirs
         (docs/renderer-settings.md).
         """
-        self._settling.cancel()  # a number nudged on the pane being replaced writes nothing
+        self._settling.flush_soon()  # a number still waiting is saved for its own wallpaper
         settling = self._settling = dial_rows.Settling()
         shown = dial_view.wallpaper_dials(item, bundle.renderer, self._app.settings)
         if not shown.renderer:

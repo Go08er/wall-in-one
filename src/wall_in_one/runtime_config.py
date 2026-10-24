@@ -173,8 +173,8 @@ class LeftOut:
         """
         if self.owner == DIALS_OWNER:
             return (
-                "Renderer settings, in Settings and in each wallpaper\u2019s own, aren\u2019t "
-                "applied until the wallpaper service is confirmed to read them: restart it "
+                "Renderer settings, in Settings and in each wallpaper\u2019s own, and scene "
+                "sound aren\u2019t applied until the wallpaper service is confirmed to read them: restart it "
                 "after an update, and make sure its installed units are current."
             )
         if self.owner == PRESET_OWNER:
@@ -2241,6 +2241,11 @@ def _compile(
     if dial_lines and not renderer_dials:
         withheld.add("")
         dial_lines = []
+    # Global scene sound waits with the dials (a released key, but a scene's own
+    # silence can't go with it); say so when that holds sound back.
+    scene_muted = settings.scene_muted or not renderer_dials
+    if not renderer_dials and not settings.scene_muted:
+        withheld.add("")
     if withheld:
         left_out.append(LeftOut(DIALS_OWNER, "", "", "", NEEDS_NEWER_SERVICE))
     carries_dials = bool(dial_lines) or any(
@@ -2289,8 +2294,11 @@ def _compile(
         # slider step restart a scene. Silent writes a volume of 0, as every
         # document did before scenes had a sound setting, so an untouched
         # profile keeps its bytes (`_own_scene_dials` for one that sounds).
-        f"scene_muted = {str(settings.scene_muted).lower()}",
-        f"scene_volume = {0 if settings.scene_muted else settings.scene_volume}",
+        # A document without the dials keeps the constants of before: a scene's
+        # own silence or volume is a dial that waits, and the global sound
+        # would otherwise play what that scene was set to silence.
+        f"scene_muted = {str(scene_muted).lower()}",
+        f"scene_volume = {0 if scene_muted else settings.scene_volume}",
         f"scene_pause_when_covered = {str(settings.scene_pause_when_covered).lower()}",
         f"scene_scaling = {_quote(settings.scene_scaling)}",
         f"scene_clamp = {_quote(settings.scene_clamp)}",

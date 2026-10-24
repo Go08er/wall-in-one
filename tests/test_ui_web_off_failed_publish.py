@@ -150,3 +150,38 @@ def test_presets_left_out_are_published_again_once_the_service_reads_them(
     application._publish_again_when_presets_become_readable(old)
     application._publish_again_when_presets_become_readable(new)
     assert publications == ["p"]
+
+
+def test_dials_left_out_by_an_unconfirmed_publish_follow_the_next_status(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status timeout during a save left the dials out; the service already listed 7.
+
+    Before: only a status newly listing 7 asked again, so they stayed out.
+    """
+    application = profiles().application
+    publications: list[str] = []
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: publications.append("p"))
+    seven = {"status_version": 2, "supported_config_schemas": [4, 5, 6, 7]}
+    newer = runtime_config.NEEDS_NEWER_SERVICE
+    application._dials_readable_seen = True
+    application._presets_readable_seen = True
+    application._publish_again_when_presets_become_readable(seven)
+    assert publications == []
+    application._left_out_said = frozenset(
+        {runtime_config.LeftOut(runtime_config.DIALS_OWNER, "", "", "", newer)}
+    )
+    application._publish_again_when_presets_become_readable(seven)
+    assert publications == ["p"]
+    # Once: units that can't be verified leave them out again, without a loop.
+    application._publish_again_when_presets_become_readable(seven)
+    assert publications == ["p"]
+    # Cleared, then left out again by a later change: asked once more.
+    application._left_out_said = frozenset()
+    application._publish_again_when_presets_become_readable(seven)
+    application._left_out_said = frozenset(
+        {runtime_config.LeftOut(runtime_config.PRESET_OWNER, "3", "Bloom", "", newer)}
+    )
+    application._publish_again_when_presets_become_readable(seven)
+    assert publications == ["p", "p"]

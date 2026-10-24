@@ -228,10 +228,15 @@ doesn't list 7 gets the document without the tables and the new keys (then,
 if it doesn't list 6, without presets and a scene's own values too: that scene
 still plays), and the app says once that those settings apply once the
 service is confirmed to read them (restarted after an update, its units
-current). Saving is never refused over them, unlike the battery option: an
+current). Global scene sound (Settings, Silent and Volume) waits with them:
+that document keeps the constants of before, silent at volume 0, because the
+scene's own silence is one of the dials left out and sound must not play
+over it. Saving is never refused over them, unlike the battery option: an
 older service just doesn't apply them yet. The health sync accepts any of the
 documents publishing could have made (`compiled_as_published`), and the app
-publishes again when a status newly lists 7. The legacy
+publishes again when a status newly lists 7, and once when a publish that was
+compiled without confirmation (a status that timed out) left them out and a
+later status lists them. The legacy
 Python `--service` mode (installs without the Rust service) doesn't apply
 the dials.
 

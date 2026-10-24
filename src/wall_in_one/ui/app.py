@@ -799,6 +799,8 @@ class Application(Adw.Application):
         self._presets_readable_seen = False
         #: And one that reads the renderer dials (schema 7).
         self._dials_readable_seen = False
+        #: A republish was already asked for what is left out (`_publish_again_...`).
+        self._left_out_retried = False
         self._default_pointer_said = ""
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
@@ -5054,7 +5056,19 @@ class Application(Adw.Application):
         dials = runtime_config.dials_supported(status)
         newly = newly or (dials and not self._dials_readable_seen)
         self._dials_readable_seen = dials
-        if newly and any(
+        # Left out of the last publication, which compiled without a
+        # confirmation (a status that timed out, say), while this status lists
+        # what was left out: ask for it again, once. A service that lists it
+        # but whose units can't be verified leaves it out again, and is not
+        # asked a second time until it is no longer waiting for that.
+        waiting = any(
+            one.why == runtime_config.NEEDS_NEWER_SERVICE
+            and (dials if one.owner == runtime_config.DIALS_OWNER else reads)
+            for one in self._left_out_said
+        )
+        retry = waiting and not self._left_out_retried
+        self._left_out_retried = waiting and (self._left_out_retried or retry)
+        if (newly or retry) and any(
             one.why == runtime_config.NEEDS_NEWER_SERVICE for one in self._left_out_said
         ):
             self._publish_runtime_for_context()

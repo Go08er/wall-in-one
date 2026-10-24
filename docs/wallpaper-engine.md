@@ -183,11 +183,25 @@ Workshop update) would play as one. While the document doesn't allow web
 wallpapers (`allow_web_wallpapers`, written only while the setting is on),
 the service reads the item's type just before it starts the engine, in every
 place the engine looks for `--bg <id>` (above), bounded like the app's scan
-(256 KiB, a regular file). For a preset it reads the base. Anything but
-`scene` or `video` is refused, and so is an item it can't find or read. The
-engine isn't started, the still stays, and status says why. It is never a
-taboo, so nothing is saved against the item. A document from before schema 8
-has no such key, so it allows no web page.
+(256 KiB, a regular file, nested to any depth). For a preset it reads the
+base. Anything but `scene` or `video` is refused, and so is an item it can't
+find or read: a scene in a Steam library on another drive is one, since the
+engine never looks there. Each reason says what it is; only a web page is put
+down to web wallpapers ("this configuration doesn't allow web wallpapers",
+since a document can lack the key for other reasons than the setting being
+off). The engine isn't started, and the entry is skipped, as the owner put
+it: "skip to next, if it's in a playlist alone, then use the default playlist
+in schedule". The service asks before anything of the entry is shown, so its
+still never goes up; the next entry of the same playlist takes over. A
+playlist with nothing left that can play gives way to the document's default
+playlist, then to All media; with nothing left at all the display plays
+nothing ([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never
+a taboo, so nothing is saved against the item; the service's journal says
+what it skipped and why. Each item is asked once per document: a reload
+(which turning the setting on or off is) asks again. A document from before
+schema 8 has no such key, so it allows no web page. While the document does
+allow web wallpapers nothing is checked, and such a scene fails in the engine
+as at 0.4.0.
 
 **No previews while it is off.** Owner: "it shouldn't load the papers to make a
 preview if web wallpapers are off." While the setting is off, nothing in a web

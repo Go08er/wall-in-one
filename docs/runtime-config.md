@@ -361,7 +361,35 @@ the setting is on. Absent, web wallpapers aren't allowed: before the service
 starts linux-wallpaperengine for a scene, it reads that item's `project.json`
 where the engine finds it, and refuses a web page or an item it can't classify
 ([wallpaper-engine.md](wallpaper-engine.md#web-wallpapers-are-off-until-allowed)).
-A change of the setting starts every display again.
+A change of the setting starts every display again. Status says what the
+loaded document allows:
+
+| Field | Where | Meaning |
+|---|---|---|
+| `allow_web_wallpapers` | top level | `true` when the document the service holds has `allow_web_wallpapers = true`, `false` otherwise (no key, or a document below 8). Status is only answered with a document loaded; after a refused reload it is the one kept. Added in 0.4.1. |
+
+**An entry the service refuses is skipped.** Such an entry is never started
+and never shown: the service asks before its still goes up, and moves on to
+the next entry of the same playlist. When every entry of the playlist a
+display is on was refused (a taboo entry counts as unable to play too, but a
+playlist of taboo entries only keeps its taboo rules), the display plays the
+document's `default_playlist`, then `all-media`, each only when something of
+it can play. The display row then names that playlist as its `playlist_id`;
+`assigned_playlist_id`, `route_source` and `schedule_rule_id` stay what chose
+the refused one, and a rule's window ending onto the playlist already shown
+changes nothing on screen. When nothing can play at all, the display plays
+nothing, exactly as above, with the reason `this configuration doesn't allow
+web wallpapers` when every refused item is a web page and `no wallpaper here
+can start` otherwise. `next`, `previous`, `random` and the rotation step over
+refused entries; with nothing else to move to, `next` and `random` answer `no
+other wallpaper here can start`, which `last_error` doesn't keep. A skip is no
+fault either: nothing is a taboo, nothing is saved, and `last_error` and
+`renderer_failed` say nothing about it. The service's journal names each
+skipped entry with its reason. The service remembers what it refused for the
+document it holds and asks each item once; a reload, the file poll's
+included, forgets. With motion off (stopped, on battery, `dynamics_enabled =
+false`) nothing is started, so nothing is refused, and a scene's still shows
+as before; the next start of motion asks.
 
 Publishing steps down as for 6 and 7. A running service that isn't confirmed
 to read 8 gets the document without `allow_web_wallpapers` (it then plays web

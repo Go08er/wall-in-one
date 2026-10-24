@@ -8,7 +8,9 @@ close-request, so the number was lost. Each now hands it on through the same que
 the application waits for that write.
 
 Each kind: ``ctl`` (the real socket), ``request`` (what `Control.quit` does on GTK, at once),
-``quit`` (``Application.quit()``, as SIGINT does). Control: the same after the number was saved.
+``quit`` (``Application.quit()``, as SIGINT does), all in ``--service`` mode, whose publication
+is synchronous; and ``quit-windowed``, the same in an ordinary windowed application, whose
+publication runs on the runtime lane. Control: the same after the number was saved.
 """
 
 from __future__ import annotations
@@ -93,7 +95,7 @@ def _rows(application: Application, clip: Path) -> tuple[Adw.SpinRow, Adw.SpinRo
 
 
 @pytest.mark.parametrize("ui", ["classic", "next"])
-@pytest.mark.parametrize("how", ["ctl", "request", "quit"])
+@pytest.mark.parametrize("how", ["ctl", "request", "quit", "quit-windowed"])
 @pytest.mark.parametrize("wait_first", [False, True], ids=["quit-at-once", "control"])
 def test_a_quit_saves_a_number_nudged_just_before(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ui: Any, how: str, wait_first: bool
@@ -103,7 +105,8 @@ def test_a_quit_saves_a_number_nudged_just_before(
     sandboxed_runtime(monkeypatch, tmp_path)
     monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
     clip = _clip(tmp_path)
-    application = Application(service=True, ui=ui)
+    windowed = how == "quit-windowed"
+    application = Application(service=not windowed, ui=ui)
     requests = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ctl-client")
     lanes: list[Any] = []
     answers: list[Future[Any]] = []
@@ -131,7 +134,8 @@ def test_a_quit_saves_a_number_nudged_just_before(
         application.activate()  # a resident application is activated by a launch
         return GLib.SOURCE_REMOVE
 
-    GLib.idle_add(launch)
+    if not windowed:
+        GLib.idle_add(launch)  # a windowed one is activated by its own run
     try:
         assert run_application(application, scenario()) == 0
         if how == "ctl":

@@ -11,6 +11,7 @@ a range is one save and not one renderer restart per step.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable, Hashable
 from typing import Final
@@ -26,6 +27,8 @@ from wall_in_one.ui.plain_text import plain
 
 #: How long a number has to stay put before it is handed on, in milliseconds.
 SETTLE_MS: Final = 450
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _digits(step: float) -> int:
@@ -54,16 +57,26 @@ def cancel_pending(owner: Hashable, key: str | None = None) -> None:
             cancel()
 
 
-def flush_all() -> None:
-    """Hand on every waiting number now, each to the wallpaper it was entered for.
+def flush_all() -> int:
+    """Hand on every waiting number now, each to the wallpaper it was entered for; how many.
 
-    For a window that is closing: the process may end before a timer fires.
-    The callbacks are the timers' own, so the write takes the same path (and
-    lock) as one that waited.
+    For a window that is closing, or an application that quits: the process
+    may end before a timer fires. The callbacks are the timers' own, so the
+    write takes the same path (and lock) as one that waited.
+
+    One that raises is logged, and every other is still handed on: nothing
+    is raised to the caller, whose own teardown follows (review r13b, N-f).
     """
+    handed = 0
     for token, (_owner, _row, _cancel, flush) in tuple(_PENDING.items()):
-        _PENDING.pop(token, None)
-        flush()
+        if _PENDING.pop(token, None) is None:
+            continue  # an earlier one's hand-on dropped it (a reset): nothing waits
+        handed += 1
+        try:
+            flush()
+        except Exception:
+            LOGGER.exception("a waiting renderer setting could not be handed on")
+    return handed
 
 
 class Settling:

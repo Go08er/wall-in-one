@@ -46,6 +46,22 @@ PRESET_SCHEMA_VERSION: Final = 6
 #: live service that doesn't list it gets the document without them
 #: (`LeftOut`, `DIALS_OWNER`), never a refusal of the whole save.
 DIALS_SCHEMA_VERSION: Final = 7
+#: A document with a playlist that plays nothing (``entries = []`` and its
+#: ``nothing_to_play`` reason), or with ``allow_web_wallpapers`` in
+#: ``[settings]`` (docs/runtime-config.md). Written only then, carrying
+#: everything 7 does. A live service that doesn't list it gets the document
+#: without ``allow_web_wallpapers`` (it then plays web pages as 0.4.0 did,
+#: while the setting is on); a playlist that plays nothing has no older shape,
+#: so that document is refused (`NothingToPlayNeedsNewerServiceError`).
+NOTHING_TO_PLAY_SCHEMA_VERSION: Final = 8
+#: The longest ``nothing_to_play`` reason the service accepts, and what a
+#: display that plays nothing is called in its status (``entry_name``).
+MAX_NOTHING_TO_PLAY_BYTES: Final = 128
+NOTHING_TO_PLAY_LABEL: Final = "Nothing to play: "
+#: Why All media plays nothing, as the document and the app say it.
+WEB_OFF_REASON: Final = "web wallpapers are off"
+FAVOURITES_REASON: Final = "none of the favourites can play"
+EMPTY_LIBRARY_REASON: Final = "nothing in the library can play"
 
 #: Per-playlist interval/shuffle and a display's own playlist beating global
 #: schedule rules live beside ``runtime.toml`` in this file, never in it, so
@@ -96,6 +112,10 @@ class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
 
 
+class NothingToPlayNeedsNewerServiceError(RuntimeConfigError):
+    """All media plays nothing, and the live service isn't confirmed to read that (schema 8)."""
+
+
 class FallbackUnseenError(RuntimeConfigError):
     """All media plays nothing only as far as the scan could look (``place`` is where)."""
 
@@ -137,6 +157,9 @@ PRESET_OWNER: Final = "preset"
 #: wallpaper's own (and, under a service that predates presets, a scene's
 #: own Wallpaper Engine values): left out together, said once.
 DIALS_OWNER: Final = "dials"
+#: Not a reference left out but what plays: All media plays nothing because
+#: web wallpapers are off, so a display on it shows nothing (``why``).
+NOTHING_OWNER: Final = "nothing"
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -171,6 +194,8 @@ class LeftOut:
 
         ``rules``: how many schedule rules (or presets) this one sentence speaks for.
         """
+        if self.owner == NOTHING_OWNER:
+            return f"{NOTHING_TO_PLAY_LABEL}{self.why}."
         if self.owner == DIALS_OWNER:
             return (
                 "Renderer settings and scene sound, in Settings and in each wallpaper\u2019s "
@@ -224,6 +249,11 @@ class LeftOut:
 
     def warning(self) -> str:
         """The same for an unattended command's ``warning:`` line: ids, and where it is saved."""
+        if self.owner == NOTHING_OWNER:
+            return (
+                f"nothing to play: {self.why}; the wallpaper service shows nothing "
+                f'on a display that plays "{FALLBACK_PLAYLIST_NAME}"'
+            )
         if self.owner == DIALS_OWNER:
             return (
                 "renderer settings are left out: the running wallpaper service has not "
@@ -261,7 +291,14 @@ class LeftOut:
 
 
 #: The order a notice speaks in: the default, the rules, then the displays.
-_NOTICE_ORDER: Final = (DEFAULT_OWNER, SCHEDULE_OWNER, DISPLAY_OWNER, PRESET_OWNER, DIALS_OWNER)
+_NOTICE_ORDER: Final = (
+    NOTHING_OWNER,
+    DEFAULT_OWNER,
+    SCHEDULE_OWNER,
+    DISPLAY_OWNER,
+    PRESET_OWNER,
+    DIALS_OWNER,
+)
 
 
 def left_out_notice(left_out: Iterable[LeftOut]) -> str:
@@ -289,6 +326,8 @@ class Compiled:
     #: ``runtime-overrides.toml``; None when no override is in use and the file must not exist.
     overrides: str | None
     left_out: tuple[LeftOut, ...] = ()
+    #: Why All media plays nothing in ``document`` (schema 8), or empty.
+    nothing: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +344,9 @@ class Published:
     written: tuple[Path, ...] = ()
     removed: tuple[Path, ...] = ()
     left_out: tuple[LeftOut, ...] = ()
+    #: The ``runtime.toml`` text this replaced, when it replaced one: what the
+    #: service may still hold if it refuses the new one (`retained_web_wallpapers`).
+    replaced: str | None = None
 
     def __bool__(self) -> bool:
         return bool(self.written or self.removed)
@@ -621,6 +663,15 @@ def _validate_status_budget(document_without_generation: str) -> None:
         largest_playlist_identity = max(largest_playlist_identity, identity_bytes)
         playlist_identity[identifier] = (identifier, name)
         playlist_identity[name] = (identifier, name)
+        reason = raw.get("nothing_to_play")
+        if isinstance(reason, str) and not entries:
+            # Status says it in place of an entry, twice: as `nothing_to_play`
+            # and in the display's `entry_name` (Rust's validate_status_budget).
+            largest_entry = max(
+                largest_entry,
+                2 * _encoded_length(reason, label="nothing_to_play reason")
+                + len(NOTHING_TO_PLAY_LABEL.encode()),
+            )
         for entry in entries:
             if not isinstance(entry, dict):
                 raise RuntimeConfigError("generated entry inventory has an invalid shape")
@@ -715,13 +766,18 @@ def read_config_generation(path: Path | None = None) -> str:
         raise RuntimeConfigError(f"runtime configuration {target}: {error}") from error
 
 
-def _named_scenes(path: Path | None) -> set[str]:
-    """The Workshop ids a ``runtime.toml`` names (`scene_id`, `scene_base`); none if unreadable."""
+def _named_scenes(path: Path | None, text: str | None = None) -> set[str]:
+    """The Workshop ids a ``runtime.toml`` names (`scene_id`, `scene_base`); none if unreadable.
+
+    ``text``: that document's text, already read (`Published.replaced`); then
+    ``path`` is not read.
+    """
     target = path if path is not None else paths.runtime_config_path()
     try:
-        text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+        if text is None:
+            text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
         document = tomllib.loads(text) if text is not None else {}
-    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
         return set()
     named: set[str] = set()
     pending: list[object] = [document]
@@ -738,7 +794,7 @@ def _named_scenes(path: Path | None) -> set[str]:
     return named
 
 
-def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
+def retained_web_wallpapers(path: Path | None = None, *, text: str | None = None) -> tuple[str, ...]:
     """Titles of the web wallpapers the published ``runtime.toml`` still plays.
 
     A document compiled while ``allow_web_wallpapers`` was on keeps naming
@@ -749,9 +805,11 @@ def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
     doesn't depend on the library folders, so it usually works when the
     compile didn't. An unreadable or malformed document says nothing: the
     service's own validation judges that. What the scan can't classify is
-    `unchecked_scene_wallpapers`'s to say.
+    `unchecked_scene_wallpapers`'s to say. ``text``: judge that document's
+    text instead of reading ``path`` (the one a publication replaced, which a
+    service that refused its successor still holds).
     """
-    named = _named_scenes(path)
+    named = _named_scenes(path, text)
     if not named:
         return ()
     items = scan.workshop_items(workshop.steam_roots())
@@ -768,7 +826,9 @@ def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
     )
 
 
-def unchecked_scene_wallpapers(path: Path | None = None) -> tuple[str, ...]:
+def unchecked_scene_wallpapers(
+    path: Path | None = None, *, text: str | None = None
+) -> tuple[str, ...]:
     """Workshop ids the published ``runtime.toml`` names that the scan can't classify.
 
     The Workshop scan lists an item only when it could read its folder and
@@ -776,9 +836,10 @@ def unchecked_scene_wallpapers(path: Path | None = None) -> tuple[str, ...]:
     item, or a project file over the scan's size cap all leave it out), so
     for these it isn't known whether the page is a web page. A caller that
     must not keep a web page counts them as possibly one (fail closed). Also
-    an id whose preset base the scan doesn't list.
+    an id whose preset base the scan doesn't list. ``text`` as for
+    `retained_web_wallpapers`.
     """
-    named = _named_scenes(path)
+    named = _named_scenes(path, text)
     if not named:
         return ()
     listed = {item.scene: item for item in scan.workshop_items(workshop.steam_roots())}
@@ -1832,15 +1893,25 @@ def render(
     *,
     presets: bool = True,
     renderer_dials: bool = True,
+    nothing_to_play: bool = True,
 ) -> str:
     """Return the TOML with every currently executable decision resolved.
 
     ``presets``: whether Wallpaper Engine presets are compiled (see
     `presets_supported`); without them the document never needs schema 6.
     ``renderer_dials``: whether the renderer dials are (`dials_supported`);
-    without them it never needs schema 7.
+    without them it never needs schema 7. ``nothing_to_play``: whether
+    schema 8's additions may be written (`nothing_to_play_supported`):
+    ``allow_web_wallpapers``, and a playlist that plays nothing, without
+    which an All media that plays nothing is refused.
     """
-    return _compile(settings, session, presets=presets, renderer_dials=renderer_dials).document
+    return _compile(
+        settings,
+        session,
+        presets=presets,
+        renderer_dials=renderer_dials,
+        nothing_to_play=nothing_to_play,
+    ).document
 
 
 def compiled(
@@ -1849,9 +1920,25 @@ def compiled(
     *,
     presets: bool = True,
     renderer_dials: bool = True,
+    nothing_to_play: bool = True,
 ) -> Compiled:
     """Both documents and what they were built without (`LeftOut`); nothing is written."""
-    return _compile(settings, session, presets=presets, renderer_dials=renderer_dials)
+    return _compile(
+        settings,
+        session,
+        presets=presets,
+        renderer_dials=renderer_dials,
+        nothing_to_play=nothing_to_play,
+    )
+
+
+def nothing_to_play_supported(status: object) -> bool:
+    """Whether the runtime that answered ``status`` reads schema 8 (`NOTHING_TO_PLAY_SCHEMA_VERSION`).
+
+    The twin of `presets_supported` and `dials_supported` for a playlist
+    that plays nothing and ``allow_web_wallpapers``.
+    """
+    return _lists_schema(status, NOTHING_TO_PLAY_SCHEMA_VERSION)
 
 
 def dials_supported(status: object) -> bool:
@@ -1868,26 +1955,52 @@ def compiled_as_published(
 ) -> Compiled:
     """The compile whose document the service holds (``generation``), of those publishing makes.
 
-    Publishing leaves the dials out unless the service lists schema 7 *and*
-    its loaded units are verified, then presets unless it lists 6 and they
+    Publishing leaves schema 8's ``allow_web_wallpapers`` out unless the
+    service lists 8 *and* its loaded units are verified, then the dials
+    unless it lists 7 and they are, then presets unless it lists 6 and they
     are (`_fitted`), while ``status`` only shows the lists. A caller comparing
     generations (the health sync) therefore accepts any of them: everything,
-    without the dials, without both, and the one ``status`` calls for. When
-    none matches, that last one is returned and the caller treats the stores
-    as having moved on.
+    without 8's additions, without them and the dials, without all three,
+    and the one ``status`` calls for. When none matches, that last one is
+    returned and the caller treats the stores as having moved on. A variant
+    that can't be built (an All media that plays nothing, below schema 8) is
+    skipped; when none can be, its refusal is raised.
     """
-    asked = (presets_supported(status), dials_supported(status))
+    asked = (
+        presets_supported(status),
+        dials_supported(status),
+        nothing_to_play_supported(status),
+    )
     first: Compiled | None = None
-    tried: set[tuple[bool, bool]] = set()
-    for presets, renderer_dials in (asked, (True, True), (True, False), (False, False)):
-        if (presets, renderer_dials) in tried:
+    refused: RuntimeConfigError | None = None
+    tried: set[tuple[bool, bool, bool]] = set()
+    for presets, renderer_dials, eight in (
+        asked,
+        (True, True, True),
+        (True, True, False),
+        (True, False, False),
+        (False, False, False),
+    ):
+        if (presets, renderer_dials, eight) in tried:
             continue
-        tried.add((presets, renderer_dials))
-        built = _compile(settings, session, presets=presets, renderer_dials=renderer_dials)
+        tried.add((presets, renderer_dials, eight))
+        try:
+            built = _compile(
+                settings,
+                session,
+                presets=presets,
+                renderer_dials=renderer_dials,
+                nothing_to_play=eight,
+            )
+        except NothingToPlayNeedsNewerServiceError as error:
+            refused = refused or error
+            continue
         if document_generation(built.document) == generation:
             return built
         first = built if first is None else first
-    assert first is not None
+    if first is None:
+        assert refused is not None
+        raise refused
     return first
 
 
@@ -2013,12 +2126,70 @@ def _is_preset(item: MediaItem) -> bool:
     return item.kind is Kind.SCENE and bool(item.scene_base or item.scene_properties)
 
 
+def _document_head(
+    settings: config.Settings,
+    *,
+    schema_version: int,
+    default: str,
+    web_allowed: bool,
+    dial_lines: Sequence[str],
+    scene_muted: bool,
+) -> list[str]:
+    """The lines of ``runtime.toml`` before its playlists: the header, ``[settings]``, ``[renderer]``.
+
+    ``web_allowed``: write ``allow_web_wallpapers = true`` (schema 8).
+    """
+    return [
+        "# Generated by Wall-in-One. Edit the library in the app, not this file.",
+        f"schema_version = {schema_version}",
+        f"default_playlist = {_quote(default)}",
+        "",
+        "[settings]",
+        f"cycle_interval_seconds = {settings.cycle_interval}",
+        f"cycle_enabled = {str(settings.cycle_enabled).lower()}",
+        f"shuffle = {str(settings.shuffle).lower()}",
+        f"dynamics_enabled = {str(settings.dynamics_enabled).lower()}",
+        f"display_mode = {_quote(settings.display_mode)}",
+        f"theme_source_connector = {_quote(settings.theme_source_connector)}",
+        *(["stop_animations_on_battery = true"] if settings.stop_animations_on_battery else []),
+        *(["allow_web_wallpapers = true"] if web_allowed else []),
+        "",
+        "[renderer]",
+        f"noctalia_program = {_quote(_program('noctalia'))}",
+        f"mpvpaper_program = {_quote(_program('mpvpaper'))}",
+        f"linux_wallpaperengine_program = {_quote(_program('linux-wallpaperengine'))}",
+        f"own_scene_renderer = {str(settings.own_scene_renderer).lower()}",
+        'layer = "background"',
+        f"video_when_hidden = {_quote(settings.video_when_hidden)}",
+        f"video_hardware_decode = {str(settings.video_hardware_decode).lower()}",
+        f"video_interpolation = {_quote(settings.video_interpolation)}",
+        f"video_muted = {str(settings.video_muted).lower()}",
+        f"video_volume = {settings.video_volume}",
+        f"scene_fps = {settings.scene_fps}",
+        # A scene's own sound, apart from a video's: linux-wallpaperengine
+        # takes audio at launch only, so coupling the two made every video
+        # slider step restart a scene. Silent writes a volume of 0, as every
+        # document did before scenes had a sound setting, so an untouched
+        # profile keeps its bytes (`_own_scene_dials` for one that sounds).
+        # A document without the dials keeps the constants of before: a scene's
+        # own silence or volume is a dial that waits, and the global sound
+        # would otherwise play what that scene was set to silence.
+        f"scene_muted = {str(scene_muted).lower()}",
+        f"scene_volume = {0 if scene_muted else settings.scene_volume}",
+        f"scene_pause_when_covered = {str(settings.scene_pause_when_covered).lower()}",
+        f"scene_scaling = {_quote(settings.scene_scaling)}",
+        f"scene_clamp = {_quote(settings.scene_clamp)}",
+        *dial_lines,
+    ]
+
+
 def _compile(
     settings: config.Settings,
     session: Session,
     *,
     presets: bool = True,
     renderer_dials: bool = True,
+    nothing_to_play: bool = True,
 ) -> Compiled:
     """Both generated documents, ``runtime.toml`` and its optional overrides, and what
     they were built without.
@@ -2053,6 +2224,14 @@ def _compile(
     turn its rules off. Everything else this checks still refuses too: the
     wire's size and count bounds, duplicate ids, text limits, renderer
     settings.
+
+    **All media may play nothing.** When it resolves nothing (and the scan
+    could look), it is written as a playlist that plays nothing, with its
+    reason (web wallpapers are off, or nothing in the library or the
+    favourites can play), at schema 8, and said (`NOTHING_OWNER`) when the
+    document plays it. Without ``nothing_to_play`` (a service not confirmed
+    for schema 8) that is refused (`NothingToPlayNeedsNewerServiceError`),
+    never written in a shape the service can't load.
     """
     _validate_settings_wire(settings)
     faults = session.authoring_faults()
@@ -2109,6 +2288,16 @@ def _compile(
         if compiled_lines is not None:
             fallback_entries.append(compiled_lines)
     playlists.append((FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, tuple(fallback_entries)))
+    # Why All media plays nothing, when it does: the owner's words first.
+    fallback_nothing = (
+        ""
+        if fallback_entries
+        else WEB_OFF_REASON
+        if any(workshop.web_off(item, allow_web) for item in fallback_items)
+        else FAVOURITES_REASON
+        if fallback_narrowed
+        else EMPTY_LIBRARY_REASON
+    )
 
     # All media is a dynamic inventory, not an authored list of paths. If it
     # resolves nothing, an unseen place may still hold something it would
@@ -2180,6 +2369,9 @@ def _compile(
     # True only once the default has resolved to nothing named: a named All media
     # was already judged (and refused) in `runtime_playlist`.
     implicit_default = False
+    # Whether anything the document plays names All media (the default, a rule
+    # or a display that is emitted): then its playing nothing is said.
+    fallback_named = False
 
     def require_known_fallback(owner: str = DEFAULT_OWNER, owner_id: str = "") -> None:
         """Refuse an All media that plays nothing only because the scan could not look.
@@ -2221,9 +2413,11 @@ def _compile(
         rule that is turned off). It is not emitted when it can't be used, and
         is neither said nor a reason to refuse.
         """
+        nonlocal fallback_named
         if is_fallback_reference(reference):
             if not quiet:
                 require_known_fallback(owner, owner_id)
+                fallback_named = True
             return FALLBACK_PLAYLIST_ID
         authored = find_playlist(reference, session)
         if authored is None:
@@ -2259,6 +2453,14 @@ def _compile(
     if default == FALLBACK_PLAYLIST_ID:
         implicit_default = True
         require_known_fallback()
+        fallback_named = True
+    if fallback_nothing and not nothing_to_play:
+        raise NothingToPlayNeedsNewerServiceError(
+            f"cannot compile runtime configuration because \u201c{FALLBACK_PLAYLIST_NAME}\u201d "
+            f"has nothing to play ({fallback_nothing}), and the running wallpaper service "
+            "is not confirmed to read a playlist that plays nothing: restart it after an "
+            "update, and make sure its installed units are current. Nothing was written."
+        )
     left_out.extend(presets_left_out.values())
     carries_presets = any(
         line.startswith(("scene_base = ", "properties = "))
@@ -2285,8 +2487,13 @@ def _compile(
         for entry in entries
         for line in entry
     )
+    # Written only when on, so a document while it is off reads exactly as
+    # one did before schema 8, which a service that predates it still loads.
+    web_allowed = allow_web and nothing_to_play
     schema_version = (
-        DIALS_SCHEMA_VERSION
+        NOTHING_TO_PLAY_SCHEMA_VERSION
+        if web_allowed or fallback_nothing
+        else DIALS_SCHEMA_VERSION
         if carries_dials
         else PRESET_SCHEMA_VERSION
         if carries_presets
@@ -2294,50 +2501,26 @@ def _compile(
         if settings.stop_animations_on_battery
         else SCHEMA_VERSION
     )
-    lines = [
-        "# Generated by Wall-in-One. Edit the library in the app, not this file.",
-        f"schema_version = {schema_version}",
-        f"default_playlist = {_quote(default)}",
-        "",
-        "[settings]",
-        f"cycle_interval_seconds = {settings.cycle_interval}",
-        f"cycle_enabled = {str(settings.cycle_enabled).lower()}",
-        f"shuffle = {str(settings.shuffle).lower()}",
-        f"dynamics_enabled = {str(settings.dynamics_enabled).lower()}",
-        f"display_mode = {_quote(settings.display_mode)}",
-        f"theme_source_connector = {_quote(settings.theme_source_connector)}",
-        *(["stop_animations_on_battery = true"] if settings.stop_animations_on_battery else []),
-        "",
-        "[renderer]",
-        f"noctalia_program = {_quote(_program('noctalia'))}",
-        f"mpvpaper_program = {_quote(_program('mpvpaper'))}",
-        f"linux_wallpaperengine_program = {_quote(_program('linux-wallpaperengine'))}",
-        f"own_scene_renderer = {str(settings.own_scene_renderer).lower()}",
-        'layer = "background"',
-        f"video_when_hidden = {_quote(settings.video_when_hidden)}",
-        f"video_hardware_decode = {str(settings.video_hardware_decode).lower()}",
-        f"video_interpolation = {_quote(settings.video_interpolation)}",
-        f"video_muted = {str(settings.video_muted).lower()}",
-        f"video_volume = {settings.video_volume}",
-        f"scene_fps = {settings.scene_fps}",
-        # A scene's own sound, apart from a video's: linux-wallpaperengine
-        # takes audio at launch only, so coupling the two made every video
-        # slider step restart a scene. Silent writes a volume of 0, as every
-        # document did before scenes had a sound setting, so an untouched
-        # profile keeps its bytes (`_own_scene_dials` for one that sounds).
-        # A document without the dials keeps the constants of before: a scene's
-        # own silence or volume is a dial that waits, and the global sound
-        # would otherwise play what that scene was set to silence.
-        f"scene_muted = {str(scene_muted).lower()}",
-        f"scene_volume = {0 if scene_muted else settings.scene_volume}",
-        f"scene_pause_when_covered = {str(settings.scene_pause_when_covered).lower()}",
-        f"scene_scaling = {_quote(settings.scene_scaling)}",
-        f"scene_clamp = {_quote(settings.scene_clamp)}",
-        *dial_lines,
-    ]
+    # Said when web wallpapers being off is why (the owner's words): an empty
+    # library or favourites list is the library's own state, said there.
+    if fallback_nothing == WEB_OFF_REASON and fallback_named:
+        left_out.append(
+            LeftOut(NOTHING_OWNER, "", FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, fallback_nothing)
+        )
+    lines = _document_head(
+        settings,
+        schema_version=schema_version,
+        default=default,
+        web_allowed=web_allowed,
+        dial_lines=dial_lines,
+        scene_muted=scene_muted,
+    )
 
     for playlist_id, name, entries in playlists:
         lines.extend(("", "[[playlists]]", f"id = {_quote(playlist_id)}", f"name = {_quote(name)}"))
+        if not entries:
+            # Only All media is ever emitted without entries (`fallback_nothing`).
+            lines.extend((f"nothing_to_play = {_quote(fallback_nothing)}", "entries = []"))
         for compiled_entry in entries:
             lines.extend(("", *compiled_entry))
 
@@ -2445,7 +2628,59 @@ def _compile(
         for connector, _playlist in emitted_assignments
         if session.displays.beats_global_rules(connector)
     )
-    return Compiled(document, _overrides_document(rotations, beating), tuple(left_out))
+    return Compiled(
+        document,
+        _overrides_document(rotations, beating),
+        tuple(left_out),
+        fallback_nothing,
+    )
+
+
+def nothing_to_play_document(settings: config.Settings, reason: str) -> str:
+    """A ``runtime.toml`` that plays nothing on any display, for ``reason`` (schema 8).
+
+    Built from ``settings`` alone, so it can be published when the library
+    can't be compiled: All media with no entries is the only playlist, and
+    the default. A service that loads it stops every renderer of its own and
+    plays nothing until a document that names something replaces it; play,
+    toggle and its own reload of the file can't bring anything back
+    (`Application._web_off_guard`). Web wallpapers are never allowed in it.
+    """
+    _validate_settings_wire(settings)
+    _bounded_text(reason, label="nothing_to_play reason", maximum_bytes=MAX_NOTHING_TO_PLAY_BYTES)
+    dial_lines = _renderer_dial_lines(settings)
+    lines = _document_head(
+        settings,
+        schema_version=NOTHING_TO_PLAY_SCHEMA_VERSION,
+        default=FALLBACK_PLAYLIST_ID,
+        web_allowed=False,
+        dial_lines=dial_lines,
+        scene_muted=settings.scene_muted,
+    )
+    lines.extend(
+        (
+            "",
+            "[[playlists]]",
+            f"id = {_quote(FALLBACK_PLAYLIST_ID)}",
+            f"name = {_quote(FALLBACK_PLAYLIST_NAME)}",
+            f"nothing_to_play = {_quote(reason)}",
+            "entries = []",
+        )
+    )
+    semantic_document = "\n".join(lines) + "\n"
+    _validate_status_budget(semantic_document)
+    lines.insert(2, f"config_generation = {_quote(_semantic_generation(semantic_document))}")
+    return "\n".join(lines) + "\n"
+
+
+def install_nothing_to_play(document: str, path: Path | None = None) -> None:
+    """Replace ``runtime.toml`` with ``document`` (`nothing_to_play_document`), durably.
+
+    The caller holds `compiler_lock` and has read what it replaces under it.
+    The overrides file is left as it is: the service skips what in it names a
+    playlist or display this document lacks.
+    """
+    _install(document, path if path is not None else paths.runtime_config_path())
 
 
 def _read_overrides(target: Path) -> str | None:
@@ -2546,7 +2781,12 @@ def publish_changes(
             *((target,) if document_changed else ()),
         )
         removed = (sidecar,) if overrides_changed and overrides is None else ()
-        changes = Published(written=written, removed=removed, left_out=built.left_out)
+        changes = Published(
+            written=written,
+            removed=removed,
+            left_out=built.left_out,
+            replaced=current if document_changed else None,
+        )
         try:
             _publish(
                 target,
@@ -2630,20 +2870,30 @@ def _fitted(
 ) -> Compiled:
     """The document for the live service: all of it, or as much as that service reads.
 
-    Schema 7 (the dials) and 6 (presets) are written only for what needs
-    them, and a service that predates one refuses it whole (its
-    ``deny_unknown_fields``). So one `runtime_compatibility.require_schema`
-    can't confirm gets the document without the dials; then, if it can't
-    confirm 6 either, without presets too (`LeftOut` says each). What
-    `presets_supported` and `dials_supported` compile from a status, exactly.
+    Schema 8 (``allow_web_wallpapers``), 7 (the dials) and 6 (presets) are
+    written only for what needs them, and a service that predates one refuses
+    it whole (its ``deny_unknown_fields``). So one
+    `runtime_compatibility.require_schema` can't confirm gets the document
+    without 8's additions; then, if it can't confirm 7 either, without the
+    dials; then without presets too (`LeftOut` says the last two). What
+    `presets_supported`, `dials_supported` and `nothing_to_play_supported`
+    compile from a status, exactly. An All media that plays nothing has no
+    shape below 8: that document is returned as it is, and
+    `_require_publishable` refuses it for such a service in the words it
+    uses for any schema it can't confirm. Nothing is written.
     """
     built = built if built is not None else _compile(settings, session)
+    if _schema_publishable(built.document, target) or built.nothing:
+        return built
+    built = _compile(settings, session, nothing_to_play=False)
     if _schema_publishable(built.document, target):
         return built
-    built = _compile(settings, session, renderer_dials=False)
+    built = _compile(settings, session, renderer_dials=False, nothing_to_play=False)
     if _schema_publishable(built.document, target):
         return built
-    return _compile(settings, session, presets=False, renderer_dials=False)
+    return _compile(
+        settings, session, presets=False, renderer_dials=False, nothing_to_play=False
+    )
 
 
 def _schema_publishable(document: str, target: Path) -> bool:

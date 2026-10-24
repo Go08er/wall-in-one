@@ -80,7 +80,18 @@ def test_an_empty_fallback_is_allowed_when_nothing_could_not_be_looked_at(
 
         document = tomllib.loads(built.document)
         assert document["default_playlist"] == ALL_MEDIA
-        assert document["playlists"] == [{"id": ALL_MEDIA, "name": "All media"}]
+        # Changed on purpose (r13, P1): written without `entries`, as before, the
+        # service could not parse it. It is now a playlist that plays nothing,
+        # with its reason, which only schema 8 carries.
+        assert document["schema_version"] == runtime_config.NOTHING_TO_PLAY_SCHEMA_VERSION
+        assert document["playlists"] == [
+            {
+                "id": ALL_MEDIA,
+                "name": "All media",
+                "nothing_to_play": runtime_config.EMPTY_LIBRARY_REASON,
+                "entries": [],
+            }
+        ]
         assert built.left_out == ()
     finally:
         session.shutdown()

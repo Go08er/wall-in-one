@@ -2220,12 +2220,16 @@ class Application(Adw.Application):
     def _hand_on_waiting_numbers(self) -> int:
         """Save every renderer number still waiting out its settle time; how many.
 
-        `dial_rows.flush_all`, for every way the application ends: a window's
-        close, ``ctl quit`` (`request_quit`) and a shutdown that comes another
-        way (`do_shutdown`). Each takes the queued write its timer would have
-        taken, admitted even once a quit was asked (`dial_rows.handing_on`);
-        that write holds the application until it is durable
-        (`_maybe_finish_requested_quit`).
+        `dial_rows.flush_all`, for the ways the application ends that run
+        this process's own code: a window's close, ``ctl quit``
+        (`request_quit`), and a quit that comes another way, such as Ctrl-C
+        (PyGObject's SIGINT fallback calls ``quit()``), through `do_shutdown`.
+        SIGTERM (there is no handler for it) and a lost display (GTK ends
+        the process itself) run none of them: a number nudged under
+        `dial_rows.SETTLE_MS` before either is lost (review r13c, N-9). Each
+        takes the queued write its timer would have taken, admitted even
+        once a quit was asked (`dial_rows.handing_on`); that write holds the
+        application until it is durable (`_maybe_finish_requested_quit`).
         """
         return dial_rows.flush_all()
 

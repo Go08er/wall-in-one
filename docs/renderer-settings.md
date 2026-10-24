@@ -203,6 +203,15 @@ what it can check), and a dial this build doesn't know rides through: the
 state file shape can now put back a nested object (`renderer`, `video`,
 `scene`) that holds only what it carried.
 
+A number is saved once it has stopped changing for 450 ms, so a spin through
+a range is one save. One still waiting when the app ends is saved then: on a
+window's close, on `wall-in-one ctl quit`, and on Ctrl-C, which waits up to
+15 s for that save and the publication it asks for (a second Ctrl-C ends the
+wait; the save still goes through). One whose time runs out while a
+`ctl quit` waits for other saves is saved too, and the quit waits for it.
+SIGTERM, and a session that ends (the display goes away), end the process
+without the app's own code: a number nudged in the last 450 ms is lost then.
+
 ## Wire
 
 `[renderer]` gains a key per new global dial, **written only when it isn't

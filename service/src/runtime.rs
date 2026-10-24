@@ -1364,6 +1364,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .to_string();
             let playlist_changed = wanted != self.active_playlist;
             let routing_changed = overrode != self.schedule_overrode_default;
+            if playlist_changed && (overrode || self.config.displays.is_empty()) {
+                // Known before the change is decided, not learned by
+                // applying it: a stand-in that already plays isn't started
+                // again.
+                self.ask_ahead_of_mirrored_change(&wanted);
+            }
             // A playlist the service refused throughout plays its stand-in
             // (`stand_in`): a change to one whose stand-in is what already
             // plays changes nothing on screen.
@@ -1382,9 +1388,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let mut candidate_available = true;
                 if playlist_changed {
                     self.active_playlist = wanted.clone();
-                    candidate_available = self
-                        .reset_cursor_automatic(&self.shown_playlist_id(&wanted))
-                        || self.nothing_reason(&wanted).is_some();
+                    candidate_available =
+                        self.start_cursor_for(&wanted) || self.nothing_reason(&wanted).is_some();
                 }
                 if candidate_available {
                     let candidate = self.selection_state();
@@ -1543,6 +1548,19 @@ impl<D: WallpaperDriver> Runtime<D> {
         for connector in &connectors {
             if pending_at_start.contains(connector) || self.pending_routes.contains_key(connector) {
                 continue;
+            }
+            if let Some(route) = self.routes.get(connector)
+                && route.manual_playlist.is_none()
+                && let Ok((wanted, _, _)) = self.automatic_route(connector, at)
+                && self
+                    .config
+                    .playlist(&wanted)
+                    .is_some_and(|playlist| playlist.id != route.active_playlist)
+            {
+                // As in mirrored mode: a rule's playlist the service refuses
+                // throughout is known to be before the route changes, so a
+                // stand-in that already plays isn't started again.
+                self.ask_ahead_of_route_change(connector, &wanted);
             }
             let Some(route) = self.routes.get(connector) else {
                 continue;
@@ -2376,6 +2394,103 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
         learned
+    }
+
+    /// The settings motion on `output` would be started with under
+    /// `playback`, as `effective_motion_settings` gives them, without its
+    /// bookkeeping: for asking ahead of a change that may not happen.
+    fn motion_settings_for(
+        &self,
+        output: &str,
+        playback: PlaybackState,
+    ) -> crate::config::Settings {
+        let inhibited = self.animations_inhibited();
+        let held_pause = playback == PlaybackState::Paused
+            && (self.power_released_outputs.contains(output)
+                || (!self.is_independent() && self.power_released_outputs.contains("")));
+        let mut settings = self.config.settings.clone();
+        settings.dynamics_enabled &=
+            !inhibited && playback != PlaybackState::Stopped && !held_pause;
+        settings
+    }
+
+    /// Before a schedule change puts `reference` in force on the mirrored
+    /// displays, ask about its entries from where its cursor would start
+    /// (`reset_cursor_automatic`), so a playlist the service refuses
+    /// throughout is known to be before the change is decided: a change
+    /// whose stand-in is what already plays then changes nothing on screen.
+    fn ask_ahead_of_mirrored_change(&mut self, reference: &str) {
+        let Some(playlist) = self.config.playlist(reference) else {
+            return;
+        };
+        let playlist_id = playlist.id.clone();
+        if self.shown_playlist_id(&playlist_id) != playlist_id {
+            return;
+        }
+        let Some(visiting) = self
+            .cursors
+            .get(&playlist_id)
+            .map(|cursor| cursor.order.clone())
+        else {
+            return;
+        };
+        let mut settings = self.motion_settings_for("", self.playback_state);
+        settings.dynamics_enabled = self.target_outputs.iter().any(|output| {
+            self.motion_settings_for(output, self.playback_state)
+                .dynamics_enabled
+        });
+        self.ask_ahead(
+            &playlist_id,
+            &visiting,
+            &settings,
+            false,
+            &mut Cleared::new(),
+        );
+    }
+
+    /// The same for an independent route about to follow `reference`, from
+    /// where its new cursor would start (`new_route_cursor`).
+    fn ask_ahead_of_route_change(&mut self, connector: &str, reference: &str) {
+        let Some(playlist) = self.config.playlist(reference) else {
+            return;
+        };
+        let playlist_id = playlist.id.clone();
+        let visiting: Vec<usize> = (0..playlist.entries.len()).collect();
+        let Some(playback) = self.routes.get(connector).map(|route| route.playback_state) else {
+            return;
+        };
+        if self.shown_playlist_id(&playlist_id) != playlist_id {
+            return;
+        }
+        let settings = self.motion_settings_for(connector, playback);
+        self.ask_ahead(
+            &playlist_id,
+            &visiting,
+            &settings,
+            false,
+            &mut Cleared::new(),
+        );
+    }
+
+    /// Put the cursor of what a display on `reference` plays at its start:
+    /// that playlist's first entry that can play (`reset_cursor_automatic`).
+    /// A stand-in (`stand_in`) keeps its rotation where it is when its entry
+    /// there can play: the person chose `reference`, not the stand-in, and
+    /// the stand-in may already be playing. True when there is an entry.
+    fn start_cursor_for(&mut self, reference: &str) -> bool {
+        let shown = self.shown_playlist_id(reference);
+        let own = self
+            .config
+            .playlist(reference)
+            .map(|playlist| playlist.id.as_str());
+        if own.is_some_and(|own| own != shown)
+            && self
+                .current_entry_for(&shown)
+                .is_some_and(|entry| !self.cant_play(&shown, entry))
+        {
+            return true;
+        }
+        self.reset_cursor_automatic(&shown)
     }
 
     fn playlist_has_usable_entry(&self, playlist_id: &str) -> bool {
@@ -4369,9 +4484,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.manual_playlist = Some(playlist_id.clone());
         self.active_playlist = playlist_id.clone();
         self.schedule_overrode_default = false;
-        if !self.reset_cursor_automatic(&self.shown_playlist_id(&playlist_id))
-            && self.nothing_reason(&playlist_id).is_none()
-        {
+        if !self.start_cursor_for(&playlist_id) && self.nothing_reason(&playlist_id).is_none() {
             self.manual_playlist = previous_manual;
             self.restore_selection(&baseline);
             return self.fail(self.taboo_playlist_error(&playlist_id));
@@ -4435,7 +4548,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.schedule_overrode_default = overrode;
         self.active_playlist.clone_from(&playlist_id);
         for effective_playlist in &effective {
-            if !self.reset_cursor_automatic(&self.shown_playlist_id(effective_playlist))
+            if !self.start_cursor_for(effective_playlist)
                 && self.nothing_reason(effective_playlist).is_none()
             {
                 self.manual_playlist = previous_manual;

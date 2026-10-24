@@ -37,11 +37,12 @@ import stat
 import string
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
+from wall_in_one.dials import PROPERTY_TYPES, SceneProperty
 from wall_in_one.library.model import MediaItem, Unplayable, UnseenKind, is_absent
 
 #: Where the scan is told about a place it could not look into: the folder,
@@ -156,17 +157,37 @@ _INT_MAX: Final = 2**31 - 1
 #: fields, which a preset can't usefully set and a path must not come from.
 _PASSED_TYPES: Final[frozenset[str]] = frozenset({"bool", "slider", "color", "combo"})
 
+#: The types kept from a declaration: those a preset passes on, and a line
+#: of text a person may set on their own scene (`dials.PROPERTY_TYPES`).
+_DECLARED_TYPES: Final[frozenset[str]] = frozenset(PROPERTY_TYPES)
+
+#: A label longer than this is cut: it is a word or two in real content.
+_MAX_LABEL: Final = 120
+
 
 @dataclass(frozen=True, slots=True)
 class Declared:
     """One property a wallpaper declares in its ``general.properties``."""
 
     name: str
-    #: `bool`, `slider`, `color` or `combo` (the only types kept).
+    #: `bool`, `slider`, `color`, `combo` or `textinput` (the only types kept).
     type: str
     #: A combo's option values, as the engine keys them (an integer as its
     #: decimal text). Empty for the other types.
     options: frozenset[str] = frozenset()
+    #: Its ``text``, or empty.
+    label: str = ""
+    #: Its ``value`` as the engine reads it, or ``None`` when the engine
+    #: couldn't (`property_value`).
+    default: str | None = None
+    #: A slider's ``min``, ``max`` and ``step``, as the engine defaults them.
+    minimum: float = 0.0
+    maximum: float = 0.0
+    step: float = 0.0
+    #: A combo's (value, label), in the order declared.
+    choices: tuple[tuple[str, str], ...] = ()
+    #: Its ``order``, where the author sorted it.
+    order: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,20 +505,69 @@ def _declarations(general: object) -> tuple[Declared, ...]:
         if not isinstance(spec, dict):
             continue
         kind = spec.get("type")
-        if not isinstance(kind, str) or kind not in _PASSED_TYPES:
+        if not isinstance(kind, str) or kind not in _DECLARED_TYPES:
             continue
         options: frozenset[str] = frozenset()
+        choices: list[tuple[str, str]] = []
         if kind == "combo":
             listed = spec.get("options")
             if not isinstance(listed, list):
                 continue
-            options = frozenset(
-                value
-                for value in (_combo_key(option) for option in listed[:_MAX_DECLARED])
-                if value is not None
-            )
-        found.append(Declared(name=name, type=kind, options=options))
+            for option in listed[:_MAX_DECLARED]:
+                value = _combo_key(option)
+                if value is None or value in options:
+                    continue
+                assert isinstance(option, dict)
+                options |= {value}
+                choices.append((value, _label(option.get("label"), value)))
+        declared = Declared(
+            name=name,
+            type=kind,
+            options=options,
+            label=_label(spec.get("text"), ""),
+            minimum=_bound(spec.get("min")),
+            maximum=_bound(spec.get("max")),
+            step=_bound(spec.get("step")),
+            choices=tuple(choices),
+            order=_order(spec.get("order")),
+        )
+        found.append(replace(declared, default=_declared_value(declared, spec)))
     return tuple(found)
+
+
+def _label(text: object, otherwise: str) -> str:
+    """A declaration's ``text`` as one plain line, or ``otherwise``."""
+    if not isinstance(text, str):
+        return otherwise
+    line = " ".join(text.split())
+    if not line or any(unicodedata.category(character) == "Cc" for character in line):
+        return otherwise
+    return line[:_MAX_LABEL]
+
+
+def _bound(value: object) -> float:
+    """A slider's ``min``, ``max`` or ``step``: what the engine reads, 0 when absent."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0.0
+    if isinstance(value, int):
+        return float(value) if abs(value) <= _MAX_SLIDER_MAGNITUDE else 0.0
+    return value if math.isfinite(value) and abs(value) <= _MAX_SLIDER_MAGNITUDE else 0.0
+
+
+def _order(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if _INT_MIN <= value <= _INT_MAX else 0
+
+
+def _declared_value(declared: Declared, spec: dict[object, object]) -> str | None:
+    """The declared ``value`` as the engine reads it (PropertyParser.cpp), or ``None``."""
+    value = spec.get("value")
+    if declared.type == "bool" and "value" not in spec:
+        return "false"
+    if declared.type == "textinput":
+        return value if isinstance(value, str) and own_text(value) else None
+    return property_value(declared, value)
 
 
 def _combo_key(option: object) -> str | None:
@@ -601,7 +671,7 @@ def preset_properties(preset: WorkshopItem, base: WorkshopItem) -> tuple[tuple[s
     A name the base does not declare is left out: the engine would ignore it
     anyway (it walks the base's declarations, WallpaperApplication.cpp:502-518).
     """
-    declared = {item.name: item for item in base.declared}
+    declared = {item.name: item for item in base.declared if item.type in _PASSED_TYPES}
     kept: dict[str, str] = {}
     for name, value in preset.preset:
         found = declared.get(name)
@@ -611,6 +681,80 @@ def preset_properties(preset: WorkshopItem, base: WorkshopItem) -> tuple[tuple[s
         if text is not None:
             kept[name] = text
     return tuple(sorted(kept.items()))
+
+
+def own_text(value: str) -> bool:
+    """Whether ``value`` may be a ``textinput``'s: one line the service accepts."""
+    return valid_property_value(value) and value == value.strip("\n\r")
+
+
+def settable(declared: Iterable[Declared]) -> tuple[SceneProperty, ...]:
+    """The properties of ``declared`` a person may set, as both interfaces show them.
+
+    In the author's order. Only one whose declared value the engine reads
+    (a control has to start somewhere true), a slider with a range, a combo
+    with options, and at most `MAX_PROPERTIES`.
+    """
+    shown: list[tuple[int, int, SceneProperty]] = []
+    for index, item in enumerate(declared):
+        if item.default is None or item.type not in _DECLARED_TYPES:
+            continue
+        step = item.step
+        if item.type == "slider":
+            if not item.minimum < item.maximum:
+                continue
+            if not item.minimum <= float(item.default) <= item.maximum:
+                continue
+            if not 0 < step <= item.maximum - item.minimum:
+                step = (item.maximum - item.minimum) / 100
+        if item.type == "combo" and not item.choices:
+            continue
+        shown.append(
+            (
+                item.order,
+                index,
+                SceneProperty(
+                    name=item.name,
+                    type=item.type,
+                    label=item.label or item.name,
+                    default=item.default,
+                    minimum=item.minimum,
+                    maximum=item.maximum,
+                    step=step,
+                    options=item.choices,
+                ),
+            )
+        )
+    shown.sort(key=lambda entry: entry[:2])
+    return tuple(found for _order, _index, found in shown[:MAX_PROPERTIES])
+
+
+def own_value(setting: SceneProperty, value: str) -> str | None:
+    """``value`` as the engine reads ``setting``, or ``None`` when it would refuse it.
+
+    A person's value for one of their scene's properties, checked as a
+    preset's is (`property_value`) and against the declaration's own range
+    and options: the last look before it becomes an argument.
+    """
+    if not valid_property_value(value):
+        return None
+    if setting.type == "bool":
+        return value if value in ("true", "false") else None
+    if setting.type == "slider":
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+        if not math.isfinite(number) or not setting.minimum <= number <= setting.maximum:
+            return None
+        return property_value(Declared(name=setting.name, type="slider"), number)
+    if setting.type == "color":
+        return property_value(Declared(name=setting.name, type="color"), value)
+    if setting.type == "combo":
+        return value if value in {option for option, _label in setting.options} else None
+    if setting.type == "textinput":
+        return value if own_text(value) else None
+    return None
 
 
 @dataclass(frozen=True, slots=True)

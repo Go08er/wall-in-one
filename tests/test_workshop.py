@@ -668,7 +668,10 @@ def test_a_huge_integer_in_a_combo_option_costs_nothing(tmp_path: Path) -> None:
 
     assert {item.id for item in found} == {"200", "201"}
     (scene,) = (item for item in found if item.id == "201")
-    assert scene.declared == (workshop.Declared("k", "combo", frozenset({"3"})),)
+    ((declared),) = scene.declared
+    assert (declared.name, declared.type, declared.options) == ("k", "combo", frozenset({"3"}))
+    # The engine's value, 1, isn't one of the options it kept: nothing to start a control at.
+    assert (declared.choices, declared.default) == ((("3", "b"),), None)
 
 
 def test_a_huge_integer_in_a_presets_values_costs_nothing(tmp_path: Path) -> None:

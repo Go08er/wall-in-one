@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import math
 import os
 import stat
 import threading
@@ -45,8 +46,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final, TypeVar
 
-from wall_in_one import file_io, paths
-from wall_in_one.library import pairing, state_file, stills
+from wall_in_one import dials, file_io, paths
+from wall_in_one.library import pairing, state_file, stills, workshop
 from wall_in_one.library.model import Kind, Library, MediaItem
 from wall_in_one.theme import noctalia
 
@@ -302,6 +303,143 @@ class PalettePolicy:
         )
 
 
+#: The dial keys a wallpaper's own table holds, by renderer, in table order.
+_DIAL_KEYS: Final[Mapping[str, tuple[str, ...]]] = {
+    renderer: tuple(known.key for known in dials.PER_WALLPAPER[renderer])
+    for renderer in ("video", "scene")
+}
+
+
+def _scalar(value: object) -> bool:
+    """A value a dial could hold as JSON gives it: no NaN, which JSON can't write back."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, bool | int | str)
+
+
+@dataclass(frozen=True, slots=True)
+class RendererOverrides:
+    """A wallpaper's own renderer settings: its dials and its Wallpaper Engine values.
+
+    Stored as the file holds them, each known dial's value whether or not
+    this build can use it, so a newer build's wider range survives this
+    one's saves; `applied` is what this build applies. A dial this build
+    doesn't know rides through `DOCUMENT_SHAPE`. Not part of `customized`:
+    "Reset to defaults" is the still and the colours; each of these has its
+    own reset (`Store.set_dial`, `Store.set_property`, `Store.reset_renderer`).
+    """
+
+    #: (key, value) by renderer, in `dials.PER_WALLPAPER` order.
+    video: tuple[tuple[str, dials.Value], ...] = ()
+    scene: tuple[tuple[str, dials.Value], ...] = ()
+    #: A scene's own Wallpaper Engine values, by name in name order, as the
+    #: engine reads them; checked against what it declares when compiled.
+    properties: tuple[tuple[str, str], ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.video or self.scene or self.properties)
+
+    def stored(self, renderer: str) -> tuple[tuple[str, dials.Value], ...]:
+        if renderer == "video":
+            return self.video
+        if renderer == "scene":
+            return self.scene
+        return ()
+
+    def applied(self, renderer: str) -> tuple[tuple[str, dials.Value], ...]:
+        """The overrides of ``renderer`` this build applies: known, typed, in bounds."""
+        return dials.overrides(renderer, dict(self.stored(renderer)))
+
+    def dial(self, renderer: str, key: str) -> dials.Value | None:
+        """``key``'s own value, or ``None`` when it follows the default."""
+        return dict(self.applied(renderer)).get(key)
+
+    def with_dial(self, renderer: str, key: str, value: dials.Value | None) -> RendererOverrides:
+        """These overrides with ``key`` set to ``value``, or back to the default for ``None``.
+
+        Raises `ValueError` for a dial a wallpaper can't set or a value it doesn't take.
+        """
+        known = dials.dial(renderer, key)
+        if known is None or not known.per_wallpaper:
+            raise ValueError(f"a wallpaper has no {renderer} dial {key!r}")
+        kept = [(name, stored) for name, stored in self.stored(renderer) if name != key]
+        if value is not None:
+            checked = known.coerce(value)
+            if checked is None:
+                raise ValueError(f"{value!r} is not a value {key} takes")
+            kept.append((key, checked))
+        order = _DIAL_KEYS[renderer]
+        table = tuple(sorted(kept, key=lambda pair: order.index(pair[0])))
+        if renderer == "video":
+            return replace(self, video=table)
+        return replace(self, scene=table)
+
+    def property(self, name: str) -> str | None:
+        """The person's own value for the Wallpaper Engine property ``name``, or ``None``."""
+        return dict(self.properties).get(name)
+
+    def with_property(self, name: str, value: str | None) -> RendererOverrides:
+        """These overrides with property ``name`` set to ``value``, or cleared for ``None``.
+
+        Raises `ValueError` for a name or value the service would refuse.
+        """
+        if not workshop.PROPERTY_NAME.fullmatch(name):
+            raise ValueError(f"{name!r} is not a property name the service accepts")
+        kept = {key: stored for key, stored in self.properties if key != name}
+        if value is not None:
+            if not workshop.valid_property_value(value) or "\n" in value:
+                raise ValueError(f"{value!r} is not a value the service accepts")
+            kept[name] = value
+        if len(kept) > workshop.MAX_PROPERTIES:
+            raise ValueError(f"a wallpaper holds at most {workshop.MAX_PROPERTIES} values")
+        return replace(self, properties=tuple(sorted(kept.items())))
+
+    def encode(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.video:
+            payload["video"] = dict(self.video)
+        if self.scene:
+            payload["scene"] = dict(self.scene)
+        if self.properties:
+            payload["properties"] = dict(self.properties)
+        return payload
+
+    @classmethod
+    def decode(cls, raw: object) -> RendererOverrides:
+        """What a record's ``renderer`` holds that this build models. Never raises."""
+        if not isinstance(raw, dict):
+            return cls()
+
+        def stored(renderer: str) -> tuple[tuple[str, dials.Value], ...]:
+            table = raw.get(renderer)
+            if not isinstance(table, dict):
+                return ()
+            return tuple(
+                (key, table[key])
+                for key in _DIAL_KEYS[renderer]
+                if key in table and _scalar(table[key])
+            )
+
+        listed = raw.get("properties")
+        properties: dict[str, str] = {}
+        if isinstance(listed, dict):
+            for name, value in listed.items():
+                if len(properties) >= workshop.MAX_PROPERTIES:
+                    break
+                if (
+                    isinstance(name, str)
+                    and workshop.PROPERTY_NAME.fullmatch(name)
+                    and isinstance(value, str)
+                    and workshop.valid_property_value(value)
+                ):
+                    properties[name] = value
+        return cls(
+            video=stored("video"),
+            scene=stored("scene"),
+            properties=tuple(sorted(properties.items())),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Pairing:
     """One library item as the app actually uses it."""
@@ -320,6 +458,9 @@ class Pairing:
     #: retraction -- and this is how a caller can say so out loud.
     override_missing: bool = False
     health: Health = Health()
+    #: Its own renderer settings (`RendererOverrides`), kept apart from
+    #: `customized`.
+    renderer: RendererOverrides = RendererOverrides()
 
     @property
     def is_moving(self) -> bool:
@@ -339,7 +480,14 @@ class Pairing:
                 "reason": self.health.reason,
                 "source": self.health.source,
             }
+        if self.renderer:
+            payload["renderer"] = self.renderer.encode()
         return payload
+
+    @property
+    def kept(self) -> bool:
+        """Whether this record holds anything worth a line in the file."""
+        return self.customized or self.health.is_borked or bool(self.renderer)
 
 
 def _record(raw: object) -> Pairing | None:
@@ -374,17 +522,31 @@ def _record(raw: object) -> Pairing | None:
         palette=PalettePolicy.decode(raw.get("palette"), raw.get("mode")),
         customized=customized,
         health=health,
+        renderer=RendererOverrides.decode(raw.get("renderer")),
     )
 
 
 #: What this build models; everything else in the file is carried, not dropped.
+#: A wallpaper's ``renderer`` is kept for what it carries even when this
+#: build reads nothing in it: a newer build's dials are somebody's choices.
 DOCUMENT_SHAPE: Final = state_file.Shape(
     known=frozenset({"version"}),
     records={
         "pairings": state_file.Shape(
             known=frozenset({"identity", "still", "palette", "mode"}),
             identity="identity",
-            objects={"health": state_file.Shape(known=frozenset({"state", "reason", "source"}))},
+            objects={
+                "health": state_file.Shape(known=frozenset({"state", "reason", "source"})),
+                "renderer": state_file.Shape(
+                    known=frozenset({"properties"}),
+                    objects={
+                        renderer: state_file.Shape(known=frozenset(_DIAL_KEYS[renderer]))
+                        for renderer in ("video", "scene")
+                    },
+                    kept=frozenset({"video", "scene"}),
+                ),
+            },
+            kept=frozenset({"renderer"}),
         )
     },
 )
@@ -577,6 +739,8 @@ def _parse(path: Path, payload: dict[str, Any]) -> tuple[dict[str, Pairing], str
             or not isinstance(health.get("source"), str)
         ):
             malformed += 1
+        if "renderer" in raw and not isinstance(raw["renderer"], dict):
+            malformed += 1
         if record.identity.key in found:
             duplicate += 1
         found[record.identity.key] = record
@@ -728,6 +892,7 @@ def _resolve(
         customized=saved.customized,
         override_missing=missing,
         health=saved.health,
+        renderer=saved.renderer,
     )
 
 
@@ -926,6 +1091,7 @@ class Store:
             customized=saved.customized,
             override_missing=missing,
             health=saved.health,
+            renderer=saved.renderer,
         )
 
     def apply(
@@ -960,6 +1126,7 @@ class Store:
                 palette=palette,
                 customized=True,
                 health=health,
+                renderer=existing.renderer if existing is not None else RendererOverrides(),
             )
             records[identity.key] = record
             return record, record != existing
@@ -990,6 +1157,7 @@ class Store:
                 palette=chosen,
                 customized=True,
                 health=health,
+                renderer=existing.renderer if existing is not None else RendererOverrides(),
             )
             records[identity.key] = record
             return record, record != existing
@@ -1016,6 +1184,7 @@ class Store:
                 palette=replace(palette, mode=mode),
                 customized=True,
                 health=health,
+                renderer=existing.renderer if existing is not None else RendererOverrides(),
             )
             records[identity.key] = record
             return record, record != existing
@@ -1119,8 +1288,9 @@ class Store:
             existing = records.get(identity.key)
             if existing is None or not existing.health.is_borked:
                 return False, False
-            if existing.customized:
-                records[identity.key] = replace(existing, health=Health())
+            cleared = replace(existing, health=Health())
+            if cleared.kept:
+                records[identity.key] = cleared
             else:
                 del records[identity.key]
             return True, True
@@ -1128,20 +1298,78 @@ class Store:
         return self._mutate(clear, refuse_unreadable=True)
 
     def reset(self, item: MediaItem) -> bool:
-        """Forget everything chosen for ``item``. True if there was anything."""
+        """Forget the still and colours chosen for ``item``. True if there was anything.
+
+        Its own renderer settings stay: each has a reset of its own
+        (`reset_renderer`), and a person who chose a frame rate didn't ask
+        for it back by resetting the colours.
+        """
         identity = Identity.of(item)
 
         def reset_choices(records: dict[str, Pairing]) -> tuple[bool, bool]:
             existing = records.get(identity.key)
             if existing is None:
                 return False, False
-            if existing.health.is_borked:
-                records[identity.key] = Pairing(identity=identity, health=existing.health)
+            left = Pairing(identity=identity, health=existing.health, renderer=existing.renderer)
+            if left.kept:
+                records[identity.key] = left
             else:
                 del records[identity.key]
             return True, True
 
         return self._mutate(reset_choices, refuse_unreadable=True)
+
+    def set_dial(
+        self, item: MediaItem, renderer: str, key: str, value: dials.Value | None
+    ) -> Pairing:
+        """Give ``item`` its own value for one dial, or (``None``) let it follow the default.
+
+        Raises `ValueError`, before any write, for a dial ``item`` can't have
+        or a value it doesn't take.
+        """
+        wanted = "video" if item.kind is Kind.VIDEO else "scene" if item.kind is Kind.SCENE else ""
+        if renderer != wanted:
+            raise ValueError(f"{item.name} has no {renderer} dials")
+        RendererOverrides().with_dial(renderer, key, value)
+        return self._edit_renderer(item, lambda own: own.with_dial(renderer, key, value))[0]
+
+    def set_property(self, item: MediaItem, name: str, value: str | None) -> Pairing:
+        """Give a scene its own value for a Wallpaper Engine property, or clear it (``None``).
+
+        Raises `ValueError`, before any write, for anything but a scene that
+        isn't a web page, or a name or value the service would refuse. That
+        ``item`` declares ``name`` is checked when it is compiled.
+        """
+        if item.kind is not Kind.SCENE or item.web_page:
+            raise ValueError(f"{item.name} has no Wallpaper Engine properties")
+        RendererOverrides().with_property(name, value)
+        return self._edit_renderer(item, lambda own: own.with_property(name, value))[0]
+
+    def reset_renderer(self, item: MediaItem) -> bool:
+        """Let every dial and property of ``item`` follow its default. True if any was set."""
+        return self._edit_renderer(item, lambda _own: RendererOverrides())[1]
+
+    def _edit_renderer(
+        self, item: MediaItem, edit: Callable[[RendererOverrides], RendererOverrides]
+    ) -> tuple[Pairing, bool]:
+        """One edit of ``item``'s own renderer settings, on the record as saved now.
+
+        The record, and whether the edit changed it.
+        """
+        identity = Identity.of(item)
+
+        def change(records: dict[str, Pairing]) -> tuple[tuple[Pairing, bool], bool]:
+            existing = records.get(identity.key) or Pairing(identity=identity)
+            record = replace(existing, renderer=edit(existing.renderer))
+            if record == existing:
+                return (record, False), False
+            if record.kept:
+                records[identity.key] = record
+            else:
+                records.pop(identity.key, None)
+            return (record, True), True
+
+        return self._mutate(change)
 
     def forget_identity(self, identity: Identity) -> bool:
         """Drop a record by identity, for a wallpaper the app has just deleted.

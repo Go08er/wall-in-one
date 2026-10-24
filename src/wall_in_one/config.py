@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Self
 
-from wall_in_one import file_io, paths, runtime_compatibility
+from wall_in_one import dials, file_io, paths, runtime_compatibility
 from wall_in_one.library import state_file
 from wall_in_one.library.model import is_absent
 from wall_in_one.theme.noctalia import ALL_SCHEMES, DEFAULT_SCHEME
@@ -338,6 +338,32 @@ class Settings:
     scene_scaling: str = scenes.DEFAULT_SCALING
     scene_clamp: str = scenes.DEFAULT_CLAMP
 
+    #: The renderer dials (`wall_in_one.dials`, docs/renderer-settings.md):
+    #: each the default a wallpaper may override in its own settings. Typed
+    #: and bounded there, and written to this file only when it isn't its
+    #: default (`DIAL_SETTINGS`).
+    video_fit: str = "fill"
+    video_speed: float = 1.0
+    video_brightness: int = 0
+    video_contrast: int = 0
+    video_saturation: int = 0
+    video_gamma: int = 0
+    video_rotate: int = 0
+    video_deband: bool = False
+    video_scale: str = ""
+    video_hidden_trigger: str = ""
+    #: A scene's sound. Silent by default, as a video is; the volume is kept
+    #: while silent, as the video's is.
+    scene_muted: bool = True
+    scene_volume: int = 50
+    scene_audio_processing: bool = True
+    scene_particles: bool = True
+    scene_mouse: bool = True
+    scene_parallax: bool = True
+    scene_pause_when_covered: bool = True
+    scene_pause_only_active: bool = False
+    scene_automute: bool = True
+
     #: ``mirrored`` is the cheap, predictable default: every attached display
     #: follows one cursor and one schedule. ``independent`` unlocks authored
     #: connector assignments, targeted calendar rules, cursors and renderers.
@@ -428,8 +454,12 @@ class Settings:
             # choice, so a hand-edited incomplete independent setup becomes the
             # safe mirrored default instead of inventing a display identity.
             display_mode = DISPLAY_MODE_MIRRORED
+        repaired: dict[str, Any] = {
+            dial.setting: _dial_value(dial, getattr(self, dial.setting)) for dial in DIAL_SETTINGS
+        }
         return replace(
             self,
+            **repaired,
             opacity=opacity,
             preview_scheme=scheme,
             cycle_interval=interval,
@@ -496,6 +526,8 @@ class Settings:
             own_scene_renderer=boolean("own_scene_renderer", True),
             output=text("output", ""),
             roots=directories("roots"),
+            # Repaired, not trusted, by `validated`: `_dial_value`.
+            **{dial.setting: raw.get(dial.setting, dial.default) for dial in DIAL_SETTINGS},
         ).validated()
 
     def to_toml(self) -> str:
@@ -534,7 +566,56 @@ class Settings:
         # never turns it on keeps exactly the bytes it had.
         if self.allow_web_wallpapers:
             lines += ("allow_web_wallpapers = true",)
+        # The dials too: an untouched profile keeps its bytes, and an older
+        # build sees a key it lacks only once somebody turned one.
+        for dial in DIAL_SETTINGS:
+            value = getattr(self, dial.setting)
+            if value != dial.default:
+                lines += (f"{dial.setting} = {dials.toml_value(value)}",)
         return "\n".join(lines) + "\n"
+
+
+#: The dials that are `Settings` fields this module reads and writes as a
+#: table (`dials.GLOBAL`), apart from the three older scene ones it always
+#: wrote (``scene_fps``, ``scene_scaling``, ``scene_clamp``).
+DIAL_SETTINGS: Final = tuple(
+    dial
+    for dial in dials.GLOBAL
+    if dial.setting not in ("scene_fps", "scene_scaling", "scene_clamp")
+)
+
+
+def _dial_value(dial: dials.Dial, value: object) -> dials.Value:
+    """``value`` for ``dial``: itself when valid, a number clamped into range, else the default."""
+    if dial.kind == "float" and isinstance(value, float) and math.isfinite(value):
+        value = round(value, 2)
+    valid = dial.coerce(value)
+    if valid is not None:
+        return valid
+    finite = isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
+    if dial.kind in ("int", "float") and finite and not isinstance(value, bool):
+        assert isinstance(value, int | float)
+        # Compared before any conversion: an integer may have any number of digits.
+        clamped = (
+            dial.maximum
+            if value > dial.maximum
+            else dial.minimum
+            if value < dial.minimum
+            else float(value)
+        )
+        return int(clamped) if dial.kind == "int" else round(clamped, 2)
+    return dial.default
+
+
+def describe_dial(dial: dials.Dial) -> str:
+    """What ``dial`` takes, for a refusal: "a boolean", "an integer between 0 and 100"..."""
+    if dial.kind == "bool":
+        return "a boolean"
+    if dial.kind == "int":
+        return f"an integer between {int(dial.minimum)} and {int(dial.maximum)}"
+    if dial.kind == "float":
+        return f"a number between {dial.minimum:g} and {dial.maximum:g}"
+    return "one of " + ", ".join(json.dumps(choice) for choice, _label in dial.choices)
 
 
 def _roots_line(roots: Sequence[Path]) -> str:
@@ -763,6 +844,10 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         if key in raw and raw[key] not in allowed:
             choices_text = ", ".join(allowed)
             raise ConfigError(f"cannot use {target}: {key} must be one of {choices_text}")
+
+    for dial in DIAL_SETTINGS:
+        if dial.setting in raw and dial.coerce(raw[dial.setting]) is None:
+            raise ConfigError(f"cannot use {target}: {dial.setting} must be {describe_dial(dial)}")
 
     for key, maximum in (
         ("active_playlist", MAX_RUNTIME_REFERENCE_BYTES),

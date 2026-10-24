@@ -513,6 +513,13 @@ def workshop_items(
                     ),
                     scene_base=plays.base,
                     scene_properties=plays.properties,
+                    scene_settings=(
+                        ()
+                        if plays.web or plays.unplayable is not None
+                        else workshop.settable(
+                            by_id[plays.base].declared if plays.base in by_id else item.declared
+                        )
+                    ),
                     scene_note=plays.note,
                     runs_program=plays.program,
                     web_page=plays.web,

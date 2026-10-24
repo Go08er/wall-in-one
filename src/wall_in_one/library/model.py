@@ -8,6 +8,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Final, Self
 
+from wall_in_one.dials import SceneProperty
+
 #: Extensions we will hand to Noctalia as a still wallpaper.
 IMAGE_EXTENSIONS: Final[frozenset[str]] = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif"}
@@ -142,6 +144,11 @@ class MediaItem:
     #: A preset's property values, by name in name order, already checked
     #: against the base's own declarations (`library.workshop`).
     scene_properties: tuple[tuple[str, str], ...] = ()
+    #: The Wallpaper Engine properties a person may set on it, as the
+    #: wallpaper the engine renders declares them (a preset's base's, for a
+    #: preset); empty for anything else, a web page or one that can't play
+    #: (`library.workshop.settable`).
+    scene_settings: tuple[SceneProperty, ...] = ()
     #: What it plays, when that isn't what its title says: a preset of a web
     #: wallpaper "plays as Electric Eye; its settings aren't applied". Empty
     #: otherwise.

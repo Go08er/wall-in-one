@@ -355,6 +355,9 @@ class Shape:
     hold one nested object. Both kinds of field count as known.
     ``strip_identity`` mirrors a parser that trims the identity it stores, so
     the merge finds the record under the identity it is written back with.
+    ``kept`` names nested objects put back to hold what they carried even
+    when the serializer wrote none: one whose every field this build reads
+    may be empty to it, and full to a newer build.
     """
 
     known: frozenset[str]
@@ -362,6 +365,7 @@ class Shape:
     strip_identity: bool = False
     records: Mapping[str, Shape] = field(default_factory=dict)
     objects: Mapping[str, Shape] = field(default_factory=dict)
+    kept: frozenset[str] = frozenset()
 
     def models(self, key: str) -> bool:
         return key in self.known or key in self.records or key in self.objects
@@ -439,7 +443,8 @@ def merge_unknown(document: dict[str, Any], unknown: Unknown, shape: Shape) -> d
 
     Never overwrites a key the serializer wrote. A record or nested object
     the serializer no longer writes takes its unknown fields with it: those
-    belonged to something this edit removed.
+    belonged to something this edit removed. Except a nested object the
+    shape ``kept``: it is put back holding only them.
     """
     for key, value in unknown.fields.items():
         if not shape.models(key):
@@ -447,6 +452,8 @@ def merge_unknown(document: dict[str, Any], unknown: Unknown, shape: Shape) -> d
     for name, nested in unknown.objects.items():
         child = shape.objects.get(name)
         current = document.get(name)
+        if child is not None and current is None and name in shape.kept:
+            current = document[name] = {}
         if child is not None and isinstance(current, dict):
             merge_unknown(current, nested, child)
     for name, by_identity in unknown.records.items():

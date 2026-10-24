@@ -598,7 +598,7 @@ def test_a_folder_that_holds_no_wallpaper_is_said_and_never_blocks_the_compiler(
     assert not any(place.kind.could_not_look for place in said.values())
     assert said[empty].note == f"{empty}: {workshop.NO_PROJECT}"
     assert said[broken].note == f"{broken}: {workshop.NOT_A_PROJECT}"
-    assert library.skipped == tuple(place.note for place in library.unseen)
+    assert library.skipped == (), "looked at: it isn't 'couldn't look'"
 
 
 # -- what the Scenes view says about them ------------------------------------

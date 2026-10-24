@@ -261,7 +261,8 @@ class Unseen:
 
     path: Path
     kind: UnseenKind
-    #: The person-readable note, the same text as in `Library.skipped`.
+    #: The person-readable note, the same text as in `Library.skipped` for a
+    #: place that couldn't be looked at (not for NOT_A_WALLPAPER: unseen only).
     note: str
 
 

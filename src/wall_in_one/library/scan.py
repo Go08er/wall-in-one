@@ -305,9 +305,17 @@ def default_roots() -> tuple[Path, ...]:
 def _not_looked(
     skipped: list[str], unseen: list[Unseen], path: Path, kind: UnseenKind, why: object
 ) -> None:
-    """Say, as a note and as a structured record, that the scan did not look at ``path``."""
+    """Say, as a note and as a structured record, that the scan did not look at ``path``.
+
+    ``Library.skipped`` means "couldn't look": it makes the deployed-profile
+    upgrade refuse and the capture cleanup wait, and the classic window counts
+    it. A place that was looked at and holds no wallpaper (`UnseenKind.
+    NOT_A_WALLPAPER`: an emptied Workshop folder, one somebody made by hand)
+    is recorded in ``unseen`` only.
+    """
     note = f"{path}: {why}"
-    skipped.append(note)
+    if kind is not UnseenKind.NOT_A_WALLPAPER:
+        skipped.append(note)
     unseen.append(Unseen(path, kind, note))
 
 

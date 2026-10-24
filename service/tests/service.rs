@@ -11492,12 +11492,11 @@ fn a_preset_of_a_web_page_is_refused_by_its_base_while_web_is_off() {
 
 #[test]
 fn the_apps_captured_nothing_to_play_status_keeps_this_services_shape() {
-    // tests/fixtures/status-nothing-to-play.json (the app's GUI test of it) was captured
-    // from this service over the app's web-off document; its keys must stay these.
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/status-nothing-to-play.json");
+    // fixtures/web-off/status-nothing-to-play.json (the app's tests read it too) was
+    // captured from this service over the app's web-off document; its keys must stay these.
+    // It is in this crate because the package builds from `service/` alone.
     let captured: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        serde_json::from_str(include_str!("fixtures/web-off/status-nothing-to-play.json")).unwrap();
     let root = directory("captured-nothing");
     let config_path = root.join("runtime.toml");
     fs::write(&config_path, WEB_ONLY_OFF).unwrap();

@@ -147,7 +147,10 @@ def test_nothing_to_play_is_said_and_is_no_protocol_error() -> None:
     Every display plays nothing: rows with empty entry fields and `entry_name`, and
     `nothing_to_play` at the top. The window takes it as a snapshot and says why.
     """
-    path = Path(__file__).parent / "fixtures" / "status-nothing-to-play.json"
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "service/tests/fixtures/web-off/status-nothing-to-play.json"
+    )
     status = json.loads(path.read_text(encoding="utf-8"))
     model = RuntimeStatusModel()
     model.adopt(status)

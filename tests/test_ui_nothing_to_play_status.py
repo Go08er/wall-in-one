@@ -1,8 +1,8 @@
 """The classic window says what the service reports when every display plays nothing.
 
-The service's own reply for the app's web-off document (``tests/fixtures/
-status-nothing-to-play.json``, captured from it; `service/tests/service.rs` keeps
-its shape): rows with empty entry fields, and ``nothing_to_play`` at the top.
+The service's own reply for the app's web-off document (``service/tests/fixtures/
+web-off/status-nothing-to-play.json``, captured from it; `service/tests/service.rs`
+keeps its shape): rows with empty entry fields, and ``nothing_to_play`` at the top.
 """
 
 from __future__ import annotations
@@ -21,7 +21,10 @@ gi.require_version("Adw", "1")
 from tests.gtk_helpers import destroy_window  # noqa: E402
 from tests.test_ui_missing_renderer_notice import _classic  # noqa: E402
 
-FIXTURE = Path(__file__).parent / "fixtures" / "status-nothing-to-play.json"
+FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "service/tests/fixtures/web-off/status-nothing-to-play.json"
+)
 
 
 def test_the_classic_window_says_nothing_to_play_not_playing(

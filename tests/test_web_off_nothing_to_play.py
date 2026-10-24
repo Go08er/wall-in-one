@@ -249,6 +249,18 @@ def test_service_start_with_units_that_cant_be_verified_keeps_the_exit_78_guard(
     assert f'scene_id = "{WEB}"' in paths.runtime_config_path().read_text()
 
 
+def test_the_unattended_warning_doesnt_promise_a_blank_display(
+    web_only: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review r13 L3. Before: "the wallpaper service shows nothing"; Noctalia keeps its still."""
+    config.save(config.Settings(roots=(web_only,), allow_web_wallpapers=False))
+    assert cli.main(["--write-config"]) == 0
+    err = capsys.readouterr().err
+    assert "nothing to play: web wallpapers are off" in err
+    assert "shows nothing" not in err
+    assert "plays no wallpaper" in err and "the last still Noctalia was given stays on it" in err
+
+
 # -- web wallpapers on, the key left out for a service not confirmed for 8 (r13 L5) -----------
 
 

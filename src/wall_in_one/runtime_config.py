@@ -158,7 +158,8 @@ PRESET_OWNER: Final = "preset"
 #: own Wallpaper Engine values): left out together, said once.
 DIALS_OWNER: Final = "dials"
 #: Not a reference left out but what plays: All media plays nothing because
-#: web wallpapers are off, so a display on it shows nothing (``why``).
+#: web wallpapers are off, so no wallpaper is played on a display that plays
+#: it (``why``); Noctalia keeps the last still it was given.
 NOTHING_OWNER: Final = "nothing"
 #: Not a reference but ``allow_web_wallpapers``, while the setting is on:
 #: left out for a service not confirmed to read schema 8, whose own check
@@ -261,8 +262,9 @@ class LeftOut:
         """The same for an unattended command's ``warning:`` line: ids, and where it is saved."""
         if self.owner == NOTHING_OWNER:
             return (
-                f"nothing to play: {self.why}; the wallpaper service shows nothing "
-                f'on a display that plays "{FALLBACK_PLAYLIST_NAME}"'
+                f"nothing to play: {self.why}; the wallpaper service plays no wallpaper "
+                f'on a display that plays "{FALLBACK_PLAYLIST_NAME}", and the last still '
+                "Noctalia was given stays on it"
             )
         if self.owner == WEB_OWNER:
             return (

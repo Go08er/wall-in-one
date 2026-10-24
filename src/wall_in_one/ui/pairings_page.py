@@ -22,7 +22,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from wall_in_one import dial_view, dials
 from wall_in_one.dials import Value as DialValue
-from wall_in_one.library import manage, pairings, scan
+from wall_in_one.library import manage, pairings, scan, workshop
 from wall_in_one.library.model import (
     IMAGE_EXTENSIONS,
     Kind,
@@ -89,6 +89,11 @@ class _StillCard(Gtk.ToggleButton):
         self.picture.set_paintable(texture)
 
 
+#: What an open editor was built from: the item, its pairing, the dial defaults, and
+#: whether it is a web page while they are off (which changes what it offers).
+_EditorKey = tuple[MediaItem, pairings.Pairing, tuple[dials.Value, ...], bool]
+
+
 class PairingsPage(Gtk.Box):
     """A full-size editor reached from one item in the Media grid."""
 
@@ -106,11 +111,16 @@ class PairingsPage(Gtk.Box):
         self._on_remove = on_remove
         self._session: Session | None = None
         self._selected: MediaItem | None = None
-        self._rendered: tuple[MediaItem, pairings.Pairing, tuple[dials.Value, ...]] | None = None
+        self._rendered: _EditorKey | None = None
         self._preview_loader = SchemePreviewLoader(max_workers=2)
-        self._thumbnail_loader = ThumbnailLoader(max_workers=2)
+        self._thumbnail_loader = ThumbnailLoader(
+            max_workers=2, web_allowed=lambda: application.settings.allow_web_wallpapers
+        )
         self._adaptive_boxes: dict[str, Gtk.Box] = {}
         self._adaptive_previews: dict[str, SchemePreview] = {}
+        #: The wallpaper being edited is a web page while they are off: no colours
+        #: are generated from its still.
+        self._adaptive_off = False
         self._palette_sources: dict[str, Palette | PalettePair | None] = {}
         self._palette_buttons: dict[str, Gtk.CheckButton] = {}
         self._policy_rows: dict[str, Gtk.ListBoxRow] = {}
@@ -195,7 +205,7 @@ class PairingsPage(Gtk.Box):
         self,
         item: MediaItem,
         bundle: pairings.Pairing,
-    ) -> tuple[MediaItem, pairings.Pairing, tuple[dials.Value, ...]]:
+    ) -> _EditorKey:
         """Canonical inputs, across the short scan-after-write window.
 
         The pairing store learns a manual still synchronously.  The library's
@@ -207,7 +217,7 @@ class PairingsPage(Gtk.Box):
         """
         resolved_item = item.with_still(bundle.still) if item.is_moving else item
         defaults = tuple(getattr(self._app.settings, dial.setting) for dial in dials.GLOBAL)
-        return resolved_item, bundle, defaults
+        return resolved_item, bundle, defaults, self._web_off_for(item)
 
     def _clear_editor(self) -> None:
         while (child := self._editor.get_first_child()) is not None:
@@ -321,6 +331,12 @@ class PairingsPage(Gtk.Box):
             button = Gtk.Button(label="Regenerate")
             button.set_valign(Gtk.Align.CENTER)
             button.connect("clicked", lambda _button: self._regenerate_scene(item))
+            if self._web_off_for(item):
+                button.set_sensitive(False)
+                regenerate.set_subtitle(
+                    f"{workshop.WEB_PREVIEW_OFF_NOTE}: turn on Allow web wallpapers "
+                    "in Settings \u2192 Library to take it"
+                )
             regenerate.add_suffix(button)
             still_group.add(regenerate)
         self._editor.append(still_group)
@@ -378,7 +394,7 @@ class PairingsPage(Gtk.Box):
         self._reset_button.connect("clicked", lambda _button: self._reset(item))
         self._editor.append(self._reset_button)
 
-        self._request_adaptive_previews(bundle)
+        self._request_adaptive_previews(bundle, item)
         # Plain idle on purpose: it must follow the rebuilt editor's layout.
         GLib.idle_add(self._restore_interaction, scroll, restore_focus)
 
@@ -760,7 +776,7 @@ class PairingsPage(Gtk.Box):
             )
             if self._editing(item):
                 self._rendered = self._editor_key(current, bundle)
-            self._request_adaptive_previews(bundle)
+            self._request_adaptive_previews(bundle, current)
             self._app.pairing_changed(current)
 
         reported = False
@@ -877,7 +893,9 @@ class PairingsPage(Gtk.Box):
             scheme = key.partition(":")[2]
             preview = self._adaptive_previews.get(scheme)
             if preview is None:
-                message = "Generating preview…"
+                message = (
+                    workshop.WEB_PREVIEW_OFF_NOTE if self._adaptive_off else "Generating preview…"
+                )
             elif preview.colours is None:
                 message = preview.error or "Preview unavailable"
             else:
@@ -897,10 +915,19 @@ class PairingsPage(Gtk.Box):
         note.add_css_class("dim-label")
         box.append(note)
 
-    def _request_adaptive_previews(self, bundle: pairings.Pairing) -> None:
+    def _web_off_for(self, item: MediaItem | None) -> bool:
+        """Whether ``item`` is a web page while they are off (asked afresh, never kept)."""
+        return item is not None and workshop.previews_off(
+            item, self._app.settings.allow_web_wallpapers
+        )
+
+    def _request_adaptive_previews(
+        self, bundle: pairings.Pairing, item: MediaItem | None = None
+    ) -> None:
         self._adaptive_previews.clear()
+        self._adaptive_off = self._web_off_for(item if item is not None else self._selected)
         self._refresh_palette_swatches(self._shown(bundle).palette.mode)
-        if bundle.still is None:
+        if bundle.still is None or self._adaptive_off:
             return
         for scheme in noctalia.ALL_SCHEMES:
             self._preview_loader.request(bundle.still, scheme, self._on_adaptive_preview)
@@ -912,7 +939,7 @@ class PairingsPage(Gtk.Box):
         if box is None or item is None or session is None:
             return
         bundle = session.pairings.resolve_accepted(item, session.library)
-        if bundle.still != preview.image:
+        if bundle.still != preview.image or self._web_off_for(item):
             return
         self._adaptive_previews[preview.scheme] = preview
         self._refresh_palette_swatch(
@@ -1216,6 +1243,12 @@ class PairingsPage(Gtk.Box):
         )
 
     def _regenerate_scene(self, item: MediaItem) -> None:
+        if self._web_off_for(item):
+            self._app.window_report(
+                f"{workshop.WEB_PREVIEW_OFF_NOTE}: turn on Allow web wallpapers in Settings "
+                "\u2192 Library to take its still"
+            )
+            return
         if self._app.regenerate_scene_still(item):
             self._app.window_report("Regenerating the automatic scene still in the background")
         else:

@@ -169,7 +169,9 @@ class NextWindow(ShellWindow):
         #: last said: said once until they change (as classic).
         self._missing_said: frozenset[tuple[str, str]] | None = None
         self._protocol_error = ""
-        self._thumbnails: LibraryThumbnails | None = LibraryThumbnails()
+        self._thumbnails: LibraryThumbnails | None = LibraryThumbnails(
+            web_allowed=lambda: self._settings.allow_web_wallpapers
+        )
         thumbs.install(self._thumbnails)
         self._prefs = UiPrefsKeeper(application.window_report)
         self._state = RealAppState(application, self._prefs, authoring=application)
@@ -235,7 +237,9 @@ class NextWindow(ShellWindow):
     # -- lifetime -------------------------------------------------------------
     def _resume(self) -> None:
         if self._thumbnails is None:
-            self._thumbnails = LibraryThumbnails()
+            self._thumbnails = LibraryThumbnails(
+                web_allowed=lambda: self._settings.allow_web_wallpapers
+            )
             thumbs.install(self._thumbnails)
         self._prefs.reopen()
         self._state.listen()
@@ -313,6 +317,8 @@ class NextWindow(ShellWindow):
     def apply_settings(self, settings: config.Settings) -> None:
         """Adopt a durable (or rolled-back) snapshot: every Settings row shows it."""
         self._settings = settings
+        if self._thumbnails is not None:
+            self._thumbnails.web_wallpapers_changed()
         self._state.settings_changed()
         self.first_run_changed()  # a library folder chosen, or a choice rolled back
 

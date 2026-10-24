@@ -858,7 +858,9 @@ class PlaylistsPage(Gtk.Box):
         self._playlist_rows: dict[Gtk.ListBoxRow, str] = {}
         self._playlist_rows_by_id: dict[str, tuple[Gtk.ListBoxRow, Gtk.Label, Gtk.Label]] = {}
         self._playlist_positions: dict[str, int] = {}
-        self._loader = ThumbnailLoader()
+        self._loader = ThumbnailLoader(
+            web_allowed=lambda: application.settings.allow_web_wallpapers
+        )
         self._source_cards: dict[_MediaCard, MediaItem] = {}
         self._source_cards_by_path: dict[Path, _MediaCard] = {}
         self._source_positions: dict[Path, int] = {}
@@ -985,6 +987,24 @@ class PlaylistsPage(Gtk.Box):
         self._sidebar_scroll.set_child(self._list)
         sidebar.append(self._sidebar_scroll)
         return sidebar
+
+    def web_wallpapers_changed(self) -> None:
+        """``allow_web_wallpapers`` moved: web pages' pictures go, or are asked for again."""
+        allowed = self._app.settings.allow_web_wallpapers
+        shown = [
+            (item, card.show_thumbnail)
+            for card, item in self._source_cards.items()
+            if item.web_page
+        ]
+        shown += [
+            (item, row.show_thumbnail)
+            for identifier, row in self._entry_rows.items()
+            if (item := self._entry_items.get(identifier)) is not None and item.web_page
+        ]
+        for item, show in shown:
+            show(item, None)
+            if allowed:
+                self._loader.request(item, show)
 
     def refresh(self, session: Session) -> None:
         """Diff authoring state without replacing the editor under the user.

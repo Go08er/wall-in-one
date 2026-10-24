@@ -311,6 +311,8 @@ class Inspector(Gtk.Box):
         overlay.set_child(
             widgets.Thumb.of(wallpaper, 360, 203, radius=14, fill=True, size=(960, 540))
         )
+        if wallpaper.settings_target:
+            overlay.add_overlay(widgets.web_off_note())
         badges = Gtk.Box(spacing=6, valign=Gtk.Align.START, halign=Gtk.Align.START)
         badges.add_css_class("inspector-preview-badges")
         if wallpaper.is_moving:

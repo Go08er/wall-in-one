@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io, paths, worker_processes
+from wall_in_one.library import workshop
 from wall_in_one.library.model import Kind, MediaItem
 
 LOGGER = logging.getLogger(__name__)
@@ -263,8 +264,12 @@ def _touch(path: Path) -> None:
         return
 
 
-def lookup(item: MediaItem) -> Path | None:
+def lookup(item: MediaItem, *, allow_web: bool = False) -> Path | None:
     """A usable cached thumbnail for ``item``, or ``None``.
+
+    A web wallpaper while they are off (``allow_web`` false) has none: not even
+    the one made while they were on is shown, and its files are not looked at
+    (the key below would stat them).
 
     This is the read side of the cache: it validates before answering, so a
     corrupt entry reports a miss, and it marks the entry used, so showing a
@@ -272,6 +277,8 @@ def lookup(item: MediaItem) -> Path | None:
     a stat and two short reads -- which matters, because delivering a hit
     synchronously is what stops a rebuilt grid flashing through an empty state.
     """
+    if workshop.previews_off(item, allow_web):
+        return None
     path = cached_path(item)
     if not _is_intact(path):
         return None
@@ -449,8 +456,15 @@ def generate(
     *,
     force: bool = False,
     processes: worker_processes.Cancellation | None = None,
+    allow_web: bool = False,
 ) -> Path:
-    """Return a cached thumbnail for ``item``, generating it if needed."""
+    """Return a cached thumbnail for ``item``, generating it if needed.
+
+    ``allow_web`` is ``allow_web_wallpapers``. A web wallpaper while they are off
+    gets nothing: no cache lookup, no decode, no ffmpeg.
+    """
+    if workshop.previews_off(item, allow_web):
+        raise ThumbnailError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no thumbnail of {item.name}")
     if not is_available():
         raise ThumbnailError("ffmpeg is not installed")
 

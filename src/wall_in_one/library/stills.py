@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from wall_in_one import file_io, paths, worker_processes
-from wall_in_one.library import pairing
+from wall_in_one.library import pairing, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
 
@@ -1857,6 +1857,7 @@ def capture_scene(
     force: bool = False,
     processes: worker_processes.Cancellation | None = None,
     size: tuple[int, int] | None = None,
+    allow_web: bool = False,
 ) -> Path:
     """Take a still from a Wallpaper Engine scene, through the engine itself.
 
@@ -1872,9 +1873,14 @@ def capture_scene(
     ``size`` is a display size the caller already measured; otherwise the
     wallpaper service is asked. Nothing is written -- no directory, no
     temporary -- unless a display was measured and the engine is installed.
+
+    ``allow_web`` is ``allow_web_wallpapers``. A web page while they are off is
+    refused before anything of it is opened: no preview read, no engine.
     """
     if item.kind is not Kind.SCENE or not item.scene:
         raise StillError(f"{item.name} is not a Wallpaper Engine scene")
+    if workshop.previews_off(item, allow_web):
+        raise StillError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no still of {item.name}")
     if item.unplayable is not None:
         # Never handed to the engine, and nothing to show a still for.
         raise StillError(f"{item.name} can\u2019t play: {item.unplayable_reason}")
@@ -2058,6 +2064,7 @@ def ensure(
     processes: worker_processes.Cancellation | None = None,
     size: tuple[int, int] | None = None,
     refused: Callable[[StillFolderError], None] | None = None,
+    allow_web: bool = False,
 ) -> Path | None:
     """The still for ``item``, making one if it has none. ``None`` if it needs none.
 
@@ -2069,8 +2076,13 @@ def ensure(
     ``refused`` hears the one failure that is not about the wallpaper: a
     folder that would not be written in (`StillFolderError`). It is forgiven
     like the rest; a caller that can tell a person gives this.
+
+    ``allow_web`` is ``allow_web_wallpapers``: a web page while they are off
+    gets none, and nothing of it is opened.
     """
     if not item.is_moving or item.unplayable is not None:
+        return None
+    if workshop.previews_off(item, allow_web):
         return None
     if item.kind is Kind.SCENE:
         if not scene_capture_required(item, root, size=size, automatic=True):
@@ -2078,7 +2090,7 @@ def ensure(
                 pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
             )
         try:
-            return capture_scene(item, root, processes=processes, size=size)
+            return capture_scene(item, root, processes=processes, size=size, allow_web=allow_web)
         except StillFolderError as error:
             if refused is not None:
                 refused(error)

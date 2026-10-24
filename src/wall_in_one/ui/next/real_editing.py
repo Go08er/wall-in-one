@@ -62,7 +62,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk
 
 from wall_in_one import config, dial_view, dials
-from wall_in_one.library import manage, pairings, scan
+from wall_in_one.library import manage, pairings, scan, workshop
 from wall_in_one.library.model import Kind, MediaItem, RepresentativeStillError
 from wall_in_one.session import RemovalResult, Session
 from wall_in_one.theme import noctalia
@@ -653,6 +653,9 @@ class RealEditing:
         """The still adaptive colors are generated from (no disk access)."""
         session = self._session
         current = session.library.find(item.path) or item
+        if workshop.previews_off(current, session.settings.allow_web_wallpapers):
+            # No colours are generated from a web wallpaper's still while they are off.
+            return None
         return session.pairings.resolve_accepted(current, session.library).still
 
     def scheme_swatches(

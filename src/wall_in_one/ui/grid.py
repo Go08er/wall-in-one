@@ -69,6 +69,22 @@ class WallpaperTile(Gtk.Box):
         self._spinner.set_valign(Gtk.Align.CENTER)
         self._frame.add_overlay(self._spinner)
 
+        #: A web wallpaper while they are off gets no picture, made from its
+        #: files or shown from the cache: this plain tile says why instead.
+        self._previews_off = workshop.previews_off(item, allow_web)
+        self._off_note = Gtk.Label(label=workshop.WEB_PREVIEW_OFF_NOTE)
+        self._off_note.set_halign(Gtk.Align.CENTER)
+        self._off_note.set_valign(Gtk.Align.CENTER)
+        self._off_note.set_wrap(True)
+        self._off_note.set_justify(Gtk.Justification.CENTER)
+        self._off_note.add_css_class("caption")
+        self._off_note.add_css_class("dim-label")
+        self._off_note.set_visible(self._previews_off)
+        self._frame.add_overlay(self._off_note)
+        if self._previews_off:
+            self._spinner.set_visible(False)
+            self.add_css_class("wio-tile-blank")
+
         # Top-right, opposite the badges, so that a long provider name can
         # never push it off the tile. A button rather than a decoration,
         # because marking a favourite should not mean finding a menu first --
@@ -179,12 +195,19 @@ class WallpaperTile(Gtk.Box):
     def show_thumbnail(self, texture: Gdk.Texture | None) -> None:
         """Take the decoded thumbnail. Already decoded, on a worker thread."""
         self._spinner.set_visible(False)
+        if self._previews_off:
+            return  # a late result from before they were turned off
         if texture is None:
             # No preview available; the name still identifies it.
             self._picture.set_paintable(None)
             self.add_css_class("wio-tile-blank")
             return
         self._picture.set_paintable(texture)
+
+    @property
+    def previews_off(self) -> bool:
+        """Whether this is the plain tile of a web wallpaper while they are off."""
+        return self._previews_off
 
     def set_current(self, current: bool) -> None:
         if current:
@@ -563,7 +586,8 @@ class WallpaperGrid(Gtk.ScrolledWindow):
             if isinstance(child, Gtk.FlowBoxChild):
                 tile.remove_controller(tile._menu_keys)
                 child.add_controller(tile._menu_keys)
-            self._loader.request(item, self._on_thumbnail)
+            if not tile.previews_off:
+                self._loader.request(item, self._on_thumbnail)
 
         # Reused tiles retain their current marker; update it after every diff
         # because runtime truth can change without the media model changing.

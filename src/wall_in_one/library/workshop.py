@@ -926,6 +926,20 @@ def web_off(item: MediaItem, allowed: bool) -> bool:
     return item.web_page and item.unplayable is None and not allowed
 
 
+#: What a web wallpaper's tile says in place of a picture while they are off.
+WEB_PREVIEW_OFF_NOTE: Final = "Web wallpapers are off"
+
+
+def previews_off(item: MediaItem, allowed: bool) -> bool:
+    """Whether nothing may be made from ``item``'s files: a web page while they are off.
+
+    Wider than `web_off`: it holds for a web page that can't play either, and it
+    is about previews, stills and colours, which open the wallpaper's own files.
+    Only its ``project.json`` is read then.
+    """
+    return item.web_page and not allowed
+
+
 def why_not_played(item: MediaItem, allow_web: bool) -> str:
     """Why a Wallpaper Engine item is never played here as things are, or empty.
 

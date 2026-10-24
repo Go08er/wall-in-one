@@ -899,6 +899,7 @@ class Application(Adw.Application):
         self._stills = StillMaker(
             report=self.window_report,
             note=lambda message: self.activity_log.record("app", message),
+            web_allowed=lambda: self._settings.allow_web_wallpapers,
         )
 
     # -- lifecycle -------------------------------------------------------

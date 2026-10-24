@@ -13,7 +13,7 @@ whatever size they are, so the requested size is not part of the key.
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
@@ -24,12 +24,17 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gdk
 
+from wall_in_one.library import workshop
 from wall_in_one.library.model import MediaItem
 from wall_in_one.ui.next.thumbs import Deliver
 from wall_in_one.ui.thumbnails import ThumbnailLoader
 
 #: Recent textures kept for synchronous hits: a few pages of cards.
 CAPACITY: Final = 512
+
+
+def _never() -> bool:
+    return False
 
 
 class HasMediaItem(Protocol):
@@ -49,8 +54,21 @@ class StillSource:
 class LibraryThumbnails:
     """`ThumbnailProvider` over the app's `ThumbnailLoader`."""
 
-    def __init__(self, loader: ThumbnailLoader | None = None) -> None:
-        self._loader = loader if loader is not None else ThumbnailLoader()
+    def __init__(
+        self,
+        loader: ThumbnailLoader | None = None,
+        *,
+        web_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        """``web_allowed`` says whether ``allow_web_wallpapers`` is on, asked afresh each time.
+
+        Without it web wallpapers are off: they are never requested, and what
+        was drawn for one earlier is not handed out (the placeholder shows).
+        """
+        self._web_allowed = web_allowed if web_allowed is not None else _never
+        self._loader = (
+            loader if loader is not None else ThumbnailLoader(web_allowed=self._web_allowed)
+        )
         self._ready: OrderedDict[MediaItem, Gdk.Texture] = OrderedDict()
         self._failed: set[MediaItem] = set()
         self._waiting: dict[MediaItem, list[Deliver]] = {}
@@ -67,9 +85,12 @@ class LibraryThumbnails:
         item = self._item(source)
         return ("thumbnail", item) if item is not None else ("nothing", id(source))
 
+    def _off(self, item: MediaItem) -> bool:
+        return workshop.previews_off(item, self._web_allowed())
+
     def cached(self, source: object, width: int, height: int) -> Gdk.Texture | None:
         item = self._item(source)
-        if item is None:
+        if item is None or self._off(item):
             return None
         found = self._ready.get(item)
         if found is not None:
@@ -80,7 +101,7 @@ class LibraryThumbnails:
         self, source: object, width: int, height: int, deliver: Deliver
     ) -> Gdk.Texture | None:
         item = self._item(source)
-        if item is None or self._closed:
+        if item is None or self._closed or self._off(item):
             return None
         found = self.cached(item, width, height)
         if found is not None or item in self._failed:
@@ -94,7 +115,11 @@ class LibraryThumbnails:
         return None
 
     def _delivered(self, item: MediaItem, texture: Gdk.Texture | None) -> None:
-        if texture is None:
+        if self._off(item):
+            # Turned off while it was made: discarded. Not remembered as a
+            # failure either, so turning them on asks for it again.
+            texture = None
+        elif texture is None:
             # Not thumbnailable (or no ffmpeg): the placeholder stays, and the
             # same item is not asked for again while this window is open.
             self._failed.add(item)
@@ -108,6 +133,17 @@ class LibraryThumbnails:
 
     def placeholder(self, source: object) -> Gdk.RGBA | None:
         return None
+
+    def web_wallpapers_changed(self) -> None:
+        """``allow_web_wallpapers`` moved: forget what was decided about web pages.
+
+        A failure noted while they were off must not stand once they are on, and
+        a picture drawn while they were on is dropped (it is not handed out
+        while they are off, and is made afresh or found in the cache after).
+        """
+        self._failed = {item for item in self._failed if not item.web_page}
+        for item in [item for item in self._ready if item.web_page]:
+            del self._ready[item]
 
     def pending(self) -> int:
         return len(self._waiting)

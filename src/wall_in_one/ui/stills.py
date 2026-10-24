@@ -35,7 +35,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib
 
 from wall_in_one import worker_processes
-from wall_in_one.library import stills
+from wall_in_one.library import stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.ui import monitors
 from wall_in_one.wallpaper import outputs, scenes
@@ -49,6 +49,10 @@ MAX_WORKERS: Final = 1
 Callback = Callable[[int], None]
 FailureCallback = Callable[[str], None]
 LOGGER = logging.getLogger(__name__)
+
+
+def _never() -> bool:
+    return False
 
 
 def _engine_capture(item: MediaItem) -> bool:
@@ -75,6 +79,7 @@ class StillMaker:
         report: FailureCallback | None = None,
         note: FailureCallback | None = None,
         displays: Callable[[], tuple[outputs.Output, ...]] | None = None,
+        web_allowed: Callable[[], bool] | None = None,
     ) -> None:
         """``report`` tells a person now (the window); ``note`` only keeps a record (the log).
 
@@ -82,7 +87,13 @@ class StillMaker:
         (`ui.monitors.snapshot`) unless given: taken on the main thread when a
         job is handed off, it is what a scene still is sized for when the
         wallpaper service has no snapshot to give.
+
+        ``web_allowed`` says whether ``allow_web_wallpapers`` is on, asked afresh
+        at every step. Without it web wallpapers are off: no still is made for
+        one and none of its files is opened. While they are off a web page is not
+        remembered as attempted, so turning them on makes theirs.
         """
+        self._web_allowed = web_allowed if web_allowed is not None else _never
         self._displays = displays
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="still")
         self._closed = False
@@ -110,9 +121,11 @@ class StillMaker:
         """
         if self._closed:
             return
+        web = self._web_allowed()
         wanted = [
             item
             for item in items
+            if not workshop.previews_off(item, web)
             # Every moving kind, not video alone. `stills.ensure` has always
             # known how to capture a Wallpaper Engine scene through the engine
             # itself, and this filter was the only reason it was never asked
@@ -237,6 +250,17 @@ class StillMaker:
         for item in items:
             if self._processes.cancelled():
                 return
+            web = self._web_allowed()
+            if workshop.previews_off(item, web):
+                # Turned off since this was queued: nothing of it is opened,
+                # and it is not counted as attempted, so turning web on makes it.
+                self._attempted.discard(item.path)
+                continue
+            processes = (
+                worker_processes.GatedCancellation(self._processes, self._web_allowed)
+                if item.web_page
+                else self._processes
+            )
             if item.kind is Kind.SCENE and (
                 (display is None and _engine_capture(item))
                 or (
@@ -252,7 +276,12 @@ class StillMaker:
             # not be written in, which is nothing ffmpeg or the video did.
             if (
                 stills.ensure(
-                    item, root, processes=self._processes, size=display, refused=folder_refused
+                    item,
+                    root,
+                    processes=processes,
+                    size=display,
+                    refused=folder_refused,
+                    allow_web=web,
                 )
                 is not None
             ):
@@ -294,15 +323,30 @@ class StillMaker:
 
     def regenerate_scene(self, item: MediaItem, root: Path, callback: Callback) -> None:
         """Force one managed scene still to be replaced, off the UI thread."""
-        if self._closed or item.kind is not Kind.SCENE:
+        if (
+            self._closed
+            or item.kind is not Kind.SCENE
+            or workshop.previews_off(item, self._web_allowed())
+        ):
             return
         self._attempted.add(item.path)
         # GTK's monitors can only be read here, on the main thread.
         fallback = self._local_displays()
 
         def run() -> None:
+            web = self._web_allowed()
+            if workshop.previews_off(item, web):
+                self._attempted.discard(item.path)
+                return
+            processes = (
+                worker_processes.GatedCancellation(self._processes, self._web_allowed)
+                if item.web_page
+                else self._processes
+            )
             size = scenes.measured_capture_size("", outputs.discover(fallback))
-            stills.capture_scene(item, root, force=True, processes=self._processes, size=size)
+            stills.capture_scene(
+                item, root, force=True, processes=processes, size=size, allow_web=web
+            )
             if not self._processes.cancelled():
 
                 def deliver() -> bool:

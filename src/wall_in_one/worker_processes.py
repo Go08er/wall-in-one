@@ -488,3 +488,37 @@ class Cancellation:
             # so cancel() can still end it.
             if registered and child.process.returncode is not None:
                 self.unregister(child)
+
+
+class GatedCancellation(Cancellation):
+    """``parent``, and also cancelled the moment ``allowed`` turns false.
+
+    For work that is only wanted while a setting is on (previews of web
+    wallpapers while ``allow_web_wallpapers`` is). ``allowed`` is asked every
+    time a child is about to start and on every poll of a running one, so the
+    setting is read fresh, not as it was when the job was queued. A child it
+    ends is one this app started, ended through its own `OwnedProcess` and so
+    by the exact process-group id of the leader it spawned; nothing is looked
+    up by name. ``parent`` still owns the children, so its ``cancel`` (the
+    window closing) ends them too.
+    """
+
+    def __init__(self, parent: Cancellation, allowed: Callable[[], bool]) -> None:
+        super().__init__()
+        self._parent = parent
+        self._allowed = allowed
+
+    def cancelled(self) -> bool:
+        return self._parent.cancelled() or not self._allowed()
+
+    def register(self, child: OwnedProcess) -> bool:
+        if not self._allowed():
+            _signal_group(child, signal.SIGKILL)
+            return False
+        return self._parent.register(child)
+
+    def unregister(self, child: OwnedProcess) -> None:
+        self._parent.unregister(child)
+
+    def cancel(self) -> None:
+        self._parent.cancel()

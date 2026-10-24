@@ -38,6 +38,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib
 
 from wall_in_one import thumbnails, worker_processes
+from wall_in_one.library import workshop
 from wall_in_one.library.model import MediaItem
 
 #: Enough to keep a few cores busy without turning a library refresh into a
@@ -48,10 +49,26 @@ Callback = Callable[[MediaItem, Gdk.Texture | None], None]
 LOGGER = logging.getLogger(__name__)
 
 
+def _never() -> bool:
+    return False
+
+
 class ThumbnailLoader:
     """Requests thumbnails off-thread and delivers them on the main thread."""
 
-    def __init__(self, max_workers: int = MAX_WORKERS) -> None:
+    def __init__(
+        self,
+        max_workers: int = MAX_WORKERS,
+        *,
+        web_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        """``web_allowed`` says whether ``allow_web_wallpapers`` is on, asked afresh each time.
+
+        It is asked when a job starts, on every poll of a running ffmpeg, and
+        again when the result is delivered. Without it web wallpapers are off:
+        they get no thumbnail, and their files are not opened.
+        """
+        self._web_allowed = web_allowed if web_allowed is not None else _never
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb")
         self._pending: dict[MediaItem, Future[Gdk.Texture | None]] = {}
         self._waiters: dict[MediaItem, list[Callback]] = {}
@@ -93,7 +110,7 @@ class ThumbnailLoader:
                 # inheriting, or being settled by, the old item's result.
                 callbacks.append(callback)
                 return
-            future = self._pool.submit(self._texture_for, item, self._processes)
+            future = self._pool.submit(self._texture_for, item, self._processes, self._web_allowed)
             self._pending[item] = future
             self._waiters[item] = [callback]
         future.add_done_callback(lambda done: self._finish(item, done))
@@ -102,22 +119,34 @@ class ThumbnailLoader:
     def _texture_for(
         item: MediaItem,
         processes: worker_processes.Cancellation | None = None,
+        web_allowed: Callable[[], bool] = lambda: False,
     ) -> Gdk.Texture | None:
         """Cache lookup, generation if needed, and the decode. Off-thread.
 
         `lookup` validates the entry before answering, so a thumbnail
         truncated by a power cut is regenerated here rather than failing to
         decode in a tile.
+
+        A web wallpaper while they are off is answered ``None`` before any of
+        that: setting read now, not when the request was queued. If they are
+        turned off while its ffmpeg runs, the poll below ends that one child.
         """
+        allowed = web_allowed()
+        if workshop.previews_off(item, allowed):
+            return None
+        if item.web_page and processes is not None:
+            processes = worker_processes.GatedCancellation(processes, web_allowed)
         try:
-            path = thumbnails.lookup(item) or (
-                thumbnails.generate(item, processes=processes)
+            path = thumbnails.lookup(item, allow_web=allowed) or (
+                thumbnails.generate(item, processes=processes, allow_web=allowed)
                 if processes is not None
-                else thumbnails.generate(item)
+                else thumbnails.generate(item, allow_web=allowed)
             )
         except thumbnails.ThumbnailError:
             # A wallpaper we cannot thumbnail is not an error worth stopping
             # for; the tile falls back to a placeholder.
+            return None
+        if workshop.previews_off(item, web_allowed()):
             return None
         try:
             return Gdk.Texture.new_from_filename(str(path))
@@ -143,8 +172,12 @@ class ThumbnailLoader:
 
         def deliver() -> bool:
             if not self._closed:
+                # Turned off while it was made: discarded, not shown.
+                shown = result
+                if shown is not None and workshop.previews_off(item, self._web_allowed()):
+                    shown = None
                 for callback in callbacks:
-                    callback(item, result)
+                    callback(item, shown)
             return GLib.SOURCE_REMOVE
 
         # Ends the tile spinner. Plain idle (200) sits below GTK's redraw (120) and starves.

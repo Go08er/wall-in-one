@@ -23,6 +23,7 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Gio, Graphene, Gsk, Gtk, Pango
 
+from wall_in_one.library import workshop
 from wall_in_one.ui.next import thumbs
 from wall_in_one.ui.next.catalog import KIND_ICON, kind_text
 from wall_in_one.ui.next.state import AppState, WallpaperView
@@ -184,6 +185,18 @@ def _neutral() -> Gdk.RGBA:
     color = Gdk.RGBA()
     color.red, color.green, color.blue, color.alpha = _NEUTRAL
     return color
+
+
+def web_off_note() -> Gtk.Label:
+    """What fills the picture of a web wallpaper while Allow web wallpapers is off."""
+    note = Gtk.Label(label=workshop.WEB_PREVIEW_OFF_NOTE)
+    note.set_halign(Gtk.Align.CENTER)
+    note.set_valign(Gtk.Align.CENTER)
+    note.set_wrap(True)
+    note.set_justify(Gtk.Justification.CENTER)
+    note.set_can_target(False)
+    note.add_css_class("dim-label")
+    return note
 
 
 def thumbnail(source: object, width: int, height: int, radius: float = 10) -> Thumb:
@@ -382,6 +395,9 @@ class WallpaperCard(Gtk.Box):
         # Fill the grid cell at 16:9 so outlines and badges always hug the picture.
         self.picture = Thumb.of(wallpaper, width, height, radius=12, fill=True)
         overlay.set_child(self.picture)
+        if wallpaper.settings_target:
+            # A web wallpaper while they are off has no picture: say why.
+            overlay.add_overlay(web_off_note())
 
         top = Gtk.Box(spacing=4, margin_top=8, margin_start=8, margin_end=8)
         top.set_valign(Gtk.Align.START)

@@ -113,7 +113,7 @@ class MainWindow(Adw.ApplicationWindow):
         super().__init__(application=application)
         self._app = application
         self._settings = settings
-        self._loader = ThumbnailLoader()
+        self._loader = ThumbnailLoader(web_allowed=lambda: self._settings.allow_web_wallpapers)
         self._palette_catalog = PaletteCatalog()
         self._palettes: PaletteBrowserDialog | None = None
         # How the library is being looked at. Deliberately not in
@@ -666,6 +666,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._settings = settings
         if settings.allow_web_wallpapers != previous.allow_web_wallpapers:
             self._grid.set_web_allowed(settings.allow_web_wallpapers)
+            self._playlists_page.web_wallpapers_changed()
             if self._management_session is not None:
                 self._web_off_titles = workshop.web_off_titles(
                     self._management_session.library.items, settings.allow_web_wallpapers

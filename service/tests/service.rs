@@ -1900,6 +1900,11 @@ struct RuntimeDriverState {
     stage_events: Vec<String>,
     /// What the driver says it could not start at all (`missing_renderers`).
     missing_renderers: Vec<MissingRenderer>,
+    /// Entries whose motion this driver won't start, as a real one refuses
+    /// a web page while web wallpapers aren't allowed: the still goes up, and
+    /// `motion_refused` says why (`refused_outputs`).
+    refuse_entry_ids: HashSet<String>,
+    refused_outputs: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -1956,6 +1961,19 @@ impl WallpaperDriver for RuntimeDriver {
             state.fail_applies_remaining -= 1;
             return Err("renderer refused candidate".into());
         }
+        state.refused_outputs.remove(output);
+        if settings.dynamics_enabled
+            && entry.kind != wall_in_one_service::config::EntryKind::Still
+            && state.refuse_entry_ids.contains(&entry.id)
+        {
+            state.refused_outputs.insert(
+                output.to_string(),
+                format!("the test driver refuses {}", entry.id),
+            );
+            state.active_outputs.remove(output);
+            state.motion_active = !state.active_outputs.is_empty();
+            return Ok(());
+        }
         state.motion_active = settings.dynamics_enabled
             && entry.kind != wall_in_one_service::config::EntryKind::Still;
         if state.motion_active {
@@ -1970,6 +1988,7 @@ impl WallpaperDriver for RuntimeDriver {
         let mut state = self.0.lock().unwrap();
         state.stage_events.push(format!("stop {output}"));
         state.active_outputs.remove(output);
+        state.refused_outputs.remove(output);
         state.motion_active = !state.active_outputs.is_empty();
     }
 
@@ -2043,6 +2062,9 @@ impl WallpaperDriver for RuntimeDriver {
         state
             .active_outputs
             .retain(|output| wanted.contains(output.as_str()));
+        state
+            .refused_outputs
+            .retain(|output, _| wanted.contains(output.as_str()));
         state.motion_active = !state.active_outputs.is_empty();
     }
 
@@ -2078,6 +2100,10 @@ impl WallpaperDriver for RuntimeDriver {
         self.0.lock().unwrap().active_outputs.contains(output)
     }
 
+    fn motion_refused(&self, output: &str) -> Option<String> {
+        self.0.lock().unwrap().refused_outputs.get(output).cloned()
+    }
+
     fn poll_failures(&mut self) -> Vec<RendererFailure> {
         let mut state = self.0.lock().unwrap();
         let mut structured = std::mem::take(&mut state.renderer_failures);
@@ -2106,6 +2132,7 @@ impl WallpaperDriver for RuntimeDriver {
         state.stops += 1;
         state.motion_active = false;
         state.active_outputs.clear();
+        state.refused_outputs.clear();
     }
 }
 
@@ -11575,4 +11602,721 @@ fn the_apps_captured_nothing_to_play_status_keeps_this_services_shape() {
         captured["displays"][0]["entry_name"]
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+// -- r13 L1: an entry the service won't start is skipped ------------------------------------
+//
+// Owner: "skip to next, if it's in a playlist alone, then use the default playlist in
+// schedule." While the document doesn't allow web wallpapers the driver refuses a web page,
+// and an item it can't find or read, before the engine starts (P2). Such an entry is now
+// skipped to the next of its playlist; a playlist refused throughout plays the default
+// playlist, then All media; and with nothing left the display plays nothing and says why.
+// Never a taboo. Every test here uses only what 27c3726 has, so each fails there by what it
+// does, not by a missing name.
+
+/// A scene the engine finds where it looks.
+const SKIP_SCENE: &str = "12345";
+/// A scene on a second Steam library: the app finds it through `libraryfolders.vdf`, the
+/// engine looks only in Steam's own folders under `$HOME` and never finds it.
+const OTHER_LIBRARY: &str = "2910000004";
+
+/// A home where the engine finds `SKIP_SCENE` as a scene and `WEB_PAGE` typed `page`
+/// (`web`, or `scene` for a control), and where `OTHER_LIBRARY` is on another Steam library,
+/// or, for a control, in the engine's own folder.
+fn skip_home(label: &str, page: &str, other_library_found: bool) -> PathBuf {
+    let page = format!(r#"{{"type":"{page}","title":"Electric Eye","file":"index.html"}}"#);
+    let scene = r#"{"type":"scene","file":"scene.json"}"#;
+    let home = workshop_home_with(label, &[(SKIP_SCENE, scene), (WEB_PAGE, &page)]);
+    let library = if other_library_found {
+        ".local/share/Steam/steamapps/workshop/content/431960"
+    } else {
+        "Games/SteamLibrary/steamapps/workshop/content/431960"
+    };
+    let item = home.join(library).join(OTHER_LIBRARY);
+    fs::create_dir_all(&item).unwrap();
+    fs::write(item.join("project.json"), scene).unwrap();
+    home
+}
+
+/// A schema-4 document, as 0.4.0 wrote and as the app steps down for a service not known to
+/// read 8: web wallpapers aren't allowed. `default` is its default playlist; `playlists`
+/// gives each playlist's entries, a Workshop id each or "" for a still. Entry `n` of playlist
+/// `p` is `p-n` with the still `/stills/p-n.png`. `tail` follows (rules, displays).
+fn skip_document(default: &str, playlists: &[(&str, &[&str])], tail: &str) -> String {
+    let mut document = format!(
+        r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+default_playlist = "{default}"
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = true
+display_mode = "mirrored"
+theme_source_connector = ""
+[renderer]
+noctalia_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = true
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 100
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+"#
+    );
+    for (id, entries) in playlists {
+        document += &format!("[[playlists]]\nid = \"{id}\"\nname = \"{id}\"\n");
+        for (index, scene) in entries.iter().enumerate() {
+            let entry = format!("{id}-{}", index + 1);
+            document += &format!("[[playlists.entries]]\nid = \"{entry}\"\n");
+            if scene.is_empty() {
+                document += "kind = \"still\"\n";
+            } else {
+                document += &format!("kind = \"scene\"\nscene_id = \"{scene}\"\n");
+            }
+            document += &format!(
+                "still = \"/stills/{entry}.png\"\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+            );
+        }
+    }
+    document + tail
+}
+
+/// A rule that puts the playlist `pages` in force from 11:00 to 13:00.
+const NOON_RULE: &str =
+    "[[schedules]]\nid = \"noon\"\nplaylist = \"pages\"\nstart = \"11:00\"\nend = \"13:00\"\n";
+
+/// A real driver over `document` with `outputs` connected and `home` where the engine looks:
+/// the runtime, the engine's argument log (written only if it is started), Noctalia's call
+/// log and the document's path.
+fn skip_runtime(
+    root: &Path,
+    document: &str,
+    home: &Path,
+    outputs: &[&str],
+) -> (Runtime<SystemDriver>, PathBuf, PathBuf, PathBuf) {
+    let log = root.join("noctalia.log");
+    let noctalia = root.join("noctalia");
+    script(&noctalia, &format!("printf '%s\\n' \"$*\" >> {log:?}"));
+    let (engine, arguments) = argument_recorder(root, "linux-wallpaperengine");
+    let document = document
+        .replace(
+            "noctalia_program = \"/bin/true\"",
+            &format!("noctalia_program = {:?}", noctalia.display().to_string()),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!(
+                "linux_wallpaperengine_program = {:?}",
+                engine.display().to_string()
+            ),
+        );
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, &document).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let (driver, _) = driver_with(
+        parsed.renderer.clone(),
+        outputs.iter().map(|output| live(output, None)).collect(),
+    );
+    let driver = driver.with_workshop_home(Some(home.to_path_buf()));
+    let runtime = Runtime::new(config_path.clone(), parsed, driver, noon()).unwrap();
+    (runtime, arguments, log, config_path)
+}
+
+/// What Noctalia was told to show, one `wallpaper-set` call each, in order.
+fn stills_handed(log: &Path) -> Vec<String> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("msg wallpaper-set "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A skip is not a fault, and nothing is saved against the item.
+fn assert_skipped_quietly(snapshot: &serde_json::Value) {
+    assert_eq!(snapshot["last_error"], "", "{snapshot}");
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+    assert!(
+        snapshot["taboo_entries"].as_array().unwrap().is_empty(),
+        "never a taboo: {snapshot}"
+    );
+}
+
+fn remove_skip_fixture(mut runtime: Runtime<SystemDriver>, root: &Path, home: &Path) {
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn a_page_the_service_refuses_is_skipped_to_the_next_entry() {
+    // Review probe `k/rust_probe_p2_skip.rs` (r13 L1): All media is the page, whose type
+    // became web after the compile, and a still. Before, the display sat on the page's still
+    // (`entry-1`) for good, and with cycle on it came back on every turn.
+    let root = directory("r13-p2-skip");
+    let home = workshop_home_with(
+        "r13-p2-skip-home",
+        &[(
+            WEB_PAGE,
+            r#"{"type":"web","title":"Electric Eye","file":"index.html"}"#,
+        )],
+    );
+    let document = stepped_down(WITH_STILL_ON);
+    let (mut runtime, arguments, log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    assert_eq!(runtime.apply_current().as_deref(), Ok("playing entry-2"));
+    thread::sleep(Duration::from_millis(300));
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(snapshot["entry_id"], "entry-2");
+    assert_eq!(snapshot["kind"], "still");
+    assert!(snapshot["nothing_to_play"].is_null());
+    assert_skipped_quietly(&snapshot);
+    assert!(
+        !arguments.exists(),
+        "linux-wallpaperengine was started for a web page"
+    );
+    // The page's still never went up: the driver is asked before anything is shown.
+    let handed = stills_handed(&log);
+    assert!(
+        !handed.iter().any(|still| still.contains(WEB_PAGE)),
+        "{handed:?}"
+    );
+    assert_eq!(
+        handed.last().map(String::as_str),
+        Some("/home/user/Pictures/wallpapers/dawn.png")
+    );
+    remove_skip_fixture(runtime, &root, &home);
+}
+
+#[test]
+fn control_a_page_that_is_still_a_scene_plays_where_it_is() {
+    let root = directory("r13-p2-skip-control");
+    let home = workshop_home_with(
+        "r13-p2-skip-control-home",
+        &[(WEB_PAGE, r#"{"type":"scene","file":"scene.json"}"#)],
+    );
+    let document = stepped_down(WITH_STILL_ON);
+    let (mut runtime, arguments, log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    assert_eq!(runtime.apply_current().as_deref(), Ok("playing entry-1"));
+    assert!(engine_started(&arguments));
+    assert!(
+        stills_handed(&log)
+            .iter()
+            .any(|still| still.contains(WEB_PAGE))
+    );
+    remove_skip_fixture(runtime, &root, &home);
+}
+
+/// All media: a still, a scene on another Steam library (or, for the control, where the
+/// engine looks), and a still, rotating every 5 s; the entry shown after each of four turns.
+fn rotation_over_another_library(found: bool) -> (Vec<String>, bool, Vec<String>) {
+    let root = directory("other-library");
+    let home = skip_home("other-library-home", "web", found);
+    let document = skip_document("all-media", &[("all-media", &["", OTHER_LIBRARY, ""])], "")
+        .replace("cycle_enabled = false", "cycle_enabled = true")
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5");
+    let (mut runtime, arguments, log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    assert_eq!(
+        runtime.apply_current().as_deref(),
+        Ok("playing all-media-1")
+    );
+    let started = Instant::now();
+    let mut shown = Vec::new();
+    let mut started_engine = false;
+    for turn in 1..=4 {
+        runtime.tick(noon(), started + Duration::from_secs(6 * turn));
+        let snapshot = status(&mut runtime, noon());
+        if !found {
+            assert_skipped_quietly(&snapshot);
+        }
+        shown.push(snapshot["entry_id"].as_str().unwrap().to_string());
+        // Asked before the next turn can stop it again.
+        started_engine |= engine_ran(&arguments, found && turn == 1);
+    }
+    let handed = stills_handed(&log);
+    remove_skip_fixture(runtime, &root, &home);
+    (shown, started_engine, handed)
+}
+
+/// Whether the engine was started: waiting for it when it is expected to be, and a
+/// second when it isn't, so that a late start is still seen.
+fn engine_ran(arguments: &Path, expected: bool) -> bool {
+    if expected {
+        engine_started(arguments)
+    } else {
+        thread::sleep(Duration::from_secs(1));
+        arguments.exists()
+    }
+}
+
+#[test]
+fn a_scene_on_another_steam_library_is_skipped_and_the_rotation_moves_on() {
+    // At 0.4.0 the engine didn't find such a scene, so it failed, became a taboo and the
+    // rotation moved on. r13's check refused it before the engine started: no taboo, but the
+    // display held its still, and the rotation came back to it on every turn. Now it is
+    // skipped, and asked once: the rotation never lands on it again.
+    let (shown, started, handed) = rotation_over_another_library(false);
+    assert_eq!(
+        shown,
+        ["all-media-3", "all-media-1", "all-media-3", "all-media-1"]
+    );
+    assert!(!started, "linux-wallpaperengine was started for it");
+    assert!(
+        !handed.iter().any(|still| still.contains("all-media-2")),
+        "{handed:?}"
+    );
+}
+
+#[test]
+fn control_a_scene_where_the_engine_looks_takes_its_turn() {
+    let (shown, started, _handed) = rotation_over_another_library(true);
+    assert_eq!(
+        shown,
+        ["all-media-2", "all-media-3", "all-media-1", "all-media-2"]
+    );
+    assert!(started);
+}
+
+/// `next`, `previous`, `next` and `random` twice over All media: a still, the page (typed
+/// `page`) and a still. The entry after each, and whether the engine started.
+fn commands_over_the_page(page: &str) -> (Vec<String>, bool) {
+    let root = directory("skip-commands");
+    let home = skip_home("skip-commands-home", page, false);
+    let document = skip_document("all-media", &[("all-media", &["", WEB_PAGE, ""])], "");
+    let (mut runtime, arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    let mut shown = Vec::new();
+    let mut started = false;
+    for verb in ["next", "previous", "next", "random", "random"] {
+        let reply = runtime_command(&mut runtime, noon(), verb, None);
+        assert!(reply.ok, "{verb}: {}", reply.message);
+        let snapshot = status(&mut runtime, noon());
+        if page == "web" {
+            assert_skipped_quietly(&snapshot);
+        }
+        shown.push(snapshot["entry_id"].as_str().unwrap().to_string());
+        // Asked before the next command can stop it again.
+        started |= engine_ran(&arguments, page == "scene" && shown.len() == 1);
+    }
+    remove_skip_fixture(runtime, &root, &home);
+    (shown, started)
+}
+
+#[test]
+fn next_previous_and_random_step_over_a_refused_entry() {
+    let (shown, started) = commands_over_the_page("web");
+    assert_eq!(
+        shown,
+        [
+            "all-media-3",
+            "all-media-1",
+            "all-media-3",
+            "all-media-1",
+            "all-media-3"
+        ]
+    );
+    assert!(!started);
+}
+
+#[test]
+fn control_next_lands_on_a_page_that_is_a_scene() {
+    let (shown, started) = commands_over_the_page("scene");
+    assert_eq!(shown[0], "all-media-2");
+    assert_eq!(shown[1], "all-media-1");
+    assert!(started);
+}
+
+/// The display's row and the engine's start for `playlists` under `default`, at noon (when
+/// `NOON_RULE` puts `pages` in force) and then at 13:00, when it no longer is; and whether
+/// Noctalia was told anything at 13:00.
+fn schedule_fallback(
+    default: &str,
+    playlists: &[(&str, &[&str])],
+    page: &str,
+) -> (serde_json::Value, serde_json::Value, bool, bool) {
+    let root = directory("skip-schedule");
+    let home = skip_home("skip-schedule-home", page, false);
+    let document = skip_document(default, playlists, NOON_RULE);
+    let (mut runtime, arguments, log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.apply_current().unwrap();
+    let at_noon = status(&mut runtime, noon());
+    // Asked before 13:00 can stop it again.
+    let started = engine_ran(&arguments, page == "scene");
+    let calls = stills_handed(&log).len();
+    let one = noon() + chrono::TimeDelta::hours(1);
+    runtime.tick(one, Instant::now());
+    let at_one = status(&mut runtime, one);
+    let told_again = stills_handed(&log).len() != calls;
+    remove_skip_fixture(runtime, &root, &home);
+    (at_noon, at_one, started, told_again)
+}
+
+#[test]
+fn a_rules_playlist_whose_only_entry_is_refused_plays_the_default() {
+    let (at_noon, at_one, started, told_again) = schedule_fallback(
+        "all-media",
+        &[("all-media", &[WEB_PAGE, ""]), ("pages", &[WEB_PAGE])],
+        "web",
+    );
+    assert_eq!(at_noon["schedule"]["rule_id"], "noon", "{at_noon}");
+    let row = &at_noon["displays"][0];
+    assert_eq!(row["playlist_id"], "all-media", "{row}");
+    assert_eq!(row["entry_id"], "all-media-2", "{row}");
+    assert_eq!(row["route_source"], "schedule");
+    assert_eq!(row["schedule_rule_id"], "noon");
+    assert!(row["nothing_to_play"].is_null());
+    assert_skipped_quietly(&at_noon);
+    // When the window ends the default is in force, which is what already plays.
+    assert!(at_one["schedule"]["rule_id"].is_null(), "{at_one}");
+    assert_eq!(at_one["displays"][0]["entry_id"], "all-media-2");
+    assert!(!told_again, "nothing changes on screen at 13:00");
+    assert!(!started);
+}
+
+#[test]
+fn control_a_rules_playlist_that_can_play_plays() {
+    let (at_noon, _at_one, started, _told_again) = schedule_fallback(
+        "all-media",
+        &[("all-media", &[WEB_PAGE, ""]), ("pages", &[WEB_PAGE])],
+        "scene",
+    );
+    assert_eq!(at_noon["displays"][0]["playlist_id"], "pages");
+    assert_eq!(at_noon["displays"][0]["entry_id"], "pages-1");
+    assert!(started);
+}
+
+#[test]
+fn a_default_refused_throughout_too_gives_way_to_all_media() {
+    let (at_noon, at_one, started, _told_again) = schedule_fallback(
+        "favourites",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("favourites", &[WEB_PAGE]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        "web",
+    );
+    for snapshot in [&at_noon, &at_one] {
+        let row = &snapshot["displays"][0];
+        assert_eq!(row["playlist_id"], "all-media", "{row}");
+        assert_eq!(row["entry_id"], "all-media-2", "{row}");
+        assert_skipped_quietly(snapshot);
+    }
+    assert!(!started);
+}
+
+#[test]
+fn a_default_that_can_play_stands_in_before_all_media() {
+    let (at_noon, _at_one, _started, _told_again) = schedule_fallback(
+        "favourites",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("favourites", &[WEB_PAGE, ""]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        "web",
+    );
+    let row = &at_noon["displays"][0];
+    assert_eq!(row["playlist_id"], "favourites", "{row}");
+    assert_eq!(row["entry_id"], "favourites-2", "{row}");
+}
+
+#[test]
+fn control_a_rules_playlist_that_can_play_plays_over_a_default_that_cant() {
+    let (at_noon, _at_one, started, _told_again) = schedule_fallback(
+        "favourites",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("favourites", &[WEB_PAGE]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        "scene",
+    );
+    assert_eq!(at_noon["displays"][0]["entry_id"], "pages-1");
+    assert!(started);
+}
+
+/// A runtime whose every playlist holds only `scene`, typed web (the page) or on another
+/// library: its status after the first apply and that apply's reply, then the replies to
+/// play, next and random, whether the engine started and what Noctalia was told.
+fn nothing_but(
+    scene: &str,
+    extra_still: bool,
+) -> (
+    serde_json::Value,
+    String,
+    Vec<(bool, String)>,
+    bool,
+    Vec<String>,
+) {
+    let root = directory("skip-nothing");
+    let home = skip_home("skip-nothing-home", "web", false);
+    let all_media: &[&str] = if extra_still { &[scene, ""] } else { &[scene] };
+    let document = skip_document(
+        "all-media",
+        &[("all-media", all_media), ("pages", &[scene])],
+        NOON_RULE,
+    );
+    let (mut runtime, arguments, log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    let applied = runtime.apply_current().unwrap();
+    let snapshot = status(&mut runtime, noon());
+    let replies = ["play", "next", "random"]
+        .into_iter()
+        .map(|verb| {
+            let reply = runtime_command(&mut runtime, noon(), verb, None);
+            (reply.ok, reply.message)
+        })
+        .collect();
+    let started = engine_ran(&arguments, scene == SKIP_SCENE);
+    let handed = stills_handed(&log);
+    remove_skip_fixture(runtime, &root, &home);
+    (snapshot, applied, replies, started, handed)
+}
+
+#[test]
+fn with_nothing_left_that_can_play_the_display_plays_nothing_and_says_why() {
+    for (scene, reason) in [
+        (WEB_PAGE, "this configuration doesn't allow web wallpapers"),
+        (OTHER_LIBRARY, "no wallpaper here can start"),
+    ] {
+        let (snapshot, applied, replies, started, handed) = nothing_but(scene, false);
+        assert_eq!(applied, format!("nothing to play: {reason}"));
+        assert_eq!(snapshot["nothing_to_play"], reason, "{snapshot}");
+        assert!(snapshot["entry_id"].is_null(), "{snapshot}");
+        let row = &snapshot["displays"][0];
+        assert_eq!(row["nothing_to_play"], reason);
+        assert_eq!(row["entry_name"], format!("Nothing to play: {reason}"));
+        assert_eq!(row["entry_id"], "");
+        assert_eq!(row["kind"], "");
+        assert_eq!(row["still"], "");
+        assert_eq!(row["motion_active"], false);
+        assert!(row["next_cycle_in_s"].is_null(), "{row}");
+        assert_skipped_quietly(&snapshot);
+        // The same state an empty playlist gives: play has nothing to start, and next and
+        // random have nothing to move to.
+        let said = format!("nothing to play: {reason}");
+        assert_eq!(
+            replies,
+            [(true, said.clone()), (false, said.clone()), (false, said)]
+        );
+        assert!(!started);
+        assert!(handed.is_empty(), "{handed:?}");
+    }
+}
+
+#[test]
+fn a_still_beside_them_in_all_media_is_what_plays() {
+    let (snapshot, applied, _replies, started, _handed) = nothing_but(WEB_PAGE, true);
+    assert_eq!(applied, "playing all-media-2");
+    assert!(snapshot["nothing_to_play"].is_null());
+    assert!(!started);
+}
+
+#[test]
+fn control_a_scene_the_engine_finds_there_plays() {
+    let (snapshot, applied, _replies, started, _handed) = nothing_but(SKIP_SCENE, false);
+    assert_eq!(applied, "playing pages-1");
+    assert!(snapshot["nothing_to_play"].is_null());
+    assert!(started);
+}
+
+/// Independent displays: DP-1 on `mixed` (the page and a still), HDMI-A-1 on `pages` (the
+/// page alone), the default All media (the page and a still).
+fn independent_skips(page: &str) -> (serde_json::Value, serde_json::Value, bool) {
+    let root = directory("skip-independent");
+    let home = skip_home("skip-independent-home", page, false);
+    let document = skip_document(
+        "all-media",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("mixed", &[WEB_PAGE, ""]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        "[[displays]]\nconnector = \"DP-1\"\nplaylist = \"mixed\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"pages\"\n",
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP-1\"",
+    );
+    let (mut runtime, arguments, _log, _config) =
+        skip_runtime(&root, &document, &home, &["DP-1", "HDMI-A-1"]);
+    runtime.apply_current().unwrap();
+    let dp = display_status(&mut runtime, noon(), "DP-1");
+    let hdmi = display_status(&mut runtime, noon(), "HDMI-A-1");
+    let started = engine_ran(&arguments, page == "scene");
+    remove_skip_fixture(runtime, &root, &home);
+    (dp, hdmi, started)
+}
+
+#[test]
+fn independent_displays_skip_and_fall_back_each_on_its_own() {
+    let (dp, hdmi, started) = independent_skips("web");
+    assert_eq!(dp["playlist_id"], "mixed", "{dp}");
+    assert_eq!(dp["entry_id"], "mixed-2", "{dp}");
+    assert_eq!(dp["last_error"], "");
+    assert_eq!(hdmi["assigned_playlist_id"], "pages", "{hdmi}");
+    assert_eq!(hdmi["playlist_id"], "all-media", "{hdmi}");
+    assert_eq!(hdmi["entry_id"], "all-media-2", "{hdmi}");
+    assert_eq!(hdmi["route_source"], "assignment");
+    assert_eq!(hdmi["last_error"], "");
+    assert!(hdmi["nothing_to_play"].is_null());
+    assert!(!started);
+}
+
+#[test]
+fn control_independent_displays_play_their_own_playlists() {
+    let (dp, hdmi, started) = independent_skips("scene");
+    assert_eq!(dp["entry_id"], "mixed-1");
+    assert_eq!(hdmi["playlist_id"], "pages");
+    assert_eq!(hdmi["entry_id"], "pages-1");
+    assert!(started);
+}
+
+/// A mirrored All media of a still, an entry the test driver refuses at the engine's start
+/// only (as a type that changed after the driver was asked), and a still, rotating; the
+/// entry after each of six turns, and how often the refused one was applied.
+fn rotation_past_a_late_refusal(refuse: bool) -> (Vec<String>, usize, serde_json::Value) {
+    let document = skip_document("all-media", &[("all-media", &["", SKIP_SCENE, ""])], "")
+        .replace("cycle_enabled = false", "cycle_enabled = true")
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5");
+    let (mut runtime, state) = started_runtime(loaded(&document, &[]), noon());
+    if refuse {
+        state
+            .lock()
+            .unwrap()
+            .refuse_entry_ids
+            .insert("all-media-2".into());
+    }
+    let started = Instant::now();
+    let mut shown = Vec::new();
+    for turn in 1..=6 {
+        runtime.tick(noon(), started + Duration::from_secs(6 * turn));
+        shown.push(
+            status(&mut runtime, noon())["entry_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let applied = state
+        .lock()
+        .unwrap()
+        .applies
+        .iter()
+        .filter(|(entry, _)| entry == "all-media-2")
+        .count();
+    (shown, applied, status(&mut runtime, noon()))
+}
+
+#[test]
+fn an_entry_refused_only_at_the_start_is_skipped_and_asked_once() {
+    let (shown, applied, snapshot) = rotation_past_a_late_refusal(true);
+    assert_eq!(
+        shown,
+        [
+            "all-media-3",
+            "all-media-1",
+            "all-media-3",
+            "all-media-1",
+            "all-media-3",
+            "all-media-1"
+        ]
+    );
+    assert_eq!(applied, 1, "tried once, never again this generation");
+    assert_skipped_quietly(&snapshot);
+}
+
+#[test]
+fn control_an_entry_that_starts_takes_every_third_turn() {
+    let (shown, applied, _snapshot) = rotation_past_a_late_refusal(false);
+    assert_eq!(
+        shown,
+        [
+            "all-media-2",
+            "all-media-3",
+            "all-media-1",
+            "all-media-2",
+            "all-media-3",
+            "all-media-1"
+        ]
+    );
+    assert_eq!(applied, 2);
+}
+
+/// On battery, then on AC again, over All media: the page (typed `page`) and a still. The
+/// entry on battery and on AC, and whether the engine started.
+fn battery_then_ac(page: &str) -> (serde_json::Value, serde_json::Value, bool) {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let root = directory("skip-ac");
+    let home = skip_home("skip-ac-home", page, false);
+    let document = skip_document("all-media", &[("all-media", &[WEB_PAGE, ""])], "")
+        .replace("schema_version = 4", "schema_version = 5")
+        .replace(
+            "dynamics_enabled = true",
+            "dynamics_enabled = true\nstop_animations_on_battery = true",
+        );
+    let (mut runtime, arguments, _log, _config) = skip_runtime(&root, &document, &home, &["DP-1"]);
+    runtime.observe_power(power_observation(Battery));
+    runtime.apply_current().unwrap();
+    let on_battery = status(&mut runtime, noon());
+    runtime.observe_power(power_observation(Ac));
+    let on_ac = status(&mut runtime, noon());
+    let started = engine_ran(&arguments, page == "scene");
+    remove_skip_fixture(runtime, &root, &home);
+    (on_battery, on_ac, started)
+}
+
+#[test]
+fn a_page_found_when_motion_resumes_on_ac_is_skipped() {
+    // On battery nothing starts, so nothing is refused: the page's still shows, as any
+    // scene's does. Motion resuming on AC asks the driver, and the page is skipped then.
+    let (on_battery, on_ac, started) = battery_then_ac("web");
+    assert_eq!(on_battery["entry_id"], "all-media-1");
+    assert_eq!(on_ac["entry_id"], "all-media-2", "{on_ac}");
+    assert_skipped_quietly(&on_ac);
+    assert!(!started);
+}
+
+#[test]
+fn control_a_scene_resumes_on_ac_where_it_is() {
+    let (_on_battery, on_ac, started) = battery_then_ac("scene");
+    assert_eq!(on_ac["entry_id"], "all-media-1");
+    assert!(started);
+}
+
+#[test]
+fn turning_web_wallpapers_on_forgets_what_was_refused() {
+    // The skip memory is the document's: the reload that brings the permission asks again.
+    let root = directory("skip-web-on");
+    let home = skip_home("skip-web-on-home", "web", false);
+    let (mut runtime, arguments, _log, config_path) =
+        skip_runtime(&root, &stepped_down(WITH_STILL_ON), &home, &["DP-1"]);
+    assert_eq!(runtime.apply_current().as_deref(), Ok("playing entry-2"));
+    let allowed = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("schema_version = 4", "schema_version = 8")
+        .replace(
+            "theme_source_connector = \"\"\n",
+            "theme_source_connector = \"\"\nallow_web_wallpapers = true\n",
+        );
+    fs::write(&config_path, allowed).unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    assert_eq!(status(&mut runtime, noon())["entry_id"], "entry-1");
+    assert!(engine_started(&arguments), "allowed, the page plays");
+    remove_skip_fixture(runtime, &root, &home);
 }

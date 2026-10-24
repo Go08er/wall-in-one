@@ -9,8 +9,31 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wall_in_one import runtime_config
-from wall_in_one.library.model import MediaItem
+from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.library.playlists import Playlist
+
+
+@dataclass(frozen=True)
+class RefusedTruth:
+    """One Wallpaper Engine item the service won't start in its loaded document.
+
+    Each entry of it is skipped, the way an empty playlist's display plays
+    nothing: never a taboo and never saved. The service asks again after a
+    reload.
+    """
+
+    #: The Workshop id of the item an entry renders: a preset's base.
+    scene_id: str
+    #: Refused because the document doesn't allow web wallpapers. Otherwise
+    #: it is an item the service can't find, read or play.
+    web_page: bool
+    #: What the service says, naming the item.
+    reason: str
+
+
+def stand_in_sentence(asked: str, playing: str) -> str:
+    """Say that ``asked`` can't play and ``playing`` stands in for it."""
+    return f"\u201c{asked}\u201d can\u2019t play here, so \u201c{playing}\u201d is playing"
 
 
 @dataclass(frozen=True)
@@ -59,6 +82,19 @@ class DisplayRuntimeTruth:
     next_cycle_in_s: int | None = None
     #: ``route_change_at`` as local ``HH:MM``, only when less than a day away.
     until: str | None = None
+    #: The playlist this display asked for (its pick, rule, assignment or the
+    #: default) when ``playlist_id`` is a stand-in for it: the service refused
+    #: every entry of it. None while it plays its own, or from a service that
+    #: doesn't say.
+    stand_in_for: str | None = None
+    #: That playlist's name, from the snapshot's own playlist inventory (its
+    #: id when the inventory doesn't name it). Empty with no ``stand_in_for``.
+    stand_in_for_name: str = ""
+
+    @property
+    def asked_playlist_id(self) -> str:
+        """The playlist this display asked for: its own, or the one stood in for."""
+        return self.stand_in_for or self.playlist_id
 
 
 @dataclass(frozen=True)
@@ -158,6 +194,23 @@ class RuntimeTruth:
     theme_source: ThemeSourceTruth | None = None
     schedules: tuple[RuntimeScheduleTruth, ...] = ()
     power: PowerRuntimeTruth | None = None
+    #: The summary's playlist asked for, when every connected display plays
+    #: the same stand-in (``playlist_id``) for it; and its name.
+    stand_in_for: str | None = None
+    stand_in_for_name: str = ""
+    #: What the service refused in its loaded document (``refused``), and how
+    #: many more it left out of this snapshot.
+    refused: tuple[RefusedTruth, ...] = ()
+    refused_omitted: int = 0
+
+    @property
+    def asked_playlist_id(self) -> str:
+        """The summary's playlist asked for: its own, or the one stood in for."""
+        return self.stand_in_for or self.playlist_id
+
+    def refusal(self, scene_id: str) -> RefusedTruth | None:
+        """Why the service refused the Workshop item ``scene_id``, if it said so."""
+        return next((one for one in self.refused if one.scene_id == scene_id), None)
 
     @property
     def follows_schedule(self) -> bool:
@@ -237,7 +290,10 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     if not isinstance(display_mode, str):
         return None
 
-    parsed_displays = _display_truth(status.get("displays"), required=status_version == 2)
+    names = _playlist_names(status.get("playlists"))
+    parsed_displays = _display_truth(
+        status.get("displays"), required=status_version == 2, names=names
+    )
     if parsed_displays is None:
         return None
     theme_source = _theme_source_truth(status.get("theme_source"), required=status_version == 2)
@@ -301,6 +357,8 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         if isinstance(reported_rule, str) and reported_rule:
             schedule_rule_id = reported_rule
 
+    stand_in_for = _stand_in_for(status.get("stand_in_for"), playlist_id)
+    refused, refused_omitted = refused_from_status(status)
     return RuntimeTruth(
         playlist_id=playlist_id,
         playlist=playlist,
@@ -315,7 +373,91 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         theme_source=theme_source,
         schedules=parsed_schedules,
         power=power,
+        stand_in_for=stand_in_for,
+        stand_in_for_name=names.get(stand_in_for, stand_in_for) if stand_in_for else "",
+        refused=refused,
+        refused_omitted=refused_omitted,
     )
+
+
+def _playlist_names(raw: object) -> dict[str, str]:
+    """The snapshot's playlist inventory as id -> name; malformed rows are left out."""
+    if not isinstance(raw, list):
+        return {}
+    names: dict[str, str] = {}
+    for record in raw:
+        if not isinstance(record, Mapping):
+            continue
+        identifier = record.get("id")
+        name = record.get("name")
+        if isinstance(identifier, str) and identifier and isinstance(name, str) and name:
+            names.setdefault(identifier, name)
+    return names
+
+
+def _stand_in_for(raw: object, playlist_id: str) -> str | None:
+    """An additive ``stand_in_for``: a playlist id other than the one playing.
+
+    Advisory, so a malformed value is dropped rather than rejecting the
+    snapshot; a service that predates it never sends it.
+    """
+    if not isinstance(raw, str) or not raw or raw == playlist_id:
+        return None
+    return raw
+
+
+#: What one snapshot carries of ``refused`` at most: the service's own cap is
+#: 16 rows. A longer list is malformed, and read no further.
+_MAX_REFUSED_ROWS = 64
+
+
+def refused_from_status(
+    status: Mapping[str, object] | None,
+) -> tuple[tuple[RefusedTruth, ...], int]:
+    """The additive ``refused`` list and ``refused_omitted`` count, or none.
+
+    Advisory, like the timing fields: a malformed row is left out, and a
+    service that predates them reports neither.
+    """
+    if status is None:
+        return (), 0
+    raw = status.get("refused")
+    rows: list[RefusedTruth] = []
+    if isinstance(raw, list):
+        for record in raw[:_MAX_REFUSED_ROWS]:
+            if not isinstance(record, Mapping):
+                continue
+            scene_id = record.get("scene_id")
+            web_page = record.get("web_page")
+            reason = record.get("reason")
+            if (
+                isinstance(scene_id, str)
+                and scene_id.isascii()
+                and scene_id.isdigit()
+                and type(web_page) is bool
+                and isinstance(reason, str)
+            ):
+                rows.append(RefusedTruth(scene_id, web_page, reason))
+    omitted = status.get("refused_omitted", 0)
+    return tuple(rows), omitted if type(omitted) is int and omitted > 0 else 0
+
+
+def refused_paths(
+    refused: Iterable[RefusedTruth], items: Iterable[MediaItem]
+) -> dict[Path, str]:
+    """The library items the service refused, by path, with its reason.
+
+    A Wallpaper Engine item is refused by the item its entries render: a
+    preset's base, else its own Workshop id.
+    """
+    reasons = {one.scene_id: one.reason for one in refused}
+    if not reasons:
+        return {}
+    return {
+        item.path: reasons[item.scene_base or item.scene]
+        for item in items
+        if item.kind is Kind.SCENE and (item.scene_base or item.scene) in reasons
+    }
 
 
 def _theme_source_truth(raw: object, *, required: bool) -> ThemeSourceTruth | None:
@@ -386,6 +528,7 @@ def _display_truth(
     raw: object,
     *,
     required: bool,
+    names: Mapping[str, str] | None = None,
 ) -> tuple[DisplayRuntimeTruth, ...] | None:
     if raw is None:
         return None if required else ()
@@ -485,6 +628,7 @@ def _display_truth(
             record.get("next_cycle_at"), record.get("next_cycle_in_s")
         )
         until = record.get("until")
+        stand_in_for = _stand_in_for(record.get("stand_in_for"), playlist_id)
         parsed.append(
             DisplayRuntimeTruth(
                 connector=connector,
@@ -520,6 +664,10 @@ def _display_truth(
                     and _CLOCK_TIME.fullmatch(until)
                     and route_change_at is not None
                     else None
+                ),
+                stand_in_for=stand_in_for,
+                stand_in_for_name=(
+                    (names or {}).get(stand_in_for, stand_in_for) if stand_in_for else ""
                 ),
             )
         )

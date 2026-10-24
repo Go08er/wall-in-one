@@ -4396,6 +4396,12 @@ class Application(Adw.Application):
         the engine, and a change of the setting starts every display again.
         Nothing but its status is asked of it then.
 
+        The file on disk is judged the same way when the service doesn't
+        hold it (`_unloaded_web_wallpapers`): its own poll of the file loads
+        it within about a second, and nothing runs this guard again after
+        that (review r13b, D1). A writer that doesn't send its own reload (a
+        hand-run ``--write-config`` while web wallpapers were on) leaves one.
+
         Otherwise the service is told to stop at once, then given a document
         that plays nothing (`runtime_config.nothing_to_play_document`) and
         told to load it: unlike a ``stop``, nothing it is asked afterwards
@@ -4459,9 +4465,24 @@ class Application(Adw.Application):
                 unsure = holding is None and unknown
             reads_eight = runtime_config.nothing_to_play_supported(status)
             titles, unchecked = runtime_config.web_wallpapers_in(judged)
-            if not allows and (reads_eight or not (titles or unchecked or unsure)):
+            held_plays = allows or (not reads_eight and bool(titles or unchecked or unsure))
+            unloaded = self._unloaded_web_wallpapers(
+                on_disk, status, judged, reads_eight=reads_eight
+            )
+            if not held_plays and not unloaded:
                 return self._web_off_not_reached(titles) if reads_eight else ""
-            what = self._held_web_words(titles, unchecked, allows=allows, known=status is not None)
+            if held_plays:
+                what = self._held_web_words(
+                    titles, unchecked, allows=allows, known=status is not None
+                )
+                lead = f"Allow web wallpapers is off, but the wallpaper service still {what}"
+            else:
+                # Only the file it hasn't loaded yet: replaced (or the service
+                # ended) below as if it held it, so that its poll can't load it.
+                lead = (
+                    "Allow web wallpapers is off, but the configuration on disk, which the "
+                    f"wallpaper service loads the next time it checks the file, {unloaded}"
+                )
             # Whether it was playing: the stop below only bridges until the
             # document that plays nothing is loaded, after which Play is put
             # back, so that turning web wallpapers on again plays as before.
@@ -4506,13 +4527,13 @@ class Application(Adw.Application):
                     with contextlib.suppress(client.ControlError, OSError):
                         client.send_runtime("play")
                 return (
-                    f"Allow web wallpapers is off, but the wallpaper service still {what}. "
+                    f"{lead}. "
                     "Playback was stopped, and the service now has nothing to play: web "
                     "wallpapers are off. Until a publication gets through, no wallpaper is "
                     "played, and the last still Noctalia was given stays on screen."
                 )
         if not locked:
-            return f"Allow web wallpapers is off, but the wallpaper service still {what}. " + (
+            return f"{lead}. " + (
                 "Playback was stopped so it doesn\u2019t keep playing, but the service "
                 "can start it again (Resume, ctl play) until a publication gets through."
                 if stopped
@@ -4538,22 +4559,19 @@ class Application(Adw.Application):
                 else "it couldn\u2019t be given a document that plays nothing"
             )
             return (
-                f"Allow web wallpapers is off, but the wallpaper service still {what}. It "
-                f"was stopped: {why}. Starting it again (systemctl --user start wall-in-one, "
+                f"{lead}. {'It' if held_plays else 'The wallpaper service'} was stopped: "
+                f"{why}. Starting it again (systemctl --user start wall-in-one, "
                 "or the panel) runs the installed service through its start check, which "
                 "doesn\u2019t start it on a configuration that may play a web wallpaper "
                 "while they are off."
             )
         if stopped:
             return (
-                f"Allow web wallpapers is off, but the wallpaper service still {what}. "
+                f"{lead}. "
                 "Playback was stopped so it doesn\u2019t keep playing, but the service "
                 "can start it again (Resume, ctl play) until a publication gets through."
             )
-        return (
-            f"Allow web wallpapers is off, but the wallpaper service still {what}. "
-            "It may still be playing; stop it from the wallpaper service."
-        )
+        return f"{lead}. It may still be playing; stop it from the wallpaper service."
 
     @staticmethod
     def _held_text_loaded(status: dict[str, object] | None, texts: Sequence[str]) -> int | None:
@@ -4573,6 +4591,51 @@ class Application(Adw.Application):
             except runtime_config.RuntimeConfigError:
                 continue
         return None
+
+    @staticmethod
+    def _unloaded_web_wallpapers(
+        on_disk: str | None,
+        status: dict[str, object] | None,
+        judged: Sequence[str],
+        *,
+        reads_eight: bool,
+    ) -> str:
+        """What the file on disk lets play while web wallpapers are off, if it isn't loaded yet.
+
+        Empty when it lets nothing play, or when it is judged already: the
+        one the service's status names (``config_generation``), or one of
+        ``judged``. Otherwise the service's own poll of the file loads it
+        within about a second (review r13b, D1), so it is judged as what it
+        holds is: one that allows web wallpapers, under any service; for a
+        service not confirmed to read schema 8, one that names a web page or
+        a Workshop item whose type can't be checked. The words follow "the
+        configuration on disk, which the wallpaper service loads the next
+        time it checks the file,".
+        """
+        if on_disk is None or on_disk in judged:
+            return ""
+        if Application._held_text_loaded(status, [on_disk]) is not None:
+            return ""  # the one it holds: what its status says of it is believed
+        allows = runtime_config.allows_web_wallpapers(text=on_disk)
+        titles, unchecked = ((), ()) if reads_eight else runtime_config.web_wallpapers_in([on_disk])
+        named = ", ".join(titles)
+        ids = ", ".join(unchecked)
+        if allows:
+            allowing = "allows web wallpapers"
+            return f"{allowing}, and names {named}" if titles else allowing
+        if titles and unchecked:
+            return (
+                f"names the web wallpapers {named}, and Workshop wallpapers whose type "
+                f"couldn\u2019t be checked ({ids})"
+            )
+        if titles:
+            return f"names the web wallpapers {named}"
+        if unchecked:
+            return (
+                f"names Workshop wallpapers whose type couldn\u2019t be checked ({ids}), so a "
+                "web wallpaper can\u2019t be ruled out"
+            )
+        return ""
 
     @staticmethod
     def _web_off_not_reached(titles: Sequence[str]) -> str:

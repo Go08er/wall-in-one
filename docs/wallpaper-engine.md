@@ -183,16 +183,20 @@ no way to clear it.
 
 **When the setting can't reach the service.** A compile that fails, or a
 reload the service refuses, leaves it on the document it holds; its status
-says which (`config_generation`), and the app judges that one. When it
-allows web wallpapers (`allow_web_wallpapers = true`, from while the setting
-was on), whatever it names, or when the service predates schema 8 (it has no
-check of its own) and the document plays a web page, an item the scan can't
-classify, or one the app no longer knows, the app stops it. A service that
-reads 8 is then handed a document that plays nothing; one that can't read it
-is told to quit, and its next start is guarded. A service that reads 8 and
-holds a document that doesn't allow web wallpapers is left alone: it refuses
-every page itself (below), and the app only says that the setting hasn't
-reached it yet. At service start, a kept document that plays a web page, or
+says which (`config_generation`), and the app judges that one. It also
+judges the file on disk when the service hasn't loaded it (one written by
+something that doesn't reload the service, such as a hand-run
+`wall-in-one --write-config`): the service's own check of the file loads it
+within about a second. When either allows web wallpapers
+(`allow_web_wallpapers = true`, from while the setting was on), whatever it
+names, or when the service predates schema 8 (it has no check of its own) and
+the document plays a web page, an item the scan can't classify, or one the
+app no longer knows, the app stops it. A service that reads 8 is then handed
+a document that plays nothing, which also replaces the file on disk; one that
+can't read it is told to quit, and its next start is guarded. A service that
+reads 8, holding a document that doesn't allow web wallpapers with none on
+disk that does, is left alone: it refuses every page itself (below), and the
+app only says that the setting hasn't reached it yet. At service start, a kept document that plays a web page, or
 that allows web wallpapers, is refused with exit 78.
 
 **When it is on and can't reach the service either.** A service that lists

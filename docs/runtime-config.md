@@ -429,13 +429,18 @@ refuses, leaves the service on what it holds: the file on disk, or a text a
 publication replaced since the service last confirmed a reload (a reload
 confirms only the texts replaced before it was sent). The app asks the
 service's status, and judges the one whose `config_generation` it reports,
-or all of them when it reports none of theirs. It stops playback only when
-that lets a page play: a document with `allow_web_wallpapers = true` (as the
-service's status says, where it says it), whatever it names; or, for a
-service not confirmed to read 8, which has no check of its own, a document
-that plays a web page or an item the scan can't classify, or one the app no
-longer knows. A service that reads 8 and holds a document that doesn't allow
-web wallpapers refuses every page itself, and is left alone. Otherwise a
+or all of them when it reports none of theirs. The file on disk is judged
+too when the service doesn't hold it, since the service's own check of the
+file loads it within about a second (one written by something that doesn't
+reload the service, such as a hand-run `wall-in-one --write-config`). It
+stops playback only when one of them lets a page play: a document with
+`allow_web_wallpapers = true` (as the service's status says of the one it
+holds, where it says it), whatever it names; or, for a service not confirmed
+to read 8, which has no check of its own, a document that plays a web page or
+an item the scan can't classify, or one the app no longer knows. A service
+that reads 8 and holds a document that doesn't allow web wallpapers refuses
+every page itself, and is left alone while the file on disk doesn't allow
+them either. Otherwise a
 service that reads 8 is
 given a document that plays nothing anywhere and reloads it: unlike a `stop`,
 nothing it is asked afterwards brings the page back. If it was playing, it is

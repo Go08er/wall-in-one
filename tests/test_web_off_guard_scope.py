@@ -377,6 +377,106 @@ def test_control_a_text_replaced_before_the_reload_was_sent_is_forgotten(
     assert _acted(sent) == []
 
 
+# -- the file on disk the service hasn't loaded yet (review r13b, D1) -------------------------
+#
+# Its own poll of the file loads it within about a second, and nothing runs the guard again.
+# The way in: a writer that sends no reload (a hand-run --write-config while web was on), then
+# web turned off and that publication failing before it writes.
+
+
+def _with_generation(text: str, generation: str) -> str:
+    head = text.split("\n", 1)[0] + "\n"
+    return text.replace(head, f'{head}config_generation = "{generation}"\n', 1)
+
+
+def _unloaded_on_disk(application: Any, monkeypatch: pytest.MonkeyPatch, disk: str) -> None:
+    """The service holds QUIET (a replaced text, its reload unconfirmed); ``disk`` is on disk."""
+    _held(application, QUIET)
+    _replaced(application, monkeypatch, QUIET)
+    _held(application, disk)
+
+
+@pytest.mark.parametrize("holds", ["a replaced text", "a document the app never saw"])
+def test_an_unloaded_document_on_disk_that_allows_web_is_ended(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    holds: str,
+) -> None:
+    """Before: only its status was asked (``said ''``), and the poll loaded the page's document.
+
+    "a document the app never saw": a status whose ``config_generation`` matches no text, with
+    ``allow_web_wallpapers: false``, which judged no text at all.
+    """
+    application = profiles().application
+    _scene_installed()
+    disk = _with_generation(_named(SCENE, allowing=True), "a" * 64)
+    _unloaded_on_disk(application, monkeypatch, disk)
+    generation = GENERATION if holds == "a replaced text" else "b" * 64
+    sent = _service(monkeypatch, schemas=READS_EIGHT, allows=False, generation=generation)
+    said = application._web_off_guard()
+    assert _acted(sent) == ["stop", "reload"], said
+    assert _plays_nothing()
+    assert said.startswith(
+        "Allow web wallpapers is off, but the configuration on disk, which the wallpaper "
+        "service loads the next time it checks the file, allows web wallpapers. "
+    ), said
+    assert "the last still Noctalia was given stays on screen" in said
+
+
+@pytest.mark.parametrize("names", ["a web page", "an id the scan can't classify"])
+def test_an_unloaded_document_a_service_without_the_check_would_play_ends_it(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    names: str,
+) -> None:
+    """One that predates schema 8 plays what it loads. Before: only QUIET, which it holds, was
+    judged, and the page's document was left for its poll."""
+    application = profiles().application
+    if names == "a web page":
+        _steam_with_web()
+        disk = _with_generation(DOCUMENT, "a" * 64)
+    else:
+        disk = _with_generation(_named(SCENE), "a" * 64)  # its folder isn't there
+    _unloaded_on_disk(application, monkeypatch, disk)
+    sent = _service(monkeypatch, schemas=OLDER, generation=GENERATION)
+    said = application._web_off_guard()
+    assert _acted(sent) == ["stop", "quit"], said
+    assert "but the configuration on disk" in said
+    assert ("Electric Eye" if names == "a web page" else SCENE) in said
+    assert "The wallpaper service was stopped: it is older than this app" in said
+
+
+def test_control_an_unloaded_document_on_disk_without_the_key_is_left_alone(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service that reads 8 refuses every page itself: the narrowing (L2) holds for the file
+    on disk too, a web page it names included."""
+    application = profiles().application
+    _steam_with_web()
+    disk = _with_generation(DOCUMENT, "a" * 64)
+    _unloaded_on_disk(application, monkeypatch, disk)
+    sent = _service(monkeypatch, schemas=READS_EIGHT, allows=False, generation=GENERATION)
+    said = application._web_off_guard()
+    assert _acted(sent) == [], said
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == disk
+
+
+def test_control_an_unloaded_document_naming_an_installed_scene_is_left_alone(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under a service without the check too, when what it names is a scene."""
+    application = profiles().application
+    _scene_installed()
+    disk = _with_generation(_named(SCENE), "a" * 64)
+    _unloaded_on_disk(application, monkeypatch, disk)
+    sent = _service(monkeypatch, schemas=OLDER, generation=GENERATION)
+    assert application._web_off_guard() == ""
+    assert _acted(sent) == []
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == disk
+
+
 # -- --service's lane: a reload that fails, not only one that is refused ---------------------
 
 

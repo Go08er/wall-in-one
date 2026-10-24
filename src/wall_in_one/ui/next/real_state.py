@@ -373,6 +373,7 @@ class RealAppState(GObject.Object):
         #: What the wallpaper service refused, by Workshop id, as the views
         #: were last built for it (status ``refused``).
         self._refused: dict[str, str] = {}
+        self._refused_omitted = 0
         self._wallpapers: tuple[LibraryWallpaper, ...] = ()
         self._index: dict[str, LibraryWallpaper] = {}
         self._playlists: tuple[LibraryPlaylist, ...] = ()
@@ -498,8 +499,11 @@ class RealAppState(GObject.Object):
     def _adopt_refused(self, truth: runtime_truth.RuntimeTruth | None) -> bool:
         """Mark what the service refused on the views it changes; True if any changed."""
         refused = {one.scene_id: one.reason for one in truth.refused} if truth is not None else {}
+        omitted = truth.refused_omitted if truth is not None else 0
+        counted = omitted != self._refused_omitted
+        self._refused_omitted = omitted
         if refused == self._refused:
-            return False
+            return counted
         self._refused = refused
         views = tuple(
             replace(view, refused_here=self._refused_reason(view.item))
@@ -508,7 +512,7 @@ class RealAppState(GObject.Object):
             for view in self._wallpapers
         )
         if views == self._wallpapers:
-            return False
+            return counted
         self._wallpapers = views
         self._index = {view.id: view for view in views}
         return True
@@ -802,6 +806,10 @@ class RealAppState(GObject.Object):
     @property
     def library_scanning(self) -> bool:
         return self._scanning
+
+    @property
+    def library_refused_omitted(self) -> int:
+        return self._refused_omitted
 
     @property
     def library_skipped(self) -> Sequence[str]:

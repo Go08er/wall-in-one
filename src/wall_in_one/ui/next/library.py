@@ -640,6 +640,11 @@ class LibraryPage(Page):
         if skipped:
             # Left out by the scan's limits, or unreadable: said, never dropped quietly.
             text += f" · {len(skipped)} skipped"
+        omitted = self.state.library_refused_omitted
+        if omitted:
+            # The service names 16 refused items at most; the cards past them
+            # carry no mark.
+            text += f" · and {omitted} more can\u2019t play here"
         if self.state.library_scanning:
             text += " · scanning…"
         self._count.set_label(text)

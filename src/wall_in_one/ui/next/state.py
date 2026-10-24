@@ -153,8 +153,8 @@ class WallpaperView(Protocol):
 
     #: Why the wallpaper service skips it in the configuration it holds now
     #: (a Wallpaper Engine item it won't start: one on another Steam library,
-    #: say), or empty. Not a playback problem and never saved: the service
-    #: asks again after its next reload.
+    #: say), or empty. Not a playback problem and never saved: it follows the
+    #: service's latest status and goes when the service stops refusing it.
     @property
     def refused_here(self) -> str: ...
 
@@ -572,6 +572,12 @@ class AppState(Protocol):
     #: as classic's subtitle does.
     @property
     def library_skipped(self) -> Sequence[str]: ...
+
+    #: How many more items the service refused than its status named (it names
+    #: at most 16, and none when the reply was held to its budget). Those have
+    #: no mark; the Library says how many.
+    @property
+    def library_refused_omitted(self) -> int: ...
 
     #: Wallpaper Engine in the library, or None while its items aren't
     #: scanned (Workshop scanning off, or no library folder). With

@@ -752,3 +752,26 @@ def test_a_preset_of_a_web_wallpaper_plays_as_its_base_and_says_so(tmp_path: Pat
     assert item.scene_note == "plays as Electric Eye; its settings aren\u2019t applied"
     assert item.preview == web / "preview.jpg", "its still and colours match the screen"
     assert item.title == "Y2K Matrix" and item.path == preset
+
+
+# -- a value std::stof refuses is never written (review of r11, finding 4) --------
+
+
+@pytest.mark.parametrize(
+    ("value", "written"),
+    (
+        (1e-300, "0.0"),
+        (1.5e-39, "0.0"),
+        (1e-38, "0.0"),
+        (-1e-38, "0.0"),
+        (1.2e-38, "1.2e-38"),
+        (0.0, "0.0"),
+        (-2.5, "-2.5"),
+        (1e9, "1000000000.0"),
+    ),
+)
+def test_a_slider_value_is_one_stof_parses(value: float, written: str) -> None:
+    """`std::stof` throws on 0 < |v| < FLT_MIN (1e-300, 1.5e-39, 1e-38; checked
+    against libstdc++), and the engine then exits: such a value is written as 0."""
+    slider = workshop.Declared("s", "slider")
+    assert workshop.property_value(slider, value) == written

@@ -139,6 +139,11 @@ _MAX_DECLARED: Final = 4096
 #: would throw and stop the engine.
 _MAX_SLIDER_MAGNITUDE: Final = 1e9
 
+#: The smallest normal float. `std::stof` throws (out of range) on any
+#: non-zero value smaller in magnitude, `1e-38` and `1.5e-39` included
+#: (checked against libstdc++), so such a value is written as zero.
+_FLT_MIN: Final = 1.1754943508222875e-38
+
 #: A number the engine reads as an `int` (a combo's option value, through
 #: nlohmann's ``get<int>``): anything outside this does not fit, and is left
 #: out rather than handed over to be truncated.
@@ -520,6 +525,9 @@ def property_value(declared: Declared, value: object) -> str | None:
             return str(value) if abs(value) <= _MAX_SLIDER_MAGNITUDE else None
         if not math.isfinite(value) or abs(value) > _MAX_SLIDER_MAGNITUDE:
             return None
+        if 0.0 < abs(value) < _FLT_MIN:
+            # What the engine could hold of it is zero; written so, it parses.
+            return "0.0"
         return repr(float(value))
     if declared.type == "color":
         if not isinstance(value, str):

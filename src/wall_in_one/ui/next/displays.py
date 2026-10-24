@@ -31,6 +31,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.displays_arrangement import CSS as ARRANGEMENT_CSS
 from wall_in_one.ui.next.displays_arrangement import Arrangement, LinkGlyph, MonitorTile, TileInfo
@@ -606,8 +607,28 @@ class DisplaysPage(Page):
                 + (f" · nothing is scheduled until {route.until}" if route.until else "")
             )
         elif route.route == "schedule":
-            text = f"Not in use now · “{route.stand_in_for_name or route.playlist}” is scheduled"
+            if route.stand_in_for:
+                # The rule's playlist can't play here: another plays instead.
+                text = "Not in use now · " + runtime_truth.stand_in_sentence(
+                    route.stand_in_for_name or route.stand_in_for, route.playlist
+                )
+            else:
+                text = (
+                    f"Not in use now · “{route.stand_in_for_name or route.playlist}” is scheduled"
+                )
             self.plays_row.set_subtitle(text + (f" until {route.until}" if route.until else ""))
+        elif route.route == "pick" and route.stand_in_for:
+            # The pick can't play here: another plays instead.
+            self.plays_row.set_subtitle(
+                "Not in use now · "
+                + (
+                    f"your pick can\u2019t play here, so \u201c{route.playlist}\u201d is playing"
+                    if route.quick
+                    else runtime_truth.stand_in_sentence(
+                        route.stand_in_for_name or route.stand_in_for, route.playlist
+                    )
+                )
+            )
         elif route.route == "pick":
             self.plays_row.set_subtitle("Not in use now · your pick is showing")
         elif route.stand_in_for and not assigned:

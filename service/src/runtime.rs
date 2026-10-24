@@ -2207,11 +2207,15 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// Whether the driver refused `entry`'s item this generation
     /// (`refused_scenes`).
     fn is_refused(&self, entry: &Entry) -> bool {
-        !self.refused_scenes.is_empty()
-            && entry.kind == EntryKind::Scene
-            && entry
-                .rendered_scene()
-                .is_some_and(|scene| self.refused_scenes.contains_key(scene))
+        self.refusal_of(entry).is_some()
+    }
+
+    /// Why the driver refused `entry`'s item this generation, if it did.
+    fn refusal_of(&self, entry: &Entry) -> Option<&Refusal> {
+        if self.refused_scenes.is_empty() || entry.kind != EntryKind::Scene {
+            return None;
+        }
+        self.refused_scenes.get(entry.rendered_scene()?)
     }
 
     /// Whether a cursor steps over `entry`: it is taboo or refused.
@@ -2241,6 +2245,25 @@ impl<D: WallpaperDriver> Runtime<D> {
             && playlist.entries.iter().any(|entry| self.is_refused(entry))
     }
 
+    /// The playlists that may stand in for `playlist` (`stand_in`), in turn:
+    /// the default playlist, then All media, each when it isn't `playlist`
+    /// and has entries.
+    fn stand_in_candidates<'a>(
+        &'a self,
+        playlist: &'a Playlist,
+    ) -> impl Iterator<Item = &'a Playlist> {
+        let default = self.config.playlist(&self.config.default_playlist);
+        let all_media = self
+            .config
+            .playlists
+            .iter()
+            .find(|candidate| candidate.id == ALL_MEDIA_PLAYLIST_ID);
+        [default, all_media]
+            .into_iter()
+            .flatten()
+            .filter(move |candidate| candidate.id != playlist.id && !candidate.entries.is_empty())
+    }
+
     /// What a display on `reference` plays: that playlist, unless the driver
     /// refused it throughout; then the default playlist, then All media,
     /// each only if something of it can play. None when nothing can: the
@@ -2252,20 +2275,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !self.refused_throughout(playlist) {
             return Some(playlist);
         }
-        let default = self.config.playlist(&self.config.default_playlist);
-        let all_media = self
-            .config
-            .playlists
-            .iter()
-            .find(|candidate| candidate.id == ALL_MEDIA_PLAYLIST_ID);
-        [default, all_media]
-            .into_iter()
-            .flatten()
-            .find(|candidate| {
-                candidate.id != playlist.id
-                    && !candidate.entries.is_empty()
-                    && !self.refused_throughout(candidate)
-            })
+        self.stand_in_candidates(playlist)
+            .find(|candidate| !self.refused_throughout(candidate))
     }
 
     /// `stand_in`'s id, or `reference`'s own when nothing stands in.
@@ -2275,10 +2286,17 @@ impl<D: WallpaperDriver> Runtime<D> {
             .map_or_else(|| reference.to_string(), |playlist| playlist.id.clone())
     }
 
-    /// Why a display plays nothing when every entry it could play was
-    /// refused (`stand_in` is None).
-    fn refused_nothing_reason(&self) -> &'static str {
-        if self.refused_scenes.values().all(|refusal| refusal.web_page) {
+    /// Why a display on `playlist` plays nothing when every entry it could
+    /// play was refused (`stand_in` is None): over the refusals of what it
+    /// tried, its own playlist and each that could stand in, not over every
+    /// refusal of the document (another display's are not this one's).
+    fn refused_nothing_reason(&self, playlist: &Playlist) -> &'static str {
+        let web_only = std::iter::once(playlist)
+            .chain(self.stand_in_candidates(playlist))
+            .flat_map(|tried| tried.entries.iter())
+            .filter_map(|entry| self.refusal_of(entry))
+            .all(|refusal| refusal.web_page);
+        if web_only {
             REFUSED_WEB_PAGES
         } else {
             REFUSED_ITEMS
@@ -2379,7 +2397,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         self.stand_in(&playlist.id)
             .is_none()
-            .then(|| self.refused_nothing_reason())
+            .then(|| self.refused_nothing_reason(playlist))
     }
 
     /// Whether a command may choose `playlist_id`: something in it can play,

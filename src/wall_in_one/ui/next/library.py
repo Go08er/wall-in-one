@@ -662,7 +662,10 @@ class LibraryPage(Page):
         titles = workshop.unsupported if workshop is not None else ()
         notice = unsupported_notice(len(titles)) if self._kind == "scene" else ""
         self._unsupported_label.set_label(notice)
-        self.unsupported_notice.set_tooltip_text(unsupported_details(titles) or None)
+        executable = workshop is not None and workshop.executable
+        self.unsupported_notice.set_tooltip_text(
+            unsupported_details(titles, executable=executable) or None
+        )
         self.unsupported_notice.set_visible(bool(notice))
         checking = (
             self._kind in ("video", "scene") and workshop is not None and self._folders is not None

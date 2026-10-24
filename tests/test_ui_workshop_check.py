@@ -171,7 +171,7 @@ def test_the_classic_library_bar_says_it_once_and_checks_through_the_rescan(
     class FakeApp(Adw.Application):
         def __init__(self) -> None:
             super().__init__(application_id="dev.goober.WorkshopCheck")
-            self.settings = config.Settings()
+            self.settings = config.Settings(roots=(tmp_path,))
             self.resolved_palette = source.resolve()
             self.session = Session(self.settings, scanner=lambda _roots: library)
             self.session.refresh()
@@ -206,10 +206,15 @@ def test_the_classic_library_bar_says_it_once_and_checks_through_the_rescan(
         window.show_library_scanning(False)
         assert window.check_workshop.get_sensitive()
 
-        # Workshop scanning off: no button, and nothing to count.
-        window.apply_settings(config.Settings(scan_workshop=False))
-        assert not window.check_workshop.get_visible()
-        assert not window.unsupported_notice.get_visible()
+        # Workshop scanning off, or no library folder (so no scan at all): no
+        # button, and nothing to count.
+        for unscanned in (
+            config.Settings(roots=(tmp_path,), scan_workshop=False),
+            config.Settings(roots=()),
+        ):
+            window.apply_settings(unscanned)
+            assert not window.check_workshop.get_visible()
+            assert not window.unsupported_notice.get_visible()
     finally:
         destroy_window(window)
         application.session.shutdown()

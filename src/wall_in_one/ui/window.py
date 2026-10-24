@@ -458,6 +458,7 @@ class MainWindow(Adw.ApplicationWindow):
         # whenever it likes, so the same rescan as F5, and a count of the
         # listed items no renderer here runs (docs/wallpaper-engine.md).
         self._unsupported_titles: tuple[str, ...] = ()
+        self._unsupported_executable = False
         self.unsupported_notice = Gtk.Box(spacing=6, visible=False)
         self.unsupported_notice.add_css_class("card")
         notice_icon = Gtk.Image.new_from_icon_name("dialog-information-symbolic")
@@ -484,11 +485,13 @@ class MainWindow(Adw.ApplicationWindow):
     def _update_workshop(self) -> None:
         """The Wallpaper Engine notice and button, for the kind shown and the last scan."""
         moving = self._query.kinds is library_filter.Kinds.VIDEOS
-        scanned = self._settings.scan_workshop
+        # As the scan decides it (`Session`): no library folder, no Workshop scan.
+        scanned = self._settings.scan_workshop and bool(self._settings.roots)
         notice = unsupported_notice(len(self._unsupported_titles)) if moving and scanned else ""
         self._unsupported_label.set_label(notice)
         self.unsupported_notice.set_tooltip_text(
-            unsupported_details(self._unsupported_titles) or None
+            unsupported_details(self._unsupported_titles, executable=self._unsupported_executable)
+            or None
         )
         self.unsupported_notice.set_visible(bool(notice))
         self.check_workshop.set_visible(moving and scanned)
@@ -676,6 +679,7 @@ class MainWindow(Adw.ApplicationWindow):
         # playlist model.
         self._grid.populate(library.items)
         self._unsupported_titles = workshop.unsupported_titles(library.items)
+        self._unsupported_executable = workshop.runs_a_program(library.items)
         self._update_workshop()
 
         self._playable = len(library)

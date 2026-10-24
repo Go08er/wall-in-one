@@ -172,6 +172,8 @@ class Workshop:
     #: linux-wallpaperengine doesn't support (or its preset's base's), or an
     #: executable one, which is never run. The Scenes view counts them.
     unsupported: tuple[str, ...] = ()
+    #: Whether one of them is a program (never run): only then is that said.
+    executable: bool = False
 
 
 class PlaylistView(Protocol):
@@ -520,8 +522,9 @@ class AppState(Protocol):
     def library_skipped(self) -> Sequence[str]: ...
 
     #: Wallpaper Engine in the library, or None while its items aren't
-    #: scanned. With `library_folders`, the Scenes and Videos views offer to
-    #: check it for new items (`LibraryFolders.rescan`).
+    #: scanned (Workshop scanning off, or no library folder). With
+    #: `library_folders`, the Scenes and Videos views offer to check it for
+    #: new items (`LibraryFolders.rescan`).
     @property
     def workshop(self) -> Workshop | None: ...
 

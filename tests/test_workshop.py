@@ -848,3 +848,64 @@ def test_a_folder_not_named_by_an_ascii_workshop_id_is_said_and_not_listed(
         (name, UnseenKind.NOT_A_WALLPAPER, workshop.NOT_AN_ID)
         for name in ("\u0661\u0662\u0663", "abc", "12a")
     )
+
+
+# -- nits from the review of r11 (finding 9) --------------------------------------
+
+
+def test_a_preset_object_does_not_override_a_declared_type_without_a_dependency(
+    tmp_path: Path,
+) -> None:
+    _install(
+        _content(tmp_path),
+        "1647046763",
+        {"type": "scene", "title": "T", "file": "scene.json", "preset": {"bloom": True}},
+    )
+
+    (item,) = _listed(tmp_path).values()
+
+    assert item.workshop_type == "scene" and item.unplayable is None
+    assert item.scene_base == ""
+
+
+def test_an_application_with_a_preset_and_a_dependency_is_still_never_run(
+    tmp_path: Path,
+) -> None:
+    content = _content(tmp_path)
+    _base(content)
+    _install(
+        content,
+        "143",
+        {
+            "type": "application",
+            "title": "Disguised",
+            "file": "a.exe",
+            "preset": {"arcs": True},
+            "dependency": "2777242023",
+        },
+    )
+
+    item = _listed(tmp_path)["143"]
+
+    assert item.unplayable is Unplayable.RUNTIME and item.runs_program
+    assert item.scene_base == "" and item.scene_properties == ()
+    assert "never runs programs" in item.unplayable_reason
+
+
+def test_only_an_executable_among_them_says_executables_are_never_run(tmp_path: Path) -> None:
+    from wall_in_one.ui.next.catalog import unsupported_details
+
+    content = _content(tmp_path)
+    _install(content, "101", {"type": "hologram", "title": "Apple", "file": "x"})
+    hologram_only = list(_listed(tmp_path).values())
+    assert not workshop.runs_a_program(hologram_only)
+    _install(content, "100", {"type": "application", "title": "Zebra", "file": "x.exe"})
+    _preset(content, {"a": 1}, dependency="100")
+    both = list(_listed(tmp_path).values())
+    assert workshop.runs_a_program(both)
+    assert sorted(item.title for item in both if item.runs_program) == ["Y2K Matrix", "Zebra"]
+
+    assert unsupported_details(("Apple",)) == "Listed, never played: Apple."
+    assert unsupported_details(("Apple", "Zebra"), executable=True) == (
+        "Listed, never played: Apple, Zebra. Executable wallpapers are never run, for security."
+    )

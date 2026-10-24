@@ -738,9 +738,15 @@ class RealAppState(GObject.Object):
     @property
     def workshop(self) -> Workshop | None:
         """What Wallpaper Engine's items in the last scan say, while they are scanned."""
-        if not self._backend.settings.scan_workshop:
+        settings = self._backend.settings
+        # As the scan decides it (`Session`): no library folder, no Workshop scan.
+        if not (settings.scan_workshop and settings.roots):
             return None
-        return Workshop(unsupported=workshop.unsupported_titles(self._session.library.items))
+        items = self._session.library.items
+        return Workshop(
+            unsupported=workshop.unsupported_titles(items),
+            executable=workshop.runs_a_program(items),
+        )
 
     # -- playlists ----------------------------------------------------------------
     @property

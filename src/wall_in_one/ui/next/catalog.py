@@ -46,14 +46,18 @@ def unsupported_notice(count: int) -> str:
     )
 
 
-def unsupported_details(titles: Sequence[str]) -> str:
-    """The notice's tooltip: which they are, the first `UNSUPPORTED_NAMED` by name."""
+def unsupported_details(titles: Sequence[str], *, executable: bool = False) -> str:
+    """The notice's tooltip: which they are, the first `UNSUPPORTED_NAMED` by name.
+
+    ``executable``: one of them is a program, never run; only then is that said.
+    """
     if not titles:
         return ""
     named = ", ".join(titles[:UNSUPPORTED_NAMED])
     more = len(titles) - UNSUPPORTED_NAMED
     listed = f"{named} and {more} more" if more > 0 else named
-    return f"Listed, never played: {listed}. Executable wallpapers are never run, for security."
+    why = " Executable wallpapers are never run, for security." if executable else ""
+    return f"Listed, never played: {listed}.{why}"
 
 
 #: Said where a page or an action of the new interface is not ported yet.

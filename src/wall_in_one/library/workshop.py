@@ -190,6 +190,10 @@ class WorkshopItem:
     complete: bool = True
     #: `file` as `project.json` names it, or empty.
     file: str = ""
+    #: The `type` it declares, folded as `kind` is, even when it is a preset
+    #: (`kind` then says `PRESET`); empty when it declares none. `NEVER_RUN`
+    #: is judged on this too.
+    declared_type: str = ""
     #: For a preset (`kind` is `PRESET`): the Workshop id of the wallpaper it
     #: is a preset of, or empty when it names none that can be trusted.
     dependency: str = ""
@@ -374,7 +378,14 @@ def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem 
         directory=directory,
         # A preset has no type of its own: it is a set of values for another
         # item, its `dependency`.
-        kind=PRESET if isinstance(preset, dict) else _type_word(kind),
+        # A preset object alone doesn't make one: an item with a type of its
+        # own and no `dependency` is that type.
+        kind=(
+            PRESET
+            if isinstance(preset, dict) and ("dependency" in document or not isinstance(kind, str))
+            else _type_word(kind)
+        ),
+        declared_type=_type_word(kind) if isinstance(kind, str) else "",
         title=title.strip() if isinstance(title, str) and title.strip() else directory.name,
         entry=entry,
         preview=preview,
@@ -604,10 +615,24 @@ class Playback:
     note: str = ""
     #: The picture its still and colours come from, when not its own preview.
     preview: Path | None = None
+    #: It is, or would play, a program (`NEVER_RUN`): never run.
+    program: bool = False
 
 
 def _type_phrase(kind: str) -> str:
     return "with no type it can read" if kind == UNKNOWN_TYPE else f"of the type \u201c{kind}\u201d"
+
+
+def _program(kind: str) -> Playback:
+    """The refusal of an item of a `NEVER_RUN` type: a program, never run."""
+    return Playback(
+        unplayable=Unplayable.RUNTIME,
+        reason=(
+            f"it is a program (Wallpaper Engine\u2019s \u201c{kind}\u201d type), "
+            "and Wall-in-One never runs programs from the Workshop"
+        ),
+        program=True,
+    )
 
 
 def _refusal(item: WorkshopItem) -> Playback | None:
@@ -615,14 +640,9 @@ def _refusal(item: WorkshopItem) -> Playback | None:
 
     `NEVER_RUN` first, so no change to `SUPPORTED_TYPES` can let one through.
     """
-    if item.kind in NEVER_RUN:
-        return Playback(
-            unplayable=Unplayable.RUNTIME,
-            reason=(
-                f"it is a program (Wallpaper Engine\u2019s \u201c{item.kind}\u201d type), "
-                "and Wall-in-One never runs programs from the Workshop"
-            ),
-        )
+    executable = next((kind for kind in (item.kind, item.declared_type) if kind in NEVER_RUN), None)
+    if executable is not None:
+        return _program(executable)
     if item.kind not in SUPPORTED_TYPES:
         return Playback(
             unplayable=Unplayable.RUNTIME,
@@ -658,6 +678,9 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
     """
     if item.kind != PRESET:
         return _refusal(item) or Playback()
+    if item.declared_type in NEVER_RUN:
+        # A preset object on an item that says it is a program: still one.
+        return _program(item.declared_type)
     if not item.dependency:
         return Playback(
             unplayable=Unplayable.NEEDS_BASE,
@@ -697,6 +720,7 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
             base=base.id,
             unplayable=refused.unplayable,
             reason=f"it is a preset of {base.title}, which can\u2019t play: {refused.reason}",
+            program=refused.program,
         )
     if base.kind == "web":
         # linux-wallpaperengine hands a page no properties (nothing calls into
@@ -722,6 +746,11 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
 
 
 # -- what the Library says about them ----------------------------------------------
+
+
+def runs_a_program(items: Iterable[MediaItem]) -> bool:
+    """Whether any of ``items`` is, or would play, a program (`NEVER_RUN`)."""
+    return any(item.runs_program for item in items)
 
 
 def unsupported_titles(items: Iterable[MediaItem]) -> tuple[str, ...]:

@@ -146,6 +146,9 @@ class MediaItem:
     #: wallpaper "plays as Electric Eye; its settings aren't applied". Empty
     #: otherwise.
     scene_note: str = ""
+    #: A Wallpaper Engine item that is, or would play, a program
+    #: (`library.workshop.NEVER_RUN`): never run, whatever the engine supports.
+    runs_program: bool = False
     #: Why it can never play as it is, or ``None``; ``unplayable_reason`` says
     #: it for a person.
     unplayable: Unplayable | None = None

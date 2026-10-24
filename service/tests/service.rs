@@ -8770,6 +8770,10 @@ const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs", "missing_renderers"];
 /// (`source`) and the packaged build (`nix`).
 const ADDED_TOP_LEVEL_STRINGS: &[&str] = &["install_kind", "nothing_to_play"];
 
+/// Top-level flags added after the shape fixture was recorded: whether the
+/// loaded document allows web wallpapers (0.4.1). Removed the same way.
+const ADDED_TOP_LEVEL_FLAGS: &[&str] = &["allow_web_wallpapers"];
+
 /// `"key":"value"` with the value replaced, for fields that differ per process
 /// or per build. A missing key is left alone; a `null` value is kept.
 fn mask_string_value(text: &str, key: &str) -> String {
@@ -8782,12 +8786,16 @@ fn mask_string_value(text: &str, key: &str) -> String {
     format!("{}<masked>{}", &text[..value_start], &text[value_end..])
 }
 
-/// Remove `,"key":value` for every key in `ADDED_DISPLAY_KEYS` and
-/// `ADDED_TOP_LEVEL_STRINGS`. The added values are `null`, integers or
-/// strings without commas, quotes or braces.
+/// Remove `,"key":value` for every key in `ADDED_DISPLAY_KEYS`,
+/// `ADDED_TOP_LEVEL_STRINGS` and `ADDED_TOP_LEVEL_FLAGS`. The added values
+/// are `null`, booleans, integers or strings without commas, quotes or braces.
 fn without_added_keys(text: &str) -> String {
     let mut text = text.to_string();
-    for key in ADDED_DISPLAY_KEYS.iter().chain(ADDED_TOP_LEVEL_STRINGS) {
+    for key in ADDED_DISPLAY_KEYS
+        .iter()
+        .chain(ADDED_TOP_LEVEL_STRINGS)
+        .chain(ADDED_TOP_LEVEL_FLAGS)
+    {
         let marker = format!(",\"{key}\":");
         while let Some(start) = text.find(&marker) {
             let value_start = start + marker.len();
@@ -11584,6 +11592,10 @@ fn the_apps_captured_nothing_to_play_status_keeps_this_services_shape() {
     };
     assert_eq!(keys(&live), keys(&captured));
     assert_eq!(keys(&live["displays"][0]), keys(&captured["displays"][0]));
+    assert_eq!(
+        live["allow_web_wallpapers"],
+        captured["allow_web_wallpapers"]
+    );
     for key in [
         "nothing_to_play",
         "entry_id",
@@ -12319,4 +12331,31 @@ fn turning_web_wallpapers_on_forgets_what_was_refused() {
     assert_eq!(status(&mut runtime, noon())["entry_id"], "entry-1");
     assert!(engine_started(&arguments), "allowed, the page plays");
     remove_skip_fixture(runtime, &root, &home);
+}
+
+#[test]
+fn status_says_whether_the_loaded_document_allows_web_wallpapers() {
+    // The app's web-off guard reads it: only the document the service holds counts.
+    let (mut runtime, _state, config_path, _page) = web_runtime("status-allows-web", WITH_STILL_ON);
+    assert_eq!(status(&mut runtime, noon())["allow_web_wallpapers"], true);
+    fs::write(&config_path, WITH_STILL_OFF).unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    assert_eq!(status(&mut runtime, noon())["allow_web_wallpapers"], false);
+    // A refused reload keeps what was loaded, and says so.
+    fs::write(&config_path, WITH_STILL_ON).unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    fs::write(&config_path, "schema_version = 99\n").unwrap();
+    assert!(!runtime_command(&mut runtime, noon(), "reload", None).ok);
+    assert_eq!(status(&mut runtime, noon())["allow_web_wallpapers"], true);
+    // And in independent mode, the same top-level field.
+    let (mut independent, _) = started_runtime(loaded(&independent_config(), &[]), noon());
+    let snapshot = status(&mut independent, noon());
+    assert_eq!(snapshot["allow_web_wallpapers"], false);
+    assert_eq!(
+        raw_status(&mut independent, noon())
+            .matches("\"allow_web_wallpapers\":")
+            .count(),
+        1,
+        "top level only"
+    );
 }

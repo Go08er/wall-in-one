@@ -1,4 +1,5 @@
 {
+ "allow_web_wallpapers": false,
  "animation_inhibition_reason": "",
  "animations_inhibited": false,
  "automatic_retry": null,

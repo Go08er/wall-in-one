@@ -192,9 +192,16 @@ pub struct Status<'a> {
     /// docs/missing-components.md.
     pub missing_renderers: Vec<MissingRendererStatus>,
     /// Why nothing plays, when every connected display plays nothing (the
-    /// document's `nothing_to_play`, schema 8); null otherwise. Each display
-    /// row says it for itself too. Added in 0.4.1.
+    /// document's `nothing_to_play`, schema 8, or the service refused every
+    /// entry they could play); null otherwise. Each display row says it for
+    /// itself too. Added in 0.4.1.
     pub nothing_to_play: Option<&'a str>,
+    /// Whether the loaded document allows web wallpapers (`[settings]
+    /// allow_web_wallpapers`, schema 8), the one thing that decides whether
+    /// the service starts a Wallpaper Engine web page. False for a document
+    /// without the key. Status is only ever answered with a document loaded;
+    /// after a refused reload it is the one kept. Added in 0.4.1.
+    pub allow_web_wallpapers: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -5843,6 +5850,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             missing_renderers: self.missing_rows(missing),
             nothing_to_play: self.mirrored_nothing_reason(),
+            allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
         })
         .map_err(|error| error.to_string())
     }
@@ -6258,6 +6266,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             missing_renderers: self.missing_rows(missing),
             nothing_to_play: self.routes_nothing_reason(&self.target_outputs),
+            allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
         })
         .map_err(|error| error.to_string())
     }

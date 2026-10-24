@@ -28,7 +28,7 @@ import logging
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
-from typing import Final
+from typing import Any, Final
 
 import gi
 
@@ -68,7 +68,8 @@ class ThumbnailLoader:
         again when the result is delivered. Without it web wallpapers are off:
         they get no thumbnail, and their files are not opened.
         """
-        self._web_allowed = web_allowed if web_allowed is not None else _never
+        #: Asked afresh at every step; the owner of a loader may set it after the fact.
+        self.web_allowed: Callable[[], bool] = web_allowed if web_allowed is not None else _never
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="thumb")
         self._pending: dict[MediaItem, Future[Gdk.Texture | None]] = {}
         self._waiters: dict[MediaItem, list[Callback]] = {}
@@ -125,11 +126,11 @@ class ThumbnailLoader:
         """
         if not item.web_page:
             return self._texture_for(item, self._processes)
-        if workshop.previews_off(item, self._web_allowed()):
+        if workshop.previews_off(item, self.web_allowed()):
             return None
-        gated = worker_processes.GatedCancellation(self._processes, self._web_allowed)
+        gated = worker_processes.GatedCancellation(self._processes, self.web_allowed)
         texture = self._texture_for(item, gated, allow_web=True)
-        return None if workshop.previews_off(item, self._web_allowed()) else texture
+        return None if workshop.previews_off(item, self.web_allowed()) else texture
 
     @staticmethod
     def _texture_for(
@@ -145,11 +146,14 @@ class ThumbnailLoader:
         decode in a tile. ``allow_web`` is only true when `_job` has just seen
         ``allow_web_wallpapers`` on.
         """
+        # Said only for a web page (`_job` has just seen the setting on): for
+        # anything else the call is the one it always was.
+        extra: dict[str, Any] = {"allow_web": True} if allow_web else {}
         try:
-            path = thumbnails.lookup(item, allow_web=allow_web) or (
-                thumbnails.generate(item, processes=processes, allow_web=allow_web)
+            path = thumbnails.lookup(item, **extra) or (
+                thumbnails.generate(item, processes=processes, **extra)
                 if processes is not None
-                else thumbnails.generate(item, allow_web=allow_web)
+                else thumbnails.generate(item, **extra)
             )
         except thumbnails.ThumbnailError:
             # A wallpaper we cannot thumbnail is not an error worth stopping
@@ -181,7 +185,7 @@ class ThumbnailLoader:
             if not self._closed:
                 # Turned off while it was made: discarded, not shown.
                 shown = result
-                if shown is not None and workshop.previews_off(item, self._web_allowed()):
+                if shown is not None and workshop.previews_off(item, self.web_allowed()):
                     shown = None
                 for callback in callbacks:
                     callback(item, shown)

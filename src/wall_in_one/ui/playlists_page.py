@@ -858,9 +858,8 @@ class PlaylistsPage(Gtk.Box):
         self._playlist_rows: dict[Gtk.ListBoxRow, str] = {}
         self._playlist_rows_by_id: dict[str, tuple[Gtk.ListBoxRow, Gtk.Label, Gtk.Label]] = {}
         self._playlist_positions: dict[str, int] = {}
-        self._loader = ThumbnailLoader(
-            web_allowed=lambda: application.settings.allow_web_wallpapers
-        )
+        self._loader = ThumbnailLoader()
+        self._loader.web_allowed = lambda: application.settings.allow_web_wallpapers
         self._source_cards: dict[_MediaCard, MediaItem] = {}
         self._source_cards_by_path: dict[Path, _MediaCard] = {}
         self._source_positions: dict[Path, int] = {}

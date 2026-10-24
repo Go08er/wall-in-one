@@ -407,6 +407,9 @@ class _AuthoringTask:
     requires_migration: bool = True
     guard_migration_transaction: bool = True
     application_held: bool = False
+    #: A renderer number handed on (`dial_rows.handing_on`): by its own timer or a flush.
+    #: What `Application._settle_before_shutdown` waits for.
+    handed_on: bool = False
     #: What the work saved but could not confirm durable (`state_file.report_not_durable`).
     spoken: _Said = field(default_factory=_Said, compare=False)
 
@@ -706,6 +709,16 @@ class Application(Adw.Application):
         # hold through its complete adoption/runtime tail.
         self._authoring_lifetime_holds = 0
         self._quit_requested = False
+        #: The task the authoring worker has now, from the head of the queue
+        #: until it completes (`_numbers_unsettled`).
+        self._authoring_current: _AuthoringTask | None = None
+        #: A renderer number's write asked for the publication now held
+        #: (`_runtime_publication_held`): the shutdown settle waits for it too.
+        self._number_publication = False
+        #: `do_shutdown` has begun: a publication goes to the runtime lane,
+        #: whatever the mode, so that its socket calls can be cut off
+        #: (`_publish_runtime_for_context`).
+        self._shutting_down = False
         self._removal_active = False
         self._removal_runtime_invalidated = False
         # A committed Delete/Trash retains a second hold until a post-delete
@@ -2082,9 +2095,12 @@ class Application(Adw.Application):
         # ends the loop with the window open and numbers still waiting out
         # their settle time. Hand them on before anything is torn down, and run
         # the loop until their writes settle, as a close or ``ctl quit`` lets
-        # them (review r13b, G1). Not a GTK teardown signal (`notify::root`):
-        # that runs while GTK is already taking the window apart.
-        if self._hand_on_waiting_numbers():
+        # them (review r13b, G1): only theirs, and within its bound (r13c, G1).
+        # Not a GTK teardown signal (`notify::root`): that runs while GTK is
+        # already taking the window apart.
+        self._shutting_down = True
+        self._hand_on_waiting_numbers()
+        if self._numbers_unsettled():
             self._settle_before_shutdown()
         current = state_file.set_durability_sink(self._previous_durability_sink)
         if current != self._not_durable:
@@ -2203,21 +2219,41 @@ class Application(Adw.Application):
         """
         return allow_during_quit or dial_rows.handing_on()
 
+    def _numbers_unsettled(self) -> bool:
+        """Whether a renderer number handed on hasn't settled: its write, or its publication.
+
+        Its write while it is queued or being saved (`_AuthoringTask.handed_on`);
+        then, when it saved something, the publication it asked for
+        (`_number_publication`) for as long as the runtime lane holds it. No
+        other tail of the application: a Settings save, a removal, a scan
+        (review r13c, G1-L2). What a ``ctl quit`` waits for is `_quit_waits`,
+        as before.
+        """
+        current = self._authoring_current
+        if current is not None and current.handed_on:
+            return True
+        if any(task.handed_on for task in self._authoring_queue):
+            return True
+        return self._number_publication and self._runtime_publication_held
+
     def _settle_before_shutdown(self) -> None:
-        """Run the loop until what a requested quit waits for has settled.
+        """Run the loop until the numbers `do_shutdown` handed on have settled.
 
         For `do_shutdown` only, once the loop has ended without that wait:
-        the writes it just handed on, and what follows them (the
-        publication). At most `SHUTDOWN_SETTLE_SECONDS`, after which shutdown
-        goes on as before: a write already running still reaches its
-        durability boundary (`_shutdown_authoring_jobs`).
+        their writes, and the publication they asked for (`_numbers_unsettled`).
+        At most `SHUTDOWN_SETTLE_SECONDS`, and truly: nothing in it blocks
+        the loop, since every publication from `do_shutdown` on runs on the
+        runtime lane, ``--service`` included (`_publish_runtime_for_context`),
+        whose socket calls the shutdown then cuts off (review r13c, G1-L1).
+        After it, shutdown goes on as before: a write already running still
+        reaches its durability boundary (`_shutdown_authoring_jobs`).
         """
         context = GLib.MainContext.default()
         deadline = time.monotonic() + SHUTDOWN_SETTLE_SECONDS
         # Wakes the loop with nothing else to do, so the deadline is looked at.
         tick = GLib.timeout_add(100, lambda: GLib.SOURCE_CONTINUE)
         try:
-            while self._quit_waits() and time.monotonic() < deadline:
+            while self._numbers_unsettled() and time.monotonic() < deadline:
                 context.iteration(True)
         finally:
             GLib.source_remove(tick)
@@ -3326,7 +3362,11 @@ class Application(Adw.Application):
         """
         if self._runtime_shutdown:
             return False
-        if not self._service_start:
+        # From `do_shutdown` on, ``--service`` too: its synchronous publication
+        # would hold the loop for as long as the service takes to answer (a
+        # reload waits up to RUNTIME_ACTION_TIMEOUT), past the settle's bound
+        # (review r13c, G1-L1). On the lane, the shutdown cuts it off.
+        if not self._service_start or self._shutting_down:
             published = self._publish_runtime_async()
             if published and self._removal_convergence_held:
                 with self._runtime_config_lock:
@@ -3550,6 +3590,7 @@ class Application(Adw.Application):
                     requires_migration=requires_migration,
                     guard_migration_transaction=guard_migration_transaction,
                     application_held=application_held,
+                    handed_on=dial_rows.handing_on(),
                 )
             )
             self._start_next_authoring_task()
@@ -3567,6 +3608,7 @@ class Application(Adw.Application):
             return
         task = self._authoring_queue.popleft()
         self._authoring_active = True
+        self._authoring_current = task
         work = task.work
         if task.requires_migration and not self._authoring_migration_ready:
             try:
@@ -3756,6 +3798,11 @@ class Application(Adw.Application):
 
     def _authoring_task_completed(self, task: _AuthoringTask) -> None:
         """Release the actor only after mutation, GTK adoption and reply."""
+        if self._authoring_current is task:
+            self._authoring_current = None
+        if task.handed_on and task.spoken.wrote and self._runtime_publication_held:
+            # Its finish asked for the publication now held (`pairing_changed`).
+            self._number_publication = True
         self._finalize_authoring_task(task)
         self._authoring_active = False
         self._release_authoring_lifetime(task)
@@ -5223,6 +5270,7 @@ class Application(Adw.Application):
             return
         self._runtime_publication_held = False
         self._runtime_publication_hold_target = 0
+        self._number_publication = False
         self.release()
         self._maybe_finish_requested_quit()
 
@@ -7114,7 +7162,9 @@ class Application(Adw.Application):
         GLib.idle_add(self.refresh_library)
 
     def _reapply_current(self) -> bool:
-        if self._service_start:
+        # Not once shutdown has begun: nothing is started on a process that is
+        # ending, and the settle's loop must not wait for it (review r13c, G1-L1).
+        if self._service_start and not self._shutting_down:
             self.apply(self._session.apply_current)
         return GLib.SOURCE_REMOVE
 

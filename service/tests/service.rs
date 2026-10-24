@@ -288,6 +288,34 @@ fn request(socket: &Path, verb: &str, argument: Option<&str>) -> serde_json::Val
     serde_json::from_str(&line).unwrap()
 }
 
+/// The service a test started, ended if the test fails first: otherwise it outlives the
+/// test, holding cargo's output pipe open. Only that one process is signalled. Every
+/// spawn of the service binary is wrapped in one; it reads as the `Child` it holds.
+struct ServiceChild(Child);
+
+impl Drop for ServiceChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+impl std::ops::Deref for ServiceChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ServiceChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
 fn stop(child: &mut Child, socket: &Path) {
     let _ = request(socket, "quit", None);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -311,13 +339,15 @@ fn handwritten_config_and_binary_are_a_complete_rotator() {
     fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
 
     let reply = request(&socket, "status", None);
     assert_eq!(reply["ok"], true);
@@ -375,15 +405,17 @@ fn systemd_mode_waits_quietly_for_the_first_config() {
     fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     let stderr = fs::File::create(&stderr_path).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .arg("--wait-for-config")
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--wait-for-config")
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .unwrap(),
+    );
 
     thread::sleep(Duration::from_millis(500));
     assert!(child.try_wait().unwrap().is_none());
@@ -524,13 +556,15 @@ fn explicit_reload_is_not_repeated_by_the_file_watcher() {
     fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
     let original = config(&recorder, &recorder, false);
     fs::write(&config_path, &original).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     let _ = request(&socket, "status", None);
 
     fs::write(
@@ -7172,14 +7206,16 @@ fn losing_singleton_has_no_wallpaper_side_effects() {
     fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&recorder, &recorder, false)).unwrap();
 
-    let mut owner = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut owner = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
     let before = fs::read_to_string(&events).unwrap();
 
@@ -7226,13 +7262,15 @@ fn initial_desktop_readiness_failure_is_visible_and_recovers_within_the_window()
         config(&noctalia, Path::new("/bin/true"), false),
     )
     .unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
 
     let failed = request(&socket, "status", None);
     let failed: serde_json::Value =
@@ -7302,13 +7340,15 @@ fn pause_during_startup_readiness_applies_once_then_pauses_motion() {
         "id = \"still-one\"\nkind = \"video\"\nstill = \"/tmp/one.png\"\nmotion = \"/tmp/one.mp4\"",
     );
     fs::write(&config_path, document).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
     assert_eq!(request(&socket, "pause", None)["message"], "paused");
     fs::write(&ready, "ready\n").unwrap();
@@ -7395,13 +7435,15 @@ fn stop_during_startup_readiness_applies_the_still_without_starting_motion() {
         "id = \"still-one\"\nkind = \"video\"\nstill = \"/tmp/one.png\"\nmotion = \"/tmp/one.mp4\"",
     );
     fs::write(&config_path, document).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
     assert_eq!(
         request(&socket, "stop", None)["message"],
@@ -7473,14 +7515,16 @@ fn initial_all_output_scene_waits_for_the_compositor_without_retrying_a_crashed_
             &format!("linux_wallpaperengine_program = {engine:?}"),
         );
     fs::write(&config_path, document).unwrap();
-    let mut child = service_command()
-        .env("WAYLAND_DISPLAY", &wayland)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .env("WAYLAND_DISPLAY", &wayland)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
 
     let failed = request(&socket, "status", None);
     let failed: serde_json::Value =
@@ -7572,14 +7616,16 @@ fn a_compositor_that_stopped_accepting_never_stalls_the_service_or_its_shutdown(
     let config_path = root.join("runtime.toml");
     fs::write(&config_path, config(&noctalia, &noctalia, false)).unwrap();
     let socket = root.join("runtime.sock");
-    let mut child = service_command()
-        .env("WAYLAND_DISPLAY", &wayland)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .env("WAYLAND_DISPLAY", &wayland)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     let ready = Instant::now() + Duration::from_secs(10);
     while status_within(&socket, Duration::from_secs(5)).is_none() {
         assert!(Instant::now() < ready, "the service never answered");
@@ -7659,15 +7705,17 @@ fn a_compositor_going_away_writes_nothing_unprefixed_to_stderr() {
     let config_path = root.join("runtime.toml");
     fs::write(&config_path, config(&noctalia, &noctalia, false)).unwrap();
     let socket = root.join("runtime.sock");
-    let mut child = service_command()
-        .env("WAYLAND_DISPLAY", &wayland)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .env("WAYLAND_DISPLAY", &wayland)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
     let status_now = || -> serde_json::Value {
         let reply = request(&socket, "status", None);
         serde_json::from_str(reply["message"].as_str().unwrap()).unwrap()
@@ -7741,15 +7789,17 @@ fn journal_of_a_flooding_compositor(slow: bool) -> (String, usize) {
     let config_path = root.join("runtime.toml");
     fs::write(&config_path, config(&noctalia, &noctalia, false)).unwrap();
     let socket = root.join("runtime.sock");
-    let mut child = service_command()
-        .env("WAYLAND_DISPLAY", &wayland)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .env("WAYLAND_DISPLAY", &wayland)
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let reply = request(&socket, "status", None);
@@ -7834,13 +7884,15 @@ fn successful_reload_apply_supersedes_the_pending_startup_retry() {
         fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
     fs::write(&config_path, config(&failed, &failed, false)).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
 
     fs::write(&config_path, config(&working, &working, false)).unwrap();
@@ -7878,13 +7930,15 @@ fn reload_without_an_apply_keeps_the_startup_readiness_retry() {
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
     let original = config(&helper, &helper, false);
     fs::write(&config_path, &original).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
 
     fs::write(
@@ -7929,13 +7983,15 @@ fn quit_during_a_pending_readiness_attempt_never_applies_again() {
     .unwrap();
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&helper, &helper, false)).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -7988,14 +8044,16 @@ fn exhausted_startup_readiness_is_fatal_for_systemd_recovery() {
     fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&helper, &helper, false)).unwrap();
     let stderr = fs::File::create(&stderr_path).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(request(&socket, "status", None)["ok"], true);
 
     let deadline = Instant::now() + Duration::from_secs(11);
@@ -8606,13 +8664,15 @@ fn the_file_watcher_reloads_when_only_the_overrides_file_changes() {
     fs::write(&harmless, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&harmless, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(&config_path, config(&harmless, &harmless, false)).unwrap();
-    let mut child = service_command()
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--socket")
-        .arg(&socket)
-        .spawn()
-        .unwrap();
+    let mut child = ServiceChild(
+        service_command()
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--socket")
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
     let loaded_overrides = || -> serde_json::Value {
         let reply = request(&socket, "status", None);
         let status: serde_json::Value =
@@ -11190,19 +11250,6 @@ fn independent_displays_that_play_nothing_say_so_and_status_still_answers() {
     let back = runtime_command(&mut runtime, noon(), "on", Some("DP-1 schedule-follow"));
     assert!(back.ok, "{}", back.message);
     assert!(display_status(&mut runtime, noon(), "DP-1")["nothing_to_play"].is_null());
-}
-
-/// The service a test started, ended if the test fails first: otherwise it outlives the
-/// test, holding cargo's output pipe open. Only that one process is signalled.
-struct ServiceChild(Child);
-
-impl Drop for ServiceChild {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
 }
 
 #[test]

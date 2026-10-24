@@ -45,7 +45,8 @@ The core workflows have been exercised on a single-display desktop.
 
 The core Luau workflows are present, but the authoring models are not identical.
 The software supports per-display wallpaper routing, schedules and transport;
-renderer tuning (mute, FPS, scaling/clamp) and cadence values remain global.
+video mute and volume and cadence values remain global, while the renderer
+dials can be each wallpaper's own.
 Legacy gesture bindings and several provider/capture tuning fields have no
 app-owned equivalent. Scene scaling and clamp migrate from one designated
 display into typed global settings. The exact import and intentional-reset list is in
@@ -340,9 +341,22 @@ the start. The interface reports when power information is unavailable. See
 surprise. The track stays loaded rather than being disabled, which is what lets
 mute and the volume setting take effect on the video already playing instead of
 only on the next one -- they go over mpv's IPC, so the wallpaper does not blink.
-Wallpaper Engine scenes remain silent. Their engine accepts audio only at
-launch, so coupling it to this live video slider would restart a scene on every
-step while claiming otherwise; separate scene-audio controls are deferred.
+Wallpaper Engine scenes have their own sound setting, silent by default. Their
+engine accepts audio only at launch, so a scene's sound is apart from this
+live video slider, and changing it restarts the scene.
+
+**Renderer dials.** Every mpv and linux-wallpaperengine option that makes
+sense on a wallpaper is a typed dial with a closed range: a video's fit,
+speed, brightness, contrast, saturation, gamma, rotation, deband, scaling
+filter and when a covering window counts; a scene's sound, frame rate,
+scaling, particles, mouse, parallax, reacting to sound and pausing. Settings
+holds the defaults; each wallpaper's own settings (its pairing editor, or its
+details in the new interface) can override any of its own, with a reset to
+the default, and list the Wallpaper Engine properties its scene declares
+(switches, sliders, colours, choices, text). No option is free text, and
+nothing that runs code or reads or writes a file of its choosing is offered:
+[`docs/renderer-settings.md`](docs/renderer-settings.md) has the list and
+the reasons, [`docs/settings.md`](docs/settings.md#renderer-dials) the keys.
 
 **Wallpaper Engine frame rate** is a 1–240 FPS native scene-rendering limit (30
 by default). Video wallpapers keep their source rate: mpv's post-decode FPS

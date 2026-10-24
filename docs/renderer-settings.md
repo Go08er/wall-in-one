@@ -87,7 +87,6 @@ details), shown as "Default (…)" or overridden, each with its own reset.
 | Brightness, contrast, saturation, gamma | `brightness=` … `gamma=` | -100..100 | yes | yes |
 | Rotation | `video-rotate=` | 0, 90, 180, 270 | yes | yes |
 | Deband | `deband=yes\|no` | on/off | yes | yes |
-| Start at | `start=` | 0-3600 s | — | yes |
 | Scaling filter | `scale=` | mpv's default, bilinear, spline36, lanczos, ewa_lanczos, mitchell | yes | — |
 | Pause or stop also when a window is | mpvpaper `--auto-mode` | hidden only (today), fullscreen, maximized | yes | — |
 | (existing) Mute, volume, hardware decoding, smoothing, when hidden | as before | as before | yes | — |
@@ -98,15 +97,25 @@ details), shown as "Default (…)" or overridden, each with its own reset.
 |---|---|---|---|---|
 | Frame rate | `--fps` | 1-240 | yes (existing) | yes |
 | Scaling, texture edges | `--scaling`, `--clamp` | as before | yes (existing) | yes |
-| Sound, volume | `--silent` or `--volume` (never both) | on/off, 0-100 | yes (existing keys) | yes |
+| Sound, volume | `--silent` or `--volume` (never both) | on/off, 0-100 | yes (existing keys) | yes (a scene that sounds by itself without a volume of its own takes the default's) |
 | React to sound | `--no-audio-processing` when off | on/off | yes | yes |
 | Particles, mouse, parallax | `--disable-particles`, `--disable-mouse`, `--disable-parallax` when off | on/off | yes | yes |
 | Pause when a window covers it | `--no-fullscreen-pause` when off | on/off | yes (existing key) | — |
 | Pause only for the active window | `--fullscreen-pause-only-active` | on/off | yes | — |
 | Mute while other apps play | `--noautomute` when off | on/off | yes | — |
 
-A scene's audio is set at launch only (the engine has no live control), so a
-change to one restarts that scene; the video ones stay live over IPC.
+Every dial is a launch option, so changing one restarts the renderers it
+reaches (a wallpaper's own: only the display showing it). Only the existing
+video mute and volume stay live over mpv's IPC.
+
+A dial that would do nothing as things are set is greyed out, never shown as
+a working control: the `--auto-mode` trigger while videos keep playing when
+covered, pausing for the active window only while scenes never pause, a
+wallpaper's own volume while it is silent. Neither is written then either.
+A **web** wallpaper's own settings hold only what reaches a page (frame rate,
+scaling, texture edges, mouse): particles and parallax are a scene's, and a
+page plays its own sound through the engine's browser, past `--silent` and
+`--volume` (nothing in `WebBrowser/` touches audio).
 
 ### Wallpaper Engine's own properties (per wallpaper)
 
@@ -115,9 +124,10 @@ becomes one control each in its settings: a switch for `bool`, a slider
 (its `min`, `max`, `step`) for `slider`, a colour button for `color`, a list
 of its labelled options for `combo`, a bounded single-line text for
 `textinput`. Each starts from the wallpaper's declared default, then a
-preset's value, then the person's own; only values that differ from the
-declared default are passed, as `--set-property NAME=VALUE`, with the same
-type rules and bounds presets have (docs/wallpaper-engine.md). A label comes
+preset's value, then the person's own. A preset's values are passed exactly
+as before, and the person's go over them, as `--set-property NAME=VALUE`,
+each checked against the declaration with the same type rules and bounds
+presets have (docs/wallpaper-engine.md). A label comes
 from the declaration's `text`, which in real content is sometimes a
 translation key: it is shown as written, as plain text.
 
@@ -146,6 +156,9 @@ and show no controls that would do nothing.
   config), `--window`, `--screen-root`, `--screen-span`, `--bg` (the
   service's), `--list-properties`, `--dump-structure`, `--render-debug`
   (debugging).
+- mpv `start` ("start at"): `loop-file` seeks back to the file's start, not to
+  `--start` (`player/playloop.c:935`), and an A-B loop needs both ends
+  (`player/misc.c:135`), so it would hold for the first pass only.
 - Deferred, not refused: `--fullscreen-pause-ignore-appid` (free text; would
   need its own bounded list), mpv `video-zoom`/`video-pan-*`/`video-align-*`,
   `video-aspect-override`, `framedrop`, track selection, per-wallpaper video
@@ -176,7 +189,14 @@ holding only `renderer`, and one with a palette as well, both keep their
 have made every older build refuse to save pairings at all. An older build's
 "Reset to defaults" removes the record, overrides included, which is what a
 reset is. In this build "Reset to defaults" still means the still and the
-colours; each override has a reset of its own.
+colours; each override has a reset of its own, and "Use defaults" takes them
+all back. A record holding only overrides is kept; one holding nothing goes.
+
+A dial's value is kept as the file holds it, valid in this build or not, so a
+newer build's wider range survives this one's saves (this build applies only
+what it can check), and a dial this build doesn't know rides through: the
+state file shape can now put back a nested object (`renderer`, `video`,
+`scene`) that holds only what it carried.
 
 ## Wire
 
@@ -195,14 +215,23 @@ table (a preset's values merged under the person's own), which schema 6
 already carries on any scene entry.
 
 **Schema 7**, for any document with a `video` or `scene` table or a new
-`[renderer]` key. Not 6: schema 6 already shipped on r11's branch as "entries
+`[renderer]` key off its default. The three scene keys that already existed
+(`scene_muted`, `scene_volume`, `scene_pause_when_covered`) are 0.4.0's and
+need nothing newer; while scenes are silent `scene_volume = 0` is written, as
+before, so an untouched profile compiles byte for byte what 4c28b8b does
+(checked on a fixed library, both default and tuned settings). Not 6: schema 6 already shipped on r11's branch as "entries
 may carry `scene_base`/`properties`", and if r11 is released first a 6-only
 service must refuse what it can't read rather than half-apply it. Every
 other document keeps 4, 5 or 6, byte for byte. As for presets, publishing a
 schema-7 document to the live path asks the running service first; one that
 doesn't list 7 gets the document without the tables and the new keys (then,
-if it doesn't list 6, without presets and properties too), and the app says
-once that those settings apply after the service is restarted.
+if it doesn't list 6, without presets and a scene's own values too: that scene
+still plays), and the app says once that those settings apply after the
+service is restarted. Saving is never refused over them, unlike the battery
+option: an older service just doesn't apply them yet. The health sync
+compiles exactly that for the status it holds (`dials_supported`). The legacy
+Python `--service` mode (installs without the Rust service) doesn't apply
+the dials.
 
 A change to one wallpaper's overrides changes only its entries, so only that
 wallpaper's renderer is handed over; a global change is a renderer-settings

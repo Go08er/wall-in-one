@@ -242,7 +242,7 @@ See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-
 | `shuffle` | Visit every wallpaper once before repeating. A playlist may set its own. | `false` |
 | `dynamics_enabled` | Animate videos and Wallpaper Engine scenes. Off releases their renderers and shows paired stills. | `true` |
 | `stop_animations_on_battery` | Temporarily show paired stills on battery without changing manual playback choices. See below. | `false` |
-| `video_muted` | Mute video wallpapers. Takes effect immediately over mpv IPC; Wallpaper Engine scenes remain silent. | `true` |
+| `video_muted` | Mute video wallpapers. Takes effect immediately over mpv IPC; scenes have their own `scene_muted`. | `true` |
 | `video_volume` | Video volume, 0-100. Kept while muted, so unmuting lands where you left it without restarting mpvpaper. | `100` |
 | `video_when_hidden` | What a video does when a window covers it: `pause`, `stop` or `play`. Takes effect on the next video. | `"pause"` |
 | `video_hardware_decode` | Let mpv choose a hardware decoder. Turn off only to diagnose corruption, tearing or driver trouble. | `true` |
@@ -250,6 +250,7 @@ See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-
 | `scene_fps` | Native linux-wallpaperengine render-rate limit, 1-240 FPS. Video wallpapers keep their source rate because an mpv post-decode FPS filter does not reduce decoding work. | `30` |
 | `scene_scaling` | Global linux-wallpaperengine scene fit: empty uses the renderer default; otherwise `stretch`, `fit`, or `fill`. It is typed rather than an arbitrary renderer argument. | `""` |
 | `scene_clamp` | Global linux-wallpaperengine texture-edge mode: empty uses the renderer default; otherwise `clamp`, `border`, or `repeat`. | `""` |
+| `video_fit` … `scene_automute` | The renderer dials: see [below](#renderer-dials). Each is written only when it isn't its default. | |
 | `display_mode` | `mirrored` keeps every display on one wallpaper, cursor and schedule (the default). `independent` gives each live connector its own playlist route, schedule winner, cursor, Shuffle/Cycle overrides and renderer; saved assignments and targeted rules remain dormant rather than being deleted when mirrored mode is restored. | `"mirrored"` |
 | `theme_source_connector` | Display whose wallpaper drives Noctalia's one shell-wide palette. Independent mode requires one connector token with no whitespace; its UI initially designates the first discovered live display. A detached saved connector is preserved rather than rewritten, while runtime status reports the lexically-first live fallback actually in force. Mirrored mode may keep the choice dormant. | `""` |
 | `output` | Legacy single-output compatibility value. New display authoring uses `display_mode`, display assignments and targeted schedule rules; the Settings UI no longer exposes this ambiguous control. | `""` |
@@ -261,6 +262,54 @@ See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-
 The Wallhaven key is not in here -- it lives in its own 0600 file. Neither are
 the favourites, which are app-maintained state rather than something you type;
 both are in [`library.md`](library.md).
+
+## Renderer dials
+
+Every mpv and linux-wallpaperengine option that makes sense on a wallpaper
+is a dial: one typed value with a closed range, never free text
+(the design, and what was left out and why, is in
+[`renderer-settings.md`](renderer-settings.md)). Settings holds each one's
+default, in both interfaces (classic: **Video wallpapers** and **Wallpaper
+Engine scenes**; new: **Advanced → Video** and **→ Scenes**). Each wallpaper can
+have its own in its settings (classic: its pairing editor; new: its details,
+**Renderer**), where a dial says **Default (…)** until you change it and
+**Overridden** after, with a button that takes it back; **Use defaults** takes
+them all back. **Reset this pairing** stays what it was, the still and the
+colours.
+
+| key | meaning | default | a wallpaper's own |
+|---|---|---|---|
+| `video_fit` | `fill` (crop to the screen), `fit` (bars) or `stretch`. | `"fill"` | yes |
+| `video_speed` | Playback speed, 0.25-4.00. | `1.0` | yes |
+| `video_brightness`, `video_contrast`, `video_saturation`, `video_gamma` | mpv's equalizer, -100..100. | `0` | yes |
+| `video_rotate` | `0`, `90`, `180` or `270` degrees. | `0` | yes |
+| `video_deband` | Smooth banding in gradients, at some GPU cost. | `false` | yes |
+| `video_scale` | mpv's scaling filter for a video smaller than the screen: empty (mpv's default), `bilinear`, `spline36`, `lanczos`, `ewa_lanczos`, `mitchell`. | `""` | no |
+| `video_hidden_trigger` | When `video_when_hidden` pauses or stops: only when hidden (empty), also behind a fullscreen window (`full`), or a fullscreen or maximized one (`max`); mpvpaper's `--auto-mode`. Greyed out while videos keep playing. | `""` | no |
+| `scene_muted`, `scene_volume` | A scene's sound: silent, or at this volume (0-100). | `true`, `50` | yes |
+| `scene_audio_processing` | Let the engine record what the computer plays so a scene can move to it. | `true` | yes |
+| `scene_particles`, `scene_mouse`, `scene_parallax` | A scene's particles, mouse interaction and parallax. | `true` | yes |
+| `scene_pause_when_covered` | Pause a scene behind a fullscreen window. | `true` | no |
+| `scene_pause_only_active` | Only when that window is the active one. Greyed out while scenes never pause. | `false` | no |
+| `scene_automute` | Silence a scene while another app plays sound. | `true` | no |
+
+`scene_fps`, `scene_scaling` and `scene_clamp` above can be a wallpaper's own
+too. A scene's own settings also list what its `project.json` declares a
+person may set (switches, sliders, colours, choices, lines of text; never a
+file or a folder), starting from the declared value, then a preset's, then
+yours. A web wallpaper has only frame rate, scaling, texture edges and the
+mouse: linux-wallpaperengine hands a page no properties, and a page plays its
+own sound past the engine.
+
+Every dial is applied when its wallpaper's renderer starts, so changing one
+restarts that renderer (video mute and volume stay live, as before). A
+change to one wallpaper's own restarts only the display showing it.
+
+The dials need the wallpaper service from this release (runtime schema 7).
+An older one that is still running gets everything else, and the app says
+once that renderer settings apply after the service is restarted: saving is
+never refused over them. The legacy Python `--service` mode doesn't apply
+them.
 
 ## Battery animation control
 

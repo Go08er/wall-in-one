@@ -266,6 +266,36 @@ matches either compile, with or without the presets
 (`runtime_config.compiled_as_published`), because the status shows the
 schemas but not whether the units were verified.
 
+### A scene's own settings
+
+The owner asked for Wallpaper Engine's per-wallpaper settings to pass through
+([renderer dials](renderer-settings.md)). A scene's settings, in both
+interfaces, list what its `project.json` declares under `general.properties`
+that a person may set: a switch for `bool`, a slider in its own `min`-`max`
+for `slider`, a colour for `color`, its labelled options for `combo`, a line
+of text for `textinput`, labelled with the declaration's `text` as written
+(sometimes a translation key) and in the author's `order`. A `file`,
+`directory` or `scenetexture` is never offered (a path, from a file anyone
+can write, into the renderer), and neither is a property whose declared value
+the engine couldn't read, a slider with no range, or a combo with no options.
+A preset shows its base's, starting from its own values.
+
+Each starts from the declared value, then a preset's, then the person's own,
+which is kept on the scene's pairing record (`renderer.properties`, by name,
+as the engine reads it). At compile time each is checked against the
+declaration again, as a preset's is: a switch is `true` or `false`, a slider
+a finite number in its range, a colour three numbers in 0-1, a combo one of
+its option values, a line of text at most 256 bytes with no control
+characters. The person's go over a preset's in `properties`, so a document
+with one is schema 6, and a service that doesn't read 6 gets the scene
+without them, playing as it is, and a notice. A web page has none: the engine
+hands it no properties (CWeb.cpp only loads its URL), so its settings say so
+instead of showing controls that would do nothing, and nothing is ever
+compiled for one, whatever a hand-edited file says.
+
+A `textinput`'s declared value is what the author wrote; the engine itself
+starts one from its JSON text (quoted), and a value set here replaces that.
+
 ### Stills
 
 A true `scene` keeps the engine capture. Every other item listed as a scene

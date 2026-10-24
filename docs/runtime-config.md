@@ -3,7 +3,7 @@
 `wall-in-one-service` reads one input: a fully resolved TOML document written
 by the Python application, plus, from 0.2.0, an optional sibling
 [`runtime-overrides.toml`](#per-playlist-rotation-and-display-precedence-runtime-overridestoml).
-Schemas `4`, `5` and `6` are intentionally strict. An
+Schemas `4`, `5`, `6` and `7` are intentionally strict. An
 unknown version, unknown field, relative path, dangling playlist reference, or
 kind-specific entry missing its motion source makes the service refuse to
 start. It never falls back to the application's database or library files.
@@ -15,7 +15,8 @@ versions; a schema-4 document cannot enable the new policy. This preserves
 older upgrade journals and prevents an older service from silently ignoring
 an enabled battery preference. A document with a Wallpaper Engine preset is
 schema 6, which carries everything 5 does; only such a document is (see
-below, after the entry fields).
+below, after the entry fields). One with a renderer dial off its default is
+schema 7, which carries everything 6 does ([renderer dials](#renderer-dials-schema-7)).
 
 From 0.4.0 the compiler no longer writes `[renderer] niri_program`, which
 0.3.x and earlier wrote when the service asked niri for displays. The service
@@ -31,7 +32,7 @@ schema number would instead have sent every save through the live-service
 check below, refusing all of them until the restart. See
 [display discovery](display-discovery.md#runtimetoml).
 
-The service advertises `supported_config_schemas = [4, 5, 6]` in status version 2.
+The service advertises `supported_config_schemas = [4, 5, 6, 7]` in status version 2.
 It also reports `runtime_version` and `runtime_executable` so update inspection
 can distinguish the responding executable from the package selected on disk.
 Executable identity does not by itself acknowledge the intended configuration;
@@ -248,9 +249,63 @@ measurements proving an end-to-end benefit.
 
 `video_muted` and `video_volume` are live mpv properties. An audio-only reload
 updates active video children through IPC and changes later launch defaults
-without a renderer hand-over. Scenes remain `scene_muted = true` and
-`scene_volume = 0`; linux-wallpaperengine has no equivalent live control, and a
-video slider must not restart a scene.
+without a renderer hand-over. A scene's sound is its own, `scene_muted` and
+`scene_volume` (linux-wallpaperengine's `--silent` or `--volume N`, never
+both): the engine has no live control, and a video slider must not restart a
+scene. While scenes are silent the compiler writes `scene_volume = 0`, as
+every document did before scenes had a sound setting; `scene_pause_when_covered`
+is now a setting too. All three keys are 0.4.0's, so they need no newer schema.
+
+### Renderer dials (schema 7)
+
+Every other dial ([settings](settings.md#renderer-dials),
+[design](renderer-settings.md)) is a `[renderer]` key written **only when it
+isn't its default**, with a default of its own on the service side, so a
+document nobody tuned is byte for byte what it was:
+
+```toml
+video_fit = "fit"             # fill (panscan=1.0), fit (panscan=0.0), stretch (keepaspect=no)
+video_speed = 1.50            # 0.25-4.00 -> speed=
+video_brightness = -10        # video_contrast, video_saturation, video_gamma: -100..100
+video_rotate = 90             # 0, 90, 180, 270 -> video-rotate=
+video_deband = true           # deband=yes
+video_scale = "lanczos"       # bilinear, spline36, lanczos, ewa_lanczos, mitchell -> scale=
+video_hidden_trigger = "max"  # full, max -> mpvpaper --auto-mode, only with --auto-pause/--auto-stop
+scene_pause_only_active = true  # --fullscreen-pause-only-active
+scene_automute = false          # --noautomute
+scene_audio_processing = false  # --no-audio-processing
+scene_particles = false         # --disable-particles
+scene_mouse = false             # --disable-mouse
+scene_parallax = false          # --disable-parallax
+```
+
+A playlist entry may carry its own, in one table matching its kind, every
+field optional; a scene's also takes `fps`, `scaling` and `clamp`:
+
+```toml
+video = { fit = "fit", speed = 1.50, rotate = 270 }
+scene = { fps = 60, muted = false, volume = 40, particles = false }
+```
+
+The service refuses a value of the wrong type or out of its range, a field it
+doesn't know (`deny_unknown_fields`: no option reaches mpv that isn't one of
+these), a `video` table on anything but a video or a `scene` table on anything
+but a scene, and any of it below schema 7. mpvpaper writes `-o` into a config
+file with every space a new line, so each value is formatted from its type and
+is one `name=value` token. A scene's own Wallpaper Engine values travel in
+`properties` (a preset's, with the person's over them), schema 6's, on any
+scene but a web page.
+
+A change to one wallpaper's own changes only its entries, so only the display
+showing it is handed over; a `[renderer]` change reconfigures every renderer,
+as before.
+
+Publishing works as for presets: a running service that doesn't list 7 gets
+the document without the dials (the global keys and every entry's table), and
+one that doesn't list 6 without presets and a scene's own values too (that
+scene still plays); the app says once that renderer settings apply after the
+service is restarted. Saving them is never refused, unlike the battery option.
+The health sync compiles exactly what was published for the service it asked.
 
 ```toml
 palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "auto" }

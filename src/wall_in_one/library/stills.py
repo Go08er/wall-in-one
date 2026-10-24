@@ -1558,20 +1558,47 @@ def _command(video: Path, target: Path, seek: float) -> list[str]:
     ]
 
 
+#: The one demuxer a Wallpaper Engine preview is read with, by its suffix. A
+#: preview sits in a folder anyone can write to, and left to probe, ffmpeg
+#: would follow what the bytes say (an HLS playlist named ``.gif`` fetches
+#: its segments from the network); told the format, it decodes a picture or
+#: fails.
+_PREVIEW_DEMUXERS: Final[dict[str, str]] = {
+    ".gif": "gif",
+    ".png": "png_pipe",
+    ".jpg": "jpeg_pipe",
+    ".jpeg": "jpeg_pipe",
+    ".webp": "webp_pipe",
+    ".bmp": "bmp_pipe",
+}
+
+
+def _preview_command(preview: Path, target: Path, demuxer: str) -> list[str]:
+    """`_command` for a preview: its format told, and nothing but local files opened."""
+    command = _command(preview, target, FALLBACK_SEEK_SECONDS)
+    at = command.index("-i")
+    return [*command[:at], "-protocol_whitelist", "file", "-f", demuxer, *command[at:]]
+
+
 def _run(
     video: Path,
     target: Path,
     seek: float,
     *,
     processes: worker_processes.Cancellation | None = None,
+    command: list[str] | None = None,
 ) -> str:
-    """Grab one frame, returning ffmpeg's complaint or ``""`` on success."""
+    """Grab one frame, returning ffmpeg's complaint or ``""`` on success.
+
+    ``command``: ffmpeg's arguments when not `_command`'s (a preview's).
+    """
+    arguments = command if command is not None else _command(video, target, seek)
     try:
         completed = (
-            processes.run(_command(video, target, seek), timeout=GENERATE_TIMEOUT)
+            processes.run(arguments, timeout=GENERATE_TIMEOUT)
             if processes is not None
             else subprocess.run(
-                _command(video, target, seek),
+                arguments,
                 capture_output=True,
                 timeout=GENERATE_TIMEOUT,
                 check=False,
@@ -2004,9 +2031,18 @@ def _still_from_preview(
     preview = item.preview
     if preview is None:
         raise StillError(f"{item.name} has no preview to take a still from")
+    demuxer = _PREVIEW_DEMUXERS.get(preview.suffix.lower())
+    if demuxer is None:
+        raise StillError(f"the preview of {item.name} is not a picture a still is taken from")
     opened = _snapshot_source(preview, Kind.VIDEO)
     try:
-        complaint = _run(opened.writer_path, output, FALLBACK_SEEK_SECONDS, processes=processes)
+        complaint = _run(
+            opened.writer_path,
+            output,
+            FALLBACK_SEEK_SECONDS,
+            processes=processes,
+            command=_preview_command(opened.writer_path, output, demuxer),
+        )
     finally:
         opened.close()
     if complaint:

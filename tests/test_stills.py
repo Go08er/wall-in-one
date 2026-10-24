@@ -1289,6 +1289,39 @@ def test_a_still_comes_from_the_preview_with_no_engine_and_no_display(
     assert stills.capture_scene(made, root, force=True) == target
 
 
+def test_a_preview_is_read_as_the_picture_its_name_says_and_nothing_is_fetched(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """An HLS playlist named .gif must not send ffmpeg to the network for its segments."""
+    item = _workshop_scene(root, "2777242023", "web", "preview.gif")
+    assert item.preview is not None
+    item.preview.write_text(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:9/segment.ts\n"
+        "#EXT-X-ENDLIST\n"
+    )
+    ran: list[list[str]] = []
+    real = subprocess.run
+
+    def recorded(arguments: list[str], **keywords: object) -> object:
+        ran.append(list(arguments))
+        return real(arguments, **keywords)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "run", recorded)
+
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(item, root)
+    assert ran, "ffmpeg was asked"
+    for arguments in ran:
+        before_input = arguments[: arguments.index("-i")]
+        assert before_input[-4:] == ["-protocol_whitelist", "file", "-f", "gif"], arguments
+    assert not (pairing.still_directory(root) / "2777242023.png").exists()
+
+    other = replace(item, preview=item.preview.with_suffix(".m3u8"))
+    item.preview.rename(other.preview)  # type: ignore[arg-type]
+    with pytest.raises(stills.StillError, match="not a picture"):
+        stills.capture_scene(other, root)
+
+
 def test_a_preview_link_is_never_followed(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     item = _workshop_scene(root, "2777242023", "web", "real.jpg")
     assert item.preview is not None

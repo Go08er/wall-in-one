@@ -1005,6 +1005,10 @@ class MainWindow(Adw.ApplicationWindow):
             if self._renderer_failed
             else state.capitalize()
         )
+        # Every display plays nothing (schema 8): say why rather than "Playing".
+        nothing = status.get("nothing_to_play")
+        if isinstance(nothing, str) and nothing:
+            state_text = f"Nothing to play: {nothing}"
         if power is not None and power.message:
             state_text += f" · {power.message}"
         self._runtime_status_text = f"{state_text} · cycle {cycle_text} · shuffle {shuffle_text}"

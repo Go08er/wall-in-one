@@ -66,7 +66,12 @@ def _playing(view: RuntimeStatusView, status: dict[str, object]) -> str:
     if truth is not None and truth.displays:
         connected = sum(1 for display in truth.displays if display.connected)
         parts.append(f"{connected} display{'' if connected == 1 else 's'}")
-    parts.append(f"{_STATES[state]} {playlist}")
+    # Every display plays nothing (schema 8): the runtime says why, and so does this.
+    nothing = status.get("nothing_to_play")
+    if isinstance(nothing, str) and nothing:
+        parts.append(f"nothing to play: {nothing}")
+    else:
+        parts.append(f"{_STATES[state]} {playlist}")
     power = view.power
     if power is not None and power.message:
         parts.append(power.message)

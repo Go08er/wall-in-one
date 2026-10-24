@@ -11489,3 +11489,49 @@ fn a_preset_of_a_web_page_is_refused_by_its_base_while_web_is_off() {
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();
 }
+
+#[test]
+fn the_apps_captured_nothing_to_play_status_keeps_this_services_shape() {
+    // tests/fixtures/status-nothing-to-play.json (the app's GUI test of it) was captured
+    // from this service over the app's web-off document; its keys must stay these.
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/status-nothing-to-play.json");
+    let captured: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+    let root = directory("captured-nothing");
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, WEB_ONLY_OFF).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(config_path, parsed, RuntimeDriver(state), noon()).unwrap();
+    runtime.apply_current().unwrap();
+    let live = status(&mut runtime, noon());
+    let keys = |value: &serde_json::Value| {
+        value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(keys(&live), keys(&captured));
+    assert_eq!(keys(&live["displays"][0]), keys(&captured["displays"][0]));
+    for key in [
+        "nothing_to_play",
+        "entry_id",
+        "kind",
+        "still",
+        "playlist_id",
+    ] {
+        assert_eq!(live[key], captured[key], "{key}");
+        assert_eq!(
+            live["displays"][0][key], captured["displays"][0][key],
+            "row {key}"
+        );
+    }
+    assert_eq!(
+        live["displays"][0]["entry_name"],
+        captured["displays"][0]["entry_name"]
+    );
+    fs::remove_dir_all(root).unwrap();
+}

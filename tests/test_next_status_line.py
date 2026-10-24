@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from wall_in_one.ui.next import status_line
 from wall_in_one.ui.status_model import RuntimeStatusModel
 
@@ -136,3 +139,22 @@ def test_an_invalid_first_reply_says_so() -> None:
     model = RuntimeStatusModel()
     model.mark_invalid("Runtime rejected its status request: busy")
     assert status_line.describe(model.view) == "Runtime status invalid"
+
+
+def test_nothing_to_play_is_said_and_is_no_protocol_error() -> None:
+    """The service's own reply for the app's web-off document (captured from it, r13).
+
+    Every display plays nothing: rows with empty entry fields and `entry_name`, and
+    `nothing_to_play` at the top. The window takes it as a snapshot and says why.
+    """
+    path = Path(__file__).parent / "fixtures" / "status-nothing-to-play.json"
+    status = json.loads(path.read_text(encoding="utf-8"))
+    model = RuntimeStatusModel()
+    model.adopt(status)
+    assert model.view.truth is not None, "a snapshot, not an invalid reply"
+    assert not model.view.protocol_error
+    assert status_line.describe(model.view) == (
+        "1 display · nothing to play: web wallpapers are off"
+    )
+    [row] = model.view.truth.displays
+    assert row.connector == "ALL" and row.connected and row.entry_id == ""

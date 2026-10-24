@@ -436,7 +436,9 @@ class RealScheduling:
                     playlist=display.playlist,
                     rule_id=display.schedule_rule_id,
                     until="" if display.route_source == "manual" else display.until or "",
-                    quick=_is_quick_choice(display.playlist_id),
+                    quick=_is_quick_choice(display.asked_playlist_id),
+                    stand_in_for=display.stand_in_for or "",
+                    stand_in_for_name=display.stand_in_for_name,
                     playback=display.playback_state,
                     cycle=display.cycle_enabled,
                     cycle_default=display.cycle_default,
@@ -455,7 +457,9 @@ class RealScheduling:
                 playlist_id=truth.playlist_id,
                 playlist=truth.playlist,
                 rule_id=truth.schedule_rule_id,
-                quick=_is_quick_choice(truth.playlist_id),
+                quick=_is_quick_choice(truth.asked_playlist_id),
+                stand_in_for=truth.stand_in_for or "",
+                stand_in_for_name=truth.stand_in_for_name,
             ),
         )
 

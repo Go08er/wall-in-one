@@ -254,6 +254,11 @@ class Reason:
     playlist: str = ""
     #: When this ends ("18:00"), only when the runtime reports it.
     until: str = ""
+    #: The name of the playlist asked for, when ``playlist`` stands in for
+    #: it: the wallpaper service refused every entry of it. Else empty.
+    stand_in_for: str = ""
+    #: The same for a pick of one wallpaper, which has no name to quote.
+    pick_stood_in: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,14 +308,23 @@ def reason_text(reason: Reason) -> str:
 
     "until" appears only when the runtime said when the reason ends.
     """
+    if reason.pick_stood_in and reason.playlist:
+        return f"Your pick can\u2019t play here, so \u201c{reason.playlist}\u201d is playing"
+    named = (
+        # What was asked for can't play, and is never presented as playing.
+        f"\u201c{reason.stand_in_for}\u201d can\u2019t play here, so "
+        f"\u201c{reason.playlist}\u201d is playing"
+        if reason.stand_in_for and reason.playlist
+        else reason.playlist
+    )
     if reason.route == "pick":
-        return f"{reason.playlist} · your pick" if reason.playlist else "Your pick"
+        return f"{named} · your pick" if named else "Your pick"
     why = {
         "schedule": "from schedule",
         "display": "this display\u2019s playlist",
         "default": "nothing scheduled",
     }[reason.route]
-    text = f"{reason.playlist} · {why}" if reason.playlist else why.capitalize()
+    text = f"{named} · {why}" if named else why.capitalize()
     return f"{text} until {reason.until}" if reason.until else text
 
 

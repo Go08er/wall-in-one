@@ -648,14 +648,30 @@ class SchedulePage(Page):
                 line.append(tag)
             title = Gtk.Label(xalign=0, wrap=True)
             title.add_css_class("now-name")
-            name = "" if route.quick else route.playlist
+            # What plays; a stand-in is named as one, since what was asked
+            # for can't play (the service refused every entry of it).
+            name = route.playlist if route.stand_in_for or not route.quick else ""
+            stood_in = (
+                (
+                    "Your pick"
+                    if route.quick
+                    else f"\u201c{route.stand_in_for_name or route.stand_in_for}\u201d"
+                )
+                + f" can\u2019t play here, so \u201c{route.playlist}\u201d is playing"
+                if route.stand_in_for
+                else ""
+            )
             if route.route == "pick":
                 title.set_markup(f"<span weight='800'>{escape(name or 'Your pick')}</span>")
                 line.append(title)
-                note = Gtk.Label(label="your pick", xalign=0)
+                note = Gtk.Label(
+                    label="in place of your pick" if stood_in else "your pick", xalign=0
+                )
                 note.add_css_class("pick-note")
                 line.append(note)
                 self._now_lines.append(line)
+                if stood_in:
+                    self._now_lines.append(widgets.dim(stood_in))
                 continue
             markup = f"<span weight='800'>{escape(name)}</span>"
             if route.until:
@@ -663,6 +679,8 @@ class SchedulePage(Page):
             title.set_markup(markup)
             line.append(title)
             self._now_lines.append(line)
+            if stood_in:
+                self._now_lines.append(widgets.dim(stood_in))
             if multi:
                 continue
             detail = Gtk.Box(spacing=6)

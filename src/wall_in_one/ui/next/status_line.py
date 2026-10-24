@@ -72,6 +72,9 @@ def _playing(view: RuntimeStatusView, status: dict[str, object]) -> str:
         parts.append(f"nothing to play: {nothing}")
     else:
         parts.append(f"{_STATES[state]} {playlist}")
+        if truth is not None and truth.stand_in_for:
+            # The service refused every entry of what was asked for.
+            parts.append(f"\u201c{truth.stand_in_for_name}\u201d can\u2019t play here")
     power = view.power
     if power is not None and power.message:
         parts.append(power.message)

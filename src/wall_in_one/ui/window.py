@@ -917,6 +917,14 @@ class MainWindow(Adw.ApplicationWindow):
         if not isinstance(playlist, str) or not isinstance(source, str):
             return
         self._runtime_media_status = status
+        truth = runtime_truth.from_status(status)
+        # What was asked for when a stand-in plays for it: the service refused
+        # every entry of it, so `playlist` is not what was chosen.
+        stood_in = (
+            f" \u00b7 \u201c{truth.stand_in_for_name}\u201d can\u2019t play here"
+            if truth is not None and truth.stand_in_for
+            else ""
+        )
         power = runtime_truth.power_from_status(status)
         state = playback_verbs.playback_state(status)
         self._playback_state = state
@@ -1039,14 +1047,16 @@ class MainWindow(Adw.ApplicationWindow):
                 self._missing_said = missing
             self._runtime_error = last_error
         elif isinstance(output_error, str) and output_error:
-            self._runtime_summary = f"{state} {playlist} ({source}) · display discovery degraded"
+            self._runtime_summary = (
+                f"{state} {playlist} ({source}){stood_in} · display discovery degraded"
+            )
             self._subtitle.set_tooltip_text(output_error)
             if output_error != self._runtime_error:
                 self.report(f"Display discovery is degraded: {output_error}")
             self._runtime_error = output_error
         else:
             self._runtime_error = ""
-            self._runtime_summary = f"{state} {playlist} ({source})"
+            self._runtime_summary = f"{state} {playlist} ({source}){stood_in}"
             self._subtitle.set_tooltip_text(None)
         if power is not None and power.message:
             self._runtime_summary += f" · {power.message}"

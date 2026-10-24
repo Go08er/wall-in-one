@@ -515,8 +515,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
     ) -> int:
         if not display.manual_override:
             return 0
+        # The person's pick, also while a stand-in plays for it.
         for index, playlist in enumerate(choices, start=1):
-            if playlist.id == display.playlist_id:
+            if playlist.id == display.asked_playlist_id:
                 return index
         return 0
 
@@ -571,7 +572,12 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if display.playback_state == "playing"
             else display.playback_state.capitalize()
         )
-        parts = [route, display.playlist, playback]
+        playing = (
+            runtime_truth.stand_in_sentence(display.stand_in_for_name, display.playlist)
+            if display.stand_in_for
+            else display.playlist
+        )
+        parts = [route, playing, playback]
         if truth.power is not None and truth.power.message:
             parts.append(truth.power.message)
         if truth.theme_source is not None and truth.theme_source.effective == display.connector:
@@ -635,7 +641,16 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 if session.manual_playlist is not None
                 else "Following the authored schedule."
             )
+        # The service refused every entry of what was asked for, and another
+        # playlist stands in: say so, never as though it had been chosen.
+        stand_in = (
+            runtime_truth.stand_in_sentence(truth.stand_in_for_name, truth.playlist)
+            if truth.stand_in_for
+            else ""
+        )
         if truth.is_manual:
+            if stand_in:
+                return f"Manual override · {stand_in}."
             return f"Manual override · {truth.playlist} is playing."
         if truth.is_multi_display:
             return "Following schedule · screens use their assigned or default playlists."
@@ -643,11 +658,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
             rule = SchedulesPage._rule_names(session).get(
                 truth.schedule_rule_id, truth.schedule_rule_id
             )
-            return (
+            said = (
                 f"Following schedule · rule {rule} selects "
                 f"{truth.scheduled_playlist or truth.playlist}."
             )
-        return f"Following schedule · default selects {truth.scheduled_playlist or truth.playlist}."
+            return f"{said[:-1]} · {stand_in}." if stand_in else said
+        said = f"Following schedule · default selects {truth.scheduled_playlist or truth.playlist}."
+        return f"{said[:-1]} · {stand_in}." if stand_in else said
 
     @staticmethod
     def _playback_selected(
@@ -656,7 +673,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         truth: runtime_truth.RuntimeTruth | None,
     ) -> int:
         manual_id = (
-            truth.playlist_id
+            # The person's pick, also while a stand-in plays for it.
+            truth.asked_playlist_id
             if truth is not None and truth.is_manual
             else session.manual_playlist
             if truth is None

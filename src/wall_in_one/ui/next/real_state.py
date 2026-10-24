@@ -660,9 +660,17 @@ class RealAppState(GObject.Object):
         for display in rows:
             wid = self._current.get(display.connector, "")
             route = _ROUTES.get(display.route_source, "default")
-            picked_one = route == "pick" and _is_quick_choice(display.playlist_id)
+            # What was asked for, also when a stand-in plays for it.
+            picked_one = route == "pick" and _is_quick_choice(display.asked_playlist_id)
+            stood_in = display.stand_in_for is not None
             until = "" if route == "pick" else display.until or ""
-            reason = Reason(route, "" if picked_one else display.playlist, until)
+            reason = Reason(
+                route,
+                display.playlist if stood_in or not picked_one else "",
+                until,
+                stand_in_for="" if picked_one else display.stand_in_for_name,
+                pick_stood_in=picked_one and stood_in,
+            )
             name = self._index[wid].name if wid in self._index else ""
             screens.append(OnScreen(display.connector, wid, name, reason))
             states.append(display.playback_state)
@@ -672,10 +680,16 @@ class RealAppState(GObject.Object):
         if not rows:
             # A version-1 runtime: one answer for every display.
             route = "pick" if truth.is_manual else "schedule"
-            picked_one = route == "pick" and _is_quick_choice(truth.playlist_id)
+            picked_one = route == "pick" and _is_quick_choice(truth.asked_playlist_id)
+            stood_in = truth.stand_in_for is not None
             wid = next(iter(self._current.values()), "")
             name = self._index[wid].name if wid in self._index else ""
-            reason = Reason(route, "" if picked_one else truth.playlist)
+            reason = Reason(
+                route,
+                truth.playlist if stood_in or not picked_one else "",
+                stand_in_for="" if picked_one else truth.stand_in_for_name,
+                pick_stood_in=picked_one and stood_in,
+            )
             screens.append(OnScreen("Display", wid, name, reason))
             following = not truth.is_manual
         # The runtime's `toggle` (what Play sends to displays that disagree)

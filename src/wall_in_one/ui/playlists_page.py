@@ -1362,14 +1362,18 @@ class PlaylistsPage(Gtk.Box):
     def _sync_play_button(self, session: Session, playlist: playlists.Playlist) -> None:
         """Render one runtime choice without touching either thumbnail pane."""
         truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
+        # What was asked for, also while a stand-in plays for it (the service
+        # refused every entry of it): that playlist is the pick, not the
+        # stand-in.
         manual = (
-            playlist.id == truth.playlist_id and truth.is_manual
+            playlist.id == truth.asked_playlist_id and truth.is_manual
             if truth is not None
             else playlist.id == session.manual_playlist
         )
         scheduled = (
-            truth is not None and playlist.id == truth.playlist_id and truth.follows_schedule
+            truth is not None and playlist.id == truth.asked_playlist_id and truth.follows_schedule
         )
+        stood_in = truth is not None and truth.stand_in_for == playlist.id
         usable, unavailable = _playlist_availability(session, playlist)
         if not usable:
             self._play_button.set_label(
@@ -1383,14 +1387,20 @@ class PlaylistsPage(Gtk.Box):
             self._play_button.set_sensitive(False)
             return
         self._play_button.set_label(
-            "Playing now · manual override"
+            "Picked · can\u2019t play here"
+            if manual and stood_in
+            else "Playing now · manual override"
             if manual
             else "Use as manual override"
             if scheduled
             else "Play this playlist now"
         )
+        entries = "entry is" if unavailable == 1 else "entries are"
+        skipped = f"{unavailable} unavailable {entries} skipped"
         self._play_button.set_tooltip_text(
-            f"{unavailable} unavailable entr{'y is' if unavailable == 1 else 'ies are'} skipped"
+            runtime_truth.stand_in_sentence(playlist.name, truth.playlist)
+            if stood_in and truth is not None
+            else skipped
             if unavailable
             else None
         )

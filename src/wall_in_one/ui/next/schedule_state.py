@@ -95,6 +95,10 @@ class RouteView:
     until: str = ""
     #: A pick of one wallpaper ("Your pick"), not of a playlist.
     quick: bool = False
+    #: The playlist asked for (its id and name), when ``playlist_id`` stands
+    #: in for it: the wallpaper service refused every entry of it. Else empty.
+    stand_in_for: str = ""
+    stand_in_for_name: str = ""
     #: ``playing``, ``paused`` or ``stopped``.
     playback: str = "playing"
     cycle: bool = False

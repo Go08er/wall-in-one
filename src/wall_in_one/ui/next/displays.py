@@ -240,8 +240,18 @@ class DisplaysPage(Page):
         route = self._route(connector)
         if route is None:
             return ""
-        playlist = "" if route.quick else route.playlist
-        return reason_text(Reason(route.route, playlist, route.until))
+        # A stand-in is named as one: what was asked for can't play.
+        stood_in = bool(route.stand_in_for)
+        playlist = route.playlist if stood_in or not route.quick else ""
+        return reason_text(
+            Reason(
+                route.route,
+                playlist,
+                route.until,
+                stand_in_for="" if route.quick else route.stand_in_for_name,
+                pick_stood_in=route.quick and stood_in,
+            )
+        )
 
     # -- building ------------------------------------------------------------------------
     def _section(self, title: str, child: Gtk.Widget, extra: Gtk.Widget | None = None) -> Gtk.Box:
@@ -503,10 +513,24 @@ class DisplaysPage(Page):
             self.play_row.set_model(
                 Gtk.StringList.new(["Follow the schedule", *(p.name for p in mine)])
             )
-        picked = route.playlist_id if route is not None and route.route == "pick" else ""
+        # The person's pick, also while a stand-in plays for it.
+        picked = (
+            route.stand_in_for or route.playlist_id
+            if route is not None and route.route == "pick"
+            else ""
+        )
         self.play_row.set_selected(play_ids.index(picked) if picked in play_ids else 0)
         self.play_row.set_sensitive(not runtime_off)
-        self.play_row.set_subtitle(runtime_off or ("Your pick" if route and route.quick else ""))
+        self.play_row.set_subtitle(
+            runtime_off
+            or (
+                self.why(connector)
+                if route is not None and route.route == "pick" and route.stand_in_for
+                else "Your pick"
+                if route and route.quick
+                else ""
+            )
+        )
 
         self.rotation_row.set_visible(not mirrored)
         if route is not None:
@@ -571,13 +595,18 @@ class DisplaysPage(Page):
             self.plays_row.set_subtitle(blocked)
         elif route is None:
             self.plays_row.set_subtitle("")
+        elif route.route == "display" and route.stand_in_for:
+            # The service refused every entry of it: another plays instead.
+            self.plays_row.set_subtitle(
+                f"Can\u2019t play here · \u201c{route.playlist}\u201d plays in its place"
+            )
         elif route.route == "display":
             self.plays_row.set_subtitle(
                 "In use now"
                 + (f" · nothing is scheduled until {route.until}" if route.until else "")
             )
         elif route.route == "schedule":
-            text = f"Not in use now · “{route.playlist}” is scheduled"
+            text = f"Not in use now · “{route.stand_in_for_name or route.playlist}” is scheduled"
             self.plays_row.set_subtitle(text + (f" until {route.until}" if route.until else ""))
         elif route.route == "pick":
             self.plays_row.set_subtitle("Not in use now · your pick is showing")

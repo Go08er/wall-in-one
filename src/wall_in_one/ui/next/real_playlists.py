@@ -448,6 +448,16 @@ class RealPlaylists:
             return f"On screen now · {why}", truth.is_manual, ()
         showing = [display for display in rows if display.playlist_id == pid]
         if not showing:
+            # Asked for, but the service refused every entry of it: another
+            # playlist stands in.
+            stood_in = next((display for display in rows if display.stand_in_for == pid), None)
+            if stood_in is not None:
+                return (
+                    f"Can\u2019t play here \u00b7 \u201c{stood_in.playlist}\u201d plays in "
+                    "its place",
+                    False,
+                    (),
+                )
             return "", False, ()
         everywhere = len(showing) == len(rows)
         where = (

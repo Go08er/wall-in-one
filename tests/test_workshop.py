@@ -803,3 +803,24 @@ def test_a_type_or_file_the_engine_refuses_never_plays(
     (item,) = _listed(tmp_path).values()
 
     assert (item.unplayable is None) is plays, item
+
+
+# -- a preset of a video it can't open needs that base (review of r11, finding 6) ---
+
+
+@pytest.mark.parametrize("video", ("gone.mp4", "link.mp4"))
+def test_a_preset_of_a_video_whose_file_isnt_there_needs_its_base(
+    tmp_path: Path, video: str
+) -> None:
+    content = _content(tmp_path)
+    base = _install(content, "160", {"type": "video", "title": "Clip", "file": video})
+    if video == "link.mp4":
+        (base / video).symlink_to("/dev/zero")
+    _preset(content, {"speed": 2}, dependency="160")
+
+    found = _listed(tmp_path)
+
+    assert set(found) == {"2946165131"}, "the video itself stays unlisted, as before"
+    preset = found["2946165131"]
+    assert preset.unplayable is Unplayable.NEEDS_BASE
+    assert "Clip" in preset.unplayable_reason and "isn\u2019t there" in preset.unplayable_reason

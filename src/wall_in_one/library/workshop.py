@@ -678,6 +678,18 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
             unplayable=Unplayable.MALFORMED,
             reason=f"it is a preset of {base.title}, which is itself a preset",
         )
+    if base.kind == "video" and base.entry is None:
+        # Not listed itself (`scan.workshop_items`): its file is gone, or one
+        # this app won't open (a link, a path into another folder). The
+        # preset has nothing it may play until the base is whole again.
+        return Playback(
+            base=base.id,
+            unplayable=Unplayable.NEEDS_BASE,
+            reason=(
+                f"it is a preset of {base.title}, whose video file isn\u2019t there. "
+                "Reinstall it in Steam, then check Wallpaper Engine again"
+            ),
+        )
     refused = _refusal(base)
     if refused is not None:
         return Playback(

@@ -79,6 +79,8 @@
  ],
  "power_available": false,
  "power_source": "unknown",
+ "refused": [],
+ "refused_omitted": 0,
  "renderer_failed": false,
  "runtime_executable": null,
  "runtime_instance": "00000000000000000000000000000000",

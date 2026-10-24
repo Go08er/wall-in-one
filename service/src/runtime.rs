@@ -1,7 +1,7 @@
 use crate::config::{
     Config, DisplayAssignment, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES,
-    NOTHING_TO_PLAY_LABEL, Playlist, SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS,
-    ScheduleRule,
+    MAX_REFUSED_REASON_BYTES, MAX_REFUSED_STATUS_ENTRIES, NOTHING_TO_PLAY_LABEL, Playlist,
+    SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
 };
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
@@ -53,6 +53,50 @@ const REFUSED_ITEMS: &str = "no wallpaper here can start";
 /// What `next` and `random` answer when every other entry of the playlist
 /// was refused: not a fault, so `last_error` doesn't keep it.
 const REFUSED_REST: &str = "no other wallpaper here can start";
+
+/// The Wallpaper Engine items the driver would not start in one document
+/// generation (`Runtime::refused_scenes`), by the item an entry renders, in
+/// the order they were learned: the order status lists them in (`refused`).
+#[derive(Default)]
+struct Refusals {
+    by_item: HashMap<String, Refusal>,
+    order: Vec<String>,
+}
+
+impl Refusals {
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn get(&self, item: &str) -> Option<&Refusal> {
+        self.by_item.get(item)
+    }
+
+    fn contains(&self, item: &str) -> bool {
+        self.by_item.contains_key(item)
+    }
+
+    /// Remember `refusal` for `item`; false when it was already known.
+    fn insert(&mut self, item: &str, refusal: Refusal) -> bool {
+        if self.by_item.contains_key(item) {
+            return false;
+        }
+        self.by_item.insert(item.to_string(), refusal);
+        self.order.push(item.to_string());
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Each item and why, in the order learned.
+    fn iter(&self) -> impl Iterator<Item = (&str, &Refusal)> {
+        self.order
+            .iter()
+            .filter_map(|item| Some((item.as_str(), self.by_item.get(item)?)))
+    }
+}
 
 /// Items asked in one walk past refused entries that the driver would start,
 /// by item and whether motion was asked for (`dynamics_enabled`): each is
@@ -176,6 +220,12 @@ pub struct Status<'a> {
     pub theme_source: ThemeSourceStatus<'a>,
     pub playlist_id: &'a str,
     pub playlist: &'a str,
+    /// The playlist asked for, when every connected display plays the same
+    /// stand-in for it (`playlist_id`): the service refused every entry of
+    /// it, so the default playlist or All media plays instead. Absent
+    /// otherwise; each display row says it for itself. Added in 0.4.1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stand_in_for: Option<&'a str>,
     pub source: &'a str,
     pub entry_id: Option<&'a str>,
     /// True when any current connected route resolves to an entry in the
@@ -237,6 +287,27 @@ pub struct Status<'a> {
     /// without the key. Status is only ever answered with a document loaded;
     /// after a refused reload it is the one kept. Added in 0.4.1.
     pub allow_web_wallpapers: bool,
+    /// The Wallpaper Engine items the service would not start in this
+    /// document generation, and why, in the order it found them: each entry
+    /// of one is skipped (never a taboo, never saved). At most
+    /// `MAX_REFUSED_STATUS_ENTRIES`; `refused_omitted` counts the rest. A
+    /// reload forgets them and asks again. Added in 0.4.1.
+    pub refused: Vec<RefusedStatus<'a>>,
+    pub refused_omitted: usize,
+}
+
+/// One item the service refused (`Status::refused`).
+#[derive(Debug, Serialize)]
+pub struct RefusedStatus<'a> {
+    /// The Workshop id of the item the entry renders: a preset's base.
+    pub scene_id: &'a str,
+    /// Whether it is a web page, refused because the document doesn't
+    /// allow web wallpapers. Every other is an item the service can't
+    /// find, read or play.
+    pub web_page: bool,
+    /// What the service says, naming the item; at most
+    /// `MAX_REFUSED_REASON_BYTES`.
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -341,6 +412,12 @@ pub struct DisplayStatus<'a> {
     pub assigned_playlist: &'a str,
     pub playlist_id: &'a str,
     pub playlist: &'a str,
+    /// The playlist this display asked for (its pick, rule, assignment or
+    /// the default) when `playlist_id` is a stand-in for it: the service
+    /// refused every entry of it. Absent while it plays its own playlist,
+    /// or nothing (`nothing_to_play` then says why). Added in 0.4.1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stand_in_for: Option<&'a str>,
     pub entry_id: &'a str,
     /// Exact current-entry safety truth for this route. This is deliberately
     /// independent of renderer failure: an equivalent occurrence can become
@@ -386,6 +463,21 @@ pub struct DisplayStatus<'a> {
     /// When and why this display's wallpaper next changes on its own.
     #[serde(flatten)]
     pub timing: DisplayTiming,
+}
+
+/// The summary's `stand_in_for`: the playlist every connected row asked for,
+/// when each plays the same stand-in for it, the summary's playlist.
+fn summary_stand_in<'a>(
+    displays: &[DisplayStatus<'a>],
+    summary: Option<&Playlist>,
+) -> Option<&'a str> {
+    let summary = summary?;
+    let mut connected = displays.iter().filter(|row| row.connected);
+    let first = connected.next()?;
+    let asked = first.stand_in_for?;
+    (first.playlist_id == summary.id
+        && connected.all(|row| row.stand_in_for == Some(asked) && row.playlist_id == summary.id))
+    .then_some(asked)
 }
 
 /// `entry_name` for a display that plays nothing for `reason`.
@@ -686,7 +778,7 @@ struct ReloadSnapshot {
     authoritative_generation: u64,
     taboo: HashMap<EntryKey, TabooEntry>,
     taboo_order: Vec<EntryKey>,
-    refused_scenes: HashMap<String, Refusal>,
+    refused_scenes: Refusals,
     routes: HashMap<String, DisplayRoute>,
     route_generation: u64,
     current_time: NaiveDateTime,
@@ -733,8 +825,9 @@ pub struct Runtime<D: WallpaperDriver> {
     /// (`WallpaperDriver::motion_refusal`). Every entry of one is skipped
     /// (owner: "skip to next, if it's in a playlist alone, then use the
     /// default playlist in schedule"), so each is asked once. Never a taboo
-    /// and never saved; a reload forgets them.
-    refused_scenes: HashMap<String, Refusal>,
+    /// and never saved; a reload forgets them. Status lists them
+    /// (`refused`), which is how the person learns of them.
+    refused_scenes: Refusals,
     authoritative_generation: u64,
     routes: HashMap<String, DisplayRoute>,
     route_generation: u64,
@@ -824,7 +917,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             pending_routes: HashMap::new(),
             taboo,
             taboo_order,
-            refused_scenes: HashMap::new(),
+            refused_scenes: Refusals::default(),
             authoritative_generation: 0,
             routes: HashMap::new(),
             route_generation: 0,
@@ -2304,6 +2397,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             .map_or_else(|| reference.to_string(), |playlist| playlist.id.clone())
     }
 
+    /// The playlist asked for (`reference`, a pick, a rule's, an assignment
+    /// or the default) when a display plays a stand-in for it, the service
+    /// having refused it throughout: what status names as `stand_in_for`.
+    /// None when it plays its own, or nothing.
+    fn stood_in_for<'a>(&'a self, reference: &str, shown: &str) -> Option<&'a str> {
+        let asked = self.config.playlist(reference)?;
+        (asked.id != shown && self.shown_playlist_id(&asked.id) == shown)
+            .then_some(asked.id.as_str())
+    }
+
     /// Why a display on `playlist` plays nothing when every entry it could
     /// play was refused (`stand_in` is None): over the refusals of what it
     /// tried, its own playlist and each that could stand in, not over every
@@ -2327,15 +2430,14 @@ impl<D: WallpaperDriver> Runtime<D> {
         let Some(scene) = entry.rendered_scene() else {
             return false;
         };
-        if self.refused_scenes.contains_key(scene) {
+        if self.refused_scenes.contains(scene) {
             return false;
         }
         eprintln!(
             "wall-in-one-service: skipped entry {:?} of playlist {playlist_id:?}: {refusal}",
             entry.id
         );
-        self.refused_scenes.insert(scene.clone(), refusal);
-        true
+        self.refused_scenes.insert(scene, refusal)
     }
 
     /// Ask the driver about the entries of `playlist_id` at `visiting`
@@ -5688,6 +5790,25 @@ impl<D: WallpaperDriver> Runtime<D> {
         Ok((fits, best))
     }
 
+    /// What the service refused this generation, as status lists it.
+    fn refused_rows(&self) -> Vec<RefusedStatus<'_>> {
+        self.refused_scenes
+            .iter()
+            .take(MAX_REFUSED_STATUS_ENTRIES)
+            .map(|(item, refusal)| RefusedStatus {
+                scene_id: item,
+                web_page: refusal.web_page,
+                reason: truncate_middle(&refusal.reason, MAX_REFUSED_REASON_BYTES),
+            })
+            .collect()
+    }
+
+    fn refused_omitted(&self) -> usize {
+        self.refused_scenes
+            .len()
+            .saturating_sub(MAX_REFUSED_STATUS_ENTRIES)
+    }
+
     /// `missing_renderers` as a reply of shape `detail` carries it.
     fn missing_rows(&self, detail: MissingDetail) -> Vec<MissingRendererStatus> {
         if detail == MissingDetail::Left {
@@ -5808,6 +5929,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     assigned_playlist: &assigned.name,
                     playlist_id: &active_playlist.id,
                     playlist: &active_playlist.name,
+                    stand_in_for: self.stood_in_for(&in_force.id, &active_playlist.id),
                     entry_id: entry.map_or("", |entry| entry.id.as_str()),
                     entry_taboo: display_entry_taboo,
                     kind: entry.map_or("", |entry| entry_kind(entry.kind)),
@@ -5922,6 +6044,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         assigned_playlist: &assigned.name,
                         playlist_id: &effective.id,
                         playlist: &effective.name,
+                        stand_in_for: self.stood_in_for(&decided.id, &effective.id),
                         entry_id: entry.map_or("", |entry| entry.id.as_str()),
                         entry_taboo: display_entry_taboo,
                         kind: entry.map_or("", |entry| entry_kind(entry.kind)),
@@ -6018,6 +6141,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             playlist_id: summary_playlist.map_or("", |playlist| playlist.id.as_str()),
             playlist: summary_playlist
                 .map_or("Multiple displays", |playlist| playlist.name.as_str()),
+            stand_in_for: summary_stand_in(&displays, summary_playlist),
             source: if self.manual_playlist.is_some() {
                 "manual"
             } else {
@@ -6084,6 +6208,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             missing_renderers: self.missing_rows(missing),
             nothing_to_play: self.mirrored_nothing_reason(),
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
+            refused: self.refused_rows(),
+            refused_omitted: self.refused_omitted(),
         })
         .map_err(|error| error.to_string())
     }
@@ -6283,6 +6409,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                 assigned_playlist: &assigned.name,
                 playlist_id: &effective.id,
                 playlist: &effective.name,
+                stand_in_for: match &route.manual_playlist {
+                    Some(manual) => Some(manual.clone()),
+                    None => self
+                        .automatic_route(output, at)
+                        .ok()
+                        .map(|(playlist, _, _)| playlist),
+                }
+                .and_then(|asked| self.stood_in_for(&asked, &effective.id)),
                 entry_id: entry.map_or("", |entry| entry.id.as_str()),
                 entry_taboo: entry.is_some_and(|entry| self.is_taboo(&effective.id, &entry.id)),
                 kind: entry.map_or("", |entry| entry_kind(entry.kind)),
@@ -6420,6 +6554,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             playlist_id: summary_playlist.map_or("", |playlist| playlist.id.as_str()),
             playlist: summary_playlist
                 .map_or("Multiple displays", |playlist| playlist.name.as_str()),
+            stand_in_for: summary_stand_in(&displays, summary_playlist),
             source: if route_states
                 .iter()
                 .all(|route| route.manual_playlist.is_some())
@@ -6500,6 +6635,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             missing_renderers: self.missing_rows(missing),
             nothing_to_play: self.routes_nothing_reason(&self.target_outputs),
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
+            refused: self.refused_rows(),
+            refused_omitted: self.refused_omitted(),
         })
         .map_err(|error| error.to_string())
     }

@@ -8769,10 +8769,10 @@ const ADDED_DISPLAY_KEYS: &[&str] = &[
 ];
 
 /// Top-level keys added after the shape fixture was recorded: the compositor's
-/// display snapshot and the renderers the service could not start (0.4.0).
-/// Removed the same way, so that the released ones are still compared byte
-/// for byte.
-const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs", "missing_renderers"];
+/// display snapshot and the renderers the service could not start (0.4.0), and
+/// the items it refused (0.4.1). Removed the same way, so that the released
+/// ones are still compared byte for byte.
+const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs", "missing_renderers", "refused"];
 
 /// Top-level string keys added after the shape fixture was recorded: the
 /// build's install kind (0.4.0), which also differs between a `cargo test`
@@ -8780,8 +8780,9 @@ const ADDED_TOP_LEVEL_KEYS: &[&str] = &["outputs", "missing_renderers"];
 const ADDED_TOP_LEVEL_STRINGS: &[&str] = &["install_kind", "nothing_to_play"];
 
 /// Top-level flags added after the shape fixture was recorded: whether the
-/// loaded document allows web wallpapers (0.4.1). Removed the same way.
-const ADDED_TOP_LEVEL_FLAGS: &[&str] = &["allow_web_wallpapers"];
+/// loaded document allows web wallpapers, and how many refused items status
+/// left out (0.4.1). Removed the same way.
+const ADDED_TOP_LEVEL_FLAGS: &[&str] = &["allow_web_wallpapers", "refused_omitted"];
 
 /// `"key":"value"` with the value replaced, for fields that differ per process
 /// or per build. A missing key is left alone; a `null` value is kept.

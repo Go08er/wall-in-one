@@ -3194,7 +3194,11 @@ class Application(Adw.Application):
             self._status_model.mark_unavailable(forget=False)
             return True
         except client.ControlError as error:
-            self.window_report(f"Runtime reload failed: {error}")
+            # It may not have loaded it (a reload that timed out): what it holds
+            # is judged as for a refusal, as on the GUI's lane.
+            failed = f"Runtime reload failed: {error}"
+            done = self._web_off_guard()
+            self.window_report(f"{failed.rstrip().rstrip('.')}. {done}" if done else failed)
             return False
         if not response.ok:
             refused = self._rejected_configuration(response.message)

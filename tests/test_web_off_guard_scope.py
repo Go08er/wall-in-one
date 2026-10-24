@@ -374,6 +374,40 @@ def test_control_a_text_replaced_before_the_reload_was_sent_is_forgotten(
     assert _acted(sent) == []
 
 
+# -- --service's lane: a reload that fails, not only one that is refused ---------------------
+
+
+def test_the_service_lane_judges_what_is_held_after_a_reload_that_times_out(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GUI's lane counts a reload that failed as a failed publication; ``--service``'s now
+    does too. Before: "Runtime reload failed" said, and a page it may still hold left playing."""
+    application = profiles(service=True).application
+    _steam_with_web()
+    _held(application, DOCUMENT)
+    monkeypatch.setattr(application, "_update_runtime_document", lambda: (True, True))
+    sent: list[str] = []
+
+    def send(verb: str, *_a: object, **_k: object) -> Response:
+        sent.append(verb)
+        if verb == "reload":
+            raise client.ControlError("timed out waiting for the wallpaper service")
+        if verb == "status":
+            return Response.success(
+                json.dumps({"status_version": 2, "supported_config_schemas": OLDER})
+            )
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    reports: list[str] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    assert application._publish_runtime() is False
+    assert _acted(sent) == ["reload", "stop", "quit"], reports
+    assert reports[-1].startswith("Runtime reload failed: timed out")
+    assert "still plays Electric Eye" in reports[-1]
+
+
 # -- what is said when the service is told to quit (N3) ---------------------------------------
 
 

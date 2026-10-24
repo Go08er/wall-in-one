@@ -154,6 +154,18 @@ the lock serializes writers, not package versions. Lock acquisition is bounded
 and fail-closed: an unsafe lock path or timeout leaves the last-known-good
 runtime document untouched.
 
+Saving `settings.toml` doesn't take the compiler lock, so a publication can
+hold settings read before the person changed them. For
+`allow_web_wallpapers` that matters: a publication that read it on must not
+install a document that allows web wallpapers once it is off. So, just before
+the atomic rename, each publication takes the settings file's own lock (the
+one every save of it takes, inside the compiler lock), reads the setting
+again, and holds that lock through the rename. When it no longer says what
+the document was compiled for, the document is compiled again for what it
+says, and nothing is written meanwhile. A settings file that can't be read is
+taken as web wallpapers off, their default. A hand edit takes no lock; the
+next publication or service start reads it.
+
 Loading changed bytes is also not synonymous with restarting the current
 wallpaper. The service compares the fully resolved effective output/entry set,
 renderer settings, and dynamics setting across the reload. Editing an inactive

@@ -127,6 +127,9 @@ def library(
     for item in extra:
         items[item.title] = item
     settings = config.Settings(roots=(root,), allow_web_wallpapers=True)
+    # Saved, as the person saved it: a publication installs only a document compiled for what
+    # settings.toml says of web wallpapers when it installs (review r13c, D2).
+    config.save(settings)
     library = Library(roots=(root,), items=tuple(items.values()))
     session = Session(settings, scanner=lambda _roots: library, pairing_store=store)
     session.refresh()

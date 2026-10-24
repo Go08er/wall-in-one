@@ -19,7 +19,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
@@ -106,10 +106,27 @@ STATUS_JSON_ESCAPE_FACTOR: Final = 4
 MAX_LIVE_OUTPUTS: Final = 64
 COMPILER_LOCK_TIMEOUT_SECONDS: Final = 5.0
 COMPILER_LOCK_POLL_SECONDS: Final = 0.025
+#: How many times one publication compiles again because ``allow_web_wallpapers``
+#: in ``settings.toml`` is no longer the one it compiled for (`_web_setting_held`).
+WEB_SETTING_ATTEMPTS: Final = 5
 
 
 class RuntimeConfigError(Exception):
     """The resolved document could not be produced or installed."""
+
+
+class _WebSettingMovedError(Exception):
+    """``settings.toml`` says ``fresh`` for ``allow_web_wallpapers``, not what was compiled for.
+
+    Raised by `_web_setting_held` before anything is written, and caught by
+    the publication that compiled (`publish_changes`, `write`), which compiles
+    again for ``fresh``. Never a `RuntimeConfigError`, so no caller's handler
+    for a failed publication can take it for one.
+    """
+
+    def __init__(self, fresh: bool) -> None:
+        super().__init__(f"allow_web_wallpapers is {str(fresh).lower()} in settings.toml now")
+        self.fresh = fresh
 
 
 class NothingToPlayNeedsNewerServiceError(RuntimeConfigError):
@@ -2755,8 +2772,14 @@ def install_nothing_to_play(document: str, path: Path | None = None) -> None:
 
     The caller holds `compiler_lock` and has read what it replaces under it.
     The overrides file is left as it is: the service skips what in it names a
-    playlist or display this document lacks.
+    playlist or display this document lacks. Such a document never allows web
+    wallpapers, so it needs no look at ``settings.toml`` (`_web_setting_held`);
+    one that does is refused, and nothing is written.
     """
+    if allows_web_wallpapers(text=document):
+        raise RuntimeConfigError(
+            "a document that plays nothing never allows web wallpapers; it was not installed"
+        )
     _install(document, path if path is not None else paths.runtime_config_path())
 
 
@@ -2785,27 +2808,98 @@ def overrides_from_a_newer_build(text: str | None) -> bool:
     return type(declared) is int and declared > OVERRIDES_SCHEMA_VERSION
 
 
+@contextmanager
+def _web_setting_held(settings: config.Settings, target: Path) -> Iterator[None]:
+    """Hold ``settings.toml`` still while ``target`` is installed, if it agrees with ``settings``.
+
+    Every publication compiles from settings read before its library scan,
+    or before its compile (the window's own snapshot, under ``--service``),
+    and nothing that saves the settings takes the compiler lock. So the
+    person can turn web wallpapers off while a publication that read them on
+    is still compiling, and that one would then install a document that
+    allows them (review r13c, D2). Only the setting's own lock, the one every
+    writer of ``settings.toml`` takes (`config.save`, `config.mutate`), keeps
+    it still: it is taken here, inside the compiler lock (the order every
+    writer keeps: compiler, then a store's own lock), ``allow_web_wallpapers``
+    is read again under it, and it is held across the install, so nothing
+    the app saves can change the setting between that read and the rename.
+
+    When the file no longer says what ``settings`` does,
+    `_WebSettingMovedError` is raised before anything is written, with what
+    it says now: the caller compiles again for that and comes back here. A
+    file that can't be read strictly, or isn't there, isn't known to allow
+    web wallpapers, so it counts as off (their default). A hand edit takes no
+    lock and is outside this; the next publication, or the next start's
+    compile, reads it.
+
+    Only for the live ``runtime.toml``: a document for any other path is
+    never loaded by the service. A lock this user can't open for writing (a
+    read-only folder) can't be taken by any writer of the file either, so
+    what the file says then holds without it. A lock that can't be had in
+    time is a failed publication, nothing written, and the guard behind it
+    (`Application._web_off_guard`) runs as for any other.
+    """
+    if target.absolute() != paths.runtime_config_path().absolute():
+        yield
+        return
+    source = paths.settings_path()
+    with ExitStack() as held:
+        if source.parent.is_dir():
+            try:
+                held.enter_context(state_file.mutation_lock(source, description="settings"))
+            except OSError as error:
+                if error.errno not in state_file.UNWRITABLE_LOCK_ERRNOS:
+                    raise RuntimeConfigError(
+                        f"cannot keep {source.name} as it is while the runtime configuration is "
+                        f"installed ({error}); the last-known-good runtime configuration was "
+                        "left untouched"
+                    ) from error
+        try:
+            fresh = config.load_strict(source).allow_web_wallpapers
+        except config.ConfigError:
+            fresh = False
+        if fresh != settings.allow_web_wallpapers:
+            raise _WebSettingMovedError(fresh)
+        yield
+
+
+def _web_setting_kept_moving() -> RuntimeConfigError:
+    return RuntimeConfigError(
+        "allow_web_wallpapers in settings.toml kept changing while the runtime configuration "
+        "was compiled; the last-known-good runtime configuration was left untouched"
+    )
+
+
 def write(settings: config.Settings, session: Session, path: Path | None = None) -> Path:
     """Compile and install both documents, overrides first (see :func:`_publish`).
 
     Each file is replaced atomically on its own; the pair is not. A refused
     ``runtime.toml`` leaves both files as they were, and so does a failed
-    ``runtime.toml`` install, which puts the previous overrides back.
+    ``runtime.toml`` install, which puts the previous overrides back. What is
+    installed is compiled for the ``allow_web_wallpapers`` that
+    ``settings.toml`` holds at that moment (`_web_setting_held`).
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
-        built = _fitted(settings, session, target)
-        document, overrides = built.document, built.overrides
-        previous_overrides = _read_overrides(target)
-        _require_publishable(document, target, built.nothing)
-        _publish(
-            target,
-            document,
-            overrides,
-            publish_overrides=not overrides_from_a_newer_build(previous_overrides),
-            previous_overrides=previous_overrides,
-        )
-    return target
+        for _attempt in range(WEB_SETTING_ATTEMPTS):
+            built = _fitted(settings, session, target)
+            document, overrides = built.document, built.overrides
+            previous_overrides = _read_overrides(target)
+            _require_publishable(document, target, built.nothing)
+            try:
+                with _web_setting_held(settings, target):
+                    _publish(
+                        target,
+                        document,
+                        overrides,
+                        publish_overrides=not overrides_from_a_newer_build(previous_overrides),
+                        previous_overrides=previous_overrides,
+                    )
+            except _WebSettingMovedError as moved:
+                settings = replace(settings, allow_web_wallpapers=moved.fresh)
+                continue
+            return target
+    raise _web_setting_kept_moving()
 
 
 def update(settings: config.Settings, session: Session, path: Path | None = None) -> bool:
@@ -2829,28 +2923,48 @@ def publish_changes(
 
     A `RuntimeConfigNotDurableError` carries the same answer in ``changes``:
     every file listed was published, only a folder sync failed.
+
+    What is installed, or kept as it is, was compiled for the
+    ``allow_web_wallpapers`` that ``settings.toml`` holds at that moment
+    (`_web_setting_held`): when the person changed it after ``settings``
+    was read, the document is compiled again for what it says now (review
+    r13c, D2). So an unchanged document that allows web wallpapers is not
+    kept once they were turned off either.
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
-        built = _compile(settings, session)
-        try:
-            current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
-        except (OSError, UnicodeDecodeError) as error:
-            raise RuntimeConfigError(f"cannot read {target}: {error}") from error
-        # Asked only when the document would change: an unchanged one was
-        # already judged publishable when it was written.
-        if current != built.document:
-            built = _fitted(settings, session, target, built)
-        document, overrides = built.document, built.overrides
-        current_overrides = _read_overrides(target)
-        document_changed = current != document
-        overrides_changed = current_overrides != overrides and not overrides_from_a_newer_build(
-            current_overrides
-        )
+        for _attempt in range(WEB_SETTING_ATTEMPTS):
+            try:
+                return _publish_changes_locked(settings, session, target)
+            except _WebSettingMovedError as moved:
+                settings = replace(settings, allow_web_wallpapers=moved.fresh)
+    raise _web_setting_kept_moving()
+
+
+def _publish_changes_locked(settings: config.Settings, session: Session, target: Path) -> Published:
+    """`publish_changes`'s one attempt, with the compiler lock held."""
+    built = _compile(settings, session)
+    try:
+        current = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+    except (OSError, UnicodeDecodeError) as error:
+        raise RuntimeConfigError(f"cannot read {target}: {error}") from error
+    # Asked only when the document would change: an unchanged one was
+    # already judged publishable when it was written.
+    if current != built.document:
+        built = _fitted(settings, session, target, built)
+    document, overrides = built.document, built.overrides
+    current_overrides = _read_overrides(target)
+    document_changed = current != document
+    overrides_changed = current_overrides != overrides and not overrides_from_a_newer_build(
+        current_overrides
+    )
+    if document_changed:
+        _require_publishable(document, target, built.nothing)
+    # Asked before any socket call is over, never while one waits: only the
+    # comparison and the renames run with the setting held.
+    with _web_setting_held(settings, target):
         if not (document_changed or overrides_changed):
             return Published(left_out=built.left_out)
-        if document_changed:
-            _require_publishable(document, target, built.nothing)
         sidecar = overrides_path(target)
         # Publication order: the overrides first, then runtime.toml.
         written = (

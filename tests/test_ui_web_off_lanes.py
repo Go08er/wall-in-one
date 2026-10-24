@@ -128,6 +128,16 @@ def _recorded(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return sent
 
 
+def _acted(sent: list[str]) -> list[str]:
+    """What was sent besides ``status``, which the profile's own poll may also send.
+
+    And the guard read the service's status before it stopped anything.
+    """
+    if "stop" in sent:
+        assert "status" in sent[: sent.index("stop")], sent
+    return [verb for verb in sent if verb != "status"]
+
+
 def _names_page() -> bool:
     return f'scene_id = "{WEB}"' in paths.runtime_config_path().read_text(encoding="utf-8")
 
@@ -162,7 +172,7 @@ def test_service_compile_fails(profiles: Any, monkeypatch: pytest.MonkeyPatch) -
         refuse_reload=False,
         schemas=READS_EIGHT,
     )
-    assert sent[:2] == ["status", "stop"] and "reload" in sent
+    assert _acted(sent) == ["stop", "reload"]
     assert not _names_page() and _plays_nothing()
     said = " ".join(reports)
     assert "can't be read" in said
@@ -181,7 +191,7 @@ def test_gui_reload_refused(profiles: Any, monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert "stop" in sent and sent.index("reload") < sent.index("stop")
     # The service now holds the document that plays nothing: it took the second reload.
-    assert sent[-1] == "reload" and _plays_nothing()
+    assert _acted(sent)[-1] == "reload" and _plays_nothing()
     problem = profile.application.publication_problem
     assert problem.startswith("Runtime rejected the new configuration: refused")
     assert "still plays Electric Eye" in problem
@@ -230,7 +240,7 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
         refuse_reload=False,
         schemas=OLDER,
     )
-    assert sent == ["status", "stop", "quit"]
+    assert _acted(sent) == ["stop", "quit"]
     said = " ".join(reports) if service else profile.application.publication_problem
     assert "still plays Electric Eye" in said
     assert "It was stopped: it is older than this app" in said
@@ -313,7 +323,7 @@ def test_a_busy_compiler_lock_still_stops_the_page(
 
     monkeypatch.setattr(runtime_config, "compiler_lock", busy)
     said = application._web_off_guard()
-    assert sent == ["status", "stop"]
+    assert _acted(sent) == ["stop"]
     assert "still plays Electric Eye" in said and "Playback was stopped" in said
     assert _names_page(), "nothing was written without the lock"
 
@@ -336,5 +346,5 @@ def test_play_is_put_back_once_nothing_to_play_is_loaded(
         schemas=READS_EIGHT,
         playback="playing",
     )
-    assert sent == ["status", "stop", "reload", "play"]
+    assert _acted(sent) == ["stop", "reload", "play"]
     assert _plays_nothing()

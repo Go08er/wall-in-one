@@ -367,3 +367,36 @@ def test_the_health_sync_finds_a_document_published_without_the_dials(
     status = {"status_version": 2, "supported_config_schemas": [4, 5, 6, 7]}
     other = runtime_config.compiled_as_published(settings, session, status, "0" * 64)
     assert 'video = { fit = "fit" }' in other.document
+
+
+def test_a_dial_on_a_wallpaper_left_out_for_another_reason_is_not_said_to_need_a_service(
+    tmp_path: Path,
+) -> None:
+    """The refusal that keeps it out comes first (web off, a program), as for presets."""
+    from wall_in_one.library.model import Unplayable
+
+    settings, session, items = library(tmp_path)
+    program = replace(
+        items["scene"],
+        path=items["scene"].path.with_name("100"),
+        scene="100",
+        title="Trojan",
+        workshop_type="application",
+        runs_program=True,
+        unplayable=Unplayable.RUNTIME,
+        unplayable_reason="it is a program",
+        scene_settings=(),
+    )
+    settings, session, items = library(tmp_path, program)
+    session.pairings.set_dial(items["web"], "scene", "fps", 60)
+    session.pairings.set_dial(program, "scene", "fps", 60)
+    web_off = replace(settings, allow_web_wallpapers=False)
+
+    left_out = runtime_config.compiled(web_off, session, renderer_dials=False).left_out
+
+    assert runtime_config.DIALS_OWNER not in {one.owner for one in left_out}
+    document = runtime_config.render(web_off, session)
+    assert 'scene_id = "2777242023"' not in document and 'scene_id = "100"' not in document
+    # With web on, the page plays, and its own frame rate waits for the service.
+    left_out = runtime_config.compiled(settings, session, renderer_dials=False).left_out
+    assert runtime_config.DIALS_OWNER in {one.owner for one in left_out}

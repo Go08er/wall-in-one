@@ -37,7 +37,7 @@ from tests.test_ui_next_window import (  # noqa: E402
     sandboxed_runtime,
     settled,
 )
-from wall_in_one import config, legacy_migration, paths  # noqa: E402
+from wall_in_one import config, legacy_migration, paths, runtime_compatibility  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.theme import noctalia  # noqa: E402
 from wall_in_one.ui.app import Application, _PlaylistReferenceRepairResult  # noqa: E402
@@ -191,6 +191,9 @@ def test_the_welcome_screen_holds_the_windows_shortcuts_until_it_is_answered(
     fresh: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """As a classic modal dialog does: no key or menu item reaches the pages beneath."""
+    # No folder yet: All media plays nothing, a schema-8 document, which is asked of
+    # the live service; it would consult systemd.
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
     application = Application(ui="next")
     rescans: list[bool] = []
     real_refresh = application.refresh_library

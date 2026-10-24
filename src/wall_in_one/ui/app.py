@@ -813,6 +813,8 @@ class Application(Adw.Application):
         self._presets_readable_seen = False
         #: And one that reads the renderer dials (schema 7).
         self._dials_readable_seen = False
+        # Whether the last status listed schema 8 (`_publish_again_when_presets_become_readable`).
+        self._nothing_readable_seen = False
         #: A republish was already asked for what is left out (`_publish_again_...`).
         self._left_out_retried = False
         self._default_pointer_said = ""
@@ -5226,6 +5228,16 @@ class Application(Adw.Application):
         )
         retry = waiting and not self._left_out_retried
         self._left_out_retried = waiting and (self._left_out_retried or retry)
+        # Schema 8, once a service lists it (the updated one, after an older one
+        # was told to quit): a publication that couldn't be given to the older
+        # one (a playlist that plays nothing), or one that left out
+        # `allow_web_wallpapers` for it, is made again, once.
+        eight = runtime_config.nothing_to_play_supported(status)
+        newly_eight = eight and not self._nothing_readable_seen
+        self._nothing_readable_seen = eight
+        if newly_eight and (self._publication_problem or self._settings.allow_web_wallpapers):
+            self._publish_runtime_for_context()
+            return
         if (newly or retry) and any(
             one.why == runtime_config.NEEDS_NEWER_SERVICE for one in self._left_out_said
         ):

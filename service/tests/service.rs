@@ -10969,6 +10969,14 @@ const WITH_STILL_ON: &str = include_str!("fixtures/web-off/with-still-on.toml");
 const WITH_STILL_OFF: &str = include_str!("fixtures/web-off/with-still-off.toml");
 const WEB_PAGE: &str = "2777242023";
 
+/// `on` as the app publishes it for a service not confirmed to read schema 8: without
+/// `allow_web_wallpapers` (the step-down). A service that predates 8, as at c8c7857, loads
+/// it, so these tests compare the same document before and after the change.
+fn stepped_down(on: &str) -> String {
+    on.replace("schema_version = 8", "schema_version = 4")
+        .replace("allow_web_wallpapers = true\n", "")
+}
+
 /// A test driver over the app's `document`, applied: the runtime, its state and the page's
 /// entry id.
 fn web_runtime(
@@ -11007,7 +11015,8 @@ fn web_runtime(
 fn the_apps_web_off_document_ends_the_page_when_web_pages_were_all_that_played() {
     // Review probe `rust_probe_web_off_reload.rs` (M1). Before: the document had no
     // `entries`, the reload was refused ("missing field `entries`") and the page played on.
-    let (mut runtime, state, config_path, page) = web_runtime("web-only-off", WEB_ONLY_ON);
+    let (mut runtime, state, config_path, page) =
+        web_runtime("web-only-off", &stepped_down(WEB_ONLY_ON));
     assert_eq!(status(&mut runtime, noon())["entry_id"], page.as_str());
     assert!(
         state.lock().unwrap().motion_active,
@@ -11045,7 +11054,8 @@ fn the_apps_web_off_document_ends_the_page_when_web_pages_were_all_that_played()
 #[test]
 fn control_with_a_still_beside_the_page_the_still_plays() {
     // Review probe `rust_probe_web_off_reload_control.rs`: passed before and still does.
-    let (mut runtime, state, config_path, page) = web_runtime("with-still-off", WITH_STILL_ON);
+    let (mut runtime, state, config_path, page) =
+        web_runtime("with-still-off", &stepped_down(WITH_STILL_ON));
     assert_eq!(status(&mut runtime, noon())["entry_id"], page.as_str());
     fs::write(&config_path, WITH_STILL_OFF).unwrap();
     let reply = runtime_command(&mut runtime, noon(), "reload", None);
@@ -11069,7 +11079,8 @@ fn a_playlist_that_plays_nothing_is_a_state_play_and_toggle_cant_leave() {
     let cycling = WEB_ONLY_OFF
         .replace("cycle_enabled = false", "cycle_enabled = true")
         .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5");
-    let (mut runtime, state, config_path, page) = web_runtime("nothing-holds", WEB_ONLY_ON);
+    let (mut runtime, state, config_path, page) =
+        web_runtime("nothing-holds", &stepped_down(WEB_ONLY_ON));
     fs::write(&config_path, &cycling).unwrap();
     assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
     let applies_before = state.lock().unwrap().applies.len();
@@ -11214,7 +11225,9 @@ fn the_file_poll_loads_the_document_that_plays_nothing_and_play_leaves_it() {
             )
             + "\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"all-media\"\n"
     };
-    fs::write(&config_path, assigned(WEB_ONLY_ON)).unwrap();
+    // As published for a service that isn't confirmed for 8; the page is a scene to the
+    // driver's checks here (`scene_home`), so it starts.
+    fs::write(&config_path, assigned(&stepped_down(WEB_ONLY_ON))).unwrap();
     let mut child = service_command()
         .arg("--config")
         .arg(&config_path)
@@ -11331,9 +11344,7 @@ fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
             r#"{"type":"web","title":"Electric Eye","file":"index.html"}"#,
         )],
     );
-    let document = WITH_STILL_ON
-        .replace("schema_version = 8", "schema_version = 4")
-        .replace("allow_web_wallpapers = true\n", "");
+    let document = stepped_down(WITH_STILL_ON);
     let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
     let applied = runtime.apply_current();
     assert!(
@@ -11378,9 +11389,7 @@ fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
 fn an_item_whose_type_cant_be_read_is_refused_while_web_is_off() {
     let root = directory("p2-unclassified");
     let home = workshop_home_with("p2-unclassified-home", &[]);
-    let document = WITH_STILL_ON
-        .replace("schema_version = 8", "schema_version = 4")
-        .replace("allow_web_wallpapers = true\n", "");
+    let document = stepped_down(WITH_STILL_ON);
     let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
     assert!(runtime.apply_current().is_ok());
     thread::sleep(Duration::from_millis(300));

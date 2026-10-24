@@ -140,7 +140,10 @@ wallpaper renderers do not: `mpvpaper` plays video wallpapers and
 presets and captures scene stills, and Wall-in-One finds and controls the
 ones installed on the system. Executable Wallpaper Engine wallpapers are never
 run, for security, and web wallpapers play only once **Allow web wallpapers**
-is turned on ([docs/library.md](docs/library.md#wallpaper-engine)).
+is turned on ([docs/library.md](docs/library.md#wallpaper-engine)). With it
+off, a display whose only wallpapers are web pages shows nothing, and the app
+says "Nothing to play: web wallpapers are off"
+([docs/wallpaper-engine.md](docs/wallpaper-engine.md#web-wallpapers-are-off-until-allowed)).
 The NixOS and home-manager modules install both unless you set
 `programs.wall-in-one.manualWallpaperInstalls = true`; with a plain
 `nix profile install`, or outside Nix, install them yourself.

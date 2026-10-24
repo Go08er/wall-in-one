@@ -30,7 +30,9 @@ def test_the_guard_finds_a_web_page_with_dials_of_its_own(tmp_path: Path) -> Non
     session.shutdown()
 
     document = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert document["schema_version"] == runtime_config.DIALS_SCHEMA_VERSION
+    # Schema 8 (r13) carries everything 7 does, and says web wallpapers are allowed.
+    assert document["schema_version"] == runtime_config.NOTHING_TO_PLAY_SCHEMA_VERSION
+    assert document["settings"]["allow_web_wallpapers"] is True
     (entry,) = (e for p in document["playlists"] for e in p["entries"] if "scene_id" in e)
     assert entry["scene"] == {"fps": 60}
     assert runtime_config.retained_web_wallpapers(target) == ("Electric Eye",)

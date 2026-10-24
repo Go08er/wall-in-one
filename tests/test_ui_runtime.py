@@ -27,7 +27,13 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tests.gtk_helpers import spin_until  # noqa: E402
-from wall_in_one import config, paths, runtime_config, runtime_health  # noqa: E402
+from wall_in_one import (  # noqa: E402
+    config,
+    paths,
+    runtime_compatibility,
+    runtime_config,
+    runtime_health,
+)
 from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import (  # noqa: E402
@@ -1115,6 +1121,9 @@ def test_explicit_quit_drains_a_fully_committed_removals_own_scan(
     monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
     monkeypatch.setattr(application, "refresh_runtime_status_async", lambda: True)
     monkeypatch.setattr(client, "send_runtime", runtime)
+    # The library left empty: All media plays nothing, a schema-8 document, which is
+    # asked of the live service; it would consult systemd.
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
     monkeypatch.setattr(Application, "quit", lambda _self: quits.append(True))
     scan_started = threading.Event()
     release_scan = threading.Event()

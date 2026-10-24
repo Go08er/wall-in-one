@@ -162,6 +162,33 @@ reloads as any other does, and turning it on also makes their stills. The key
 is written to `settings.toml` only when on, so a profile that never turns it
 on keeps its bytes. Executables stay refused either way.
 
+**When web pages are all that plays.** Turning the setting off then leaves
+All media with nothing to play. The display shows nothing, and the app says
+"Nothing to play: web wallpapers are off." The document says so
+([schema 8](runtime-config.md#nothing-to-play-schema-8)), so `play`, the
+companion's Resume, `ctl toggle` and the service's own reload of the file
+can't bring the page back. Noctalia keeps the last still it was given, which
+for a page is its own still: the service has no way to clear it.
+
+**When the setting can't reach the service.** A compile that fails, or a
+reload the service refuses, leaves it on the document it holds. When that
+plays a web page, or an item the scan can't classify, the app stops it and
+hands the service a document that plays nothing; an older service that can't
+read that is told to quit, and its next start is guarded. At service start,
+a kept document that plays a web page is still refused with exit 78.
+
+**The service checks too.** linux-wallpaperengine reads `project.json` again
+when it starts, so an item whose type changed to `web` after the compile (a
+Workshop update) would play as one. While the document doesn't allow web
+wallpapers (`allow_web_wallpapers`, written only while the setting is on),
+the service reads the item's type just before it starts the engine, in every
+place the engine looks for `--bg <id>` (above), bounded like the app's scan
+(256 KiB, a regular file). For a preset it reads the base. Anything but
+`scene` or `video` is refused, and so is an item it can't find or read. The
+engine isn't started, the still stays, and status says why. It is never a
+taboo, so nothing is saved against the item. A document from before schema 8
+has no such key, so it allows no web page.
+
 ### Executable wallpapers are never run
 
 Owner decision, for security: a Wallpaper Engine `application` wallpaper is a

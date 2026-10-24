@@ -39,6 +39,8 @@ def test_compiler_uses_new_schema_only_for_enabled_battery_policy(tmp_path: Path
     (root / "wallpaper.png").write_bytes(b"fixture")
     settings = config.Settings(roots=(root,), scan_workshop=False)
     session = Session(settings)
+    # Scanned, so All media holds the picture: an empty one is schema 8's (r13).
+    session.refresh()
     original = runtime_config.render(settings, session)
     document = tomllib.loads(original)
     assert document["schema_version"] == 4

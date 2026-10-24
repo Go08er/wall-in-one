@@ -3,7 +3,7 @@
 `wall-in-one-service` reads one input: a fully resolved TOML document written
 by the Python application, plus, from 0.2.0, an optional sibling
 [`runtime-overrides.toml`](#per-playlist-rotation-and-display-precedence-runtime-overridestoml).
-Schemas `4`, `5`, `6` and `7` are intentionally strict. An
+Schemas `4`, `5`, `6`, `7` and `8` are intentionally strict. An
 unknown version, unknown field, relative path, dangling playlist reference, or
 kind-specific entry missing its motion source makes the service refuse to
 start. It never falls back to the application's database or library files.
@@ -17,6 +17,8 @@ an enabled battery preference. A document with a Wallpaper Engine preset is
 schema 6, which carries everything 5 does; only such a document is (see
 below, after the entry fields). One with a renderer dial off its default is
 schema 7, which carries everything 6 does ([renderer dials](#renderer-dials-schema-7)).
+One with a playlist that plays nothing, or that allows web wallpapers, is
+schema 8, which carries everything 7 does ([nothing to play](#nothing-to-play-schema-8)).
 
 From 0.4.0 the compiler no longer writes `[renderer] niri_program`, which
 0.3.x and earlier wrote when the service asked niri for displays. The service
@@ -32,7 +34,7 @@ schema number would instead have sent every save through the live-service
 check below, refusing all of them until the restart. See
 [display discovery](display-discovery.md#runtimetoml).
 
-The service advertises `supported_config_schemas = [4, 5, 6, 7]` in status version 2.
+The service advertises `supported_config_schemas = [4, 5, 6, 7, 8]` in status version 2.
 It also reports `runtime_version` and `runtime_executable` so update inspection
 can distinguish the responding executable from the package selected on disk.
 Executable identity does not by itself acknowledge the intended configuration;
@@ -94,7 +96,10 @@ or says `nothing changed`.
 
 The compiler never refuses over a playlist that can't play. A playlist with
 nothing to play (it is empty, or every wallpaper in it is missing or has no
-still yet, as far as the scan could tell) is not written. A reference to one, or to a playlist that doesn't
+still yet, as far as the scan could tell) is not written. All media is the
+exception: it is always written, and when it has nothing to play it is
+written as a playlist that plays nothing, with its reason
+([schema 8](#nothing-to-play-schema-8)). A reference to one, or to a playlist that doesn't
 exist, is left out and said, and everything else is published: such a
 `default_playlist` is written as `all-media`, and a `[[schedules]]` rule or a
 `[[displays]]` assignment that names one is not written, nor is that
@@ -313,6 +318,72 @@ never refused, unlike the battery option. The health sync accepts any document
 publishing could have made for the service it asked (`compiled_as_published`:
 everything, without the dials, without both, and the one its status calls
 for), so a document without the dials still matches its generation.
+
+### Nothing to play (schema 8)
+
+A playlist may play nothing. It has no entries and says why:
+
+```toml
+[[playlists]]
+id = "all-media"
+name = "All media"
+nothing_to_play = "web wallpapers are off"
+entries = []
+```
+
+The reason is required exactly when there are no entries, at most 128 bytes,
+with no control characters. Below schema 8 a playlist with no entries is
+refused by name, as before. (0.4.0's compiler wrote an empty All media
+without `entries`, which no service could parse; it now writes this.) The
+compiler writes it for All media only. Its reasons are `web wallpapers are
+off` (web pages were all All media had), `none of the favourites can play`
+and `nothing in the library can play`. The app says "Nothing to play: web
+wallpapers are off." when that is why.
+
+A display on such a playlist shows nothing of the service's: its renderer is
+stopped, and Noctalia keeps the last still it was given (there is no way to
+clear it). `play`, `toggle`, `next`, the rotation, a schedule and the file
+poll can't change that; `next`, `previous` and `random` answer `nothing to
+play: <reason>`, and `play` succeeds with the same words. It is a state, not a
+fault: `last_error` stays empty. Status says it on the display row and, when
+every connected display plays nothing, at the top:
+
+| Field | Where | Meaning |
+|---|---|---|
+| `nothing_to_play` | top level, each display row | The reason; `null` while something plays. |
+| `entry_name` | each display row | `"Nothing to play: <reason>"` on such a row, `null` otherwise. The companion shows it as the display's title. |
+
+On such a row `entry_id`, `kind` and `still` are empty and there is no
+rotation countdown.
+
+`[settings] allow_web_wallpapers = true` is schema 8 too, written only while
+the setting is on. Absent, web wallpapers aren't allowed: before the service
+starts linux-wallpaperengine for a scene, it reads that item's `project.json`
+where the engine finds it, and refuses a web page or an item it can't classify
+([wallpaper-engine.md](wallpaper-engine.md#web-wallpapers-are-off-until-allowed)).
+A change of the setting starts every display again.
+
+Publishing steps down as for 6 and 7. A running service that isn't confirmed
+to read 8 gets the document without `allow_web_wallpapers` (it then plays web
+pages as 0.4.0 did, while the setting is on). A playlist that plays nothing
+has no older shape, so for such a service that document is refused and
+nothing is written. While web wallpapers are off, the app then ends the page
+the service still holds (see below). The health sync tries the stepped-down
+variants too.
+
+**When a publication fails while web wallpapers are off.** The setting is
+saved first, so a compile or write that fails, or a reload the service
+refuses, leaves the service on what it holds. When that may play a web page
+(the file on disk, or a text a publication replaced since the service last
+confirmed a reload), the app stops playback. A service that reads 8 is then
+given a document that plays nothing anywhere and reloads it: unlike a `stop`,
+nothing it is asked afterwards brings the page back. A service that can't
+load it (one older than the app, still running after an update) is told to
+quit, as `wall-in-one ctl quit` does. It exits cleanly, so systemd leaves it
+stopped, and whatever starts it next (the companion, or `systemctl --user
+start wall-in-one`) runs the updated service through the start guard below.
+The app says which it did. This holds for the window, `--service` and the
+health lane.
 
 ```toml
 palette = { kind = "adaptive", scheme = "m3-tonal-spot", mode = "auto" }

@@ -262,3 +262,28 @@ def test_the_guard_does_nothing_while_web_wallpapers_are_on(
     sent = _recorded(monkeypatch)
     assert application._web_off_guard() == ""
     assert sent == []
+
+
+def test_a_service_that_newly_reads_schema_8_gets_the_failed_publication_again(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After an older service was told to quit, the updated one is published to once."""
+    application = profiles().application
+    publications: list[str] = []
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: publications.append("p"))
+    older = {"status_version": 2, "supported_config_schemas": OLDER}
+    newer = {"status_version": 2, "supported_config_schemas": READS_EIGHT}
+    application._publish_again_when_presets_become_readable(older)
+    application._set_publication_problem("the running wallpaper service is older")
+    application._publish_again_when_presets_become_readable(older)
+    assert publications == []
+    application._publish_again_when_presets_become_readable(newer)
+    assert publications == ["p"]
+    application._publish_again_when_presets_become_readable(newer)
+    assert publications == ["p"], "once, not on every poll"
+    # Nothing failed and web is off: a service newly reading 8 asks for nothing.
+    application._set_publication_problem("")
+    application._publish_again_when_presets_become_readable(older)
+    application._publish_again_when_presets_become_readable(newer)
+    assert publications == ["p"]

@@ -2755,7 +2755,7 @@ def write(settings: config.Settings, session: Session, path: Path | None = None)
         built = _fitted(settings, session, target)
         document, overrides = built.document, built.overrides
         previous_overrides = _read_overrides(target)
-        _require_publishable(document, target)
+        _require_publishable(document, target, built.nothing)
         _publish(
             target,
             document,
@@ -2808,7 +2808,7 @@ def publish_changes(
         if not (document_changed or overrides_changed):
             return Published(left_out=built.left_out)
         if document_changed:
-            _require_publishable(document, target)
+            _require_publishable(document, target, built.nothing)
         sidecar = overrides_path(target)
         # Publication order: the overrides first, then runtime.toml.
         written = (
@@ -2947,17 +2947,25 @@ def _schema_publishable(document: str, target: Path) -> bool:
     return True
 
 
-def _require_publishable(document: str, target: Path) -> None:
+def _require_publishable(document: str, target: Path, nothing: str = "") -> None:
     """Refuse, before any byte is written, a schema the live service cannot load.
 
     Only ``runtime.toml`` needs this: the overrides file is never read by a
     service that predates it, so it is safe to publish under any service.
+    ``nothing``: why All media plays nothing in ``document`` (`Compiled.nothing`),
+    said with the refusal, since nothing below schema 8 can say it.
     """
     if target.absolute() == paths.runtime_config_path().absolute():
         schema = tomllib.loads(document)["schema_version"]
         try:
             runtime_compatibility.require_schema(schema)
         except runtime_compatibility.RuntimeCompatibilityError as error:
+            if nothing:
+                raise NothingToPlayNeedsNewerServiceError(
+                    f"\u201c{FALLBACK_PLAYLIST_NAME}\u201d has nothing to play ({nothing}), "
+                    "and only a wallpaper service that reads schema_version "
+                    f"{NOTHING_TO_PLAY_SCHEMA_VERSION} can be told so. {error}"
+                ) from error
             raise RuntimeConfigError(str(error)) from error
 
 

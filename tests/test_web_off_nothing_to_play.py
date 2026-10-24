@@ -161,8 +161,10 @@ def test_a_service_that_predates_schema_8_is_refused_nothing_and_keeps_its_docum
     _publish(root, allow_web=True)
     before = paths.runtime_config_path().read_bytes()
     _service(monkeypatch, schemas=[4, 5])
-    with pytest.raises(runtime_config.RuntimeConfigError, match="No changes were saved"):
+    with pytest.raises(runtime_config.RuntimeConfigError, match="No changes were saved") as refused:
         _publish(root, allow_web=False)
+    assert "has nothing to play (web wallpapers are off)" in str(refused.value)
+    assert "schema_version 8" in str(refused.value)
     assert paths.runtime_config_path().read_bytes() == before
 
 

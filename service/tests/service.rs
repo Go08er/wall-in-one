@@ -1905,6 +1905,8 @@ struct RuntimeDriverState {
     /// `motion_refused` says why (`refused_outputs`).
     refuse_entry_ids: HashSet<String>,
     refused_outputs: std::collections::HashMap<String, String>,
+    /// Whether what `refuse_entry_ids` refuses at the start is a web page.
+    refuse_as_web_page: bool,
 }
 
 #[derive(Clone)]
@@ -2100,8 +2102,15 @@ impl WallpaperDriver for RuntimeDriver {
         self.0.lock().unwrap().active_outputs.contains(output)
     }
 
-    fn motion_refused(&self, output: &str) -> Option<String> {
-        self.0.lock().unwrap().refused_outputs.get(output).cloned()
+    fn motion_refused(&self, output: &str) -> Option<wall_in_one_service::workshop::Refusal> {
+        let state = self.0.lock().unwrap();
+        state
+            .refused_outputs
+            .get(output)
+            .map(|reason| wall_in_one_service::workshop::Refusal {
+                web_page: state.refuse_as_web_page,
+                reason: reason.clone(),
+            })
     }
 
     fn poll_failures(&mut self) -> Vec<RendererFailure> {

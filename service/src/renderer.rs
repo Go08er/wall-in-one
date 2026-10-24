@@ -311,9 +311,10 @@ pub trait WallpaperDriver: Send {
     /// Why `output`'s last motion start did not start its renderer although
     /// it could have: a Wallpaper Engine item that is a web page, or that the
     /// service can't find or read, while the document doesn't allow web
-    /// wallpapers (`crate::workshop`). The runtime then skips the entry
-    /// (`motion_refusal`). Gone once the output is stopped or applied again.
-    fn motion_refused(&self, _output: &str) -> Option<String> {
+    /// wallpapers (`crate::workshop`), and whether it is a web page. The
+    /// runtime then skips the entry (`motion_refusal`). Gone once the output
+    /// is stopped or applied again.
+    fn motion_refused(&self, _output: &str) -> Option<workshop::Refusal> {
         None
     }
     /// Why motion for `entry` would not be started on purpose if it were
@@ -520,14 +521,15 @@ enum StartError {
     Missing(std::io::Error),
     Failed(String),
     /// Not started on purpose (`crate::workshop`); the still stays.
-    Refused(String),
+    Refused(workshop::Refusal),
 }
 
 impl StartError {
     fn into_message(self, program: &str) -> String {
         match self {
             Self::Missing(error) => format!("cannot start {program}: {error}"),
-            Self::Failed(message) | Self::Refused(message) => message,
+            Self::Failed(message) => message,
+            Self::Refused(refusal) => refusal.reason,
         }
     }
 }
@@ -1042,7 +1044,7 @@ pub struct SystemDriver {
     /// The outputs (by `key`) whose scene was not started because web
     /// wallpapers aren't allowed and its item is, or may be, a web page, or
     /// can't be found or read (`crate::workshop`).
-    refused_motion: HashMap<String, String>,
+    refused_motion: HashMap<String, workshop::Refusal>,
     /// The home folder linux-wallpaperengine resolves an item id against
     /// (`workshop::engine_home`), for reading an item's type first.
     workshop_home: Option<PathBuf>,
@@ -1384,7 +1386,7 @@ impl SystemDriver {
             && let Some(refusal) =
                 workshop::refusal_without_web(self.workshop_home.as_deref(), scene)
         {
-            return Err(StartError::Refused(refusal.reason));
+            return Err(StartError::Refused(refusal));
         }
         // Its own dials over the defaults (docs/renderer-settings.md).
         let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());
@@ -1908,7 +1910,7 @@ impl WallpaperDriver for SystemDriver {
             .map(|(_, record)| record.clone())
     }
 
-    fn motion_refused(&self, output: &str) -> Option<String> {
+    fn motion_refused(&self, output: &str) -> Option<workshop::Refusal> {
         self.refused_motion.get(&Self::key(output)).cloned()
     }
 

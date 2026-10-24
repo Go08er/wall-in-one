@@ -905,12 +905,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.driver
                     .start_motion_only(&target.entry, &target.output, &self.config.settings);
             if result.is_ok()
-                && let Some(reason) = self.driver.motion_refused(&target.output)
+                && let Some(refusal) = self.driver.motion_refused(&target.output)
             {
-                let refusal = Refusal {
-                    web_page: false,
-                    reason,
-                };
                 self.remember_refusal(&target.playlist_id, &target.entry, refusal);
                 refused_outputs.insert(target.output.clone());
                 continue;
@@ -2971,11 +2967,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn learn_refusals_after_apply(&mut self) -> bool {
         let mut learned = false;
         for target in self.current_targets(&self.target_outputs) {
-            if let Some(reason) = self.driver.motion_refused(&target.output) {
-                let refusal = Refusal {
-                    web_page: false,
-                    reason,
-                };
+            if let Some(refusal) = self.driver.motion_refused(&target.output) {
                 learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
             }
         }
@@ -3243,11 +3235,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let connectors: Vec<String> = selected.iter().cloned().collect();
         let mut learned = false;
         for target in self.current_targets(&connectors) {
-            if let Some(reason) = self.driver.motion_refused(&target.output) {
-                let refusal = Refusal {
-                    web_page: false,
-                    reason,
-                };
+            if let Some(refusal) = self.driver.motion_refused(&target.output) {
                 learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
             }
         }

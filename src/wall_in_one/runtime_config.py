@@ -174,8 +174,8 @@ class LeftOut:
         if self.owner == DIALS_OWNER:
             return (
                 "Renderer settings, in Settings and in each wallpaper\u2019s own, and scene "
-                "sound aren\u2019t applied until the wallpaper service is confirmed to read them: restart it "
-                "after an update, and make sure its installed units are current."
+                "sound aren\u2019t applied until the wallpaper service is confirmed to read them: "
+                "restart it after an update, and make sure its installed units are current."
             )
         if self.owner == PRESET_OWNER:
             if rules == 1:

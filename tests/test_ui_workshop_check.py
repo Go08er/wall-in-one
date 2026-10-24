@@ -68,6 +68,17 @@ def _install(content: Path, workshop_id: str, project: dict[str, object]) -> Pat
     return directory
 
 
+def _visible_labels(widget: Gtk.Widget) -> list[str]:
+    found: list[str] = []
+    child = widget.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Label) and child.get_visible():
+            found.append(child.get_label())
+        found.extend(_visible_labels(child))
+        child = child.get_next_sibling()
+    return found
+
+
 def test_the_scenes_view_counts_what_cant_run_and_checks_wallpaper_engine_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -184,6 +195,7 @@ def test_web_wallpapers_are_off_until_allowed_and_then_play(
 
         # Its details lead to the setting.
         page.inspect(electric)
+        assert workshop.WEB_PREVIEW_OFF_NOTE in _visible_labels(page.inspector), "no picture"
         button = page.inspector.setting_button
         assert button is not None
         button.emit("clicked")

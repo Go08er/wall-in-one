@@ -21,7 +21,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from tests.web_previews import Fixture  # noqa: E402
+from tests.web_previews import Fixture, _Watch  # noqa: E402
 from wall_in_one.library import workshop  # noqa: E402
 from wall_in_one.library.model import MediaItem  # noqa: E402
 
@@ -47,7 +47,7 @@ def _labels(widget: Any) -> list[str]:
 
 
 def test_the_classic_tile_is_a_plain_placeholder_and_the_grid_asks_for_no_picture(
-    web_folder: Fixture,
+    web_folder: Fixture, watch: _Watch
 ) -> None:
     from wall_in_one.ui.grid import WallpaperGrid, WallpaperTile
     from wall_in_one.ui.thumbnails import ThumbnailLoader
@@ -85,9 +85,13 @@ def test_the_classic_tile_is_a_plain_placeholder_and_the_grid_asks_for_no_pictur
         web_folder.preset.path,
     }
     loader.shutdown()
+    assert watch.clean(), (watch.opens, watch.started)
+    assert watch.clean(), (watch.opens, watch.started)
 
 
-def test_the_next_interface_gives_a_web_page_no_picture_and_says_why(web_folder: Fixture) -> None:
+def test_the_next_interface_gives_a_web_page_no_picture_and_says_why(
+    web_folder: Fixture, watch: _Watch
+) -> None:
     from wall_in_one.library import pairings
     from wall_in_one.ui.next.library_thumbnails import LibraryThumbnails
     from wall_in_one.ui.next.real_state import wallpaper_view
@@ -133,3 +137,4 @@ def test_the_next_interface_gives_a_web_page_no_picture_and_says_why(web_folder:
         web_folder.web, favourite=False, pairing=None, health=pairings.Health(), allow_web=True
     )
     assert workshop.WEB_PREVIEW_OFF_NOTE not in _labels(WallpaperCard(on))
+    assert watch.clean(), (watch.opens, watch.started)

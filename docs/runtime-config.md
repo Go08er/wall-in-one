@@ -377,7 +377,9 @@ refuses, leaves the service on what it holds. When that may play a web page
 (the file on disk, or a text a publication replaced since the service last
 confirmed a reload), the app stops playback. A service that reads 8 is then
 given a document that plays nothing anywhere and reloads it: unlike a `stop`,
-nothing it is asked afterwards brings the page back. A service that can't
+nothing it is asked afterwards brings the page back. If it was playing, it is
+told to play again, so that turning web wallpapers on later plays as before;
+nothing can start from that document. A service that can't
 load it (one older than the app, still running after an update) is told to
 quit, as `wall-in-one ctl quit` does. It exits cleanly, so systemd leaves it
 stopped, and whatever starts it next (the companion, or `systemctl --user

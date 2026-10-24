@@ -10956,3 +10956,512 @@ fn a_renderer_behind_a_folder_the_service_cannot_enter_is_no_access() {
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
 }
+
+// -- r13: a playlist that plays nothing, and web pages while web is off ----------------------
+//
+// The four documents are the app's own (`tests/test_web_off_nothing_to_play.py` keeps them
+// what its compiler writes): a library whose only playable item is the web page 2777242023,
+// and the same with a still beside it, each compiled with "Allow web wallpapers" on, then off.
+
+const WEB_ONLY_ON: &str = include_str!("fixtures/web-off/web-only-on.toml");
+const WEB_ONLY_OFF: &str = include_str!("fixtures/web-off/web-only-off.toml");
+const WITH_STILL_ON: &str = include_str!("fixtures/web-off/with-still-on.toml");
+const WITH_STILL_OFF: &str = include_str!("fixtures/web-off/with-still-off.toml");
+const WEB_PAGE: &str = "2777242023";
+
+/// A test driver over the app's `document`, applied: the runtime, its state and the page's
+/// entry id.
+fn web_runtime(
+    label: &str,
+    document: &str,
+) -> (
+    Runtime<RuntimeDriver>,
+    Arc<Mutex<RuntimeDriverState>>,
+    PathBuf,
+    String,
+) {
+    let root = directory(label);
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, document).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let page = parsed
+        .playlists
+        .iter()
+        .flat_map(|playlist| playlist.entries.iter())
+        .find(|entry| entry.scene_id.as_deref() == Some(WEB_PAGE))
+        .map(|entry| entry.id.clone())
+        .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        noon(),
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    (runtime, state, config_path, page)
+}
+
+#[test]
+fn the_apps_web_off_document_ends_the_page_when_web_pages_were_all_that_played() {
+    // Review probe `rust_probe_web_off_reload.rs` (M1). Before: the document had no
+    // `entries`, the reload was refused ("missing field `entries`") and the page played on.
+    let (mut runtime, state, config_path, page) = web_runtime("web-only-off", WEB_ONLY_ON);
+    assert_eq!(status(&mut runtime, noon())["entry_id"], page.as_str());
+    assert!(
+        state.lock().unwrap().motion_active,
+        "the page plays while it is allowed"
+    );
+
+    fs::write(&config_path, WEB_ONLY_OFF).unwrap();
+    let reply = runtime_command(&mut runtime, noon(), "reload", None);
+    assert!(reply.ok, "{}", reply.message);
+    let after = status(&mut runtime, noon());
+    assert!(after["entry_id"].is_null(), "{after}");
+    assert_eq!(after["nothing_to_play"], "web wallpapers are off");
+    assert_eq!(after["last_error"], "", "nothing to play is not a fault");
+    assert_eq!(after["renderer_failed"], false);
+    let row = &after["displays"][0];
+    assert_eq!(row["connector"], "ALL");
+    assert_eq!(row["entry_id"], "");
+    assert_eq!(row["kind"], "");
+    assert_eq!(row["still"], "");
+    assert_eq!(row["motion_active"], false);
+    assert_eq!(row["nothing_to_play"], "web wallpapers are off");
+    assert_eq!(row["entry_name"], "Nothing to play: web wallpapers are off");
+    assert!(row["next_cycle_in_s"].is_null(), "{row}");
+    assert_eq!(after["playlists"][0]["entries"], 0);
+    let driver = state.lock().unwrap();
+    assert!(
+        driver.active_outputs.is_empty(),
+        "{:?}",
+        driver.active_outputs
+    );
+    assert!(!driver.motion_active);
+    assert_eq!(driver.retained_outputs.last(), Some(&Vec::new()));
+}
+
+#[test]
+fn control_with_a_still_beside_the_page_the_still_plays() {
+    // Review probe `rust_probe_web_off_reload_control.rs`: passed before and still does.
+    let (mut runtime, state, config_path, page) = web_runtime("with-still-off", WITH_STILL_ON);
+    assert_eq!(status(&mut runtime, noon())["entry_id"], page.as_str());
+    fs::write(&config_path, WITH_STILL_OFF).unwrap();
+    let reply = runtime_command(&mut runtime, noon(), "reload", None);
+    assert!(reply.ok, "{}", reply.message);
+    let after = status(&mut runtime, noon());
+    assert_ne!(after["entry_id"], page.as_str());
+    assert_eq!(after["kind"], "still");
+    assert!(after["nothing_to_play"].is_null());
+    assert!(after["displays"][0]["entry_name"].is_null());
+    assert!(!state.lock().unwrap().motion_active);
+}
+
+#[test]
+fn a_playlist_that_plays_nothing_is_a_state_play_and_toggle_cant_leave() {
+    // Review probe `rust_probe_stop_then_play.rs` (M2), reframed. The probe sent `stop` to a
+    // service still holding the page's own document, then `play`: a service told only to
+    // stop keeps a document that names the page, so that can only ever start it again,
+    // and it still does. The fix changes the document instead: once the service holds the
+    // one that plays nothing (what the app now publishes, and what its guard installs when
+    // a publication fails), nothing a client sends brings the page back.
+    let cycling = WEB_ONLY_OFF
+        .replace("cycle_enabled = false", "cycle_enabled = true")
+        .replace("cycle_interval_seconds = 300", "cycle_interval_seconds = 5");
+    let (mut runtime, state, config_path, page) = web_runtime("nothing-holds", WEB_ONLY_ON);
+    fs::write(&config_path, &cycling).unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    let applies_before = state.lock().unwrap().applies.len();
+    for (verb, argument) in [
+        ("stop", None),
+        ("play", None),
+        ("stop", None),
+        ("toggle", None),
+        ("pause", None),
+        ("toggle", None),
+        ("play", None),
+        ("schedule-follow", None),
+        ("playlist-use", Some("All media")),
+        ("shuffle", Some("on")),
+    ] {
+        let reply = runtime_command(&mut runtime, noon(), verb, argument);
+        assert!(reply.ok, "{verb}: {}", reply.message);
+        if verb == "play" {
+            assert_eq!(reply.message, "nothing to play: web wallpapers are off");
+        }
+    }
+    for verb in ["next", "previous", "random"] {
+        let reply = runtime_command(&mut runtime, noon(), verb, None);
+        assert!(!reply.ok, "{verb}");
+        assert_eq!(reply.message, "nothing to play: web wallpapers are off");
+    }
+    // Its own rotation and the file poll's reload of the same bytes find nothing either.
+    let started = Instant::now();
+    for seconds in [6, 12, 18] {
+        runtime.tick(noon(), started + Duration::from_secs(seconds));
+    }
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    let applies = state.lock().unwrap().applies.clone();
+    assert!(
+        applies[applies_before..].is_empty(),
+        "nothing may be applied while nothing is to play: {:?}",
+        &applies[applies_before..]
+    );
+    assert!(
+        !applies[applies_before..]
+            .iter()
+            .any(|(entry, _)| entry == &page)
+    );
+    let after = status(&mut runtime, noon());
+    assert_eq!(after["nothing_to_play"], "web wallpapers are off");
+    assert_eq!(after["last_error"], "");
+    assert_eq!(after["playback_state"], "playing");
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+}
+
+#[test]
+fn a_service_that_starts_on_a_document_that_plays_nothing_runs_and_says_why() {
+    let root = directory("starts-on-nothing");
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, WEB_ONLY_OFF).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState::default()));
+    let mut runtime =
+        Runtime::new(config_path, parsed, RuntimeDriver(state.clone()), noon()).unwrap();
+    let applied = runtime.apply_current().unwrap();
+    assert_eq!(applied, "nothing to play: web wallpapers are off");
+    assert!(state.lock().unwrap().applies.is_empty());
+    assert_eq!(
+        status(&mut runtime, noon())["nothing_to_play"],
+        "web wallpapers are off"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn independent_displays_that_play_nothing_say_so_and_status_still_answers() {
+    let document = independent_config()
+        .replace("schema_version = 4", "schema_version = 8")
+        .replace(
+            "[[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"day\"\n",
+            "[[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"later\"\n",
+        )
+        + "[[playlists]]\nid = \"later\"\nname = \"Later\"\n\
+           nothing_to_play = \"web wallpapers are off\"\nentries = []\n";
+    let (mut runtime, state) = started_runtime(loaded(&document, &[]), noon());
+    let snapshot = status(&mut runtime, noon());
+    assert!(snapshot["nothing_to_play"].is_null(), "DP-1 still plays");
+    let hdmi = display_status(&mut runtime, noon(), "HDMI-A-1");
+    assert_eq!(hdmi["nothing_to_play"], "web wallpapers are off");
+    assert_eq!(
+        hdmi["entry_name"],
+        "Nothing to play: web wallpapers are off"
+    );
+    assert_eq!(hdmi["entry_id"], "");
+    assert_eq!(hdmi["last_error"], "");
+    let dp = display_status(&mut runtime, noon(), "DP-1");
+    assert!(dp["nothing_to_play"].is_null());
+    assert_ne!(dp["entry_id"], "");
+    assert!(!state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+
+    let play = runtime_command(&mut runtime, noon(), "on", Some("HDMI-A-1 play"));
+    assert!(play.ok, "{}", play.message);
+    assert!(play.message.contains("nothing to play"), "{}", play.message);
+    let next = runtime_command(&mut runtime, noon(), "on", Some("HDMI-A-1 next"));
+    assert!(!next.ok);
+    assert!(next.message.contains("nothing to play"), "{}", next.message);
+    let moved = runtime_command(&mut runtime, noon(), "on", Some("DP-1 playlist-use later"));
+    assert!(moved.ok, "{}", moved.message);
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(snapshot["nothing_to_play"], "web wallpapers are off");
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    let back = runtime_command(&mut runtime, noon(), "on", Some("DP-1 schedule-follow"));
+    assert!(back.ok, "{}", back.message);
+    assert!(display_status(&mut runtime, noon(), "DP-1")["nothing_to_play"].is_null());
+}
+
+#[test]
+fn the_file_poll_loads_the_document_that_plays_nothing_and_play_leaves_it() {
+    // The service's own reload when runtime.toml changes (main.rs), with the real driver.
+    // The page is assigned to DP-1 so that no compositor needs asking.
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("file-poll-nothing");
+    let config_path = root.join("runtime.toml");
+    let socket = root.join("runtime.sock");
+    let noctalia = root.join("noctalia");
+    script(&noctalia, "exit 0");
+    let pids = root.join("engine-pids");
+    let engine = root.join("linux-wallpaperengine");
+    fs::write(
+        &engine,
+        format!("#!/bin/sh\necho $$ >> {:?}\nexec sleep 30\n", pids),
+    )
+    .unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let assigned = |document: &str| {
+        document
+            .replace(
+                "noctalia_program = \"/bin/true\"",
+                &format!("noctalia_program = {:?}", noctalia.display().to_string()),
+            )
+            .replace(
+                "linux_wallpaperengine_program = \"/bin/true\"",
+                &format!(
+                    "linux_wallpaperengine_program = {:?}",
+                    engine.display().to_string()
+                ),
+            )
+            + "\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"all-media\"\n"
+    };
+    fs::write(&config_path, assigned(WEB_ONLY_ON)).unwrap();
+    let mut child = service_command()
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket)
+        .spawn()
+        .unwrap();
+    let started = |count: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines: Vec<String> = fs::read_to_string(&pids)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            if lines.len() >= count || Instant::now() >= deadline {
+                return lines;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let [page] = started(1).try_into().unwrap();
+    assert_eq!(request(&socket, "status", None)["ok"], true);
+
+    // No reload is sent: the service notices the new file itself.
+    fs::write(&config_path, assigned(WEB_ONLY_OFF)).unwrap();
+    let gone = Path::new("/proc").join(&page);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while gone.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!gone.exists(), "the page's engine is still running");
+    let snapshot: serde_json::Value = serde_json::from_str(
+        request(&socket, "status", None)["message"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot["nothing_to_play"], "web wallpapers are off");
+    for verb in ["play", "stop", "play"] {
+        let reply = request(&socket, verb, None);
+        assert_eq!(reply["ok"], true, "{verb}: {reply}");
+    }
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(started(2).len(), 1, "play started the engine again");
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A home where the engine finds `id` with `project` as its project.json.
+fn workshop_home_with(label: &str, items: &[(&str, &str)]) -> PathBuf {
+    let home = directory(label);
+    for (id, project) in items {
+        let item = home
+            .join(".local/share/Steam/steamapps/workshop/content/431960")
+            .join(id);
+        fs::create_dir_all(&item).unwrap();
+        fs::write(item.join("project.json"), project).unwrap();
+    }
+    home
+}
+
+/// A real driver over a one-scene document, its engine an argument recorder.
+fn p2_runtime(
+    root: &Path,
+    document: &str,
+    home: &Path,
+) -> (Runtime<SystemDriver>, PathBuf, PathBuf) {
+    let noctalia = root.join("noctalia");
+    script(&noctalia, "exit 0");
+    let (engine, arguments) = argument_recorder(root, "linux-wallpaperengine");
+    let document = document
+        .replace(
+            "noctalia_program = \"/bin/true\"",
+            &format!("noctalia_program = {:?}", noctalia.display().to_string()),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!(
+                "linux_wallpaperengine_program = {:?}",
+                engine.display().to_string()
+            ),
+        );
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, &document).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let (driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
+    let driver = driver.with_workshop_home(Some(home.to_path_buf()));
+    let runtime = Runtime::new(config_path.clone(), parsed, driver, noon()).unwrap();
+    (runtime, arguments, config_path)
+}
+
+/// Whether the engine was started: its recorder wrote its arguments.
+fn engine_started(arguments: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if arguments.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
+    // P2: a Workshop update turned the compiled scene into a web page. The document doesn't
+    // allow web wallpapers (schema 4, as 0.4.0 wrote), so the engine is never started for it.
+    let root = directory("p2-became-web");
+    let home = workshop_home_with(
+        "p2-became-web-home",
+        &[(
+            WEB_PAGE,
+            r#"{"type":"web","title":"Electric Eye","file":"index.html"}"#,
+        )],
+    );
+    let document = WITH_STILL_ON
+        .replace("schema_version = 8", "schema_version = 4")
+        .replace("allow_web_wallpapers = true\n", "");
+    let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
+    let applied = runtime.apply_current();
+    assert!(
+        applied.is_ok(),
+        "the still stays, so the apply succeeds: {applied:?}"
+    );
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        !arguments.exists(),
+        "linux-wallpaperengine was started for a web page"
+    );
+    let snapshot = status(&mut runtime, noon());
+    let said = snapshot["last_error"].as_str().unwrap();
+    assert!(
+        said.contains("web wallpapers are off") && said.contains("is a web page"),
+        "{said}"
+    );
+    assert_eq!(snapshot["motion_active"], false);
+    assert!(
+        snapshot["taboo_entries"].as_array().unwrap().is_empty(),
+        "never a taboo"
+    );
+    // Play asks again, and the type is read again: still a web page.
+    assert!(runtime_command(&mut runtime, noon(), "play", None).ok);
+    thread::sleep(Duration::from_millis(300));
+    assert!(!arguments.exists());
+    // The type is read at each start: once it is a scene again, it starts.
+    let project = home.join(".local/share/Steam/steamapps/workshop/content/431960/2777242023");
+    fs::write(
+        project.join("project.json"),
+        r#"{"type":"scene","file":"scene.json"}"#,
+    )
+    .unwrap();
+    assert!(runtime_command(&mut runtime, noon(), "play", None).ok);
+    assert!(engine_started(&arguments), "a scene starts");
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn an_item_whose_type_cant_be_read_is_refused_while_web_is_off() {
+    let root = directory("p2-unclassified");
+    let home = workshop_home_with("p2-unclassified-home", &[]);
+    let document = WITH_STILL_ON
+        .replace("schema_version = 8", "schema_version = 4")
+        .replace("allow_web_wallpapers = true\n", "");
+    let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
+    assert!(runtime.apply_current().is_ok());
+    thread::sleep(Duration::from_millis(300));
+    assert!(!arguments.exists());
+    let said = status(&mut runtime, noon())["last_error"].to_string();
+    assert!(said.contains("its Workshop folder wasn't found"), "{said}");
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
+    let root = directory("p2-allowed");
+    let home = workshop_home_with(
+        "p2-allowed-home",
+        &[(
+            WEB_PAGE,
+            r#"{"type":"web","title":"Electric Eye","file":"index.html"}"#,
+        )],
+    );
+    let (mut runtime, arguments, config_path) = p2_runtime(&root, WITH_STILL_ON, &home);
+    assert!(runtime.apply_current().is_ok());
+    assert!(engine_started(&arguments), "allowed, the page plays");
+    // The same document without the permission (the entries unchanged): every display
+    // starts again, and the page is refused this time.
+    let refused = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("allow_web_wallpapers = true\n", "");
+    fs::write(&config_path, refused).unwrap();
+    fs::remove_file(&arguments).unwrap();
+    let reply = runtime_command(&mut runtime, noon(), "reload", None);
+    assert!(reply.ok, "{}", reply.message);
+    thread::sleep(Duration::from_millis(300));
+    assert!(!arguments.exists(), "the page started again");
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(snapshot["motion_active"], false);
+    assert!(
+        snapshot["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("is a web page")
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn a_preset_of_a_web_page_is_refused_by_its_base_while_web_is_off() {
+    let root = directory("p2-preset");
+    let home = workshop_home_with(
+        "p2-preset-home",
+        &[
+            (
+                WEB_PAGE,
+                r#"{"type":"web","title":"Electric Eye","file":"index.html"}"#,
+            ),
+            (
+                "3000000001",
+                r#"{"title":"Y2K","dependency":"2777242023","preset":{}}"#,
+            ),
+        ],
+    );
+    let document = WITH_STILL_ON
+        .replace("schema_version = 8", "schema_version = 6")
+        .replace("allow_web_wallpapers = true\n", "")
+        .replace(
+            "scene_id = \"2777242023\"",
+            "scene_id = \"3000000001\"\nscene_base = \"2777242023\"",
+        );
+    let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
+    assert!(runtime.apply_current().is_ok());
+    thread::sleep(Duration::from_millis(300));
+    assert!(!arguments.exists(), "a preset renders its base, a web page");
+    let said = status(&mut runtime, noon())["last_error"].to_string();
+    assert!(
+        said.contains("Workshop item 2777242023 is a web page"),
+        "{said}"
+    );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+}

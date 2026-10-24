@@ -794,7 +794,9 @@ def _named_scenes(path: Path | None, text: str | None = None) -> set[str]:
     return named
 
 
-def retained_web_wallpapers(path: Path | None = None, *, text: str | None = None) -> tuple[str, ...]:
+def retained_web_wallpapers(
+    path: Path | None = None, *, text: str | None = None
+) -> tuple[str, ...]:
     """Titles of the web wallpapers the published ``runtime.toml`` still plays.
 
     A document compiled while ``allow_web_wallpapers`` was on keeps naming
@@ -849,6 +851,37 @@ def unchecked_scene_wallpapers(
         if base and base not in listed:
             unchecked.add(base)
     return tuple(sorted(unchecked))
+
+
+def web_wallpapers_in(texts: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """What any of ``texts`` (``runtime.toml`` documents) plays that web being off forbids.
+
+    The titles of its web wallpapers (`retained_web_wallpapers`), and the
+    Workshop ids whose type the scan can't classify (`unchecked_scene_wallpapers`),
+    from one Workshop scan, for every text a service may still hold.
+    """
+    named: set[str] = set()
+    for text in texts:
+        named |= _named_scenes(None, text)
+    if not named:
+        return (), ()
+    items = scan.workshop_items(workshop.steam_roots())
+    web = {item.scene for item in items if item.web_page or item.workshop_type == "web"}
+    titles = sorted(
+        (
+            item.name
+            for item in items
+            if item.scene in named and (item.scene in web or item.scene_base in web)
+        ),
+        key=str.casefold,
+    )
+    listed = {item.scene: item for item in items}
+    unchecked = {name for name in named if name not in listed}
+    for name in named & listed.keys():
+        base = listed[name].scene_base
+        if base and base not in listed:
+            unchecked.add(base)
+    return tuple(titles), tuple(sorted(unchecked))
 
 
 def _program(name: str) -> Path:
@@ -1933,7 +1966,7 @@ def compiled(
 
 
 def nothing_to_play_supported(status: object) -> bool:
-    """Whether the runtime that answered ``status`` reads schema 8 (`NOTHING_TO_PLAY_SCHEMA_VERSION`).
+    """Whether the runtime that answered ``status`` reads schema 8 (a playlist that plays nothing).
 
     The twin of `presets_supported` and `dials_supported` for a playlist
     that plays nothing and ``allow_web_wallpapers``.
@@ -2135,7 +2168,7 @@ def _document_head(
     dial_lines: Sequence[str],
     scene_muted: bool,
 ) -> list[str]:
-    """The lines of ``runtime.toml`` before its playlists: the header, ``[settings]``, ``[renderer]``.
+    """The lines of ``runtime.toml`` before its playlists: the header and its two tables.
 
     ``web_allowed``: write ``allow_web_wallpapers = true`` (schema 8).
     """
@@ -2505,7 +2538,9 @@ def _compile(
     # library or favourites list is the library's own state, said there.
     if fallback_nothing == WEB_OFF_REASON and fallback_named:
         left_out.append(
-            LeftOut(NOTHING_OWNER, "", FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, fallback_nothing)
+            LeftOut(
+                NOTHING_OWNER, "", FALLBACK_PLAYLIST_ID, FALLBACK_PLAYLIST_NAME, fallback_nothing
+            )
         )
     lines = _document_head(
         settings,
@@ -2891,9 +2926,7 @@ def _fitted(
     built = _compile(settings, session, renderer_dials=False, nothing_to_play=False)
     if _schema_publishable(built.document, target):
         return built
-    return _compile(
-        settings, session, presets=False, renderer_dials=False, nothing_to_play=False
-    )
+    return _compile(settings, session, presets=False, renderer_dials=False, nothing_to_play=False)
 
 
 def _schema_publishable(document: str, target: Path) -> bool:

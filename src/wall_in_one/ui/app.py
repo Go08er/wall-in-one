@@ -147,8 +147,12 @@ def _with_durability(message: str, warnings: Sequence[str]) -> str:
 
 def _runtime_installed(
     settings: config.Settings, session: Session
-) -> tuple[bool, tuple[runtime_config.LeftOut, ...]]:
-    """`runtime_config.publish_changes`: whether a file changed, and what was left out.
+) -> tuple[bool, tuple[runtime_config.LeftOut, ...], str | None]:
+    """`runtime_config.publish_changes`: whether a file changed, what was left out and replaced.
+
+    The last is the ``runtime.toml`` text the new one replaced (`Published.replaced`),
+    None when it didn't replace one: what the service still holds if it refuses the
+    new one (`Application._web_off_guard`).
 
     What was left out is the compiled document's, whether or not a byte
     changed: every reference to a playlist that can't play, which the
@@ -168,8 +172,16 @@ def _runtime_installed(
         published = runtime_config.publish_changes(settings, session)
     except runtime_config.RuntimeConfigNotDurableError as uncertain:
         state_file.report_not_durable(str(uncertain))
-        return True, uncertain.changes.left_out if uncertain.changes is not None else ()
-    return bool(published), published.left_out
+        changes = uncertain.changes
+        if changes is None:
+            return True, (), None
+        return True, changes.left_out, getattr(changes, "replaced", None)
+    return bool(published), published.left_out, getattr(published, "replaced", None)
+
+
+#: How many replaced ``runtime.toml`` texts are kept as what the service may
+#: still hold (`Application._web_off_guard`); past it, one isn't known.
+HELD_CANDIDATES: Final = 4
 
 
 def _settings_published[Saved: (config.Settings, config.Settings | None)](
@@ -431,6 +443,8 @@ class _RuntimePublication:
     error: str = ""
     unavailable: bool = False
     deferred: bool = False
+    #: Said after a refused reload's own words: what the web-off guard did.
+    note: str = ""
 
 
 class _RuntimeLibraryNotReadyError(Exception):
@@ -823,6 +837,11 @@ class Application(Adw.Application):
         self._runtime_library_ready.set()
         self._runtime_document_generation = 0
         self._runtime_loaded_generation = 0
+        # The runtime.toml texts replaced since the service last confirmed a
+        # reload: what it may still hold if it refused one since (at most
+        # HELD_CANDIDATES; past that, what it holds isn't known).
+        self._held_candidates: list[str] = []
+        self._held_candidates_unknown = False
         self._runtime_shutdown = False
         # A GTK object can be destroyed while a worker is waiting on the
         # socket, then replaced by a later activation.  The monotonically
@@ -3145,20 +3164,29 @@ class Application(Adw.Application):
         """
         valid, changed = self._update_runtime_document()
         if not valid:
+            # What failed is said; while web wallpapers are off, a page the
+            # service still holds must not keep playing (`_web_off_guard`).
+            done = self._web_off_guard()
+            if done:
+                self.window_report(done)
             return False
         if not changed:
             return True
         try:
             response = client.send_runtime("reload")
         except client.NotRunningError:
+            self._service_holds_what_is_on_disk()
             self._status_model.mark_unavailable(forget=False)
             return True
         except client.ControlError as error:
             self.window_report(f"Runtime reload failed: {error}")
             return False
         if not response.ok:
-            self.window_report(self._rejected_configuration(response.message))
+            refused = self._rejected_configuration(response.message)
+            done = self._web_off_guard()
+            self.window_report(f"{refused.rstrip().rstrip('.')}. {done}" if done else refused)
             return False
+        self._service_holds_what_is_on_disk()
         with self._runtime_config_lock:
             self._runtime_loaded_generation = self._runtime_document_generation
         return True
@@ -4210,12 +4238,23 @@ class Application(Adw.Application):
         # Held across the store as well as the compile (it is re-entrant), so
         # that the set kept is the newest document's whichever path got there.
         with runtime_config.compiler_lock():
-            changed, left_out = _runtime_installed(settings, session)
+            changed, left_out, replaced = _runtime_installed(settings, session)
             pointer = self._default_pointer(left_out)
             with self._runtime_config_lock:
                 self._compiled_left_out = left_out
                 self._compiled_default_pointer = pointer
+                if replaced is not None:
+                    self._held_candidates.append(replaced)
+                    if len(self._held_candidates) > HELD_CANDIDATES:
+                        del self._held_candidates[0]
+                        self._held_candidates_unknown = True
         return changed
+
+    def _service_holds_what_is_on_disk(self) -> None:
+        """The service confirmed a reload (or isn't running): it holds the file on disk now."""
+        with self._runtime_config_lock:
+            self._held_candidates.clear()
+            self._held_candidates_unknown = False
 
     @staticmethod
     def _default_pointer(left_out: tuple[runtime_config.LeftOut, ...]) -> str:
@@ -4250,43 +4289,159 @@ class Application(Adw.Application):
         return self._stopping_web_after_failure(publication)
 
     def _stopping_web_after_failure(self, publication: _RuntimePublication) -> _RuntimePublication:
-        """A publication that failed while web wallpapers are off must not leave one playing.
+        """A failed publication or a refused reload, while web wallpapers are off, ends any page.
 
         The setting is saved before its publication, so a compile or write
-        that fails leaves the service on the document it already holds. When
-        that document still plays a web page, playback is stopped and the
-        failure says so. (A reload the service refuses is not this: the new
-        document is on disk by then, and the page it replaced isn't known.)
-        Runs on the compile lane, never on GTK.
+        that fails leaves the service on the document it already holds, and
+        so does a reload it refuses. When that document may still play a web
+        page, `_web_off_guard` ends it for good and the failure says so. Runs
+        on the compile lane, never on GTK.
         """
-        if not publication.error or publication.deferred or self._runtime_shutdown:
+        if publication.deferred or self._runtime_shutdown:
             return publication
+        if publication.unavailable or (publication.error == "" and publication.response is None):
+            if publication.unavailable:
+                self._service_holds_what_is_on_disk()
+            return publication
+        refused = publication.response is not None and not publication.response.ok
+        if not publication.error and not refused:
+            return publication
+        done = self._web_off_guard()
+        if not done:
+            return publication
+        if refused:
+            return replace(publication, note=done)
+        return replace(publication, error=f"{publication.error.rstrip().rstrip('.')}. {done}")
+
+    def _web_off_guard(self) -> str:
+        """End a web page the service may still hold while web wallpapers are off; say what.
+
+        After a publication that failed or a reload the service refused,
+        whatever the lane (the compile lane, ``--service``'s synchronous
+        one, the health lane). What the service may hold is the file on disk
+        or one of the texts publications replaced since it last confirmed a
+        reload (`runtime_config.Published.replaced`). When any of them plays
+        a web page, or a Workshop item whose type can't be checked, the
+        service is told to stop at once, then given a document that plays
+        nothing (`runtime_config.nothing_to_play_document`) and told to load
+        it: unlike a ``stop``, nothing it is asked afterwards (play, toggle,
+        the companion's Resume, its own poll of the file, a restart through
+        ExecStartPre) brings the page back. A service that can't load that
+        document (one older than this app, still running after an update)
+        is told to quit, so that whatever starts it next runs the updated one
+        through its ExecStartPre guard. Empty when there is nothing to end.
+        """
         try:
-            if config.load_strict().allow_web_wallpapers:
-                return publication
-            titles = runtime_config.retained_web_wallpapers()
-        except Exception:  # the failure is already being said
-            return publication
-        if not titles:
-            return publication
+            settings = config.load_strict()
+        except config.ConfigError:
+            return ""  # its own error is said by the compile
+        if settings.allow_web_wallpapers:
+            return ""
+        target = paths.runtime_config_path()
         try:
-            stopped = client.send_runtime("stop").ok
+            with runtime_config.compiler_lock():
+                try:
+                    on_disk = file_io.read_regular_text(
+                        target, runtime_config.MAX_RUNTIME_CONFIG_BYTES
+                    )
+                except OSError, UnicodeDecodeError:
+                    on_disk = None
+                with self._runtime_config_lock:
+                    candidates = list(self._held_candidates)
+                    unknown = self._held_candidates_unknown
+                titles, unchecked = runtime_config.web_wallpapers_in(
+                    [*candidates, *([on_disk] if on_disk is not None else [])]
+                )
+                if not titles and not unchecked and not unknown:
+                    return ""
+                what = self._held_web_words(titles, unchecked)
+                try:
+                    stopped = client.send_runtime("stop").ok
+                except client.NotRunningError:
+                    # Nothing plays; the next start is guarded (ExecStartPre).
+                    self._service_holds_what_is_on_disk()
+                    return ""
+                except client.ControlError, OSError:
+                    stopped = False
+                try:
+                    status_reply = client.send_runtime("status")
+                    status = json.loads(status_reply.message) if status_reply.ok else None
+                except client.ControlError, OSError, ValueError, RecursionError:
+                    status = None
+                written = False
+                if runtime_config.nothing_to_play_supported(status):
+                    try:
+                        document = runtime_config.nothing_to_play_document(
+                            settings, runtime_config.WEB_OFF_REASON
+                        )
+                        if on_disk != document:
+                            runtime_config.install_nothing_to_play(document, target)
+                        written = True
+                    except runtime_config.RuntimeConfigNotDurableError as uncertain:
+                        state_file.report_not_durable(str(uncertain))
+                        written = True
+                    except runtime_config.RuntimeConfigError:
+                        written = False
+                    if written:
+                        with self._runtime_config_lock:
+                            self._runtime_document_generation += 1
+        except runtime_config.RuntimeConfigError:
+            return ""  # the compiler lock: the failure itself is already said
+        if written:
+            try:
+                loaded = client.send_runtime("reload").ok
+            except client.ControlError, OSError:
+                loaded = False
+            if loaded:
+                self._service_holds_what_is_on_disk()
+                with self._runtime_config_lock:
+                    self._runtime_loaded_generation = self._runtime_document_generation
+                return (
+                    f"Allow web wallpapers is off, but the wallpaper service still {what}. "
+                    "Playback was stopped, and the service now has nothing to play: web "
+                    "wallpapers are off. It stays so until a publication gets through."
+                )
+        # A service that can't be given nothing to play: end it, as `ctl quit`
+        # does. It exits cleanly, so systemd leaves it stopped; the next start
+        # (the companion's, or systemctl's) runs ExecStartPre's guard first.
+        try:
+            quit_ok = client.send_runtime("quit").ok
         except client.NotRunningError:
-            return publication  # nothing is playing; the next start is guarded (cli)
+            quit_ok = True
         except client.ControlError, OSError:
-            stopped = False
-        action = (
-            "Playback was stopped so it doesn\u2019t keep playing"
-            if stopped
-            else "It may still be playing; stop it from the wallpaper service"
+            quit_ok = False
+        if quit_ok:
+            self._service_holds_what_is_on_disk()
+            return (
+                f"Allow web wallpapers is off, but the wallpaper service still {what}. It "
+                "was stopped: it is older than this app, or couldn\u2019t load a document "
+                "that plays nothing, so it can\u2019t be told to play nothing. Starting it "
+                "again (systemctl --user start wall-in-one, or the panel) runs the updated "
+                "service, which plays nothing while web wallpapers are off."
+            )
+        if stopped:
+            return (
+                f"Allow web wallpapers is off, but the wallpaper service still {what}. "
+                "Playback was stopped so it doesn\u2019t keep playing, but the service "
+                "can start it again (Resume, ctl play) until a publication gets through."
+            )
+        return (
+            f"Allow web wallpapers is off, but the wallpaper service still {what}. "
+            "It may still be playing; stop it from the wallpaper service."
         )
-        return replace(
-            publication,
-            error=(
-                f"{publication.error}. Allow web wallpapers is off, but the published settings "
-                f"still play {', '.join(titles)}. {action}."
-            ),
-        )
+
+    @staticmethod
+    def _held_web_words(titles: Sequence[str], unchecked: Sequence[str]) -> str:
+        """What the held document plays that web wallpapers being off forbids, after "still"."""
+        if titles and not unchecked:
+            return f"plays {', '.join(titles)}"
+        if unchecked:
+            said = (
+                f"plays Workshop wallpapers whose type couldn\u2019t be checked "
+                f"({', '.join(unchecked)}), so a web wallpaper can\u2019t be ruled out"
+            )
+            return f"{said}; it also plays {', '.join(titles)}" if titles else said
+        return "may hold a document that plays a web wallpaper"
 
     def _compile_runtime_until_current_locked(
         self,
@@ -4598,6 +4753,8 @@ class Application(Adw.Application):
                     self._status_model.mark_unavailable(forget=False)
                 elif publication.response is not None and not publication.response.ok:
                     problem = self._rejected_configuration(publication.response.message)
+                    if publication.note:
+                        problem = f"{problem.rstrip().rstrip('.')}. {publication.note}"
                     self.window_report(problem)
                 elif publication.changed and self._window is not None:
                     self.refresh_runtime_status_async()
@@ -4815,6 +4972,7 @@ class Application(Adw.Application):
             response = self._send_gui_runtime("reload")
             if not response.ok:
                 return response
+            self._service_holds_what_is_on_disk()
             with self._runtime_config_lock:
                 self._runtime_loaded_generation = max(
                     self._runtime_loaded_generation,
@@ -5227,6 +5385,10 @@ class Application(Adw.Application):
                     )
             else:
                 publication = None
+            if publication is not None:
+                # A refused reload here leaves what the service held, as on
+                # the compile lane: while web wallpapers are off, no page.
+                publication = self._stopping_web_after_failure(publication)
             return _RuntimeHealthResult(
                 request,
                 changed=changed,
@@ -5313,6 +5475,8 @@ class Application(Adw.Application):
             self._status_model.mark_unavailable(forget=False)
         elif publication.response is not None and not publication.response.ok:
             problem = self._rejected_configuration(publication.response.message)
+            if publication.note:
+                problem = f"{problem.rstrip().rstrip('.')}. {publication.note}"
         # Said when it becomes the problem, not by every poll that meets it
         # again: it stands (`publication_problem`) until a publication gets
         # through, this lane's or the compile lane's, and is new after that.

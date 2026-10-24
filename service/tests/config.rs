@@ -1074,3 +1074,122 @@ fn status_snapshot_is_bounded_before_runtime_start() {
     let error = config.validate().unwrap_err().to_string();
     assert!(error.contains("protocol response limit"), "{error}");
 }
+
+// -- schema 8: a playlist that plays nothing, and allow_web_wallpapers -----------------------
+
+/// `document(schema)` with one more playlist, `Later`, as written after `[[playlists]]`.
+fn with_later(schema: u32, later: &str) -> String {
+    format!(
+        "{}\n[[playlists]]\nid = \"later\"\nname = \"Later\"\n{later}\n",
+        document(schema)
+    )
+}
+
+#[test]
+fn schema_eight_reads_a_playlist_that_plays_nothing_with_its_reason() {
+    let parsed = Config::from_bytes(
+        with_later(
+            8,
+            "nothing_to_play = \"web wallpapers are off\"\nentries = []",
+        )
+        .into_bytes(),
+    )
+    .unwrap();
+    let later = parsed.playlist("later").unwrap();
+    assert!(later.entries.is_empty());
+    assert_eq!(later.nothing_to_play(), Some("web wallpapers are off"));
+    // Without the key, entries read as none (the shape 0.4.0 wrote by mistake).
+    let parsed =
+        Config::from_bytes(with_later(8, "nothing_to_play = \"empty\"").into_bytes()).unwrap();
+    assert!(parsed.playlist("later").unwrap().entries.is_empty());
+    // A document that plays nothing at all: its only playlist, the default.
+    let only = document(8)
+        .split("[[playlists]]")
+        .next()
+        .unwrap()
+        .replace("default_playlist = \"day\"", "default_playlist = \"later\"")
+        + "[[playlists]]\nid = \"later\"\nname = \"Later\"\nnothing_to_play = \"r\"\nentries = []\n";
+    Config::from_bytes(only.into_bytes()).unwrap();
+}
+
+#[test]
+fn below_schema_eight_a_playlist_with_no_entries_is_refused_by_name() {
+    for schema in [4, 5, 6, 7] {
+        for later in ["entries = []", "", "nothing_to_play = \"r\"\nentries = []"] {
+            let error = Config::from_bytes(with_later(schema, later).into_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("playlist \"Later\" has no entries")
+                    && error.contains("requires schema_version 8"),
+                "{schema} {later:?}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_reason_is_required_exactly_when_a_playlist_has_no_entries() {
+    let error = Config::from_bytes(with_later(8, "entries = []").into_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no nothing_to_play reason"), "{error}");
+    let with_entry = with_later(
+        8,
+        "nothing_to_play = \"r\"\n[[playlists.entries]]\nid = \"a\"\nkind = \"still\"\n\
+         still = \"/tmp/a.png\"\npalette = { kind = \"keep\" }",
+    );
+    let error = Config::from_bytes(with_entry.into_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("can't carry nothing_to_play"), "{error}");
+    for reason in [
+        "\"\"",
+        "\" \"",
+        "\"line\\nbreak\"",
+        &format!("{:?}", "x".repeat(129)),
+    ] {
+        let error = Config::from_bytes(
+            with_later(8, &format!("nothing_to_play = {reason}\nentries = []")).into_bytes(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("nothing_to_play reason"),
+            "{reason}: {error}"
+        );
+    }
+    let longest = format!("nothing_to_play = {:?}\nentries = []", "x".repeat(128));
+    Config::from_bytes(with_later(8, &longest).into_bytes()).unwrap();
+}
+
+#[test]
+fn allow_web_wallpapers_needs_schema_eight_and_is_off_when_absent() {
+    let allowed = |schema: u32| {
+        document(schema).replace(
+            "theme_source_connector = \"\"\n",
+            "theme_source_connector = \"\"\nallow_web_wallpapers = true\n",
+        )
+    };
+    for schema in [4, 5, 6, 7] {
+        let error = Config::from_bytes(allowed(schema).into_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("allow_web_wallpapers requires schema_version 8"),
+            "{schema}: {error}"
+        );
+        assert!(
+            !Config::from_bytes(document(schema).into_bytes())
+                .unwrap()
+                .settings
+                .allow_web_wallpapers
+        );
+    }
+    assert!(
+        Config::from_bytes(allowed(8).into_bytes())
+            .unwrap()
+            .settings
+            .allow_web_wallpapers
+    );
+}

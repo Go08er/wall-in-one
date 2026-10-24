@@ -106,3 +106,35 @@ def test_the_judgement_is_on_the_file_read_under_the_lock(tmp_path: Path) -> Non
     )
     store.reset_renderer(items["video"])
     assert _renderer(state) == {"video": {"zoom": 2}}
+
+
+def _clear_borked_fixture(
+    tmp_path: Path, record: dict[str, object]
+) -> tuple[Path, pairings.Store, MediaItem]:
+    _s, _sess, items = library(tmp_path)
+    state = paths.app_state_dir() / pairings.STATE_FILENAME
+    state.parent.mkdir(parents=True, exist_ok=True)
+    key = pairings.Identity.of(items["video"]).key
+    state.write_text(
+        json.dumps({"version": 2, "pairings": [{"identity": key, **record}]}), encoding="utf-8"
+    )
+    return state, pairings.Store.open(state), items["video"]
+
+
+def test_unknown_inside_health_only_does_not_leave_an_empty_shell(tmp_path: Path) -> None:
+    """Clearing health takes health's unknown fields with it; nothing else is left to keep."""
+    state, store, video = _clear_borked_fixture(
+        tmp_path, {"health": {"state": "borked", "reason": "r", "source": "s", "newer": 1}}
+    )
+    assert store.clear_borked(video)
+    assert json.loads(state.read_text(encoding="utf-8"))["pairings"] == []
+
+
+def test_unknown_beside_health_still_rides_through_clearing_it(tmp_path: Path) -> None:
+    state, store, video = _clear_borked_fixture(
+        tmp_path,
+        {"health": {"state": "borked", "reason": "r", "source": "s", "newer": 1}, "note": "x"},
+    )
+    assert store.clear_borked(video)
+    (record,) = json.loads(state.read_text(encoding="utf-8"))["pairings"]
+    assert record.get("note") == "x" and "health" not in record

@@ -981,7 +981,7 @@ class Store:
         self._loaded = _loaded
         # Identities whose record, as read under the lock of the mutation in
         # progress, carries fields this build doesn't model.
-        self._carried: frozenset[str] = frozenset()
+        self._carried: Mapping[str, state_file.Unknown] = {}
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
@@ -1494,9 +1494,20 @@ class Store:
         """Whether a record goes back in the file: it holds a choice, or fields we don't model.
 
         Judged on the record as read under the lock, so a newer build's dial
-        rides through the removal of the last thing this build knows.
+        rides through the removal of the last thing this build knows. And on
+        what the write will put back: unknown fields inside ``health`` go with
+        it unless it is still written, so they alone keep nothing.
         """
-        return record.kept or record.identity.key in self._carried
+        if record.kept:
+            return True
+        carried = self._carried.get(record.identity.key)
+        if carried is None:
+            return False
+        return (
+            bool(carried.fields)
+            or "renderer" in carried.objects
+            or ("health" in carried.objects and record.health.is_borked)
+        )
 
     def _mutate(
         self,
@@ -1542,7 +1553,7 @@ class Store:
                     # its own refusal of any fault.)
                     raise _unreadable_error(fault, target)
                 updated = dict(records)
-                self._carried = frozenset(reading.unknown.records.get("pairings", {}))
+                self._carried = reading.unknown.records.get("pairings", {})
                 result, changed = operation(updated)
                 if changed:
                     previous_fault = self._fault

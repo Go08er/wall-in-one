@@ -45,6 +45,7 @@ def test_a_padded_application_is_labelled_a_program_and_never_run(tmp_path: Path
         ("102", {"type": "Application\t", "title": "Trojan 2", "file": "run.exe"}),
         ("103", {"title": "Its preset", "dependency": "101", "preset": {"a": 1}}),
         ("104", {"type": " APPLICATION", "title": "Preset-like", "preset": {}, "dependency": "9"}),
+        ("105", {"type": "application ", "title": "Trailing", "file": "run.exe"}),
     ):
         (content / folder).mkdir(parents=True)
         (content / folder / "project.json").write_text(json.dumps(project))
@@ -57,3 +58,5 @@ def test_a_padded_application_is_labelled_a_program_and_never_run(tmp_path: Path
         assert "program" in item.unplayable_reason, folder
     assert items["101"].workshop_type == "application"
     assert items["102"].workshop_type == "application"
+    assert items["105"].runs_program and items["105"].workshop_type == "application"
+    assert items["105"].workshop_detail == "application"  # no trailing space in the label

@@ -508,7 +508,11 @@ def workshop_items(
                     # A program however its type is spelled is named so.
                     workshop_type=(
                         item.lenient_type
-                        if plays.program and item.kind == workshop.UNKNOWN_TYPE
+                        if plays.program
+                        and (
+                            item.kind == workshop.UNKNOWN_TYPE
+                            or item.kind.strip() in workshop.NEVER_RUN
+                        )
                         else item.kind
                     ),
                     scene_base=plays.base,

@@ -66,7 +66,7 @@ WEB_WALLPAPERS_EXPLAINED: Final = (
     "A web wallpaper runs its page\u2019s JavaScript in linux-wallpaperengine\u2019s "
     "built-in browser, an older Chromium, with web security and site isolation off: "
     "the page can reach web services on your computer and network, and send data out. "
-    "Off, they are listed but never played. Executable wallpapers are never run."
+    "Off, they are listed but never played or previewed. Executable wallpapers are never run."
 )
 
 

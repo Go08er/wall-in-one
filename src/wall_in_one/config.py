@@ -399,7 +399,7 @@ class Settings:
     #: Play Wallpaper Engine web wallpapers (and presets of them). Off by
     #: default, owner decision: one runs its page's JavaScript in the engine's
     #: own older Chromium with web security and site isolation off
-    #: (docs/wallpaper-engine.md). Off, they are listed and never played.
+    #: (docs/wallpaper-engine.md). Off, they are listed and never played or previewed.
     allow_web_wallpapers: bool = False
 
     #: Default named playlist when no schedule rule matches. Empty selects the

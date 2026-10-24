@@ -189,6 +189,25 @@ engine isn't started, the still stays, and status says why. It is never a
 taboo, so nothing is saved against the item. A document from before schema 8
 has no such key, so it allows no web page.
 
+**No previews while it is off.** Owner: "it shouldn't load the papers to make a
+preview if web wallpapers are off." While the setting is off, nothing in a web
+wallpaper's folder (`MediaItem.web_page`, so a preset of one too) is opened
+except its `project.json`, which the scan reads to know what the item is.
+No thumbnail, still, colour or screenshot is made from its preview, its page
+or anything else there, and linux-wallpaperengine is never started for one.
+The Library tile, the details pane and the pairing editor show a plain tile
+like the "Can't play" ones, still badged "Scene · web", and say "Web
+wallpapers are off". Pictures the app made while it was on are its own files,
+but they are not shown either: the placeholder is the same whether or not one
+is cached, and a cache miss never starts a generation. Every step reads the
+setting when it runs (`workshop.previews_off(item, allow_web)`), not when the
+work was queued. Turning it on makes the previews as usual. Turning it off
+again drops what is queued for web wallpapers, discards a picture that was
+being made, and ends a running ffmpeg or linux-wallpaperengine started for
+one by its own process group (`worker_processes.GatedCancellation`); nothing
+is signalled by name. The scan only `lstat`s the files `project.json` names
+(it never opens them).
+
 ### Executable wallpapers are never run
 
 Owner decision, for security: a Wallpaper Engine `application` wallpaper is a

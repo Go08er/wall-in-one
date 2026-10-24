@@ -261,7 +261,9 @@ beside.
   security and site isolation off: the page can reach web services on your
   computer and network, and send data out. While the setting is off, web
   wallpapers (and presets of them) are listed but say **Can't play**, with a
-  way to the setting, and are never handed to a renderer or given a still.
+  way to the setting, and are never handed to a renderer or given a still. Their
+  tiles are plain, with no picture: nothing in a web wallpaper's folder but its
+  `project.json` is read.
   Turning it on or off takes effect at once, like any other setting.
 - A **preset** (a set of settings someone published for another wallpaper) is
   its own item, with its own title and preview. It plays the wallpaper it is a

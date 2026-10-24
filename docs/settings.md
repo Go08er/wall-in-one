@@ -256,7 +256,7 @@ See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-
 | `output` | Legacy single-output compatibility value. New display authoring uses `display_mode`, display assignments and targeted schedule rules; the Settings UI no longer exposes this ambiguous control. | `""` |
 | `own_scene_renderer` | Let Wall-in-One start linux-wallpaperengine for Wallpaper Engine scenes, web wallpapers and presets. Existing ownership of the target output is still respected. | `true` |
 | `scan_workshop` | Include Wallpaper Engine items found in Steam's Workshop libraries ([which play](library.md#wallpaper-engine); executable ones never run). | `true` |
-| `allow_web_wallpapers` | Play Wallpaper Engine web wallpapers (and presets of them). A web wallpaper runs its page's JavaScript in linux-wallpaperengine's built-in, older Chromium with web security and site isolation off, so the page can reach web services on your computer and network and send data out. Off, they are listed but never played. Written to `settings.toml` only when on. | `false` |
+| `allow_web_wallpapers` | Play Wallpaper Engine web wallpapers (and presets of them). A web wallpaper runs its page's JavaScript in linux-wallpaperengine's built-in, older Chromium with web security and site isolation off, so the page can reach web services on your computer and network and send data out. Off, they are listed but never played or previewed. Written to `settings.toml` only when on. | `false` |
 | `active_playlist` | Stable id of the default named playlist when no schedule rule matches. Empty uses the built-in all-media playlist. Runtime overrides do not rewrite it. | `""` |
 
 The Wallhaven key is not in here -- it lives in its own 0600 file. Neither are

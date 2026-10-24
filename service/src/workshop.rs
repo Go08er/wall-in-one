@@ -7,7 +7,8 @@
 //! page whatever the setting says. While the document doesn't allow web
 //! wallpapers (`Settings::allow_web_wallpapers`), the service therefore reads
 //! the item's type itself, just before it starts the engine, and refuses a
-//! web page or an item it can't classify (docs/wallpaper-engine.md).
+//! web page or an item it can't classify (docs/wallpaper-engine.md). The
+//! runtime skips a refused entry to the next one that can play.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};

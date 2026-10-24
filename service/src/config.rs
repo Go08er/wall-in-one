@@ -157,7 +157,8 @@ pub struct Settings {
     /// Whether a Wallpaper Engine web page may play (schema 8). Absent means
     /// not allowed: before linux-wallpaperengine is started for a scene, the
     /// service then reads the item's `project.json` and refuses a web page,
-    /// or one whose type it can't read (`crate::workshop`).
+    /// or one whose type it can't read (`crate::workshop`); the runtime skips
+    /// such an entry (`Runtime::refused_scenes`).
     #[serde(default)]
     pub allow_web_wallpapers: bool,
 }

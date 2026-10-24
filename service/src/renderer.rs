@@ -309,11 +309,22 @@ pub trait WallpaperDriver: Send {
         None
     }
     /// Why `output`'s last motion start did not start its renderer although
-    /// it could have: a Wallpaper Engine item that is a web page, or whose
-    /// type can't be read, while the document doesn't allow web wallpapers
-    /// (`crate::workshop`). The still stays, as for a missing program. Gone
-    /// once the output is stopped or applied again.
+    /// it could have: a Wallpaper Engine item that is a web page, or that the
+    /// service can't find or read, while the document doesn't allow web
+    /// wallpapers (`crate::workshop`). The runtime then skips the entry
+    /// (`motion_refusal`). Gone once the output is stopped or applied again.
     fn motion_refused(&self, _output: &str) -> Option<String> {
+        None
+    }
+    /// Why motion for `entry` would not be started on purpose if it were
+    /// applied now with `settings`, as `motion_refused` would then say. Asked
+    /// before anything of the entry is shown, so the runtime can skip it with
+    /// its still never up. None for drivers that start nothing.
+    fn motion_refusal(
+        &self,
+        _entry: &Entry,
+        _settings: &crate::config::Settings,
+    ) -> Option<workshop::Refusal> {
         None
     }
     /// For a reload that does not change the renderer settings: forget each
@@ -1029,7 +1040,8 @@ pub struct SystemDriver {
     /// is missing: the output as the runtime names it, and what was missing.
     missing_motion: HashMap<String, (String, MissingRenderer)>,
     /// The outputs (by `key`) whose scene was not started because web
-    /// wallpapers aren't allowed and its item is, or may be, a web page.
+    /// wallpapers aren't allowed and its item is, or may be, a web page, or
+    /// can't be found or read (`crate::workshop`).
     refused_motion: HashMap<String, String>,
     /// The home folder linux-wallpaperengine resolves an item id against
     /// (`workshop::engine_home`), for reading an item's type first.
@@ -1366,11 +1378,13 @@ impl SystemDriver {
             .ok_or_else(|| StartError::Failed("scene entry has no scene id".into()))?;
         // The one place the engine is started: whatever asked for it, a web
         // page doesn't start here unless the document allows web wallpapers.
+        // The runtime asks first (`motion_refusal`); this holds whatever
+        // changed on disk since.
         if !allow_web
             && let Some(refusal) =
                 workshop::refusal_without_web(self.workshop_home.as_deref(), scene)
         {
-            return Err(StartError::Refused(format!("{refusal}; its still stays")));
+            return Err(StartError::Refused(refusal.reason));
         }
         // Its own dials over the defaults (docs/renderer-settings.md).
         let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());
@@ -1485,7 +1499,7 @@ impl SystemDriver {
             }
             Err(StartError::Refused(refusal)) => {
                 // Not the entry's failure and not a missing program: its
-                // still is up and stays, and the runtime says why.
+                // still is up, and the runtime skips the entry.
                 self.refused_motion.insert(Self::key(output), refusal);
                 Ok(())
             }
@@ -1896,6 +1910,23 @@ impl WallpaperDriver for SystemDriver {
 
     fn motion_refused(&self, output: &str) -> Option<String> {
         self.refused_motion.get(&Self::key(output)).cloned()
+    }
+
+    fn motion_refusal(
+        &self,
+        entry: &Entry,
+        settings: &crate::config::Settings,
+    ) -> Option<workshop::Refusal> {
+        // Exactly when `start_motion` would reach `start_scene`'s check.
+        if !settings.dynamics_enabled
+            || self.animations_inhibited
+            || settings.allow_web_wallpapers
+            || entry.kind != EntryKind::Scene
+            || !self.settings.own_scene_renderer
+        {
+            return None;
+        }
+        workshop::refusal_without_web(self.workshop_home.as_deref(), entry.rendered_scene()?)
     }
 
     fn recheck_missing_renderers(&mut self) -> Vec<String> {

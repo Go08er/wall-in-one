@@ -8,6 +8,7 @@ use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response, success_fits};
 use crate::renderer::{MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver};
 use crate::schedule;
+use crate::workshop::Refusal;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,21 @@ const MAX_MISSING_RENDERER_PATH_BYTES: usize = 1024;
 /// rules on a few displays needs well under a tenth of it; only hundreds of
 /// rules on dozens of displays reach it, and the rest then report no change.
 const ROUTE_CHANGE_RULE_CHECKS: usize = 2_000_000;
+/// The playlist the app compiles every playable item into
+/// (`runtime_config.FALLBACK_PLAYLIST_ID`): after the default, the last
+/// stand-in for a display whose own playlist the service refused throughout.
+const ALL_MEDIA_PLAYLIST_ID: &str = "all-media";
+/// Why a display plays nothing when the service refused every entry it
+/// could have played (`Runtime::refused_scenes`), each a web page. Short:
+/// status repeats it on every such row, beside no entry (the status budgets
+/// count the entry it stands in for, not this).
+const REFUSED_WEB_PAGES: &str = "this configuration doesn't allow web wallpapers";
+/// The same when not every one of them is a web page: an item the engine
+/// wouldn't find, or one the service can't read or doesn't play.
+const REFUSED_ITEMS: &str = "no wallpaper here can start";
+/// What `next` and `random` answer when every other entry of the playlist
+/// was refused: not a fault, so `last_error` doesn't keep it.
+const REFUSED_REST: &str = "no other wallpaper here can start";
 
 fn clean_error(value: &str) -> String {
     value
@@ -628,6 +644,7 @@ struct ReloadSnapshot {
     authoritative_generation: u64,
     taboo: HashMap<EntryKey, TabooEntry>,
     taboo_order: Vec<EntryKey>,
+    refused_scenes: HashMap<String, Refusal>,
     routes: HashMap<String, DisplayRoute>,
     route_generation: u64,
     current_time: NaiveDateTime,
@@ -667,6 +684,15 @@ pub struct Runtime<D: WallpaperDriver> {
     pending_routes: HashMap<String, PendingRouteAutomatic>,
     taboo: HashMap<EntryKey, TabooEntry>,
     taboo_order: Vec<EntryKey>,
+    /// The Wallpaper Engine items the driver would not start in this
+    /// document generation, by the item an entry renders
+    /// (`Entry::rendered_scene`), with why: while web wallpapers aren't
+    /// allowed, a web page, or an item the service can't find or read
+    /// (`WallpaperDriver::motion_refusal`). Every entry of one is skipped
+    /// (owner: "skip to next, if it's in a playlist alone, then use the
+    /// default playlist in schedule"), so each is asked once. Never a taboo
+    /// and never saved; a reload forgets them.
+    refused_scenes: HashMap<String, Refusal>,
     authoritative_generation: u64,
     routes: HashMap<String, DisplayRoute>,
     route_generation: u64,
@@ -756,6 +782,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             pending_routes: HashMap::new(),
             taboo,
             taboo_order,
+            refused_scenes: HashMap::new(),
             authoritative_generation: 0,
             routes: HashMap::new(),
             route_generation: 0,
@@ -841,6 +868,9 @@ impl<D: WallpaperDriver> Runtime<D> {
         let mut errors = Vec::new();
         let mut missing_notes = Vec::new();
         let mut resumed = false;
+        // The displays whose entry the driver won't start: each moves on as
+        // an apply would (`skip_refused_mirrored`), once the loop is done.
+        let mut refused_outputs = HashSet::new();
         self.driver.begin_apply();
         for target in targets {
             let playback = if self.is_independent() {
@@ -856,16 +886,34 @@ impl<D: WallpaperDriver> Runtime<D> {
             {
                 continue;
             }
+            if let Some(refusal) = self
+                .driver
+                .motion_refusal(&target.entry, &self.config.settings)
+            {
+                self.remember_refusal(&target.playlist_id, &target.entry, refusal);
+                refused_outputs.insert(target.output.clone());
+                continue;
+            }
             let result =
                 self.driver
                     .start_motion_only(&target.entry, &target.output, &self.config.settings);
+            if result.is_ok()
+                && let Some(reason) = self.driver.motion_refused(&target.output)
+            {
+                let refusal = Refusal {
+                    web_page: false,
+                    reason,
+                };
+                self.remember_refusal(&target.playlist_id, &target.entry, refusal);
+                refused_outputs.insert(target.output.clone());
+                continue;
+            }
             let missing = result
                 .is_ok()
                 .then(|| {
                     self.driver
                         .motion_missing(&target.output)
                         .map(|missing| missing_renderer_diagnostic(&missing))
-                        .or_else(|| self.driver.motion_refused(&target.output))
                 })
                 .flatten();
             if let Some(diagnostic) = missing {
@@ -911,6 +959,14 @@ impl<D: WallpaperDriver> Runtime<D> {
         if self.is_independent() {
             self.refresh_independent_last_error();
         }
+        if !refused_outputs.is_empty() {
+            // The apply says what became of them, as any apply does.
+            let _ = if self.is_independent() {
+                self.apply_independent_selected(&refused_outputs)
+            } else {
+                self.apply_current()
+            };
+        }
     }
 
     /// Changes when a successful apply or terminal command supersedes a
@@ -945,6 +1001,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.authoritative_generation = snapshot.authoritative_generation;
         self.taboo = snapshot.taboo;
         self.taboo_order = snapshot.taboo_order;
+        self.refused_scenes = snapshot.refused_scenes;
         self.routes = snapshot.routes;
         self.route_generation = snapshot.route_generation;
         self.current_time = snapshot.current_time;
@@ -1269,12 +1326,18 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .to_string();
             let playlist_changed = wanted != self.active_playlist;
             let routing_changed = overrode != self.schedule_overrode_default;
-            if routing_changed && !playlist_changed {
+            // A playlist the service refused throughout plays its stand-in
+            // (`stand_in`): a change to one whose stand-in is what already
+            // plays changes nothing on screen.
+            let shown_changed = playlist_changed
+                && self.shown_playlist_id(&wanted) != self.shown_playlist_id(&self.active_playlist);
+            if (routing_changed || playlist_changed) && !shown_changed {
                 // Only provenance changed (for example, a schedule rule
                 // naming the already-active default). Commit the truth
                 // shown in status without restarting motion.
                 self.schedule_overrode_default = overrode;
-            } else if playlist_changed {
+                self.active_playlist = wanted;
+            } else if shown_changed {
                 schedule_transition_attempted = true;
                 let baseline = self.selection_state();
                 self.schedule_overrode_default = overrode;
@@ -1282,7 +1345,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 if playlist_changed {
                     self.active_playlist = wanted.clone();
                     candidate_available = self
-                        .reset_cursor_automatic(&self.active_playlist.clone())
+                        .reset_cursor_automatic(&self.shown_playlist_id(&wanted))
                         || self.nothing_reason(&wanted).is_some();
                 }
                 if candidate_available {
@@ -1381,8 +1444,14 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !moved {
             self.restore_selection(&baseline);
             self.last_cycle = now;
-            // Nothing to play is not a fault: there is just nothing to move to.
-            if self.mirrored_nothing_reason().is_none() {
+            // Nothing to play is not a fault: there is just nothing to move
+            // to. Nor is a playlist whose other entries were refused.
+            if self.mirrored_nothing_reason().is_none()
+                && !self
+                    .effective_playlist_ids()
+                    .iter()
+                    .any(|playlist| self.holds_refused(playlist))
+            {
                 self.last_error = "every entry in the active playlist is taboo this session".into();
             }
             return;
@@ -1505,8 +1574,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                     let candidate = self.routes[connector].clone();
                     self.routes.insert(connector.clone(), before.clone());
                     self.start_route_automatic(connector.clone(), before, candidate, "cycle", now);
-                } else if self.route_nothing_reason(connector).is_some() {
-                    // Nothing to move to on a route that plays nothing.
+                } else if self.route_nothing_reason(connector).is_some()
+                    || self.holds_refused(&self.routes[connector].active_playlist)
+                {
+                    // Nothing to move to on a route that plays nothing, or
+                    // whose other entries were refused.
                     self.routes
                         .get_mut(connector)
                         .expect("route exists")
@@ -2094,6 +2166,104 @@ impl<D: WallpaperDriver> Runtime<D> {
         })
     }
 
+    /// Whether the driver refused `entry`'s item this generation
+    /// (`refused_scenes`).
+    fn is_refused(&self, entry: &Entry) -> bool {
+        !self.refused_scenes.is_empty()
+            && entry.kind == EntryKind::Scene
+            && entry
+                .rendered_scene()
+                .is_some_and(|scene| self.refused_scenes.contains_key(scene))
+    }
+
+    /// Whether a cursor steps over `entry`: it is taboo or refused.
+    fn cant_play(&self, playlist_id: &str, entry: &Entry) -> bool {
+        self.is_taboo(playlist_id, &entry.id) || self.is_refused(entry)
+    }
+
+    /// Whether `playlist` has an entry the driver refused.
+    fn holds_refused(&self, playlist_id: &str) -> bool {
+        !self.refused_scenes.is_empty()
+            && self
+                .config
+                .playlist(playlist_id)
+                .is_some_and(|playlist| playlist.entries.iter().any(|entry| self.is_refused(entry)))
+    }
+
+    /// Whether nothing of `playlist` can play this generation because of a
+    /// refusal: every entry is refused or taboo, and one at least is
+    /// refused. A playlist whose every entry is only taboo keeps the taboo
+    /// rules (its first still, motion off).
+    fn refused_throughout(&self, playlist: &Playlist) -> bool {
+        !self.refused_scenes.is_empty()
+            && playlist
+                .entries
+                .iter()
+                .all(|entry| self.cant_play(&playlist.id, entry))
+            && playlist.entries.iter().any(|entry| self.is_refused(entry))
+    }
+
+    /// What a display on `reference` plays: that playlist, unless the driver
+    /// refused it throughout; then the default playlist, then All media,
+    /// each only if something of it can play. None when nothing can: the
+    /// display then plays nothing (`nothing_reason`). Owner: "skip to next,
+    /// if it's in a playlist alone, then use the default playlist in
+    /// schedule."
+    fn stand_in(&self, reference: &str) -> Option<&Playlist> {
+        let playlist = self.config.playlist(reference)?;
+        if !self.refused_throughout(playlist) {
+            return Some(playlist);
+        }
+        let default = self.config.playlist(&self.config.default_playlist);
+        let all_media = self
+            .config
+            .playlists
+            .iter()
+            .find(|candidate| candidate.id == ALL_MEDIA_PLAYLIST_ID);
+        [default, all_media]
+            .into_iter()
+            .flatten()
+            .find(|candidate| {
+                candidate.id != playlist.id
+                    && !candidate.entries.is_empty()
+                    && !self.refused_throughout(candidate)
+            })
+    }
+
+    /// `stand_in`'s id, or `reference`'s own when nothing stands in.
+    fn shown_playlist_id(&self, reference: &str) -> String {
+        self.stand_in(reference)
+            .or_else(|| self.config.playlist(reference))
+            .map_or_else(|| reference.to_string(), |playlist| playlist.id.clone())
+    }
+
+    /// Why a display plays nothing when every entry it could play was
+    /// refused (`stand_in` is None).
+    fn refused_nothing_reason(&self) -> &'static str {
+        if self.refused_scenes.values().all(|refusal| refusal.web_page) {
+            REFUSED_WEB_PAGES
+        } else {
+            REFUSED_ITEMS
+        }
+    }
+
+    /// Remember that the driver won't start `entry`'s item, once a
+    /// generation, and say so in the journal. True when it is new.
+    fn remember_refusal(&mut self, playlist_id: &str, entry: &Entry, refusal: Refusal) -> bool {
+        let Some(scene) = entry.rendered_scene() else {
+            return false;
+        };
+        if self.refused_scenes.contains_key(scene) {
+            return false;
+        }
+        eprintln!(
+            "wall-in-one-service: skipped entry {:?} of playlist {playlist_id:?}: {refusal}",
+            entry.id
+        );
+        self.refused_scenes.insert(scene.clone(), refusal);
+        true
+    }
+
     fn playlist_has_usable_entry(&self, playlist_id: &str) -> bool {
         self.config.playlist(playlist_id).is_some_and(|playlist| {
             playlist
@@ -2103,12 +2273,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         })
     }
 
-    /// Why `reference`'s playlist plays nothing (schema 8: no entries, and
-    /// its reason), or None when it has something to play.
+    /// Why a display on `reference`'s playlist plays nothing (schema 8: no
+    /// entries, and its reason; or every entry it could play was refused,
+    /// `stand_in`), or None when it has something to play.
     fn nothing_reason(&self, reference: &str) -> Option<&str> {
-        self.config
-            .playlist(reference)
-            .and_then(Playlist::nothing_to_play)
+        let playlist = self.config.playlist(reference)?;
+        if let Some(reason) = playlist.nothing_to_play() {
+            return Some(reason);
+        }
+        self.stand_in(&playlist.id)
+            .is_none()
+            .then(|| self.refused_nothing_reason())
     }
 
     /// Whether a command may choose `playlist_id`: something in it can play,
@@ -2292,16 +2467,20 @@ impl<D: WallpaperDriver> Runtime<D> {
         ))
     }
 
+    /// The playlist `connector` plays, and why: its pick, rule, assignment
+    /// or the default, or that one's stand-in once the service refused it
+    /// throughout (`stand_in`). The reason stays the one that chose it.
     fn route_decision(
         &self,
         connector: &str,
         manual: Option<&str>,
         at: NaiveDateTime,
     ) -> Result<(String, RouteSource, Option<String>), String> {
-        if let Some(manual) = manual {
-            return Ok((manual.to_string(), RouteSource::Manual, None));
-        }
-        self.automatic_route(connector, at)
+        let (wanted, source, rule_id) = match manual {
+            Some(manual) => (manual.to_string(), RouteSource::Manual, None),
+            None => self.automatic_route(connector, at)?,
+        };
+        Ok((self.shown_playlist_id(&wanted), source, rule_id))
     }
 
     fn new_route_cursor(
@@ -2335,7 +2514,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     playlist
                         .entries
                         .iter()
-                        .position(|entry| !self.is_taboo(playlist_id, &entry.id))
+                        .position(|entry| !self.cant_play(playlist_id, entry))
                         .unwrap_or(0)
                 })
             })
@@ -2721,6 +2900,82 @@ impl<D: WallpaperDriver> Runtime<D> {
             let selected: HashSet<String> = outputs.iter().cloned().collect();
             return self.apply_independent_in_batch(&selected);
         }
+        self.skip_refused_mirrored();
+        let mut result = self.apply_mirrored_targets();
+        // An item whose type changed between the driver's answer and its
+        // start is refused there instead, its still already up: it is
+        // skipped the same way. Each round remembers one item more.
+        while self.learn_refusals_after_apply() {
+            self.skip_refused_mirrored();
+            result = self.apply_mirrored_targets();
+        }
+        result
+    }
+
+    /// Before anything is shown, move every mirrored playlist in force off
+    /// the entries the driver would not start now (`motion_refusal`): to its
+    /// next entry, then to its stand-in (`stand_in`), or to nothing. A
+    /// taboo entry shows its still with motion off, so it isn't asked.
+    fn skip_refused_mirrored(&mut self) {
+        loop {
+            self.step_over_refused_mirrored();
+            let mut learned = false;
+            for target in self.current_targets(&self.target_outputs) {
+                if self.is_taboo(&target.playlist_id, &target.entry.id) {
+                    continue;
+                }
+                let settings = self.effective_motion_settings(&target.output, self.playback_state);
+                if let Some(refusal) = self.driver.motion_refusal(&target.entry, &settings) {
+                    learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
+                }
+            }
+            if !learned {
+                return;
+            }
+        }
+    }
+
+    /// Move each mirrored playlist in force whose entry is refused to its
+    /// next one that can play. One that has none gives way to its stand-in,
+    /// which is then looked at too; each playlist moves once.
+    fn step_over_refused_mirrored(&mut self) {
+        let mut stepped = HashSet::new();
+        loop {
+            let refused: Vec<String> = self
+                .effective_playlist_ids()
+                .into_iter()
+                .filter(|playlist| {
+                    self.current_entry_for(playlist)
+                        .is_some_and(|entry| self.is_refused(entry))
+                })
+                .filter(|playlist| stepped.insert(playlist.clone()))
+                .collect();
+            if refused.is_empty() {
+                return;
+            }
+            for playlist in refused {
+                self.move_cursor_forward(&playlist);
+            }
+        }
+    }
+
+    /// Remember what the driver refused at the start itself (`motion_refused`)
+    /// for the targets just applied. True when something new was refused.
+    fn learn_refusals_after_apply(&mut self) -> bool {
+        let mut learned = false;
+        for target in self.current_targets(&self.target_outputs) {
+            if let Some(reason) = self.driver.motion_refused(&target.output) {
+                let refusal = Refusal {
+                    web_page: false,
+                    reason,
+                };
+                learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
+            }
+        }
+        learned
+    }
+
+    fn apply_mirrored_targets(&mut self) -> Result<String, String> {
         let targets = self.current_targets(&self.target_outputs);
         let outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
         // Every renderer of ours on an output without a target stops here,
@@ -2756,15 +3011,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             match self.driver.apply(&target.entry, &target.output, &settings) {
                 Ok(()) => {
-                    // A web page while web wallpapers are off: its still is
-                    // up, the engine was not started, and this says why.
-                    if let Some(refusal) = self.driver.motion_refused(&target.output) {
-                        static_fallbacks.push(if target.output.is_empty() {
-                            refusal
-                        } else {
-                            format!("{}: {refusal}", target.output)
-                        });
-                    }
+                    // A refusal at the start itself is skipped by the caller
+                    // (`learn_refusals_after_apply`), never said as a fault.
                     // The renderer program is not there: the still is up and
                     // the entry is fine, so this is said like a taboo's still,
                     // never recorded against the entry.
@@ -2918,6 +3166,88 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn apply_independent_in_batch(&mut self, selected: &HashSet<String>) -> Result<String, String> {
+        self.skip_refused_routes(selected);
+        let mut result = self.apply_routes(selected);
+        // As in mirrored mode (`apply_current_in_batch`).
+        while self.learn_route_refusals_after_apply(selected) {
+            self.skip_refused_routes(selected);
+            result = self.apply_routes(selected);
+        }
+        result
+    }
+
+    /// `skip_refused_mirrored` for the `selected` independent routes: each
+    /// moves to its next entry that can play, then to its stand-in through
+    /// its decision (`route_decision`), or to nothing.
+    fn skip_refused_routes(&mut self, selected: &HashSet<String>) {
+        let mut connectors: Vec<String> = selected.iter().cloned().collect();
+        connectors.sort();
+        loop {
+            for connector in &connectors {
+                self.step_route_over_refused(connector);
+            }
+            let mut learned = false;
+            for target in self.current_targets(&connectors) {
+                let Some(playback) = self
+                    .routes
+                    .get(&target.output)
+                    .map(|route| route.playback_state)
+                else {
+                    continue;
+                };
+                if self.is_taboo(&target.playlist_id, &target.entry.id) {
+                    continue;
+                }
+                let settings = self.effective_motion_settings(&target.output, playback);
+                if let Some(refusal) = self.driver.motion_refusal(&target.entry, &settings) {
+                    learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
+                }
+            }
+            if !learned {
+                return;
+            }
+        }
+    }
+
+    /// Move `connector`'s route off a refused entry: to the next of its
+    /// playlist that can play, else to its stand-in, at most the default and
+    /// All media after its own.
+    fn step_route_over_refused(&mut self, connector: &str) {
+        for _ in 0..3 {
+            if !self
+                .route_current_entry(connector)
+                .is_some_and(|entry| self.is_refused(entry))
+            {
+                return;
+            }
+            if self.move_route_forward(connector) {
+                return;
+            }
+            // Nothing of its playlist can play: its decision now names the
+            // stand-in, or the same playlist when nothing can stand in.
+            if !matches!(self.refresh_route_decision(connector, true), Ok(true)) {
+                return;
+            }
+        }
+    }
+
+    /// `learn_refusals_after_apply` for the `selected` routes.
+    fn learn_route_refusals_after_apply(&mut self, selected: &HashSet<String>) -> bool {
+        let connectors: Vec<String> = selected.iter().cloned().collect();
+        let mut learned = false;
+        for target in self.current_targets(&connectors) {
+            if let Some(reason) = self.driver.motion_refused(&target.output) {
+                let refusal = Refusal {
+                    web_page: false,
+                    reason,
+                };
+                learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
+            }
+        }
+        learned
+    }
+
+    fn apply_routes(&mut self, selected: &HashSet<String>) -> Result<String, String> {
         let targets = self.current_targets(&self.target_outputs);
         let plays_nothing = self
             .target_outputs
@@ -3042,9 +3372,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .insert(target.output.clone(), missing_renderer_diagnostic(&missing));
                 continue;
             }
-            if let Some(refusal) = self.driver.motion_refused(&target.output) {
-                // A web page while web wallpapers are off (see above).
-                static_fallbacks.insert(target.output.clone(), refusal);
+            if self.driver.motion_refused(&target.output).is_some() {
+                // Skipped by the caller (`learn_route_refusals_after_apply`).
                 continue;
             }
             if playback == PlaybackState::Paused
@@ -3100,6 +3429,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 let Some(playlist) = self.config.playlist(&route.active_playlist) else {
                     continue;
                 };
+                // A route that plays nothing because every entry it could
+                // play was refused (a stand-in is installed by its decision,
+                // `route_decision`).
+                if self.stand_in(&playlist.id).is_none() {
+                    continue;
+                }
                 let Some(index) = route.cursor.order.get(route.cursor.position) else {
                     continue;
                 };
@@ -3112,7 +3447,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         } else if self.config.displays.is_empty() {
-            if let Some(playlist) = self.config.playlist(&self.active_playlist)
+            if let Some(playlist) = self.stand_in(&self.active_playlist)
                 && let Some(entry) = self.current_entry_for(&playlist.id).cloned()
             {
                 targets.push(Target {
@@ -3135,7 +3470,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             display.playlist.as_str()
                         })
                 };
-                if let Some(playlist) = self.config.playlist(reference)
+                if let Some(playlist) = self.stand_in(reference)
                     && let Some(entry) = self.current_entry_for(&playlist.id).cloned()
                 {
                     targets.push(Target {
@@ -3283,15 +3618,18 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.cancel_route_retries(&connectors);
                 let mut changed = HashSet::new();
                 let now = Instant::now();
+                // What the displays play: the pick, or its stand-in once the
+                // service refused it throughout (`stand_in`).
+                let shown = self.shown_playlist_id(&playlist_id);
                 for connector in &connectors {
                     let already_active = self.routes.get(connector).is_some_and(|route| {
                         route.manual_playlist.as_deref() == Some(playlist_id.as_str())
-                            && route.active_playlist == playlist_id
+                            && route.active_playlist == shown
                             && route.playback_state == PlaybackState::Playing
                             && !route.renderer_failed
                     }) && self
                         .route_current_entry(connector)
-                        .is_some_and(|entry| !self.is_taboo(&playlist_id, &entry.id));
+                        .is_some_and(|entry| !self.cant_play(&shown, entry));
                     if already_active {
                         self.routes
                             .get_mut(connector)
@@ -3303,11 +3641,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .routes
                         .get(connector)
                         .ok_or_else(|| format!("display route {connector:?} is missing"))?
-                        .shuffle_enabled(self.playlist_shuffle_default(&playlist_id));
-                    let cursor = self.new_route_cursor(&playlist_id, None, shuffle, true)?;
+                        .shuffle_enabled(self.playlist_shuffle_default(&shown));
+                    let cursor = self.new_route_cursor(&shown, None, shuffle, true)?;
                     let route = self.routes.get_mut(connector).expect("route was checked");
                     route.manual_playlist = Some(playlist_id.clone());
-                    route.active_playlist = playlist_id.clone();
+                    route.active_playlist = shown.clone();
                     route.schedule_rule_id = None;
                     route.source = RouteSource::Manual;
                     route.cursor = cursor;
@@ -3347,7 +3685,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .clone();
                     let current_is_usable = self
                         .route_current_entry(connector)
-                        .is_some_and(|entry| !self.is_taboo(&route.active_playlist, &entry.id));
+                        .is_some_and(|entry| !self.cant_play(&route.active_playlist, entry));
                     let unchanged_target = route.active_playlist == wanted && current_is_usable;
                     let unchanged_provenance = route.manual_playlist.is_none()
                         && route.active_playlist == wanted
@@ -3529,8 +3867,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                     if let Some(reason) = self.routes_nothing_reason(&connectors) {
                         return Err(format!("nothing to play: {reason}"));
                     }
+                    let refused = connectors.iter().any(|connector| {
+                        self.routes
+                            .get(connector)
+                            .is_some_and(|route| self.holds_refused(&route.active_playlist))
+                    });
                     return Err(if request.verb == "previous" {
                         "no previous playback history"
+                    } else if refused {
+                        REFUSED_REST
                     } else {
                         "selected display playlists are empty or taboo"
                     }
@@ -3706,14 +4051,11 @@ impl<D: WallpaperDriver> Runtime<D> {
         let Some(playlist) = self.config.playlist(&playlist_id) else {
             return false;
         };
-        let entry_ids: Vec<String> = playlist
+        let entry_count = playlist.entries.len();
+        let eligible: Vec<bool> = playlist
             .entries
             .iter()
-            .map(|entry| entry.id.clone())
-            .collect();
-        let eligible: Vec<bool> = entry_ids
-            .iter()
-            .map(|entry| !self.is_taboo(&playlist_id, entry))
+            .map(|entry| !self.cant_play(&playlist_id, entry))
             .collect();
         let shuffle = self.route_shuffle(route);
         let route = self.routes.get_mut(connector).expect("route exists");
@@ -3743,9 +4085,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 cursor.forward.clear();
                 return cursor.order[position] != current;
             }
-            let mut next: Vec<usize> = (0..entry_ids.len())
-                .filter(|index| eligible[*index])
-                .collect();
+            let mut next: Vec<usize> = (0..entry_count).filter(|index| eligible[*index]).collect();
             if next.is_empty() {
                 return false;
             }
@@ -3788,7 +4128,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let eligible: Vec<bool> = playlist
             .entries
             .iter()
-            .map(|entry| !self.is_taboo(&playlist_id, &entry.id))
+            .map(|entry| !self.cant_play(&playlist_id, entry))
             .collect();
         let route = self.routes.get_mut(connector).expect("route exists");
         let cursor = &mut route.cursor;
@@ -3827,7 +4167,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
+            .filter_map(|(index, entry)| (!self.cant_play(&playlist_id, entry)).then_some(index))
             .collect();
         let shuffle = self.route_shuffle(route);
         let route = self.routes.get_mut(connector).expect("route exists");
@@ -3902,7 +4242,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.manual_playlist = Some(playlist_id.clone());
         self.active_playlist = playlist_id.clone();
         self.schedule_overrode_default = false;
-        if !self.reset_cursor_automatic(&playlist_id) && self.nothing_reason(&playlist_id).is_none()
+        if !self.reset_cursor_automatic(&self.shown_playlist_id(&playlist_id))
+            && self.nothing_reason(&playlist_id).is_none()
         {
             self.manual_playlist = previous_manual;
             self.restore_selection(&baseline);
@@ -3967,7 +4308,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.schedule_overrode_default = overrode;
         self.active_playlist.clone_from(&playlist_id);
         for effective_playlist in &effective {
-            if !self.reset_cursor_automatic(effective_playlist)
+            if !self.reset_cursor_automatic(&self.shown_playlist_id(effective_playlist))
                 && self.nothing_reason(effective_playlist).is_none()
             {
                 self.manual_playlist = previous_manual;
@@ -4192,6 +4533,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                 // Not a fault to keep in `last_error`: there is nothing here.
                 return Err(format!("nothing to play: {reason}"));
             }
+            if delta >= 0
+                && self
+                    .effective_playlist_ids()
+                    .iter()
+                    .any(|playlist| self.holds_refused(playlist))
+            {
+                // Nor is a playlist whose other entries were refused.
+                return Err(REFUSED_REST.into());
+            }
             return self.fail(if delta < 0 {
                 "no previous playback history"
             } else {
@@ -4213,6 +4563,13 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !moved {
             if let Some(reason) = self.mirrored_nothing_reason() {
                 return Err(format!("nothing to play: {reason}"));
+            }
+            if self
+                .effective_playlist_ids()
+                .iter()
+                .any(|playlist| self.holds_refused(playlist))
+            {
+                return Err(REFUSED_REST.into());
             }
             return self.fail("active display playlists are empty or taboo");
         }
@@ -4326,6 +4683,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             authoritative_generation: self.authoritative_generation,
             taboo: self.taboo.clone(),
             taboo_order: self.taboo_order.clone(),
+            // Taken, not copied: the candidate is a new generation, whose
+            // items are asked again. A rollback puts these back.
+            refused_scenes: std::mem::take(&mut self.refused_scenes),
             routes: self.routes.clone(),
             route_generation: self.route_generation,
             current_time: self.current_time,
@@ -4670,7 +5030,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
+            .filter_map(|(index, entry)| (!self.cant_play(&playlist_id, entry)).then_some(index))
             .collect();
         let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
             return false;
@@ -4693,19 +5053,14 @@ impl<D: WallpaperDriver> Runtime<D> {
             return false;
         };
         let playlist_id = playlist.id.clone();
-        let entry_ids: Vec<String> = playlist
+        let entry_count = playlist.entries.len();
+        let usable: Vec<bool> = playlist
             .entries
             .iter()
-            .map(|entry| entry.id.clone())
+            .map(|entry| !self.cant_play(&playlist_id, entry))
             .collect();
         let shuffle_enabled = self.mirrored_shuffle(&playlist_id);
-        let taboo = &self.taboo;
-        let eligible = |index: usize| {
-            !taboo.contains_key(&EntryKey {
-                playlist_id: playlist_id.clone(),
-                entry_id: entry_ids[index].clone(),
-            })
-        };
+        let eligible = |index: usize| usable.get(index).copied().unwrap_or(false);
         let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
             return false;
         };
@@ -4737,9 +5092,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 return cursor.order[position] != current;
             }
 
-            let mut next: Vec<usize> = (0..entry_ids.len())
-                .filter(|index| eligible(*index))
-                .collect();
+            let mut next: Vec<usize> = (0..entry_count).filter(|index| eligible(*index)).collect();
             if next.is_empty() {
                 return false;
             }
@@ -4779,7 +5132,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let eligible: Vec<bool> = playlist
             .entries
             .iter()
-            .map(|entry| !self.is_taboo(&playlist_id, &entry.id))
+            .map(|entry| !self.cant_play(&playlist_id, entry))
             .collect();
         let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
             return false;
@@ -4816,7 +5169,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| (!self.is_taboo(&playlist_id, &entry.id)).then_some(index))
+            .filter_map(|(index, entry)| (!self.cant_play(&playlist_id, entry)).then_some(index))
             .collect();
         let shuffle = self.mirrored_shuffle(&playlist_id);
         let Some(cursor) = self.cursors.get_mut(&playlist_id) else {
@@ -4884,11 +5237,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                 .map(|route| route.active_playlist.clone())
                 .collect();
         }
+        // Each as its displays play it: a stand-in for one the service
+        // refused throughout (`stand_in`).
         if self.config.displays.is_empty()
             || self.manual_playlist.is_some()
             || self.schedule_overrode_default
         {
-            return vec![self.active_playlist.clone()];
+            return vec![self.shown_playlist_id(&self.active_playlist)];
         }
         let mut seen = HashSet::new();
         self.target_outputs
@@ -4903,8 +5258,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                         display.playlist.as_str()
                     });
                 let playlist = self.config.playlist(reference)?;
-                if seen.insert(playlist.id.clone()) {
-                    Some(playlist.id.clone())
+                let shown = self.shown_playlist_id(&playlist.id);
+                if seen.insert(shown.clone()) {
+                    Some(shown)
                 } else {
                     None
                 }
@@ -5116,7 +5472,9 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
-        let active_playlist = self.playlist()?;
+        // What plays: the playlist in force, or its stand-in (`stand_in`).
+        let in_force = self.playlist()?;
+        let active_playlist = self.stand_in(&in_force.id).unwrap_or(in_force);
         let effective_ids = self.effective_playlist_ids();
         let summary_playlist = if self.manual_playlist.is_some()
             || self.schedule_overrode_default
@@ -5128,7 +5486,9 @@ impl<D: WallpaperDriver> Runtime<D> {
         } else {
             None
         };
-        let entry = summary_playlist.and_then(|playlist| self.current_entry_for(&playlist.id));
+        let entry = summary_playlist
+            .filter(|playlist| self.nothing_reason(&playlist.id).is_none())
+            .and_then(|playlist| self.current_entry_for(&playlist.id));
         let kind = entry.map(|entry| entry_kind(entry.kind));
         let active_ids: HashSet<_> = effective_ids.into_iter().collect();
         let taboo_total = self.taboo.len();
@@ -5294,14 +5654,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                 } else {
                     assigned_reference
                 };
-                let effective = self
+                let decided = self
                     .config
                     .playlist(reference)
                     .ok_or_else(|| format!("display {output} names a missing playlist"))?;
-                let entry = self.current_entry_for(&effective.id);
-                let nothing = entry
+                let effective = self.stand_in(&decided.id).unwrap_or(decided);
+                let nothing = self.nothing_reason(&effective.id);
+                let entry = nothing
                     .is_none()
-                    .then(|| effective.nothing_to_play())
+                    .then(|| self.current_entry_for(&effective.id))
                     .flatten();
                 if entry.is_some() || nothing.is_some() {
                     let display_entry_taboo =

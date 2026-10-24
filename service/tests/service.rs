@@ -11409,9 +11409,10 @@ fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
     let document = stepped_down(WITH_STILL_ON);
     let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
     let applied = runtime.apply_current();
-    assert!(
-        applied.is_ok(),
-        "the still stays, so the apply succeeds: {applied:?}"
+    assert_eq!(
+        applied.as_deref(),
+        Ok("playing entry-2"),
+        "the page is skipped to the still beside it"
     );
     thread::sleep(Duration::from_millis(300));
     assert!(
@@ -11419,28 +11420,29 @@ fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
         "linux-wallpaperengine was started for a web page"
     );
     let snapshot = status(&mut runtime, noon());
-    let said = snapshot["last_error"].as_str().unwrap();
-    assert!(
-        said.contains("doesn't allow web wallpapers") && said.contains("is a web page"),
-        "{said}"
-    );
+    assert_eq!(snapshot["entry_id"], "entry-2");
+    assert_eq!(snapshot["last_error"], "", "a skip is not a fault");
     assert_eq!(snapshot["motion_active"], false);
     assert!(
         snapshot["taboo_entries"].as_array().unwrap().is_empty(),
         "never a taboo"
     );
-    // Play asks again, and the type is read again: still a web page.
     assert!(runtime_command(&mut runtime, noon(), "play", None).ok);
     thread::sleep(Duration::from_millis(300));
     assert!(!arguments.exists());
-    // The type is read at each start: once it is a scene again, it starts.
+    // Remembered for this document: once it is a scene again, `next` still steps over
+    // it until a reload asks again.
     let project = home.join(".local/share/Steam/steamapps/workshop/content/431960/2777242023");
     fs::write(
         project.join("project.json"),
         r#"{"type":"scene","file":"scene.json"}"#,
     )
     .unwrap();
-    assert!(runtime_command(&mut runtime, noon(), "play", None).ok);
+    assert!(!runtime_command(&mut runtime, noon(), "next", None).ok);
+    assert!(!arguments.exists());
+    assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
+    assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
+    assert_eq!(status(&mut runtime, noon())["entry_id"], "entry-1");
     assert!(engine_started(&arguments), "a scene starts");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
@@ -11453,11 +11455,12 @@ fn an_item_whose_type_cant_be_read_is_refused_while_web_is_off() {
     let home = workshop_home_with("p2-unclassified-home", &[]);
     let document = stepped_down(WITH_STILL_ON);
     let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
-    assert!(runtime.apply_current().is_ok());
+    assert_eq!(runtime.apply_current().as_deref(), Ok("playing entry-2"));
     thread::sleep(Duration::from_millis(300));
     assert!(!arguments.exists());
-    let said = status(&mut runtime, noon())["last_error"].to_string();
-    assert!(said.contains("wasn't found where linux-wallpaperengine looks"), "{said}");
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(snapshot["entry_id"], "entry-2");
+    assert_eq!(snapshot["last_error"], "");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();
@@ -11477,7 +11480,7 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
     assert!(runtime.apply_current().is_ok());
     assert!(engine_started(&arguments), "allowed, the page plays");
     // The same document without the permission (the entries unchanged): every display
-    // starts again, and the page is refused this time.
+    // starts again, and the page is skipped this time.
     let refused = fs::read_to_string(&config_path)
         .unwrap()
         .replace("allow_web_wallpapers = true\n", "");
@@ -11489,12 +11492,8 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
     assert!(!arguments.exists(), "the page started again");
     let snapshot = status(&mut runtime, noon());
     assert_eq!(snapshot["motion_active"], false);
-    assert!(
-        snapshot["last_error"]
-            .as_str()
-            .unwrap()
-            .contains("is a web page")
-    );
+    assert_eq!(snapshot["entry_id"], "entry-2");
+    assert_eq!(snapshot["last_error"], "");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();
@@ -11524,14 +11523,10 @@ fn a_preset_of_a_web_page_is_refused_by_its_base_while_web_is_off() {
             "scene_id = \"3000000001\"\nscene_base = \"2777242023\"",
         );
     let (mut runtime, arguments, _config) = p2_runtime(&root, &document, &home);
-    assert!(runtime.apply_current().is_ok());
+    assert_eq!(runtime.apply_current().as_deref(), Ok("playing entry-2"));
     thread::sleep(Duration::from_millis(300));
     assert!(!arguments.exists(), "a preset renders its base, a web page");
-    let said = status(&mut runtime, noon())["last_error"].to_string();
-    assert!(
-        said.contains("Workshop item 2777242023 is a web page"),
-        "{said}"
-    );
+    assert_eq!(status(&mut runtime, noon())["entry_id"], "entry-2");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();

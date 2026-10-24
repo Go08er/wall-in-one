@@ -442,9 +442,7 @@ def refused_from_status(
     return tuple(rows), omitted if type(omitted) is int and omitted > 0 else 0
 
 
-def refused_paths(
-    refused: Iterable[RefusedTruth], items: Iterable[MediaItem]
-) -> dict[Path, str]:
+def refused_paths(refused: Iterable[RefusedTruth], items: Iterable[MediaItem]) -> dict[Path, str]:
     """The library items the service refused, by path, with its reason.
 
     A Wallpaper Engine item is refused by the item its entries render: a

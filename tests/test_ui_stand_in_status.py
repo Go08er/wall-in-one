@@ -37,7 +37,7 @@ from wall_in_one.ui.schedules_page import SchedulesPage  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "service/tests/fixtures/stand-in"
 CHOICES = (SimpleNamespace(id="scenes", name="scenes"), SimpleNamespace(id="pages", name="pages"))
-STAND_IN = "“pages” can’t play here, so “scenes” is playing"
+STAND_IN = "\u201cpages\u201d can\u2019t play here, so \u201cscenes\u201d is playing"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -144,21 +144,21 @@ def test_the_classic_tile_marks_an_item_the_service_refused() -> None:
     from wall_in_one.ui.grid import WallpaperTile
 
     tile = WallpaperTile(_scene("2910000004"))
-    assert "Can’t play here" not in _labels(tile)
+    assert "Can\u2019t play here" not in _labels(tile)
     tile.set_refused(REASON)
-    assert "Can’t play here" in _labels(tile)
+    assert "Can\u2019t play here" in _labels(tile)
     assert f"The wallpaper service skips it: {REASON}" in _tooltips(tile)
     tile.set_refused(None)
-    assert "Can’t play here" not in _labels(tile), "the service no longer says so"
+    assert "Can\u2019t play here" not in _labels(tile), "the service no longer says so"
     # Beside a mark that already says it never plays here, not said twice.
     web = WallpaperTile(_scene("2777242023", "web"), allow_web=False)
     web.set_refused("this configuration doesn't allow web wallpapers")
-    assert "Can’t play" in _labels(web) and "Can’t play here" not in _labels(web)
+    assert "Can\u2019t play" in _labels(web) and "Can\u2019t play here" not in _labels(web)
     # Nor beside a playback warning.
     borked = WallpaperTile(_scene("2910000004"))
     borked.set_borked("the renderer crashed")
     borked.set_refused(REASON)
-    assert "Can’t play here" not in _labels(borked)
+    assert "Can\u2019t play here" not in _labels(borked)
 
 
 def test_the_next_card_marks_an_item_the_service_refused() -> None:
@@ -171,7 +171,7 @@ def test_the_next_card_marks_an_item_the_service_refused() -> None:
     )
     assert view.refused_here == REASON and not view.problem
     card = WallpaperCard(view)
-    assert "Can’t play here" in _labels(card)
+    assert "Can\u2019t play here" in _labels(card)
     assert f"The wallpaper service skips it: {REASON}" in _tooltips(card)
     control = wallpaper_view(item, favourite=False, pairing=None, health=pairings.Health())
-    assert "Can’t play here" not in _labels(WallpaperCard(control))
+    assert "Can\u2019t play here" not in _labels(WallpaperCard(control))

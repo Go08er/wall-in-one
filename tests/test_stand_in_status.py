@@ -40,7 +40,7 @@ def _view(name: str) -> RuntimeStatusModel:
 def test_the_next_status_line_says_the_pick_cant_play() -> None:
     # r13b S1: it said "1 display · playing scenes", the stand-in, for a pick of `pages`.
     said = status_line.describe(_view("pick-refused").view)
-    assert said == "1 display · playing scenes · “pages” can’t play here", said
+    assert said == "1 display · playing scenes · \u201cpages\u201d can\u2019t play here", said
 
 
 def test_control_the_next_status_line_for_a_pick_that_plays() -> None:
@@ -70,7 +70,7 @@ def test_runtime_truth_reads_what_a_stand_in_plays_for() -> None:
 
 
 def test_the_next_interfaces_reasons_say_the_stand_in() -> None:
-    stand_in = "“pages” can’t play here, so “scenes” is playing"
+    stand_in = "\u201cpages\u201d can\u2019t play here, so \u201cscenes\u201d is playing"
     assert reason_text(Reason("pick", "scenes", stand_in_for="pages")) == (
         f"{stand_in} · your pick"
     )
@@ -78,11 +78,11 @@ def test_the_next_interfaces_reasons_say_the_stand_in() -> None:
         f"{stand_in} · from schedule until 18:00"
     )
     assert reason_text(Reason("display", "scenes", stand_in_for="pages")) == (
-        f"{stand_in} · this display’s playlist"
+        f"{stand_in} · this display\u2019s playlist"
     )
     # A pick of one wallpaper has no name to quote.
     assert reason_text(Reason("pick", "scenes", pick_stood_in=True)) == (
-        "Your pick can’t play here, so “scenes” is playing"
+        "Your pick can\u2019t play here, so \u201cscenes\u201d is playing"
     )
     # Controls: as before.
     assert reason_text(Reason("pick", "scenes")) == "scenes · your pick"

@@ -361,6 +361,18 @@ mod tests {
     }
 
     #[test]
+    fn control_nothing_is_said_for_a_scene_or_a_video() {
+        let home = home("worded-control");
+        item(&home, 0, "50", r#"{"type":"scene","file":"scene.json"}"#);
+        item(&home, 0, "51", r#"{"type":"video","file":"a.mp4"}"#);
+        for id in ["50", "51"] {
+            let said = refusal_without_web(Some(&home), id).map(|refusal| refusal.to_string());
+            assert_eq!(said, None, "{id}");
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn every_place_the_engine_looks_must_agree() {
         let home = home("places");
         item(&home, 0, "20", r#"{"type":"scene"}"#);

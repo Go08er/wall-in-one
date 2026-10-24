@@ -12,7 +12,7 @@ a range is one save and not one renderer restart per step.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Final
 
 import gi
@@ -35,29 +35,61 @@ def _digits(step: float) -> int:
     return min(6, max(0, math.ceil(-math.log10(step) - 1e-9)))
 
 
+#: Every settle timer that is waiting, from any pane (a pane that built again
+#: has dropped its own `Settling`, and a close has no pane to ask): token →
+#: (the wallpaper it is for, the row's key, its cancel, its flush).
+_PENDING: dict[object, tuple[Hashable, str, Callable[[], None], Callable[[], None]]] = {}
+
+
+def cancel_pending(owner: Hashable, key: str | None = None) -> None:
+    """Drop the waiting numbers of ``owner`` (one row's, with ``key``), whichever pane made them.
+
+    A reset is the last word for its wallpaper: a number nudged before it must
+    not land after it, even one a previous build handed on to an idle. Another
+    wallpaper's numbers stay.
+    """
+    for token, (found, row, cancel, _flush) in tuple(_PENDING.items()):
+        if found == owner and (key is None or row == key):
+            _PENDING.pop(token, None)
+            cancel()
+
+
+def flush_all() -> None:
+    """Hand on every waiting number now, each to the wallpaper it was entered for.
+
+    For a window that is closing: the process may end before a timer fires.
+    The callbacks are the timers' own, so the write takes the same path (and
+    lock) as one that waited.
+    """
+    for token, (_owner, _row, _cancel, flush) in tuple(_PENDING.items()):
+        _PENDING.pop(token, None)
+        flush()
+
+
 class Settling:
-    """The pending settle timers of one pane's rows.
+    """The pending settle timers of one pane's rows, for one wallpaper (``owner``).
 
     A pane makes one per build. `cancel` is for a reset of its own ("Use
-    defaults" must not be written over by a number nudged a moment ago).
+    defaults" must not be written over by a number nudged a moment ago); it
+    reaches numbers an earlier build handed on too (`cancel_pending`).
     `flush` is for a pane that builds again: every number still waiting is
     handed on now, to the wallpaper and dial it was entered for (the row's
     callback is bound to those, not to what the pane shows later), so a save
     that rebuilds the pane never loses the number nudged beside it.
     """
 
-    def __init__(self) -> None:
-        self._rows: list[tuple[Callable[[], None], Callable[[], None]]] = []
+    def __init__(self, owner: Hashable = None) -> None:
+        self.owner = owner
+        self._rows: list[Callable[[], None]] = []
 
-    def add(self, cancel: Callable[[], None], flush: Callable[[], None]) -> None:
-        self._rows.append((cancel, flush))
+    def add(self, flush: Callable[[], None]) -> None:
+        self._rows.append(flush)
 
     def cancel(self) -> None:
-        for cancel, _flush in self._rows:
-            cancel()
+        cancel_pending(self.owner)
 
     def flush(self) -> None:
-        for _cancel, flush in self._rows:
+        for flush in self._rows:
             flush()
 
     def flush_soon(self) -> None:
@@ -71,7 +103,7 @@ class Settling:
 
 
 def _settled(
-    callback: Callable[[], None], settling: Settling | None
+    callback: Callable[[], None], settling: Settling | None, key: str
 ) -> tuple[Callable[[], None], Callable[[], None]]:
     """``callback``, run once the calls to it have stopped for `SETTLE_MS`; and its cancel.
 
@@ -82,8 +114,11 @@ def _settled(
     twice or recurse.
     """
     pending: list[int] = []
+    token = object()
+    owner = settling.owner if settling is not None else None
 
     def cancel() -> None:
+        _PENDING.pop(token, None)
         while pending:
             GLib.source_remove(pending.pop())
 
@@ -94,6 +129,7 @@ def _settled(
 
     def fire() -> bool:
         pending.clear()
+        _PENDING.pop(token, None)
         callback()
         return GLib.SOURCE_REMOVE
 
@@ -101,9 +137,10 @@ def _settled(
         if pending:
             GLib.source_remove(pending.pop())
         pending.append(GLib.timeout_add(SETTLE_MS, fire))
+        _PENDING[token] = (owner, key, cancel, flush)
 
     if settling is not None:
-        settling.add(cancel, flush)
+        settling.add(flush)
     return call, cancel
 
 
@@ -206,6 +243,8 @@ def own_row(
     def back() -> None:
         for cancel in cancel_settling:
             cancel()
+        if settling is not None:  # and one an earlier build of the pane handed on
+            cancel_pending(settling.owner, row.get_name())
         on_change(None)
 
     reset = _reset_button(view.own, back, dial.label.lower())
@@ -219,7 +258,7 @@ def own_row(
 
     handler = hand_on
     if dial.kind in ("int", "float"):
-        handler, cancel = _settled(hand_on, settling)
+        handler, cancel = _settled(hand_on, settling, row.get_name())
         cancel_settling.append(cancel)
     row.connect(setting_signal(row), lambda *_arguments: handler())
     row.set_sensitive(view.available and not locked)
@@ -258,6 +297,8 @@ def property_row(
     def back() -> None:
         for cancel in cancel_settling:
             cancel()
+        if settling is not None:
+            cancel_pending(settling.owner, f"property:{setting.name}")
         on_change(None)
 
     reset = _reset_button(view.own, back, setting.label)
@@ -286,7 +327,9 @@ def property_row(
             digits=digits,
         )
         settled, cancel = _settled(
-            lambda: on_change(repr(round(spin.get_value(), max(digits, 2)))), settling
+            lambda: on_change(repr(round(spin.get_value(), max(digits, 2)))),
+            settling,
+            f"property:{setting.name}",
         )
         cancel_settling.append(cancel)
         spin.connect("notify::value", lambda *_arguments: settled())

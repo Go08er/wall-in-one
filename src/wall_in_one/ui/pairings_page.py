@@ -1042,7 +1042,7 @@ class PairingsPage(Gtk.Box):
         (docs/renderer-settings.md).
         """
         self._settling.flush_soon()  # a number still waiting is saved for its own wallpaper
-        settling = self._settling = dial_rows.Settling()
+        settling = self._settling = dial_rows.Settling(pairings.Identity.of(item).key)
         shown = dial_view.wallpaper_dials(item, bundle.renderer, self._app.settings)
         if not shown.renderer:
             return None
@@ -1075,6 +1075,8 @@ class PairingsPage(Gtk.Box):
 
         def set_dial(key: str) -> Callable[[DialValue | None], None]:
             def change(value: DialValue | None) -> None:
+                if self._gone(item):
+                    return
                 self._store_renderer(
                     item, lambda store, current: store.set_dial(current, renderer, key, value)
                 )
@@ -1083,6 +1085,8 @@ class PairingsPage(Gtk.Box):
 
         def set_property(name: str) -> Callable[[str | None], None]:
             def change(value: str | None) -> None:
+                if self._gone(item):
+                    return
                 self._store_renderer(
                     item, lambda store, current: store.set_property(current, name, value)
                 )
@@ -1107,6 +1111,11 @@ class PairingsPage(Gtk.Box):
                 properties.add(row)
             box.append(properties)
         return box
+
+    def _gone(self, item: MediaItem) -> bool:
+        """Whether ``item`` has left the library: its waiting number is dropped, unreported."""
+        current = self._app.session.library.find(item.path)
+        return current is None or pairings.Identity.of(current) != pairings.Identity.of(item)
 
     def _store_renderer(
         self,

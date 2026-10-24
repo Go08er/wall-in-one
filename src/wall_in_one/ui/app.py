@@ -65,7 +65,7 @@ from wall_in_one.session import (
     removal_lock_refusal,
 )
 from wall_in_one.theme import css, noctalia, source
-from wall_in_one.ui import monitors
+from wall_in_one.ui import dial_rows, monitors
 from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.real_schedule import ColorsForgotten
@@ -2128,6 +2128,11 @@ class Application(Adw.Application):
         # in-memory recovery defaults here used to overwrite a malformed file,
         # and even a valid future document lost unknown keys merely because an
         # older app was opened and closed without an edit.
+        # A number nudged under 450 ms ago is handed on now, to the wallpaper it
+        # was entered for, through the same queued write the timer would use;
+        # the accepted write keeps the process resident until it is durable.
+        # Not a `notify::root` handler: that runs during teardown.
+        dial_rows.flush_all()
         # The stored reference is typed as WindowServices, which says nothing
         # about GTK, so compare identities as plain objects.
         closing: object = window

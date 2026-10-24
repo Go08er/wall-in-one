@@ -22,7 +22,12 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw  # noqa: E402
 
 from tests.test_ui_next_slice import finish, library_page, run  # noqa: E402
-from tests.test_ui_next_window import Step, sandboxed_runtime, settled  # noqa: E402
+from tests.test_ui_next_window import (  # noqa: E402
+    Step,
+    application_lanes,
+    sandboxed_runtime,
+    settled,
+)
 from tests.test_ui_renderer_dials import _own, _reset_of, toolkit  # noqa: E402,F401
 from wall_in_one import runtime_compatibility  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
@@ -148,3 +153,91 @@ def test_two_numbers_nudged_close_together_are_both_saved(
         yield from finish(application, window, lanes)
 
     run(application, scenario(), lanes)
+
+
+def _clip(tmp_path: Path) -> Path:
+    folder = tmp_path / "wallpapers"
+    clip = folder / "clip.mp4"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"video")
+    clip.with_name("clip-still.png").write_bytes(b"placeholder image bytes")
+    return clip
+
+
+@pytest.mark.parametrize("idle_first", [False, True], ids=["reset-before-idle", "control"])
+def test_next_use_defaults_after_a_rebuild_is_the_last_word(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idle_first: bool
+) -> None:
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    clip = _clip(tmp_path)
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        state = window.state
+        yield "the first scan", lambda: settled(application) and state.has_wallpaper(str(clip))
+        page = library_page(window)
+        page.inspect(state.wallpaper(str(clip)))
+        deband = page.inspector.renderer_rows["dial:video:deband"]
+        assert isinstance(deband, Adw.SwitchRow)
+        deband.set_active(True)
+        yield (
+            "deband to be saved",
+            lambda: settled(application) and _own(clip, Kind.VIDEO).dial("video", "deband") is True,
+        )
+        yield "the details to be built again", _after(0.6)
+        speed = page.inspector.renderer_rows["dial:video:speed"]
+        assert isinstance(speed, Adw.SpinRow)
+        speed.set_value(1.5)
+        # A rebuild of the details (as a "library"/"now"/"settings" change makes).
+        page.inspector.show(state.wallpaper(str(clip)))
+        assert page.inspector.renderer_rows["dial:video:speed"] is not speed
+        if idle_first:
+            yield "the flush idle to run", _after(0.05)
+        reset = page.inspector.renderer_reset
+        assert reset is not None and reset.get_sensitive()
+        reset.emit("clicked")
+        yield "the settle time to pass", _after((dial_rows.SETTLE_MS + 400) / 1000)
+        yield "the saves to finish", lambda: settled(application)
+        own = _own(clip, Kind.VIDEO)
+        assert not own, f"after Use defaults the wallpaper still has its own: {own}"
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)
+
+
+@pytest.mark.parametrize("wait_first", [False, True], ids=["close-at-once", "control"])
+def test_next_a_number_nudged_just_before_the_window_closes_is_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, wait_first: bool
+) -> None:
+    """The commit message: "a closing window still saves to the right wallpaper"."""
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    clip = _clip(tmp_path)
+    application = Application(ui="next")
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        state = window.state
+        yield "the first scan", lambda: settled(application) and state.has_wallpaper(str(clip))
+        page = library_page(window)
+        page.inspect(state.wallpaper(str(clip)))
+        speed = page.inspector.renderer_rows["dial:video:speed"]
+        assert isinstance(speed, Adw.SpinRow)
+        speed.set_value(1.5)
+        if wait_first:
+            yield "the settle time to pass", _after((dial_rows.SETTLE_MS + 400) / 1000)
+            yield "the saves to finish", lambda: settled(application)
+        else:
+            yield "a moment", _after(0.1)
+        lanes.extend(application_lanes(application))
+        window.close()
+
+    run(application, scenario(), lanes)
+    own = _own(clip, Kind.VIDEO)
+    assert own.dial("video", "speed") == 1.5, f"speed after the window closed: {own}"

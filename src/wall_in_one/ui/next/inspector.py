@@ -680,7 +680,7 @@ class Inspector(Gtk.Box):
         that takes it back; the defaults are Settings' (docs/renderer-settings.md).
         """
         self._settling.flush_soon()  # a number still waiting is saved for its own wallpaper
-        settling = self._settling = dial_rows.Settling()
+        settling = self._settling = dial_rows.Settling(wallpaper.id)
         shown = editing.wallpaper_dials(wallpaper.id)
         if not shown.renderer:
             return None

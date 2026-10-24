@@ -29,7 +29,7 @@ from tests.test_ui_pairing_picker import (  # noqa: E402
     QuietPreviewLoader,
     QuietThumbnailLoader,
 )
-from tests.test_ui_renderer_dials import toolkit  # noqa: E402,F401
+from tests.test_ui_renderer_dials import _reset_of, toolkit  # noqa: E402,F401
 from wall_in_one import config  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
@@ -212,3 +212,165 @@ def test_a_number_nudged_just_before_the_window_goes_is_saved_for_its_wallpaper(
     _drain(dial_rows.SETTLE_MS + 600)
     record = session.pairings.get(pairings.Identity.of(video))
     assert record is not None and record.renderer.dial("video", "speed") == 1.5
+
+
+class GuardedApp(PairingApp):
+    """PairingApp whose prepare refuses a removed item, as app.py:3997-4006 does."""
+
+    def prepare_pairing_mutation(self, item: MediaItem, mutation: Any) -> Any:
+        current = self.session.library.find(item.path)
+        if current is None or pairings.Identity.of(current) != pairings.Identity.of(item):
+            raise ValueError(f"{item.name} was removed before the authoring change could save")
+        return lambda: mutation(self.session.pairings, current)
+
+
+def _open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, app: type[PairingApp] = PairingApp
+) -> tuple[Session, PairingApp, pairings_page.PairingsPage, Gtk.Window, MediaItem, list[Library]]:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    video = MediaItem(tmp_path / "clip.mp4", Kind.VIDEO, 1, 1, paired_still=tmp_path / "c.png")
+    holder = [Library(roots=(tmp_path,), items=(video,))]
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: holder[0],
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    application = app(session)
+    page = pairings_page.PairingsPage(cast(Any, application), lambda: None)
+    root = Gtk.Window()
+    root.set_child(page)
+    return session, application, page, root, video, holder
+
+
+def _own(session: Session, item: MediaItem) -> pairings.RendererOverrides:
+    record = session.pairings.get(pairings.Identity.of(item))
+    return record.renderer if record is not None else pairings.RendererOverrides()
+
+
+# -- a reset clicked after a rebuild, before the flush idle has run (L7) -----------------
+
+
+@pytest.mark.parametrize("idle_first", [False, True], ids=["reset-before-idle", "control"])
+def test_use_defaults_after_a_rebuild_is_the_last_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, idle_first: bool
+) -> None:
+    session, _app, page, root, video, _holder = _open(tmp_path, monkeypatch)
+    session.pairings.set_dial(video, "video", "brightness", 10)  # so Use defaults is live
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)  # pending on the first build's Settling
+    deband = page.renderer_rows["dial:video:deband"]
+    assert isinstance(deband, Adw.SwitchRow)
+    deband.set_active(True)  # immediate save -> rebuild -> old Settling.flush_soon (idle)
+    assert page.renderer_rows["dial:video:deband"] is not deband, "the pane was not rebuilt"
+    if idle_first:
+        _drain(30)
+    assert page.renderer_reset is not None and page.renderer_reset.get_sensitive()
+    page.renderer_reset.emit("clicked")  # the rebuilt pane's Use defaults
+    _drain(dial_rows.SETTLE_MS + 600)
+    own = _own(session, video)
+    root.destroy()
+    assert not own, f"after Use defaults the wallpaper still has its own: {own}"
+
+
+@pytest.mark.parametrize("idle_first", [False, True], ids=["reset-before-idle", "control"])
+def test_a_dials_reset_after_a_rebuild_is_the_last_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, idle_first: bool
+) -> None:
+    session, _app, page, root, video, _holder = _open(tmp_path, monkeypatch)
+    session.pairings.set_dial(video, "video", "speed", 1.25)  # so its reset is shown
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)
+    deband = page.renderer_rows["dial:video:deband"]
+    assert isinstance(deband, Adw.SwitchRow)
+    deband.set_active(True)
+    if idle_first:
+        _drain(30)
+    rebuilt = page.renderer_rows["dial:video:speed"]
+    assert rebuilt is not speed
+    reset = _reset_of(rebuilt)
+    assert reset.get_visible()
+    reset.emit("clicked")
+    _drain(dial_rows.SETTLE_MS + 600)
+    own = _own(session, video)
+    root.destroy()
+    assert own.dial("video", "speed") is None, f"speed after its own reset: {own}"
+
+
+# -- the wallpaper leaves the library while its number is waiting (N7) ---------------------
+
+
+def test_a_removed_wallpaper_gets_no_record_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, _application, page, root, video, holder = _open(
+        tmp_path, monkeypatch, app=GuardedApp
+    )
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)
+    holder[0] = Library(roots=(tmp_path,), items=())
+    session.refresh()
+    page.refresh(session)  # no _build_renderer, so no flush; the timer lives
+    _drain(dial_rows.SETTLE_MS + 600)
+    record = session.pairings.get(pairings.Identity.of(video))
+    root.destroy()
+    assert record is None, f"a record came back for a removed wallpaper: {record}"
+
+
+def test_a_removed_wallpaper_is_not_reported_as_a_failed_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, application, page, root, video, holder = _open(
+        tmp_path, monkeypatch, app=GuardedApp
+    )
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)
+    holder[0] = Library(roots=(tmp_path,), items=())
+    session.refresh()
+    page.refresh(session)
+    _drain(dial_rows.SETTLE_MS + 600)
+    messages = list(application.messages)
+    root.destroy()
+    assert not messages, f"reported after the wallpaper was removed: {messages}"
+
+
+def test_a_reset_of_one_wallpaper_leaves_the_pending_number_of_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pairings_page, "ThumbnailLoader", QuietThumbnailLoader)
+    monkeypatch.setattr(pairings_page, "SchemePreviewLoader", QuietPreviewLoader)
+    first = MediaItem(tmp_path / "a.mp4", Kind.VIDEO, 1, 1, paired_still=tmp_path / "a.png")
+    second = MediaItem(tmp_path / "b.mp4", Kind.VIDEO, 1, 1, paired_still=tmp_path / "b.png")
+    library = Library(roots=(tmp_path,), items=(first, second))
+    session = Session(
+        config.Settings(roots=(tmp_path,)),
+        scanner=lambda _roots: library,
+        pairing_store=pairings.Store(path=tmp_path / "pairings.json"),
+    )
+    session.refresh()
+    session.pairings.set_dial(second, "video", "deband", True)  # so its Use defaults is live
+    page = pairings_page.PairingsPage(cast(Any, PairingApp(session)), lambda: None)
+    root = Gtk.Window()
+    root.set_child(page)
+    page.edit(session, first)
+    row = page.renderer_rows["dial:video:speed"]
+    assert isinstance(row, Adw.SpinRow)
+    row.set_value(1.5)  # pending for a
+    page.edit(session, second)  # a's number is handed to an idle
+    assert page.renderer_reset is not None and page.renderer_reset.get_sensitive()
+    page.renderer_reset.emit("clicked")  # b's Use defaults, before the idle
+    _drain(dial_rows.SETTLE_MS + 600)
+    own_a, own_b = _own(session, first), _own(session, second)
+    root.destroy()
+    assert own_a.dial("video", "speed") == 1.5, (own_a, own_b)
+    assert not own_b, own_b
+

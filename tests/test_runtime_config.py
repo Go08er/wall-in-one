@@ -1546,3 +1546,14 @@ def test_the_health_sync_compiles_what_was_published_for_its_service(
         {"status_version": 2, "supported_config_schemas": ["6"]}
     )
     assert not runtime_config.presets_supported(None)
+
+
+def test_a_scene_id_that_is_not_ascii_digits_is_never_compiled(tmp_path: Path) -> None:
+    """`str.isdigit` takes "\u0661\u0662\u0663"; the service and Steam don't."""
+    _settings, _session, items = _workshop_session(tmp_path)
+    eastern = replace(items["scene"], scene="\u0661\u0662\u0663", title="Eastern")
+    settings, session, _items = _workshop_session(tmp_path, eastern)
+
+    entries = _entries(runtime_config.render(settings, session))
+
+    assert "\u0661\u0662\u0663" not in {entry.get("scene_id") for entry in entries}

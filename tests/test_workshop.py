@@ -824,3 +824,27 @@ def test_a_preset_of_a_video_whose_file_isnt_there_needs_its_base(
     preset = found["2946165131"]
     assert preset.unplayable is Unplayable.NEEDS_BASE
     assert "Clip" in preset.unplayable_reason and "isn\u2019t there" in preset.unplayable_reason
+
+
+# -- only folders named by a Workshop id are listed (review of r11, finding 7) ------
+
+
+def test_a_folder_not_named_by_an_ascii_workshop_id_is_said_and_not_listed(
+    tmp_path: Path,
+) -> None:
+    from wall_in_one.library import scan
+    from wall_in_one.library.model import UnseenKind
+
+    content = _content(tmp_path)
+    project: dict[str, object] = {"type": "web", "title": "T", "file": "index.html"}
+    for name in ("\u0661\u0662\u0663", "abc", "12a", "123"):
+        _install(content, name, project, file="index.html")
+    said: list[tuple[str, UnseenKind, str]] = []
+
+    items = scan.workshop_items((tmp_path,), on_unseen=lambda p, k, w: said.append((p.name, k, w)))
+
+    assert [item.scene for item in items] == ["123"]
+    assert sorted(said) == sorted(
+        (name, UnseenKind.NOT_A_WALLPAPER, workshop.NOT_AN_ID)
+        for name in ("\u0661\u0662\u0663", "abc", "12a")
+    )

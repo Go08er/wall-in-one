@@ -744,7 +744,9 @@ def _resolved_entry(
         _absolute_path(bundle.motion, label="playlist entry motion")
         lines.append(f"motion = {_quote(bundle.motion)}")
     elif item.kind is Kind.SCENE:
-        if not item.scene.isdigit():
+        # ASCII digits only: `str.isdigit` also takes "١٢٣", which no Steam
+        # folder is named and which the service refuses.
+        if not workshop.is_workshop_id(item.scene):
             return None
         _bounded_text(item.scene, label="scene id", maximum_bytes=MAX_IDENTIFIER_BYTES)
         lines.append(f"scene_id = {_quote(item.scene)}")

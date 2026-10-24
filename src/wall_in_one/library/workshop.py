@@ -397,6 +397,7 @@ def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem 
 #: What the scan says about a Workshop folder it can't list.
 NO_PROJECT: Final = "a Wallpaper Engine folder with no project.json"
 NOT_A_PROJECT: Final = "its project.json is not Wallpaper Engine's JSON"
+NOT_AN_ID: Final = "a folder in Wallpaper Engine's whose name isn't a Workshop id"
 
 
 def _why(error: OSError) -> str:
@@ -802,6 +803,13 @@ def scan_content_directories(
                         on_unseen(left, UnseenKind.LIMIT, f"stopped at {MAX_ITEMS} Workshop items")
                 return tuple(found.values())
             if not _is_folder(directory, follow=False, on_unseen=on_unseen):
+                continue
+            if not is_workshop_id(directory.name):
+                # Steam names every item's folder by its Workshop id, in ASCII
+                # digits; `str.isdigit` would also take "١٢٣". The id reaches
+                # the renderer's command line, so anything else isn't listed.
+                if on_unseen is not None:
+                    on_unseen(directory, UnseenKind.NOT_A_WALLPAPER, NOT_AN_ID)
                 continue
             item = _read_project(directory, on_unseen)
             if item is not None and item.id not in found:

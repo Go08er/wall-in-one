@@ -2,10 +2,13 @@
 
 Wall-in-One lists what Steam installed for Wallpaper Engine (application 431960)
 from each Steam library's `steamapps/workshop/content/431960/<id>/project.json`.
-Until this change it kept two kinds and dropped the rest without a word: a
-`video` item with its file on disk, and a `scene`. A `web` wallpaper and a
-preset therefore never showed up, which is what the owner reported (one new
-`web` item, one new preset, out of 51: 45 video, 4 scene, 1 web, 1 preset).
+Up to 0.4.0 it kept two kinds and dropped the rest without a word: a `video`
+item with its file on disk, and a `scene`. A `web` wallpaper and a preset
+therefore never showed up, which is what the owner reported (one new `web`
+item, one new preset, out of 51: 45 video, 4 scene, 1 web, 1 preset). The
+other kinds are now listed too, each with its type and, when it can't play,
+why; [the table below](#one-category-scenes-and-other-wallpaper-engine-items)
+says what is listed as what, and what still isn't.
 
 This note records what `linux-wallpaperengine` itself can run, read from the
 source nixpkgs builds (`linux-wallpaperengine` 0.0.1-unstable-2026-06-09,
@@ -162,9 +165,9 @@ reloads as any other does, and turning it on also makes their stills. The key
 is written to `settings.toml` only when on, so a profile that never turns it
 on keeps its bytes. Executables stay refused either way.
 
-**Where a web wallpaper was.** Owner: "skip to next, if it's in a playlist
-alone, then use the default playlist". The compiler leaves a web wallpaper
-out of its playlist, and the rest of that playlist plays. A playlist left
+**Where a web wallpaper was.** The compiler follows the owner's rule (quoted
+in full under "The service checks too", below): it leaves a web wallpaper out
+of its playlist, and the rest of that playlist plays. A playlist left
 with nothing (a web wallpaper alone) is left out too, and so is what names
 it: a display whose own playlist it is follows the schedule and the default
 playlist, a schedule rule that names it doesn't apply, and a default that
@@ -177,9 +180,10 @@ and no wallpaper is played. The app says "Nothing to play: web wallpapers are
 off." The document says so
 ([schema 8](runtime-config.md#nothing-to-play-schema-8)), so `play`, the
 companion's Resume, `ctl toggle` and the service's own reload of the file
-can't bring the page back. The display isn't blank: Noctalia keeps the last
-still it was given, which for a page is its own still, and the service has
-no way to clear it.
+can't bring the page back. Noctalia keeps the last still it was given, and
+the service has no way to clear it: that is the still of whatever played
+last, which is a page's own only if the page played while web wallpapers
+were on.
 
 **When the setting can't reach the service.** A compile that fails, or a
 reload the service refuses, leaves it on the document it holds; its status
@@ -196,8 +200,12 @@ a document that plays nothing, which also replaces the file on disk; one that
 can't read it is told to quit, and its next start is guarded. A service that
 reads 8, holding a document that doesn't allow web wallpapers with none on
 disk that does, is left alone: it refuses every page itself (below), and the
-app only says that the setting hasn't reached it yet. At service start, a kept document that plays a web page, or
-that allows web wallpapers, is refused with exit 78.
+app only says that the setting hasn't reached it yet.
+At service start, a kept document (the one there already, kept because the
+compile failed) is refused with exit 78 while the setting is off, if it plays
+a web page, names a Workshop item whose type can't be checked, or allows web
+wallpapers. The unit isn't restarted on 78; the companion tries it again
+every 300 s, which runs the compile again.
 
 **When it is on and can't reach the service either.** A service that lists
 schema 8 but isn't confirmed to read it (its installed units can't be

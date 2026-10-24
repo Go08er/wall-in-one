@@ -215,12 +215,21 @@ def test_a_number_nudged_just_before_the_window_goes_is_saved_for_its_wallpaper(
 
 
 class GuardedApp(PairingApp):
-    """PairingApp whose prepare refuses a removed item, as app.py:3997-4006 does."""
+    """PairingApp whose prepare refuses a removed item, as `Application.prepare_pairing_mutation`
+    does (`current_item_for_authoring`): one no longer listed, and one whose removal committed
+    (``removed``, `Application._removed_item_paths`) though the library still lists it."""
+
+    def __init__(self, session: Session) -> None:
+        super().__init__(session)
+        self.removed: set[Path] = set()
+
+    def current_item_for_authoring(self, item: MediaItem) -> MediaItem:
+        if item.path in self.removed:
+            raise ValueError(f"{item.name} was removed before the authoring change could save")
+        return super().current_item_for_authoring(item)
 
     def prepare_pairing_mutation(self, item: MediaItem, mutation: Any) -> Any:
-        current = self.session.library.find(item.path)
-        if current is None or pairings.Identity.of(current) != pairings.Identity.of(item):
-            raise ValueError(f"{item.name} was removed before the authoring change could save")
+        current = self.current_item_for_authoring(item)
         return lambda: mutation(self.session.pairings, current)
 
 
@@ -337,6 +346,33 @@ def test_a_removed_wallpaper_is_not_reported_as_a_failed_save(
     messages = list(application.messages)
     root.destroy()
     assert not messages, f"reported after the wallpaper was removed: {messages}"
+
+
+@pytest.mark.parametrize("how", ["removal-committed-not-rescanned", "control-rescanned"])
+def test_a_number_for_a_wallpaper_whose_removal_committed_is_dropped_unreported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """N-g. The removal committed (`Application._adopt_item_removal`), but its own scan wasn't
+    installed: the library still lists the wallpaper until the rescan lands. Before: `_gone`
+    asked the library only, and the write's guard refused it, with the failure toast N7 meant
+    to remove."""
+    session, application, page, root, video, holder = _open(tmp_path, monkeypatch, app=GuardedApp)
+    assert isinstance(application, GuardedApp)
+    page.edit(session, video)
+    speed = page.renderer_rows["dial:video:speed"]
+    assert isinstance(speed, Adw.SpinRow)
+    speed.set_value(1.5)
+    application.removed.add(video.path)
+    if how == "control-rescanned":
+        holder[0] = Library(roots=(tmp_path,), items=())
+        session.refresh()
+        page.refresh(session)
+    _drain(dial_rows.SETTLE_MS + 600)
+    record = session.pairings.get(pairings.Identity.of(video))
+    messages = list(application.messages)
+    root.destroy()
+    assert record is None, record
+    assert not messages, f"{how}: reported after the wallpaper was removed: {messages}"
 
 
 def test_a_reset_of_one_wallpaper_leaves_the_pending_number_of_another(

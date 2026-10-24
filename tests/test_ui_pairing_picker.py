@@ -89,6 +89,13 @@ class PairingApp:
         finish(result)
         return True
 
+    def current_item_for_authoring(self, item: MediaItem) -> MediaItem:
+        """`Application.current_item_for_authoring`, without its removed paths."""
+        current = self.session.library.find(item.path)
+        if current is None or pairings.Identity.of(current) != pairings.Identity.of(item):
+            raise ValueError(f"{item.name} was removed before the authoring change could save")
+        return current
+
     def prepare_pairing_mutation(self, item: MediaItem, mutation: Any) -> Any:
         current = self.session.library.find(item.path)
         assert current is not None

@@ -1113,9 +1113,17 @@ class PairingsPage(Gtk.Box):
         return box
 
     def _gone(self, item: MediaItem) -> bool:
-        """Whether ``item`` has left the library: its waiting number is dropped, unreported."""
-        current = self._app.session.library.find(item.path)
-        return current is None or pairings.Identity.of(current) != pairings.Identity.of(item)
+        """Whether ``item`` has left the library: its waiting number is dropped, unreported.
+
+        Judged as its write would be (`Application.current_item_for_authoring`),
+        so a removal that has committed counts before its rescan is installed
+        (review r13b, N-g), and the write never refuses what was let through.
+        """
+        try:
+            self._app.current_item_for_authoring(item)
+        except ValueError:
+            return True
+        return False
 
     def _store_renderer(
         self,

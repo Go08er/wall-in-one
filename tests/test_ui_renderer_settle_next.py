@@ -241,3 +241,47 @@ def test_next_a_number_nudged_just_before_the_window_closes_is_saved(
     run(application, scenario(), lanes)
     own = _own(clip, Kind.VIDEO)
     assert own.dial("video", "speed") == 1.5, f"speed after the window closed: {own}"
+
+
+@pytest.mark.parametrize("removed", [True, False], ids=["removal-committed", "control"])
+def test_next_a_number_for_a_wallpaper_whose_removal_committed_is_dropped_unreported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, removed: bool
+) -> None:
+    """N-g, in the new interface. The removal committed (`Application._removed_item_paths`) but
+    its rescan isn't installed yet, so the view still shows the wallpaper. Before: the number
+    went to the write, whose guard refused it, and "renderer settings were not saved" was said
+    for a wallpaper the person had just removed."""
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    clip = _clip(tmp_path)
+    application = Application(ui="next")
+    reports: list[str] = []
+    monkeypatch.setattr(application, "window_report", reports.append)
+    lanes: list[object] = []
+
+    def scenario() -> Iterator[Step]:
+        window = application._window
+        assert isinstance(window, NextWindow)
+        state = window.state
+        yield "the first scan", lambda: settled(application) and state.has_wallpaper(str(clip))
+        page = library_page(window)
+        page.inspect(state.wallpaper(str(clip)))
+        speed = page.inspector.renderer_rows["dial:video:speed"]
+        assert isinstance(speed, Adw.SpinRow)
+        speed.set_value(1.5)
+        if removed:
+            application._removed_item_paths.add(clip)  # as `_adopt_item_removal` does
+        yield "the settle time to pass", _after((dial_rows.SETTLE_MS + 400) / 1000)
+        yield "the saves to finish", lambda: settled(application)
+        own = _own(clip, Kind.VIDEO)
+        said = [line for line in reports if "renderer settings" in line]
+        if removed:
+            assert own.dial("video", "speed") is None, f"saved for a removed wallpaper: {own}"
+            assert not said, f"reported after the wallpaper was removed: {said}"
+        else:
+            assert own.dial("video", "speed") == 1.5, f"speed lost: {own}"
+            assert not said, said
+        application._removed_item_paths.discard(clip)
+        yield from finish(application, window, lanes)
+
+    run(application, scenario(), lanes)

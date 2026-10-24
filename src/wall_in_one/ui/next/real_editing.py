@@ -466,6 +466,19 @@ class RealEditing:
     def _report(self, message: str) -> None:
         self._backend.window_report(message)
 
+    def _gone(self, item: MediaItem) -> bool:
+        """Whether ``item`` has left the library: a number still waiting for it is dropped.
+
+        Judged as its write would be (`current_item_for_authoring`), so a
+        removal that has committed counts before its rescan is installed and
+        the view still shows the item (review r13b, N-g): no failure is said.
+        """
+        try:
+            self._backend.current_item_for_authoring(item)
+        except ValueError:
+            return True
+        return False
+
     def _refused(self) -> bool:
         blocked = self.editing_blocked()
         if blocked:
@@ -790,7 +803,7 @@ class RealEditing:
 
     def set_wallpaper_dial(self, wid: str, key: str, value: dials.Value | None) -> None:
         item = self._shown.item_of(wid)
-        if item is None:
+        if item is None or self._gone(item):
             return
         renderer = dial_view.renderer_of(item)
 
@@ -801,7 +814,7 @@ class RealEditing:
 
     def set_wallpaper_property(self, wid: str, name: str, value: str | None) -> None:
         item = self._shown.item_of(wid)
-        if item is None:
+        if item is None or self._gone(item):
             return
 
         def mutation(store: pairings.Store, current: MediaItem) -> object:

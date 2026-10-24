@@ -12359,3 +12359,76 @@ fn status_says_whether_the_loaded_document_allows_web_wallpapers() {
         "top level only"
     );
 }
+
+/// Independent displays under `NOON_RULE`: DP-1 assigned `mixed`, HDMI-A-1 assigned All
+/// media, `pages` the page alone (typed `page`). Each row at noon, and at 13:00 when the
+/// rule's window has ended, and what Noctalia was told for HDMI-A-1 at 13:00.
+fn independent_window(page: &str) -> (Vec<serde_json::Value>, Vec<String>) {
+    let root = directory("skip-independent-window");
+    let home = skip_home("skip-independent-window-home", page, false);
+    let document = skip_document(
+        "all-media",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("mixed", &["", ""]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        &format!(
+            "{NOON_RULE}[[displays]]\nconnector = \"DP-1\"\nplaylist = \"mixed\"\n\
+             [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"all-media\"\n"
+        ),
+    )
+    .replace(
+        "display_mode = \"mirrored\"",
+        "display_mode = \"independent\"",
+    )
+    .replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"DP-1\"",
+    );
+    let (mut runtime, _arguments, log, _config) =
+        skip_runtime(&root, &document, &home, &["DP-1", "HDMI-A-1"]);
+    runtime.apply_current().unwrap();
+    let mut rows = vec![
+        display_status(&mut runtime, noon(), "DP-1"),
+        display_status(&mut runtime, noon(), "HDMI-A-1"),
+    ];
+    let calls = stills_handed(&log).len();
+    let one = noon() + chrono::TimeDelta::hours(1);
+    runtime.tick(one, Instant::now());
+    rows.push(display_status(&mut runtime, one, "DP-1"));
+    rows.push(display_status(&mut runtime, one, "HDMI-A-1"));
+    let hdmi_at_one = stills_handed(&log)[calls..]
+        .iter()
+        .filter(|call| call.starts_with("HDMI-A-1 "))
+        .cloned()
+        .collect();
+    remove_skip_fixture(runtime, &root, &home);
+    (rows, hdmi_at_one)
+}
+
+#[test]
+fn independent_displays_on_a_refused_rule_use_the_default_and_its_end_changes_only_what_differs() {
+    let (rows, hdmi_at_one) = independent_window("web");
+    for row in &rows[..2] {
+        assert_eq!(row["playlist_id"], "all-media", "{row}");
+        assert_eq!(row["entry_id"], "all-media-2", "{row}");
+        assert_eq!(row["schedule_rule_id"], "noon", "{row}");
+        assert_eq!(row["last_error"], "", "{row}");
+    }
+    // At 13:00 DP-1 goes back to its own playlist; HDMI-A-1's assignment is the stand-in
+    // it already plays, so nothing is shown again there.
+    assert_eq!(rows[2]["playlist_id"], "mixed", "{}", rows[2]);
+    assert_eq!(rows[3]["playlist_id"], "all-media", "{}", rows[3]);
+    assert_eq!(rows[3]["entry_id"], "all-media-2");
+    assert!(hdmi_at_one.is_empty(), "{hdmi_at_one:?}");
+}
+
+#[test]
+fn control_independent_displays_on_a_rule_that_can_play_change_back_at_its_end() {
+    let (rows, hdmi_at_one) = independent_window("scene");
+    assert_eq!(rows[1]["playlist_id"], "pages");
+    assert_eq!(rows[3]["playlist_id"], "all-media");
+    assert_eq!(rows[3]["entry_id"], "all-media-1");
+    assert!(!hdmi_at_one.is_empty());
+}

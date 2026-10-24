@@ -92,6 +92,13 @@ const STATUS_STRUCTURAL_RESERVE: usize = 256 * 1024;
 const STATUS_DIAGNOSTIC_RESERVE: usize = 64 * 1024;
 const STATUS_JSON_ESCAPE_FACTOR: usize = 4;
 const MAX_LIVE_OUTPUTS: usize = 64;
+/// The most items status lists in `refused` (what the service skipped in
+/// this document generation); `refused_omitted` counts the rest. Counted in
+/// the status budget below, for a document with a Wallpaper Engine entry.
+pub const MAX_REFUSED_STATUS_ENTRIES: usize = 16;
+/// The longest reason a `refused` row carries, cut in the middle past it:
+/// a reason names the item, and may name a path or an error.
+pub const MAX_REFUSED_REASON_BYTES: usize = 256;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -1108,15 +1115,20 @@ impl Config {
     fn validate_status_budget(&self) -> Result<(), ConfigError> {
         let mut configured_text = 0_usize;
         let mut largest_playlist_identity = 0_usize;
+        let mut largest_playlist_id = 0_usize;
         let mut largest_entry = 0_usize;
+        let mut largest_item = 0_usize;
 
         for playlist in &self.playlists {
             let identity = playlist.id.len().saturating_add(playlist.name.len());
             configured_text = configured_text.saturating_add(identity);
             largest_playlist_identity = largest_playlist_identity.max(identity);
+            largest_playlist_id = largest_playlist_id.max(playlist.id.len());
             for entry in &playlist.entries {
                 largest_entry =
                     largest_entry.max(entry.id.len().saturating_add(path_bytes(&entry.still)));
+                // The item a `refused` row names (`Entry::rendered_scene`).
+                largest_item = largest_item.max(entry.rendered_scene().map_or(0, String::len));
             }
             // A display that plays nothing carries the reason twice in place
             // of an entry: as `nothing_to_play` and in its `entry_name`.
@@ -1145,7 +1157,15 @@ impl Config {
         // Output discovery is independently capped at 64 live outputs and the
         // atomic inventory also retains up to 64 configured-but-detached
         // assignments. A manual override may put the largest playlist and
-        // entry on every row, so count the full 128-row union.
+        // entry on every row, so count the full 128-row union. A row whose
+        // playlist the service refused throughout also names the one asked
+        // for (`stand_in_for`), as does the summary: only a Wallpaper Engine
+        // entry is ever refused, so only then.
+        let stand_in_for = if largest_item > 0 {
+            largest_playlist_id
+        } else {
+            0
+        };
         let largest_connector = self
             .displays
             .iter()
@@ -1155,13 +1175,23 @@ impl Config {
             .max(MAX_CONNECTOR_BYTES);
         let per_display = largest_connector
             .saturating_add(largest_playlist_identity.saturating_mul(2))
+            .saturating_add(stand_in_for)
             .saturating_add(largest_entry);
         configured_text = configured_text
             .saturating_add(
                 per_display.saturating_mul(MAX_LIVE_OUTPUTS.saturating_add(MAX_DISPLAYS)),
             )
             .saturating_add(largest_playlist_identity)
+            .saturating_add(stand_in_for)
             .saturating_add(largest_entry);
+        // What the service refused (`refused`): only a Wallpaper Engine entry
+        // can be, each row its item and a bounded reason.
+        if largest_item > 0 {
+            configured_text = configured_text.saturating_add(
+                MAX_REFUSED_STATUS_ENTRIES
+                    .saturating_mul(largest_item.saturating_add(MAX_REFUSED_REASON_BYTES)),
+            );
+        }
 
         let encoded_bound = configured_text
             .saturating_mul(STATUS_JSON_ESCAPE_FACTOR)

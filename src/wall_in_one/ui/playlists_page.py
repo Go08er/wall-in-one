@@ -998,7 +998,7 @@ class PlaylistsPage(Gtk.Box):
         shown += [
             (item, row.show_thumbnail)
             for identifier, row in self._entry_rows.items()
-            if (item := self._entry_items.get(identifier)) is not None and item.web_page
+            if (item := self._entry_items.get(identifier)) is not None and item.holds_web
         ]
         for item, show in shown:
             show(item, None)

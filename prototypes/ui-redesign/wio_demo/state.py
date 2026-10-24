@@ -43,6 +43,17 @@ import gi
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, GObject
 
+from wall_in_one.dials import (
+    OWN_REQUIRES,
+    PER_WALLPAPER,
+    WEB_KEYS,
+    WEB_PROPERTIES_NOTE,
+    DialView,
+    PropertyView,
+    WallpaperDials,
+    available,
+)
+from wall_in_one.dials import Value as DialValue
 from wall_in_one.ui.next import thumbs as pictures
 from wall_in_one.ui.next.playlists_state import EntryView, PlaylistDetail, Rotation, Usage
 from wall_in_one.ui.next.schedule_state import (
@@ -301,6 +312,9 @@ class AppState(GObject.Object):
         ]
         # Preferences only the Settings page shows (nothing else in the demo acts on them).
         self.preferences: dict[str, Any] = dict(data.PREFERENCES)
+        # Each wallpaper's own renderer dials and Wallpaper Engine values.
+        self._own_dials: dict[str, dict[str, DialValue]] = {}
+        self._own_properties: dict[str, dict[str, str]] = {}
         self._palette_manager: DemoPalettes | None = None
         # Window look: "solid", "translucent" (the compositor shows/blurs the
         # desktop behind) or "frosted" (the app draws your wallpaper, blurred).
@@ -726,6 +740,63 @@ class AppState(GObject.Object):
 
     def regenerate_still(self, wid: str) -> None:
         self.toast(f"Capturing a new still for \u201c{self.wallpaper(wid).name}\u201d")
+
+    def wallpaper_dials(self, wid: str) -> WallpaperDials:
+        """As the app shows them: its own over Settings' defaults (`wall_in_one.dial_view`)."""
+        wallpaper = self.wallpaper(wid)
+        renderer = wallpaper.kind if wallpaper.kind in ("video", "scene") else ""
+        if not renderer or wallpaper.never_plays:
+            return WallpaperDials()
+        web = wallpaper.kind_detail == "web"
+        own = self._own_dials.get(wid, {})
+        shown = [dial for dial in PER_WALLPAPER[renderer] if not web or dial.key in WEB_KEYS]
+        defaults = {
+            dial.key: self.preferences.get(dial.setting, dial.default) if dial.setting else dial.default
+            for dial in shown
+        }
+        values = {key: own.get(key, default) for key, default in defaults.items()}
+        views = tuple(
+            DialView(
+                dial,
+                values[dial.key],
+                defaults[dial.key],
+                own=dial.key in own,
+                available=available(dial.key, values, OWN_REQUIRES),
+            )
+            for dial in shown
+        )
+        if web:
+            return WallpaperDials(renderer, views, note=WEB_PROPERTIES_NOTE)
+        properties: tuple[PropertyView, ...] = ()
+        if renderer == "scene":
+            mine = self._own_properties.get(wid, {})
+            properties = tuple(
+                PropertyView(found, mine.get(found.name, found.default), found.default, own=found.name in mine)
+                for found in data.SCENE_PROPERTIES
+            )
+        return WallpaperDials(renderer, views, properties)
+
+    def set_wallpaper_dial(self, wid: str, key: str, value: DialValue | None) -> None:
+        own = self._own_dials.setdefault(wid, {})
+        if value is None:
+            own.pop(key, None)
+        else:
+            own[key] = value
+        self.emit_changed("library")
+
+    def set_wallpaper_property(self, wid: str, name: str, value: str | None) -> None:
+        mine = self._own_properties.setdefault(wid, {})
+        if value is None:
+            mine.pop(name, None)
+        else:
+            mine[name] = value
+        self.emit_changed("library")
+
+    def reset_wallpaper_dials(self, wid: str) -> None:
+        self._own_dials.pop(wid, None)
+        self._own_properties.pop(wid, None)
+        self.emit_changed("library")
+        self.toast(f"\u201c{self.wallpaper(wid).name}\u201d\u2019s renderer settings are back to the defaults")
 
     def choose_still(self, wid: str, path: str | None) -> None:
         wallpaper = self.wallpaper(wid)

@@ -15,6 +15,7 @@ a Workshop item typed. The service checks the same bounds again
 from __future__ import annotations
 
 import math
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -240,7 +241,7 @@ DIALS: Final[tuple[Dial, ...]] = (
         "int",
         "Volume",
         50,
-        "Used while it isn't silent",
+        "For a scene that isn't silent",
         minimum=0,
         maximum=100,
         setting="scene_volume",
@@ -307,6 +308,13 @@ PER_WALLPAPER: Final[Mapping[str, tuple[Dial, ...]]] = {
 #: The dials with a global default, in Settings.
 GLOBAL: Final[tuple[Dial, ...]] = tuple(dial for dial in DIALS if dial.setting)
 
+#: The global dials beyond the three older scene settings, which Settings and
+#: ``runtime.toml`` always had (``scene_fps``, ``scene_scaling``,
+#: ``scene_clamp``) and which keep their own rows and lines.
+NEWER_GLOBAL: Final[tuple[Dial, ...]] = tuple(
+    dial for dial in GLOBAL if dial.setting not in ("scene_fps", "scene_scaling", "scene_clamp")
+)
+
 
 def dial(renderer: str, key: str) -> Dial | None:
     """The dial ``key`` of ``renderer``, or ``None`` for one that doesn't exist."""
@@ -328,6 +336,25 @@ def overrides(renderer: str, raw: object) -> tuple[tuple[str, Value], ...]:
             if value is not None:
                 kept.append((known.key, value))
     return tuple(kept)
+
+
+#: The most a Wallpaper Engine property's value may hold, in UTF-8 bytes:
+#: the service's bound (`config.rs`), shared with `library.workshop`.
+MAX_TEXT_BYTES: Final = 256
+
+
+def valid_text(value: str) -> bool:
+    """Whether the service accepts ``value`` as a property's: bounded, no control characters.
+
+    JSON can spell a lone surrogate, which is no UTF-8 at all.
+    """
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= MAX_TEXT_BYTES and not any(
+        unicodedata.category(character) == "Cc" for character in value
+    )
 
 
 #: The Wallpaper Engine property types a person may set on a scene of
@@ -360,6 +387,81 @@ class SceneProperty:
     step: float = 0.0
     #: A combo's options, (value, label), in the order declared.
     options: tuple[tuple[str, str], ...] = ()
+
+
+#: A dial that does something only while another has one of these values:
+#: shown greyed out otherwise, never as a control that does nothing.
+#: By `Dial.setting` for the global ones, and by key for a wallpaper's own.
+REQUIRES: Final[Mapping[str, tuple[str, tuple[Value, ...]]]] = {
+    "video_hidden_trigger": ("video_when_hidden", ("pause", "stop")),
+    "scene_pause_only_active": ("scene_pause_when_covered", (True,)),
+}
+OWN_REQUIRES: Final[Mapping[str, tuple[str, tuple[Value, ...]]]] = {
+    "volume": ("muted", (False,)),
+}
+
+#: What a web wallpaper's own settings hold: linux-wallpaperengine renders a
+#: page in its browser, so particles and parallax are a scene's, and the
+#: page plays its own sound past the engine's (CWeb.cpp, WebBrowser/CEF).
+WEB_KEYS: Final = ("fps", "scaling", "clamp", "mouse")
+
+#: Said for a web wallpaper in place of controls that would do nothing.
+WEB_PROPERTIES_NOTE: Final = (
+    "linux-wallpaperengine doesn\u2019t hand a web page its properties, and the page "
+    "plays its own sound: neither can be set here."
+)
+
+
+def available(key: str, values: Mapping[str, Value], requires: Mapping[str, object]) -> bool:
+    """Whether ``key`` does anything with ``values``, by `REQUIRES` or `OWN_REQUIRES`."""
+    needed = requires.get(key)
+    if not isinstance(needed, tuple):
+        return True
+    other, allowed = needed
+    return values.get(other) in allowed
+
+
+@dataclass(frozen=True, slots=True)
+class DialView:
+    """One dial as a wallpaper's settings show it."""
+
+    dial: Dial
+    #: What applies: its own value, else the default.
+    value: Value
+    #: The default it follows when it has none of its own.
+    default: Value
+    #: It has a value of its own.
+    own: bool = False
+    #: It does something as things are set (`OWN_REQUIRES`).
+    available: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class PropertyView:
+    """One Wallpaper Engine property as a scene's settings show it."""
+
+    setting: SceneProperty
+    #: What applies, as the engine reads it.
+    value: str
+    #: What applies without the person's own: a preset's value, else the declared one.
+    default: str
+    own: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class WallpaperDials:
+    """Everything one wallpaper's own renderer settings show."""
+
+    #: ``video``, ``scene`` or empty (a still, or one that can't play: nothing to set).
+    renderer: str = ""
+    dials: tuple[DialView, ...] = ()
+    properties: tuple[PropertyView, ...] = ()
+    #: Why some settings aren't offered (a web page), or empty.
+    note: str = ""
+
+    @property
+    def any_own(self) -> bool:
+        return any(view.own for view in self.dials) or any(view.own for view in self.properties)
 
 
 def toml_value(value: Value) -> str:

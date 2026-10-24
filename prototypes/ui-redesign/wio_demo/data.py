@@ -11,6 +11,8 @@ from __future__ import annotations
 import colorsys
 import hashlib
 
+from wall_in_one.dials import NEWER_GLOBAL, SceneProperty
+
 from . import art
 from .models import Display, Palette, Playlist, RememberedDisplay, Rule, StoreItem, Wallpaper
 
@@ -537,6 +539,15 @@ RUNTIME_LOG_EXTRA = [
 
 # Settings only the Settings page shows, by their settings.toml keys (the rest
 # are AppState attributes the other pages act on, see AppState.setting).
+#: What the demo's scenes declare a person may set (`MediaItem.scene_settings`).
+SCENE_PROPERTIES = (
+    SceneProperty("bloom", "bool", "Bloom", "true"),
+    SceneProperty("rain", "slider", "Rain", "0.5", minimum=0.0, maximum=1.0, step=0.05),
+    SceneProperty("tint", "color", "Tint", "0.200000 0.400000 0.800000"),
+    SceneProperty("mood", "combo", "Mood", "calm", options=(("calm", "Calm"), ("storm", "Storm"))),
+    SceneProperty("caption", "textinput", "Caption", "Good night"),
+)
+
 PREFERENCES = {
     "scan_workshop": True,
     "allow_web_wallpapers": False,
@@ -555,4 +566,6 @@ PREFERENCES = {
     "scene_scaling": "",
     "scene_clamp": "",
     "opacity": 1.0,
+    # The renderer dials' defaults, as the app's own Settings starts them.
+    **{dial.setting: dial.default for dial in NEWER_GLOBAL},
 }

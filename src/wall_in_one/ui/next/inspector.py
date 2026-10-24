@@ -26,6 +26,8 @@ gi.require_version("Pango", "1.0")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango
 
+from wall_in_one.dials import Value as DialValue
+from wall_in_one.ui import dial_rows
 from wall_in_one.ui.next import thumbs, widgets
 from wall_in_one.ui.next.catalog import kind_text, quoted
 from wall_in_one.ui.next.state import (
@@ -202,6 +204,10 @@ class Inspector(Gtk.Box):
         #: Leads to the setting that would let it play, when there is one.
         self.setting_button: Gtk.Button | None = None
         self.remove_button: Gtk.Button | None = None
+        #: The wallpaper's own renderer settings, while it has them: each row
+        #: by its widget name (``dial:video:speed``, ``property:bloom``).
+        self.renderer_rows: dict[str, Gtk.Widget] = {}
+        self.renderer_reset: Gtk.Button | None = None
 
         header = Adw.HeaderBar(
             show_start_title_buttons=False, show_end_title_buttons=False, show_back_button=False
@@ -270,6 +276,8 @@ class Inspector(Gtk.Box):
         self.color_mode = self.theme_mode = self.color_detail = None
         self.reset_button = self.retry_button = self.remove_button = None
         self.setting_button = None
+        self.renderer_rows = {}
+        self.renderer_reset = None
         if same:
 
             def restore() -> bool:
@@ -350,8 +358,9 @@ class Inspector(Gtk.Box):
         if wallpaper.is_moving and self._editing is not None:
             # A plain image is its own still; only moving wallpapers need one.
             box.append(self._still(self._editing, wallpaper))
-            if self._offers(EXTRA_MOTION):
-                box.append(self._motion(wallpaper))
+            renderer = self._renderer(self._editing, wallpaper)
+            if renderer is not None:
+                box.append(renderer)
         box.append(self._colors(wallpaper))
         box.append(self._playlists(wallpaper))
         box.append(self._file(wallpaper))
@@ -652,24 +661,52 @@ class Inspector(Gtk.Box):
 
         dialog.open(root if isinstance(root, Gtk.Window) else None, None, chosen)
 
-    def _motion(self, wallpaper: WallpaperView) -> Gtk.Box:
-        group = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        group.add_css_class("boxed-list")
-        group.append(
-            plain(
-                Adw.SwitchRow, title="Animate", subtitle="Off shows the still instead", active=True
-            )
-        )
-        group.append(plain(Adw.SwitchRow, title="Sound", subtitle="Muted by default", active=False))
-        if wallpaper.kind == "scene":
-            fps = plain(Adw.ComboRow, title="Frame rate", subtitle="Lower saves power")
-            fps.set_model(
-                Gtk.StringList.new(
-                    ["Use app setting (30 fps)", "15 fps", "24 fps", "30 fps", "60 fps"]
+    def _renderer(self, editing: LibraryEditing, wallpaper: WallpaperView) -> Gtk.Box | None:
+        """Its own renderer settings: the dials, then its scene's Wallpaper Engine properties.
+
+        Each says "Default (…)" until it has a value of its own, with a button
+        that takes it back; the defaults are Settings' (docs/renderer-settings.md).
+        """
+        shown = editing.wallpaper_dials(wallpaper.id)
+        if not shown.renderer:
+            return None
+        blocked = editing.editing_blocked()
+        wid = wallpaper.id
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        dials_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        dials_list.add_css_class("boxed-list")
+
+        def set_dial(key: str) -> Callable[[DialValue | None], None]:
+            return lambda value: editing.set_wallpaper_dial(wid, key, value)
+
+        def set_property(name: str) -> Callable[[str | None], None]:
+            return lambda value: editing.set_wallpaper_property(wid, name, value)
+
+        for view in shown.dials:
+            row = dial_rows.own_row(view, set_dial(view.dial.key), locked=blocked)
+            self.renderer_rows[row.get_name()] = row
+            dials_list.append(row)
+        box.append(dials_list)
+        if shown.properties:
+            box.append(widgets.dim("Wallpaper Engine settings"))
+            properties = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+            properties.add_css_class("boxed-list")
+            for found in shown.properties:
+                row = dial_rows.property_row(
+                    found, set_property(found.setting.name), locked=blocked
                 )
-            )
-            group.append(fps)
-        return self._section("Motion", group)
+                self.renderer_rows[row.get_name()] = row
+                properties.append(row)
+            box.append(properties)
+        if shown.note:
+            box.append(widgets.dim(shown.note))
+        reset = Gtk.Button(label="Use defaults", valign=Gtk.Align.CENTER)
+        reset.add_css_class("flat")
+        reset.set_tooltip_text("Every setting here back to its default")
+        reset.set_sensitive(shown.any_own and not blocked)
+        reset.connect("clicked", lambda _button: editing.reset_wallpaper_dials(wid))
+        self.renderer_reset = reset
+        return self._section("Renderer", box, extra=reset)
 
     def _colors(self, wallpaper: WallpaperView) -> Gtk.Box:
         editing = self._editing

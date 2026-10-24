@@ -20,6 +20,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
+from wall_in_one import dial_view
+from wall_in_one.dials import Value as DialValue
 from wall_in_one.library import manage, pairings, scan
 from wall_in_one.library.model import (
     IMAGE_EXTENSIONS,
@@ -30,6 +32,7 @@ from wall_in_one.library.model import (
 from wall_in_one.theme import noctalia, palettes
 from wall_in_one.theme.palette import Mode as PaletteMode
 from wall_in_one.theme.palette import Palette, PalettePair
+from wall_in_one.ui import dial_rows
 from wall_in_one.ui.palette_browser import SchemePreview, SchemePreviewLoader, swatch_strip
 from wall_in_one.ui.palette_catalog import CatalogState, PaletteCatalog
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
@@ -358,6 +361,12 @@ class PairingsPage(Gtk.Box):
         self._populate_policy_list(item, bundle)
         self._editor.append(colour_group)
         self._refresh_palette_swatches(shown.mode)
+
+        self.renderer_rows: dict[str, Gtk.Widget] = {}
+        self.renderer_reset: Gtk.Button | None = None
+        renderer = self._build_renderer(item, bundle)
+        if renderer is not None:
+            self._editor.append(renderer)
 
         self._reset_button = Gtk.Button(label="Reset this pairing to automatic defaults")
         self._reset_button.add_css_class("destructive-action")
@@ -994,6 +1003,106 @@ class PairingsPage(Gtk.Box):
         if hasattr(self, "_policy_list"):
             self._populate_policy_list(item, bundle)
         self._reflect_palette_policy(bundle.palette)
+
+    def _build_renderer(self, item: MediaItem, bundle: pairings.Pairing) -> Gtk.Widget | None:
+        """Its own renderer settings: the dials, then its scene's Wallpaper Engine properties.
+
+        Each follows its default in Settings, and says so, until it has its
+        own; "Reset this pairing" leaves them, and "Use defaults" is theirs
+        (docs/renderer-settings.md).
+        """
+        shown = dial_view.wallpaper_dials(item, bundle.renderer, self._app.settings)
+        if not shown.renderer:
+            return None
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        group = Adw.PreferencesGroup(
+            title="Renderer",
+            description=(
+                "This wallpaper\u2019s own settings for "
+                + ("mpv" if shown.renderer == "video" else "linux-wallpaperengine")
+                + ". Each follows Settings until you change it here"
+            ),
+        )
+        reset = Gtk.Button(label="Use defaults", valign=Gtk.Align.CENTER)
+        reset.add_css_class("flat")
+        reset.set_tooltip_text("Every renderer setting of this wallpaper back to its default")
+        reset.set_sensitive(shown.any_own)
+        reset.connect(
+            "clicked",
+            lambda _button: self._store_renderer(
+                item,
+                lambda store, current: store.reset_renderer(current),
+                done=f"{item.name}\u2019s renderer settings are back to the defaults",
+            ),
+        )
+        group.set_header_suffix(reset)
+        self.renderer_reset = reset
+        renderer = shown.renderer
+
+        def set_dial(key: str) -> Callable[[DialValue | None], None]:
+            def change(value: DialValue | None) -> None:
+                self._store_renderer(
+                    item, lambda store, current: store.set_dial(current, renderer, key, value)
+                )
+
+            return change
+
+        def set_property(name: str) -> Callable[[str | None], None]:
+            def change(value: str | None) -> None:
+                self._store_renderer(
+                    item, lambda store, current: store.set_property(current, name, value)
+                )
+
+            return change
+
+        for view in shown.dials:
+            row = dial_rows.own_row(view, set_dial(view.dial.key))
+            self.renderer_rows[row.get_name()] = row
+            group.add(row)
+        box.append(group)
+        if shown.properties or shown.note:
+            properties = Adw.PreferencesGroup(
+                title="Wallpaper Engine settings",
+                description=shown.note or "What this scene declares, as its author named it",
+            )
+            for found in shown.properties:
+                row = dial_rows.property_row(found, set_property(found.setting.name))
+                self.renderer_rows[row.get_name()] = row
+                properties.add(row)
+            box.append(properties)
+        return box
+
+    def _store_renderer(
+        self,
+        item: MediaItem,
+        mutation: Callable[[pairings.Store, MediaItem], object],
+        *,
+        done: str = "",
+    ) -> None:
+        """Save one change to ``item``'s own renderer settings, then show what is saved."""
+        store = self._app.session.pairings
+
+        def shown_again() -> None:
+            current = self._selected
+            if current is not None and self._editing(item):
+                self._show_editor(current, bundle=self._resolve(current))
+
+        def saved(_result: object) -> None:
+            self._app.pairing_changed(item)
+            shown_again()
+            if done:
+                self._app.window_report(done)
+
+        def failed(error: str) -> None:
+            shown_again()  # the controls first, then the report
+            self._app.window_report(f"Renderer settings were not saved; nothing changed: {error}")
+
+        self._app.authoring_action_async(
+            lambda: mutation(store, item),
+            saved,
+            prepare=lambda: self._app.prepare_pairing_mutation(item, mutation),
+            failure=failed,
+        )
 
     def _store_policy(
         self,

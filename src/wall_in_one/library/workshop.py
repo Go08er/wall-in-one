@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
-from wall_in_one.dials import PROPERTY_TYPES, SceneProperty
+from wall_in_one.dials import MAX_TEXT_BYTES, PROPERTY_TYPES, SceneProperty, valid_text
 from wall_in_one.library.model import MediaItem, Unplayable, UnseenKind, is_absent
 
 #: Where the scan is told about a place it could not look into: the folder,
@@ -127,7 +127,7 @@ _TYPE_WORD: Final = re.compile(r"\A[a-z0-9][a-z0-9 _.-]{0,31}\Z")
 #: `MAX_ENTRY_PROPERTIES` and the two after it): each one becomes a
 #: `--set-property NAME=VALUE` argument.
 MAX_PROPERTIES: Final = 512
-MAX_PROPERTY_VALUE_BYTES: Final = 256
+MAX_PROPERTY_VALUE_BYTES: Final = MAX_TEXT_BYTES
 
 #: A property name the service accepts: a TOML bare key that never starts
 #: with `-` and has no `=`, so `NAME=VALUE` is one unambiguous argument.
@@ -603,13 +603,7 @@ def valid_property_value(value: str) -> bool:
 
     JSON can spell a lone surrogate, which is no UTF-8 at all.
     """
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return len(encoded) <= MAX_PROPERTY_VALUE_BYTES and not any(
-        unicodedata.category(character) == "Cc" for character in value
-    )
+    return valid_text(value)
 
 
 def property_value(declared: Declared, value: object) -> str | None:

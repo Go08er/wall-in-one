@@ -61,7 +61,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gio, GLib, Gtk
 
-from wall_in_one import config
+from wall_in_one import config, dial_view, dials
 from wall_in_one.library import manage, pairings, scan
 from wall_in_one.library.model import Kind, MediaItem, RepresentativeStillError
 from wall_in_one.session import RemovalResult, Session
@@ -774,6 +774,90 @@ class RealEditing:
             failure=lambda error: self._report(
                 f"{item.name} could not be reset; nothing changed: {error}"
             ),
+        )
+
+    # -- a wallpaper's own renderer settings ---------------------------------------------
+    def wallpaper_dials(self, wid: str) -> dials.WallpaperDials:
+        item = self._shown.item_of(wid)
+        if item is None:
+            return dials.WallpaperDials()
+        record = self._session.pairings.get(pairings.Identity.of(item))
+        own = record.renderer if record is not None else pairings.RendererOverrides()
+        return dial_view.wallpaper_dials(item, own, self._backend.settings)
+
+    def set_wallpaper_dial(self, wid: str, key: str, value: dials.Value | None) -> None:
+        item = self._shown.item_of(wid)
+        if item is None:
+            return
+        renderer = dial_view.renderer_of(item)
+
+        def mutation(store: pairings.Store, current: MediaItem) -> object:
+            return store.set_dial(current, renderer, key, value)
+
+        self._queue_renderer(item, wid, mutation)
+
+    def set_wallpaper_property(self, wid: str, name: str, value: str | None) -> None:
+        item = self._shown.item_of(wid)
+        if item is None:
+            return
+
+        def mutation(store: pairings.Store, current: MediaItem) -> object:
+            return store.set_property(current, name, value)
+
+        self._queue_renderer(item, wid, mutation)
+
+    def reset_wallpaper_dials(self, wid: str) -> None:
+        item = self._shown.item_of(wid)
+        if item is None:
+            return
+
+        def mutation(store: pairings.Store, current: MediaItem) -> object:
+            return store.reset_renderer(current)
+
+        self._queue_renderer(
+            item,
+            wid,
+            mutation,
+            done=f"{item.name}\u2019s renderer settings are back to the defaults",
+        )
+
+    def _queue_renderer(
+        self,
+        item: MediaItem,
+        wid: str,
+        mutation: Callable[[pairings.Store, MediaItem], object],
+        *,
+        done: str = "",
+    ) -> None:
+        """One change to ``item``'s own renderer settings, on the authoring lane.
+
+        Saved, the runtime document is published again, so only the renderer
+        showing ``item`` is handed over; the control already shows the value,
+        so only a failure (and a reset) is said.
+        """
+        if self._refused():
+            self._settle_view(wid, force=True)
+            return
+        backend = self._backend
+        store = self._session.pairings
+
+        def saved(_result: object) -> None:
+            backend.pairing_changed(item)
+            self._settle_view(wid, force=True)
+            if done:
+                self._report(done)
+
+        def failed(error: str) -> None:
+            self._settle_view(wid, force=True)  # the control first, then the report
+            self._report(
+                f"{item.name}\u2019s renderer settings were not saved; nothing changed: {error}"
+            )
+
+        backend.authoring_action_async(
+            lambda: mutation(store, item),
+            saved,
+            prepare=lambda: backend.prepare_pairing_mutation(item, mutation),
+            failure=failed,
         )
 
     def regenerate_still(self, wid: str) -> None:

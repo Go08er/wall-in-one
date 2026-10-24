@@ -33,7 +33,14 @@ from tests.gtk_helpers import spin_until  # noqa: E402
 from tests.started import started_application  # noqa: E402
 from tests.test_ui_codex030_round1b import _descendants  # noqa: E402
 from tests.test_ui_next_window import sandboxed_runtime  # noqa: E402
-from wall_in_one import config, paths, programs, runtime_compatibility, ui_prefs  # noqa: E402
+from wall_in_one import (  # noqa: E402
+    config,
+    dials,
+    paths,
+    programs,
+    runtime_compatibility,
+    ui_prefs,
+)
 from wall_in_one.providers import credentials, registry  # noqa: E402
 from wall_in_one.theme import noctalia, palettes, template  # noqa: E402
 from wall_in_one.ui import palette_browser  # noqa: E402
@@ -69,7 +76,7 @@ CLASSIC_KEYS = frozenset(
         "scene_scaling",
         "scene_clamp",
     }
-)
+) | frozenset(dial.setting for dial in dials.NEWER_GLOBAL)
 
 
 @pytest.fixture(scope="module", autouse=True)

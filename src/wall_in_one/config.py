@@ -578,11 +578,7 @@ class Settings:
 #: The dials that are `Settings` fields this module reads and writes as a
 #: table (`dials.GLOBAL`), apart from the three older scene ones it always
 #: wrote (``scene_fps``, ``scene_scaling``, ``scene_clamp``).
-DIAL_SETTINGS: Final = tuple(
-    dial
-    for dial in dials.GLOBAL
-    if dial.setting not in ("scene_fps", "scene_scaling", "scene_clamp")
-)
+DIAL_SETTINGS: Final = dials.NEWER_GLOBAL
 
 
 def _dial_value(dial: dials.Dial, value: object) -> dials.Value:

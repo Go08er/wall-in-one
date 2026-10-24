@@ -17,13 +17,13 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from wall_in_one import config, display_policy, programs
+from wall_in_one import config, dials, display_policy, programs
 from wall_in_one.library import scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
-from wall_in_one.ui import runtime_truth
+from wall_in_one.ui import dial_rows, runtime_truth
 from wall_in_one.ui.launch_rows import LaunchRows
 from wall_in_one.ui.next.catalog import WEB_WALLPAPERS_EXPLAINED, WEB_WALLPAPERS_TITLE
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
@@ -98,6 +98,22 @@ class PreferencesPage(Adw.PreferencesPage):
 
         self.add(self._build_library_group())
         self.add(self._build_playback_group())
+        self._dial_rows: list[tuple[dials.Dial, Adw.PreferencesRow]] = []
+        self.add(
+            self._build_dials_group(
+                "video",
+                "Video wallpapers",
+                "How mpv shows every video; each wallpaper can have its own in its pairing",
+            )
+        )
+        self.add(
+            self._build_dials_group(
+                "scene",
+                "Wallpaper Engine scenes",
+                "How linux-wallpaperengine plays every scene; each can have its own in its "
+                "pairing. Changing one restarts the scene",
+            )
+        )
         self.add(self._build_providers_group())
         self.add(self._build_colour_group())
         self.add(self._build_appearance_group())
@@ -134,6 +150,7 @@ class PreferencesPage(Adw.PreferencesPage):
             self._scene_scaling,
             self._scene_clamp,
             self._when_hidden,
+            *(row for _dial, row in self._dial_rows),
             self._follow_palette,
             self._scheme,
             self._opacity,
@@ -501,6 +518,27 @@ class PreferencesPage(Adw.PreferencesPage):
         group.add(self._when_hidden)
         return group
 
+    def _build_dials_group(
+        self, renderer: str, title: str, description: str
+    ) -> Adw.PreferencesGroup:
+        """The renderer dials' global defaults (`wall_in_one.dials`), one row each."""
+        group = Adw.PreferencesGroup(title=title, description=description)
+        for dial in config.DIAL_SETTINGS:
+            if dial.renderer != renderer:
+                continue
+            row = dial_rows.setting_row(dial)
+            row.connect(dial_rows.setting_signal(row), self._on_changed)
+            group.add(row)
+            self._dial_rows.append((dial, row))
+        return group
+
+    def _refresh_dial_availability(self, values: dict[str, Any]) -> None:
+        """Grey out a dial that does nothing as things are set (`dials.REQUIRES`)."""
+        writable = not self._read_only_keys()
+        for dial, row in self._dial_rows:
+            useful = dials.available(dial.setting, values, dials.REQUIRES)
+            row.set_sensitive(writable and useful)
+
     def _known_theme_connectors(self, settings: config.Settings) -> tuple[str, ...]:
         connected = self._live_theme_connectors()
         session = getattr(self._app, "session", None)
@@ -858,6 +896,11 @@ class PreferencesPage(Adw.PreferencesPage):
                 self._when_hidden.set_selected(
                     renderer.WHEN_HIDDEN_CHOICES.index(settings.video_when_hidden)
                 )
+            for dial, row in self._dial_rows:
+                dial_rows.show_value(dial, row, getattr(settings, dial.setting))
+            self._refresh_dial_availability(
+                {key: getattr(settings, key) for key in config.KNOWN_KEYS}
+            )
             self._opacity.set_value(settings.opacity)
             self._follow_palette.set_active(settings.follow_noctalia_palette)
             if settings.preview_scheme in ALL_SCHEMES:
@@ -938,12 +981,14 @@ class PreferencesPage(Adw.PreferencesPage):
             "video_when_hidden": renderer.WHEN_HIDDEN_CHOICES[hidden_index]
             if hidden_index < len(renderer.WHEN_HIDDEN_CHOICES)
             else renderer.DEFAULT_WHEN_HIDDEN,
+            **{dial.setting: dial_rows.row_value(dial, row) for dial, row in self._dial_rows},
             "opacity": round(self._opacity.get_value(), 2),
             "follow_noctalia_palette": self._follow_palette.get_active(),
             "preview_scheme": ALL_SCHEMES[scheme_index]
             if scheme_index < len(ALL_SCHEMES)
             else config.Settings().preview_scheme,
         }
+        self._refresh_dial_availability(changes)
         # A failed write restores several widgets. Some GTK controls can emit
         # a trailing notification after that synchronous restore; do not turn
         # it into a second write attempt or a duplicate error toast.

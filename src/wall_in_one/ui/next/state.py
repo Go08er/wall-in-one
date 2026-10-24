@@ -42,6 +42,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
+from wall_in_one.dials import Value as DialValue
+from wall_in_one.dials import WallpaperDials
+
 if TYPE_CHECKING:
     from gi.repository import Gdk
 
@@ -364,7 +367,7 @@ class PlaybackControls(Protocol):
 
 #: `LibraryEditing.extras`: inspector controls an adapter backs beyond the
 #: Protocol's methods. Without one, its control is not shown at all.
-#: Per-wallpaper Animate, Sound and frame rate, and the motion preview.
+#: The motion preview over a moving wallpaper's picture.
 EXTRA_MOTION: Final = "motion"
 #: "Use frame": the still taken from a chosen moment of a video.
 EXTRA_FRAME: Final = "frame"
@@ -468,6 +471,25 @@ class LibraryEditing(Protocol):
     ) -> list[str]: ...
 
     def palettes(self, origin: str | None = None) -> Sequence[PaletteView]: ...
+
+    def wallpaper_dials(self, wid: str) -> WallpaperDials:
+        """``wid``'s own renderer settings: each dial and Wallpaper Engine property as it stands.
+
+        Empty (no ``renderer``) for a still, and for one that can't play.
+        """
+        ...
+
+    def set_wallpaper_dial(self, wid: str, key: str, value: DialValue | None) -> None:
+        """Give ``wid`` its own value for one dial (`dials.PER_WALLPAPER`); None: the default."""
+        ...
+
+    def set_wallpaper_property(self, wid: str, name: str, value: str | None) -> None:
+        """Give a scene its own value for one Wallpaper Engine property; None: the default."""
+        ...
+
+    def reset_wallpaper_dials(self, wid: str) -> None:
+        """Every dial and property of ``wid`` back to its default."""
+        ...
 
 
 class LibraryFolders(Protocol):

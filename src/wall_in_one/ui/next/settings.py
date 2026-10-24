@@ -51,6 +51,7 @@ gi.require_version("Graphene", "1.0")
 
 from gi.repository import Adw, Gio, GLib, Graphene, Gtk
 
+from wall_in_one import dials
 from wall_in_one.programs import SCENE_ENGINE_MISSING
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.catalog import (
@@ -73,7 +74,6 @@ from wall_in_one.ui.next.settings_state import (
     SCHEMES,
     VOLUME_RANGE,
     WHEN_HIDDEN,
-    Choices,
     Folder,
     SettingsAccess,
 )
@@ -170,7 +170,8 @@ class _Binding:
 
     key: str
     row: Adw.PreferencesRow
-    choices: Choices = ()
+    #: Values of the setting's own type (a dial's rotation is a number), with labels.
+    choices: tuple[tuple[Any, str], ...] = ()
 
 
 def _row_text(row: Gtk.Widget) -> str:
@@ -429,7 +430,9 @@ class SettingsPage(Page):
         self._bind(key, row)
         return row
 
-    def _combo(self, title: str, subtitle: str, key: str, choices: Choices) -> Adw.ComboRow:
+    def _combo(
+        self, title: str, subtitle: str, key: str, choices: tuple[tuple[Any, str], ...]
+    ) -> Adw.ComboRow:
         row = plain(
             Adw.ComboRow,
             title=title,
@@ -446,7 +449,9 @@ class SettingsPage(Page):
         self._bind(key, row, choices)
         return row
 
-    def _bind(self, key: str, row: Adw.PreferencesRow, choices: Choices = ()) -> None:
+    def _bind(
+        self, key: str, row: Adw.PreferencesRow, choices: tuple[tuple[Any, str], ...] = ()
+    ) -> None:
         self._bindings.append(_Binding(key, row, choices))
         self._writers.append(row)
 
@@ -1195,6 +1200,7 @@ class SettingsPage(Page):
             ),
             "smooth motion interpolation oversample linear frame rate judder",
         )
+        self._add_dials(group, video, "video", "video mpv look picture")
         scenes = plain(Adw.ExpanderRow, title="Scenes", subtitle="Wallpaper Engine")
         scenes.add_prefix(Gtk.Image.new_from_icon_name("applications-games-symbolic"))
         self._expanders.append(scenes)
@@ -1247,6 +1253,30 @@ class SettingsPage(Page):
             ),
             "texture edges clamp border repeat sampling",
         )
+        self._add_dials(group, scenes, "scene", "scene wallpaper engine sound particles")
+
+    def _add_dials(
+        self, group: _Group, expander: Adw.ExpanderRow, renderer: str, keywords: str
+    ) -> None:
+        """The renderer dials' defaults (`wall_in_one.dials`); each wallpaper can have its own."""
+        for dial in dials.NEWER_GLOBAL:
+            if dial.renderer != renderer:
+                continue
+            row: Adw.PreferencesRow
+            if dial.kind == "bool":
+                row = self._switch(dial.label, dial.help, dial.setting)
+            elif dial.kind == "choice":
+                row = self._combo(dial.label, dial.help, dial.setting, dial.choices)
+            else:
+                row = self._spin(
+                    dial.label,
+                    dial.help,
+                    dial.setting,
+                    (dial.minimum, dial.maximum),
+                    dial.step,
+                    digits=2 if dial.kind == "float" else 0,
+                )
+            self._add_child(group, expander, row, f"{keywords} {dial.label.lower()}")
 
     # -- 8. Tidy up, 9. About ------------------------------------------------------------
     def _build_tidy(self) -> None:
@@ -1466,6 +1496,12 @@ class SettingsPage(Page):
         self._notice.set_subtitle(blocked)
         for widget in self._writers:
             widget.set_sensitive(not blocked)
+        for binding in self._bindings:
+            # A dial that does nothing as things are set (`dials.REQUIRES`).
+            needed = dials.REQUIRES.get(binding.key)
+            if needed is not None and not blocked:
+                other, allowed = needed
+                binding.row.set_sensitive(access.setting(other) in allowed)
         self._rebuild_folders(access, bool(blocked))
         note = access.battery_note()
         self._battery_note.set_subtitle(note)

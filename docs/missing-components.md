@@ -138,10 +138,12 @@ picked, minus its motion.
   budget counts the configured program paths (counting them would refuse a
   document near the limit that loads today), so the key follows the rule
   `outputs` follows: never at a taboo record's expense. When a reply would not
-  fit, `outputs` is left out first; then as many taboo records are kept as fit
-  with `missing_renderers` left out, and only then does `missing_renderers`
-  get what room is left: whole, without its paths, or not at all. Only a
-  document at the schema's ceilings comes near it.
+  fit, 0.4.1's `refused` rows and `stand_in_for` give way first, by the same
+  rule ([runtime-config](runtime-config.md#nothing-to-play-schema-8)); then
+  `outputs` is left out; then as many taboo records are kept as fit with
+  `missing_renderers` left out, and only then does `missing_renderers` get
+  what room is left: whole, without its paths, or not at all. Only a document
+  at the schema's ceilings comes near it.
 
 ### When it clears
 

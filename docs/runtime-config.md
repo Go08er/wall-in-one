@@ -405,10 +405,21 @@ entries; a reload, the file poll's included, forgets.
 | `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none. Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
 | `refused_omitted` | top level | How many more items were refused than `refused` lists. Added in 0.4.1. |
 
-The status budget counts these: the largest playlist id once more per row and
-for the summary, and 16 rows of the largest Workshop id an entry renders with
-a 256-byte reason, for a document with a Wallpaper Engine entry (only such an
-entry is ever refused).
+Neither status budget counts these, so the budget is 0.4.0's, and any
+document 0.4.0 published still loads. (Counting them refused a document near
+the limit that 0.4.0 published, and the unit then stopped on its own start
+check.) They are fitted when the reply is built instead, and give way before
+anything a 0.4.0 reply carries. When a reply would not fit, the service leaves
+out, in order:
+
+1. `refused` rows, the last listed first, each counted in `refused_omitted`;
+2. every `stand_in_for`, on the rows and at the top level (the app then can't
+   tell the stand-in from what was asked for);
+3. as at 0.4.0, `outputs`, then `missing_renderers`' paths, then its rows, then
+   the oldest taboo records.
+
+Only a document at the schema's ceilings comes near it. With the first two
+gone, the reply is the one the budget bounds.
 
 Publishing steps down as for 6 and 7. A running service that isn't confirmed
 to read 8 gets the document without `allow_web_wallpapers`. One that predates

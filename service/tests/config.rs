@@ -1194,13 +1194,28 @@ fn allow_web_wallpapers_needs_schema_eight_and_is_off_when_absent() {
     );
 }
 
-// -- r13c: the status budget counts what status says of a refused entry ---------------------
+// -- r13d B1: a Wallpaper Engine entry costs the status budget nothing ----------------------
+//
+// Review r13c B1: 3433e14 charged what status says of a refused entry (`stand_in_for`, `refused`)
+// to the budget of any document with a Wallpaper Engine entry, so a near-ceiling document that
+// 0.4.0 published, which b3d1398 loads, was refused, and the unit stopped on its start check.
+// Those fields are fitted when the reply is built (`Runtime::status_reply`, tests/service.rs),
+// and the budget is 0.4.0's again.
+
+/// `fixtures/status-budget`'s Wallpaper Engine entry, as a still.
+fn without_its_scene(document: &str) -> String {
+    let stills = document.replace(
+        &format!("kind = \"scene\"\nscene_id = \"{}\"\n", "1".repeat(200)),
+        "kind = \"still\"\n",
+    );
+    assert_ne!(stills, document);
+    stills
+}
 
 #[test]
-fn the_status_budget_counts_a_stand_ins_asked_for_playlist_and_the_refused_list() {
-    // fixtures/status-budget: a document with a Wallpaper Engine entry whose status just fits
-    // one reply once every row may name the playlist it asked for (`stand_in_for`) and status
-    // lists what the service refused (`refused`), and the same a byte over. The app's mirror
+fn the_status_budget_is_the_same_with_or_without_a_wallpaper_engine_entry() {
+    // fixtures/status-budget: a document with a Wallpaper Engine entry whose status bound is the
+    // protocol limit exactly, and the same a byte over. The app's mirror
     // (`runtime_config._validate_status_budget`, tests/test_runtime_config.py) reads the same
     // pair: the two budgets agree at the edge. The pair is in this crate because the package
     // builds from `service/` alone.
@@ -1211,11 +1226,10 @@ fn the_status_budget_counts_a_stand_ins_asked_for_playlist_and_the_refused_list(
         .unwrap_err()
         .to_string();
     assert!(error.contains("protocol response limit"), "{error}");
-    // Without its Wallpaper Engine entry nothing can be refused, and neither is counted.
-    let stills = over.replace(
-        &format!("kind = \"scene\"\nscene_id = \"{}\"\n", "1".repeat(200)),
-        "kind = \"still\"\n",
-    );
-    assert_ne!(stills, over);
-    Config::from_bytes(stills.into_bytes()).unwrap();
+    // As a still, the entry changes nothing either way.
+    Config::from_bytes(without_its_scene(fits).into_bytes()).unwrap();
+    let error = Config::from_bytes(without_its_scene(over).into_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("protocol response limit"), "{error}");
 }

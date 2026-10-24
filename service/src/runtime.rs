@@ -1,7 +1,7 @@
 use crate::config::{
     Config, DisplayAssignment, DisplayMode, Entry, EntryKind, MAX_PATH_BYTES,
-    MAX_REFUSED_REASON_BYTES, MAX_REFUSED_STATUS_ENTRIES, NOTHING_TO_PLAY_LABEL, Playlist,
-    SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS, ScheduleRule,
+    NOTHING_TO_PLAY_LABEL, Playlist, SUPPORTED_OVERRIDE_SCHEMAS, SUPPORTED_SCHEMA_VERSIONS,
+    ScheduleRule,
 };
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
@@ -33,6 +33,14 @@ const TRUNCATION_MARKER: &str = " ... [truncated] ... ";
 /// structural reserve, whatever program paths the document names (neither
 /// status budget counts them). See docs/missing-components.md.
 const MAX_MISSING_RENDERER_PATH_BYTES: usize = 1024;
+/// The most items status lists in `refused` (what the service skipped in
+/// this document generation); `refused_omitted` counts the rest. Like
+/// `missing_renderers`, outside the document's status budget: at the reply's
+/// limit fewer are listed (`Runtime::status_reply`).
+const MAX_REFUSED_STATUS_ENTRIES: usize = 16;
+/// The longest reason a `refused` row carries, cut in the middle past it:
+/// a reason names the item, and may name a path or an error.
+const MAX_REFUSED_REASON_BYTES: usize = 256;
 /// Rule checks one status reply may spend finding every display's next
 /// schedule boundary (`schedule::next_change`). A profile with a few dozen
 /// rules on a few displays needs well under a tenth of it; only hundreds of
@@ -324,6 +332,33 @@ enum MissingDetail {
     Full,
     WithoutPaths,
     Left,
+}
+
+/// How much a status reply carries of what the document's status budget
+/// doesn't bound (`Runtime::status_reply`).
+#[derive(Clone, Copy, Debug)]
+struct ReplyShape {
+    /// The most taboo records listed; `taboo_entries_omitted` counts the
+    /// rest.
+    taboo: usize,
+    /// Whether `outputs` carries the compositor's snapshot.
+    outputs: bool,
+    missing: MissingDetail,
+    /// The most `refused` rows listed; `refused_omitted` counts the rest.
+    refused: usize,
+    /// Whether the display rows, and the summary, name the playlist a
+    /// stand-in plays for (`stand_in_for`).
+    stand_in_for: bool,
+}
+
+impl ReplyShape {
+    const WHOLE: Self = Self {
+        taboo: MAX_TABOO_STATUS_ENTRIES,
+        outputs: true,
+        missing: MissingDetail::Full,
+        refused: MAX_REFUSED_STATUS_ENTRIES,
+        stand_in_for: true,
+    };
 }
 
 impl MissingRendererStatus {
@@ -5736,50 +5771,110 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// as the 64-record cap already does -- instead of the reply failing. The
     /// shape of the status never changes, and `entry_taboo` stays exact.
     ///
-    /// The compositor's display snapshot (`outputs`) and the renderers the
-    /// service could not run (`missing_renderers`) are outside the
-    /// document's budget and go first: `outputs` is left out, then as many
-    /// taboo records fit as would without `missing_renderers`, and only then
-    /// is `missing_renderers` given what room is left: whole, without its
-    /// paths, or not at all. Neither is ever kept at a record's expense.
+    /// What the budget doesn't bound at all is fitted here, and goes first.
+    /// The fields added in 0.4.1, `refused` and `stand_in_for`, give way
+    /// before anything a 0.4.0 reply carries, so the budget stays 0.4.0's
+    /// and a document that loaded then still loads (docs/runtime-config.md):
+    ///
+    /// 1. `refused` rows, the last listed first, each counted in
+    ///    `refused_omitted`;
+    /// 2. every `stand_in_for`, on the rows and in the summary;
+    /// 3. the compositor's display snapshot (`outputs`);
+    /// 4. `missing_renderers`' paths, then its rows (the renderers the
+    ///    service could not run);
+    /// 5. the oldest taboo records.
+    ///
+    /// None of the first four is ever kept at a taboo record's expense. With
+    /// all of them gone the reply is the one the budget bounds.
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
-        use MissingDetail::{Full, WithoutPaths};
-        let everything = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, true, Full)?;
+        let everything = self.status_json(at, ReplyShape::WHOLE)?;
         if success_fits(&everything) {
             return Ok(everything);
         }
-        let full = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, false, Full)?;
-        if success_fits(&full) {
-            return Ok(full);
+        let (shape, best) = self.fitting_without_additions(at)?;
+        // What room is left: every `stand_in_for`, then as many `refused`
+        // rows as fit.
+        let shape = ReplyShape {
+            stand_in_for: true,
+            ..shape
+        };
+        let with_stand_ins = self.status_json(at, shape)?;
+        if !success_fits(&with_stand_ins) {
+            return Ok(best);
         }
-        let (records, mut best) = self.fitting_taboo_records(at)?;
-        for detail in [Full, WithoutPaths] {
-            let candidate = self.status_json(at, records, false, detail)?;
+        let listed = self.refused_scenes.len().min(MAX_REFUSED_STATUS_ENTRIES);
+        let (_, best) =
+            self.most_that_fit(at, listed, |refused| ReplyShape { refused, ..shape })?;
+        Ok(best)
+    }
+
+    /// The reply 0.4.0 would fit, without `refused` rows or `stand_in_for`:
+    /// `outputs` left out first, then as many taboo records kept as fit
+    /// without `missing_renderers`, which then gets what room is left:
+    /// whole, without its paths, or not at all. Its shape, and that reply.
+    fn fitting_without_additions(&self, at: NaiveDateTime) -> Result<(ReplyShape, String), String> {
+        let mut shape = ReplyShape {
+            refused: 0,
+            stand_in_for: false,
+            ..ReplyShape::WHOLE
+        };
+        let everything = self.status_json(at, shape)?;
+        if success_fits(&everything) {
+            return Ok((shape, everything));
+        }
+        shape.outputs = false;
+        let full = self.status_json(at, shape)?;
+        if success_fits(&full) {
+            return Ok((shape, full));
+        }
+        let (records, mut best) =
+            self.most_that_fit(at, MAX_TABOO_STATUS_ENTRIES, |taboo| ReplyShape {
+                taboo,
+                missing: MissingDetail::Left,
+                ..shape
+            })?;
+        shape.taboo = records;
+        shape.missing = MissingDetail::Left;
+        for detail in [MissingDetail::Full, MissingDetail::WithoutPaths] {
+            let candidate = self.status_json(
+                at,
+                ReplyShape {
+                    missing: detail,
+                    ..shape
+                },
+            )?;
             if success_fits(&candidate) {
+                shape.missing = detail;
                 best = candidate;
                 break;
             }
         }
-        Ok(best)
+        Ok((shape, best))
     }
 
-    /// The most taboo records a reply without `outputs` and
-    /// `missing_renderers` has room for, and that reply.
-    fn fitting_taboo_records(&self, at: NaiveDateTime) -> Result<(usize, String), String> {
-        let all = self.status_json(at, MAX_TABOO_STATUS_ENTRIES, false, MissingDetail::Left)?;
-        if success_fits(&all) {
-            return Ok((MAX_TABOO_STATUS_ENTRIES, all));
+    /// The most of `0..=most` a reply shaped `shape(count)` has room for,
+    /// and that reply. 0 and its reply when none has room, which a document
+    /// the budget passed never reaches for taboo records (its writer refuses
+    /// such a document).
+    fn most_that_fit(
+        &self,
+        at: NaiveDateTime,
+        most: usize,
+        shape: impl Fn(usize) -> ReplyShape,
+    ) -> Result<(usize, String), String> {
+        let all = self.status_json(at, shape(most))?;
+        if most == 0 || success_fits(&all) {
+            return Ok((most, all));
         }
-        let mut best = self.status_json(at, 0, false, MissingDetail::Left)?;
+        let mut best = self.status_json(at, shape(0))?;
         if !success_fits(&best) {
-            // Not reachable from a validated document; the writer refuses it.
             return Ok((0, best));
         }
-        // The most records that fit: `fits` fits, `over` does not.
-        let (mut fits, mut over) = (0, MAX_TABOO_STATUS_ENTRIES);
+        // `fits` fits, `over` does not.
+        let (mut fits, mut over) = (0, most);
         while over - fits > 1 {
             let middle = fits + (over - fits) / 2;
-            let candidate = self.status_json(at, middle, false, MissingDetail::Left)?;
+            let candidate = self.status_json(at, shape(middle))?;
             if success_fits(&candidate) {
                 fits = middle;
                 best = candidate;
@@ -5790,11 +5885,12 @@ impl<D: WallpaperDriver> Runtime<D> {
         Ok((fits, best))
     }
 
-    /// What the service refused this generation, as status lists it.
-    fn refused_rows(&self) -> Vec<RefusedStatus<'_>> {
+    /// What the service refused this generation, as status lists it: at
+    /// most `limit` rows.
+    fn refused_rows(&self, limit: usize) -> Vec<RefusedStatus<'_>> {
         self.refused_scenes
             .iter()
-            .take(MAX_REFUSED_STATUS_ENTRIES)
+            .take(limit.min(MAX_REFUSED_STATUS_ENTRIES))
             .map(|(item, refusal)| RefusedStatus {
                 scene_id: item,
                 web_page: refusal.web_page,
@@ -5803,10 +5899,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .collect()
     }
 
-    fn refused_omitted(&self) -> usize {
+    /// How many more were refused than `refused_rows(limit)` lists.
+    fn refused_omitted(&self, limit: usize) -> usize {
         self.refused_scenes
             .len()
-            .saturating_sub(MAX_REFUSED_STATUS_ENTRIES)
+            .saturating_sub(limit.min(MAX_REFUSED_STATUS_ENTRIES))
     }
 
     /// `missing_renderers` as a reply of shape `detail` carries it.
@@ -5821,15 +5918,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             .collect()
     }
 
-    fn status_json(
-        &self,
-        at: NaiveDateTime,
-        taboo_limit: usize,
-        outputs: bool,
-        missing: MissingDetail,
-    ) -> Result<String, String> {
+    fn status_json(&self, at: NaiveDateTime, shape: ReplyShape) -> Result<String, String> {
         if self.is_independent() {
-            return self.status_json_independent(at, taboo_limit, outputs, missing);
+            return self.status_json_independent(at, shape);
         }
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -5876,7 +5967,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     observed_config_epoch: record.observed_config_epoch,
                 })
             })
-            .take(taboo_limit.min(MAX_TABOO_STATUS_ENTRIES))
+            .take(shape.taboo.min(MAX_TABOO_STATUS_ENTRIES))
             .collect();
         let playlists = self
             .config
@@ -6110,6 +6201,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         }
+        if !shape.stand_in_for {
+            for row in &mut displays {
+                row.stand_in_for = None;
+            }
+        }
         serde_json::to_string(&Status {
             loaded_config_sha256: self.config.source_sha256.as_deref(),
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
@@ -6200,16 +6296,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             schedules,
             displays,
-            outputs: if outputs {
+            outputs: if shape.outputs {
                 self.driver.published_outputs()
             } else {
                 &[]
             },
-            missing_renderers: self.missing_rows(missing),
+            missing_renderers: self.missing_rows(shape.missing),
             nothing_to_play: self.mirrored_nothing_reason(),
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
-            refused: self.refused_rows(),
-            refused_omitted: self.refused_omitted(),
+            refused: self.refused_rows(shape.refused),
+            refused_omitted: self.refused_omitted(shape.refused),
         })
         .map_err(|error| error.to_string())
     }
@@ -6217,9 +6313,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn status_json_independent(
         &self,
         at: NaiveDateTime,
-        taboo_limit: usize,
-        outputs: bool,
-        missing: MissingDetail,
+        shape: ReplyShape,
     ) -> Result<String, String> {
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
@@ -6289,7 +6383,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     observed_config_epoch: record.observed_config_epoch,
                 })
             })
-            .take(taboo_limit.min(MAX_TABOO_STATUS_ENTRIES))
+            .take(shape.taboo.min(MAX_TABOO_STATUS_ENTRIES))
             .collect();
         let taboo_entries_omitted = taboo_total.saturating_sub(taboo_entries.len());
         let playlists = self
@@ -6523,6 +6617,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .target_outputs
             .iter()
             .find_map(|connector| self.pending_routes.get(connector));
+        if !shape.stand_in_for {
+            for row in &mut displays {
+                row.stand_in_for = None;
+            }
+        }
         serde_json::to_string(&Status {
             loaded_config_sha256: self.config.source_sha256.as_deref(),
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
@@ -6627,16 +6726,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             },
             schedules,
             displays,
-            outputs: if outputs {
+            outputs: if shape.outputs {
                 self.driver.published_outputs()
             } else {
                 &[]
             },
-            missing_renderers: self.missing_rows(missing),
+            missing_renderers: self.missing_rows(shape.missing),
             nothing_to_play: self.routes_nothing_reason(&self.target_outputs),
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
-            refused: self.refused_rows(),
-            refused_omitted: self.refused_omitted(),
+            refused: self.refused_rows(shape.refused),
+            refused_omitted: self.refused_omitted(shape.refused),
         })
         .map_err(|error| error.to_string())
     }

@@ -597,22 +597,29 @@ def test_status_inventory_budget_matches_the_rust_protocol_limit() -> None:
 _BUDGET_EDGE = Path(__file__).resolve().parents[1] / "service/tests/fixtures/status-budget"
 
 
-def test_the_status_budget_agrees_with_the_services_at_the_edge() -> None:
-    """r13c: what status says of a refused entry is counted the same on both sides.
+def _without_its_scene(document: str) -> str:
+    """``status-budget``'s Wallpaper Engine entry, as a still."""
+    stills = document.replace(f'kind = "scene"\nscene_id = "{"1" * 200}"\n', 'kind = "still"\n')
+    assert stills != document
+    return stills
 
-    ``fits.toml`` has a Wallpaper Engine entry, so every row may name the
-    playlist it asked for (``stand_in_for``) and status lists what the service
-    refused (``refused``); it just fits one reply, and ``over.toml`` is a byte
-    over. The service's ``tests/config.rs`` reads the same pair.
+
+def test_the_status_budget_agrees_with_the_services_at_the_edge() -> None:
+    """r13d B1: a Wallpaper Engine entry costs the budget nothing, on both sides.
+
+    ``fits.toml`` has a Wallpaper Engine entry and a status bound of the
+    protocol limit exactly; ``over.toml`` is a byte over. The service's
+    ``tests/config.rs`` reads the same pair. What status says of a refused
+    entry (``stand_in_for``, ``refused``) is fitted when the reply is built,
+    so the budget is 0.4.0's, and the entry as a still changes nothing.
     """
-    runtime_config._validate_status_budget((_BUDGET_EDGE / "fits.toml").read_text())
+    fits = (_BUDGET_EDGE / "fits.toml").read_text()
     over = (_BUDGET_EDGE / "over.toml").read_text()
-    with pytest.raises(runtime_config.RuntimeConfigError, match="protocol response limit"):
-        runtime_config._validate_status_budget(over)
-    # Without its Wallpaper Engine entry nothing can be refused, and neither is counted.
-    stills = over.replace(f'kind = "scene"\nscene_id = "{"1" * 200}"\n', 'kind = "still"\n')
-    assert stills != over
-    runtime_config._validate_status_budget(stills)
+    runtime_config._validate_status_budget(fits)
+    runtime_config._validate_status_budget(_without_its_scene(fits))
+    for document in (over, _without_its_scene(over)):
+        with pytest.raises(runtime_config.RuntimeConfigError, match="protocol response limit"):
+            runtime_config._validate_status_budget(document)
 
 
 def test_status_budget_failure_never_replaces_last_known_good(

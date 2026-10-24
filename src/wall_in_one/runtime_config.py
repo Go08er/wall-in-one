@@ -104,11 +104,6 @@ STATUS_STRUCTURAL_RESERVE_BYTES: Final = 256 * 1024
 STATUS_DIAGNOSTIC_RESERVE_BYTES: Final = 64 * 1024
 STATUS_JSON_ESCAPE_FACTOR: Final = 4
 MAX_LIVE_OUTPUTS: Final = 64
-#: What status lists of the items the service refused (``refused``), and the
-#: longest reason a row carries: Rust's ``MAX_REFUSED_STATUS_ENTRIES`` and
-#: ``MAX_REFUSED_REASON_BYTES``, counted in the status budget the same way.
-MAX_REFUSED_STATUS_ENTRIES: Final = 16
-MAX_REFUSED_REASON_BYTES: Final = 256
 COMPILER_LOCK_TIMEOUT_SECONDS: Final = 5.0
 COMPILER_LOCK_POLL_SECONDS: Final = 0.025
 
@@ -667,9 +662,7 @@ def _validate_status_budget(document_without_generation: str) -> None:
 
     configured_text = 0
     largest_playlist_identity = 0
-    largest_playlist_id = 0
     largest_entry = 0
-    largest_item = 0
     playlist_identity: dict[str, tuple[str, str]] = {}
     for raw in raw_playlists:
         if not isinstance(raw, dict):
@@ -688,9 +681,6 @@ def _validate_status_budget(document_without_generation: str) -> None:
         )
         configured_text += identity_bytes
         largest_playlist_identity = max(largest_playlist_identity, identity_bytes)
-        largest_playlist_id = max(
-            largest_playlist_id, _encoded_length(identifier, label="playlist id")
-        )
         playlist_identity[identifier] = (identifier, name)
         playlist_identity[name] = (identifier, name)
         reason = raw.get("nothing_to_play")
@@ -714,11 +704,6 @@ def _validate_status_budget(document_without_generation: str) -> None:
                 _encoded_length(entry_id, label="entry id")
                 + _encoded_length(still, label="entry still"),
             )
-            # The item a ``refused`` row names: a preset's base, else its own
-            # (Rust's ``Entry::rendered_scene``).
-            item = entry.get("scene_base", entry.get("scene_id"))
-            if isinstance(item, str):
-                largest_item = max(largest_item, _encoded_length(item, label="scene id"))
 
     for raw in raw_schedules:
         if not isinstance(raw, dict):
@@ -751,17 +736,9 @@ def _validate_status_budget(document_without_generation: str) -> None:
             _encoded_length(raw["connector"], label="display connector"),
         )
 
-    # A row on a stand-in also names the playlist asked for (``stand_in_for``),
-    # as does the summary: only a Wallpaper Engine entry is ever refused, so
-    # only then.
-    stand_in_for = largest_playlist_id if largest_item > 0 else 0
-    per_display = largest_connector + largest_playlist_identity * 2 + stand_in_for + largest_entry
+    per_display = largest_connector + largest_playlist_identity * 2 + largest_entry
     configured_text += per_display * (MAX_LIVE_OUTPUTS + MAX_DISPLAYS)
-    configured_text += largest_playlist_identity + stand_in_for + largest_entry
-    # What the service refused (``refused``): only a Wallpaper Engine entry can
-    # be, each row its item and a bounded reason.
-    if largest_item > 0:
-        configured_text += MAX_REFUSED_STATUS_ENTRIES * (largest_item + MAX_REFUSED_REASON_BYTES)
+    configured_text += largest_playlist_identity + largest_entry
     encoded_bound = (
         configured_text * STATUS_JSON_ESCAPE_FACTOR
         + STATUS_STRUCTURAL_RESERVE_BYTES

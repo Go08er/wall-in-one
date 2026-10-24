@@ -427,6 +427,8 @@ def test_a_service_whose_status_cant_be_read_isnt_called_older(
     assert _acted(sent) == ["stop", "quit"], said
     assert "its status couldn\u2019t be read" in said
     assert "older than this app" not in said
+    # What it holds is only what the app remembers then.
+    assert "still may hold a configuration that plays Electric Eye" in said
     # Nor does its next start play nothing: it plays no web wallpaper (L3).
     assert "plays nothing while" not in said
 

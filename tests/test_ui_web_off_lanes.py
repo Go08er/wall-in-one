@@ -337,7 +337,9 @@ def test_a_busy_compiler_lock_still_stops_the_page(
     monkeypatch.setattr(runtime_config, "compiler_lock", busy)
     said = application._web_off_guard()
     assert _acted(sent) == ["stop"]
-    assert "still plays Electric Eye" in said and "Playback was stopped" in said
+    # Its status has no body here: what it holds is only what the app remembers.
+    assert "may hold a configuration that plays Electric Eye" in said
+    assert "Playback was stopped" in said
     assert _names_page(), "nothing was written without the lock"
 
 

@@ -4461,7 +4461,7 @@ class Application(Adw.Application):
             titles, unchecked = runtime_config.web_wallpapers_in(judged)
             if not allows and (reads_eight or not (titles or unchecked or unsure)):
                 return self._web_off_not_reached(titles) if reads_eight else ""
-            what = self._held_web_words(titles, unchecked, allows=allows)
+            what = self._held_web_words(titles, unchecked, allows=allows, known=status is not None)
             # Whether it was playing: the stop below only bridges until the
             # document that plays nothing is loaded, after which Play is put
             # back, so that turning web wallpapers on again plays as before.
@@ -4592,12 +4592,24 @@ class Application(Adw.Application):
 
     @staticmethod
     def _held_web_words(
-        titles: Sequence[str], unchecked: Sequence[str], *, allows: bool = False
+        titles: Sequence[str],
+        unchecked: Sequence[str],
+        *,
+        allows: bool = False,
+        known: bool = True,
     ) -> str:
         """What the held document plays that web wallpapers being off forbids, after "still".
 
         ``allows``: it allows web wallpapers (`runtime_config.allows_web_wallpapers`).
+        ``known``: the service's status was read. Otherwise what it holds, and
+        whether it would play it, is only what the app remembers: said as "may".
         """
+        if not known:
+            if allows:
+                return "may hold a configuration that allows web wallpapers"
+            if titles or unchecked:
+                held = Application._held_web_words(titles, unchecked)
+                return f"may hold a configuration that {held}"
         if allows:
             if titles:
                 return f"plays {', '.join(titles)}, from a configuration that allows web wallpapers"

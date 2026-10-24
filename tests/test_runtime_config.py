@@ -1400,7 +1400,8 @@ def test_executable_wallpaper_engine_items_never_reach_a_renderer(tmp_path: Path
     automatic.mkdir(parents=True)
     for workshop_id in ("100", "200", "300"):
         (automatic / f"{workshop_id}.png").write_bytes(b"\x89PNG")
-    settings = config.Settings(roots=(root,))
+    # Web wallpapers on, so the web item stands for what does reach a renderer.
+    settings = config.Settings(roots=(root,), allow_web_wallpapers=True)
     session = Session(
         settings,
         scanner=lambda roots: scan.scan(

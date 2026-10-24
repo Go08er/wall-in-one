@@ -149,6 +149,10 @@ class MediaItem:
     #: A Wallpaper Engine item that is, or would play, a program
     #: (`library.workshop.NEVER_RUN`): never run, whatever the engine supports.
     runs_program: bool = False
+    #: A Wallpaper Engine item that plays a web page in the engine's browser:
+    #: a ``web`` wallpaper, or a preset of one. Played only with
+    #: ``allow_web_wallpapers`` on (`library.workshop.web_off`).
+    web_page: bool = False
     #: Why it can never play as it is, or ``None``; ``unplayable_reason`` says
     #: it for a person.
     unplayable: Unplayable | None = None

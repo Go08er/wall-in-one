@@ -160,6 +160,12 @@ class WallpaperView(Protocol):
     @property
     def kind_note(self) -> str: ...
 
+    #: A Settings place (`SettingsPage.activate`) whose setting would let it
+    #: play, e.g. ``library.web`` for a web wallpaper while they are off; or
+    #: empty.
+    @property
+    def settings_target(self) -> str: ...
+
     @property
     def tags(self) -> tuple[str, ...]: ...
 
@@ -174,6 +180,9 @@ class Workshop:
     unsupported: tuple[str, ...] = ()
     #: Whether one of them is a program (never run): only then is that said.
     executable: bool = False
+    #: The titles of web wallpapers (and presets of them) not played while
+    #: Allow web wallpapers is off. Counted apart: a choice, not a lack.
+    web_off: tuple[str, ...] = ()
 
 
 class PlaylistView(Protocol):

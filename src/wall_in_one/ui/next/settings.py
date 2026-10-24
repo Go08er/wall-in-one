@@ -53,7 +53,11 @@ from gi.repository import Adw, Gio, GLib, Graphene, Gtk
 
 from wall_in_one.programs import SCENE_ENGINE_MISSING
 from wall_in_one.ui.next import widgets
-from wall_in_one.ui.next.catalog import CLASSIC_HINT
+from wall_in_one.ui.next.catalog import (
+    CLASSIC_HINT,
+    WEB_WALLPAPERS_EXPLAINED,
+    WEB_WALLPAPERS_TITLE,
+)
 from wall_in_one.ui.next.page import Page
 from wall_in_one.ui.next.settings_palettes import PalettesDialog
 from wall_in_one.ui.next.settings_state import (
@@ -499,6 +503,15 @@ class SettingsPage(Page):
             "scan_workshop",
         )
         self._add(more, workshop, "steam workshop wallpaper engine scenes scan")
+        # Off by default (docs/wallpaper-engine.md); a web wallpaper's details
+        # lead here (`library.web`).
+        web = self._switch(WEB_WALLPAPERS_TITLE, WEB_WALLPAPERS_EXPLAINED, "allow_web_wallpapers")
+        self._add(
+            more,
+            web,
+            "web wallpapers wallpaper engine javascript browser chromium security",
+            target="library.web",
+        )
 
     def _rebuild_folders(self, access: SettingsAccess, blocked: bool) -> None:
         folders = tuple(access.folder_list())

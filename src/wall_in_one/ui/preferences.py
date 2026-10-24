@@ -25,6 +25,7 @@ from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.launch_rows import LaunchRows
+from wall_in_one.ui.next.catalog import WEB_WALLPAPERS_EXPLAINED, WEB_WALLPAPERS_TITLE
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.ui.plain_text import plain
@@ -115,6 +116,7 @@ class PreferencesPage(Adw.PreferencesPage):
         self._settings_controls: tuple[Gtk.Widget, ...] = (
             self._add_root,
             self._workshop,
+            self._web,
             self._shuffle,
             self._cycle,
             self._interval,
@@ -172,6 +174,13 @@ class PreferencesPage(Adw.PreferencesPage):
         )
         self._workshop.connect("notify::active", self._on_changed)
         group.add(self._workshop)
+        # Off by default (docs/wallpaper-engine.md): what turning it on means
+        # is said where it is turned on.
+        self._web = plain(
+            Adw.SwitchRow, title=WEB_WALLPAPERS_TITLE, subtitle=WEB_WALLPAPERS_EXPLAINED
+        )
+        self._web.connect("notify::active", self._on_changed)
+        group.add(self._web)
         return group
 
     def _refresh_roots(self) -> None:
@@ -829,6 +838,7 @@ class PreferencesPage(Adw.PreferencesPage):
             self._refresh_power_status(settings)
             self._own_scenes.set_active(settings.own_scene_renderer)
             self._workshop.set_active(settings.scan_workshop)
+            self._web.set_active(settings.allow_web_wallpapers)
             self._favourites_only.set_active(settings.cycle_favourites_only)
             self._display_mode.set_selected(
                 1 if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT else 0
@@ -902,6 +912,7 @@ class PreferencesPage(Adw.PreferencesPage):
             "stop_animations_on_battery": self._battery_animations.get_active(),
             "own_scene_renderer": self._own_scenes.get_active(),
             "scan_workshop": self._workshop.get_active(),
+            "allow_web_wallpapers": self._web.get_active(),
             "cycle_favourites_only": self._favourites_only.get_active(),
             "display_mode": (
                 config.DISPLAY_MODE_INDEPENDENT if independent else config.DISPLAY_MODE_MIRRORED

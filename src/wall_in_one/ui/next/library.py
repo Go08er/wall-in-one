@@ -28,7 +28,13 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from wall_in_one.ui.grid import MEDIA_PAGE_SIZE
 from wall_in_one.ui.next import thumbs, widgets
-from wall_in_one.ui.next.catalog import quoted, unsupported_details, unsupported_notice
+from wall_in_one.ui.next.catalog import (
+    quoted,
+    unsupported_details,
+    unsupported_notice,
+    web_off_details,
+    web_off_notice,
+)
 from wall_in_one.ui.next.inspector import Inspector
 from wall_in_one.ui.next.page import Page
 from wall_in_one.ui.next.state import (
@@ -164,6 +170,14 @@ class LibraryPage(Page):
         self._unsupported_label = Gtk.Label(wrap=True, xalign=0)
         self.unsupported_notice.append(self._unsupported_label)
         self._workshop_row.append(self.unsupported_notice)
+        # Web wallpapers while they are off: a choice, not a lack, so said
+        # apart; it leads to the setting.
+        self.web_off_button = Gtk.Button(valign=Gtk.Align.CENTER, visible=False)
+        self.web_off_button.add_css_class("flat")
+        self.web_off_button.connect(
+            "clicked", lambda *_: self.state.navigate("settings:library.web")
+        )
+        self._workshop_row.append(self.web_off_button)
         self._workshop_row.append(Gtk.Box(hexpand=True))
         self.check_workshop = Gtk.Button(valign=Gtk.Align.CENTER)
         self.check_workshop.set_child(
@@ -667,6 +681,11 @@ class LibraryPage(Page):
             unsupported_details(titles, executable=executable) or None
         )
         self.unsupported_notice.set_visible(bool(notice))
+        web_off = workshop.web_off if workshop is not None else ()
+        web = web_off_notice(len(web_off)) if self._kind == "scene" else ""
+        self.web_off_button.set_label(web)
+        self.web_off_button.set_tooltip_text(web_off_details(web_off) or None)
+        self.web_off_button.set_visible(bool(web))
         checking = (
             self._kind in ("video", "scene") and workshop is not None and self._folders is not None
         )
@@ -679,7 +698,12 @@ class LibraryPage(Page):
             else "Look through Steam\u2019s Wallpaper Engine folders again, with the rest of "
             "the library (F5)"
         )
-        self._workshop_row.set_visible(bool(notice) or checking)
+        self._workshop_row.set_visible(bool(notice) or bool(web) or checking)
+
+    @property
+    def web_off_text(self) -> str:
+        """The Scenes view's line about web wallpapers kept off, as shown."""
+        return self.web_off_button.get_label() or "" if self.web_off_button.get_visible() else ""
 
     @property
     def unsupported_text(self) -> str:

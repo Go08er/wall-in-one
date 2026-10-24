@@ -113,8 +113,10 @@ in both interfaces' kind badges; the category keeps its name, so the classic
 |---|---|---|
 | `video` with its file | Video | mpvpaper, as before |
 | `video` whose file is gone, or one the app won't open | not listed, as before | – |
-| `scene` naming a `.json`, `web` naming a `.html`/`.htm` | Scene · its type | `--bg <id>` |
+| `scene` naming a `.json` | Scene | `--bg <id>` |
+| `web` naming a `.html`/`.htm` | Scene · web | `--bg <id>`, only with Allow web wallpapers on (off by default) |
 | preset whose base is installed and plays | Scene · preset, titled and previewed as the preset | `--bg <base>` plus its properties |
+| preset of a web wallpaper | Scene · preset, "plays as <base>" | `--bg <base>`, no properties; only with web wallpapers on |
 | preset whose base is not installed (or names none) | Scene · preset, "needs its base" | never |
 | `application` (or a preset of one) | Scene · application, unsupported | never, whatever the engine supports |
 | any other type, or none (or a preset of one) | Scene · its type, unsupported | never |
@@ -136,6 +138,28 @@ A `video` item whose file is gone stays unlisted, as before, rather than
 going to the engine: deleting a Workshop video's file through the app is how
 it leaves the library, and the dry run of that delete must agree with it.
 
+### Web wallpapers are off until allowed
+
+Owner decision, after the review of r11: a `web` wallpaper, and a preset of
+one, plays only with **Allow web wallpapers** (`allow_web_wallpapers`, off by
+default) turned on. What it means is said where it is turned on: the page's
+JavaScript runs in linux-wallpaperengine's built-in browser, an older
+Chromium, with web security and site isolation off
+(`WebBrowser/CEF/BrowserApp.cpp:21-37`), so the page can reach web services on
+the computer and its network and send data out.
+
+The item's classification doesn't depend on the setting (it is a scan fact,
+`MediaItem.web_page`); every consumer asks `workshop.why_not_played(item,
+allow_web)`. While it is off the compiler leaves such items out of
+`runtime.toml`, Apply and the legacy applier refuse them with "web wallpapers
+are off: turn on Allow web wallpapers in Settings → Library to play it", the
+stills worker gets none of them, and the new interface's details pane leads to
+the setting. They are not counted with the unsupported ones: the Scenes view
+says "N web wallpapers are off" apart. A settings change recompiles and
+reloads as any other does, and turning it on also makes their stills. The key
+is written to `settings.toml` only when on, so a profile that never turns it
+on keeps its bytes. Executables stay refused either way.
+
 ### Executable wallpapers are never run
 
 Owner decision, for security: a Wallpaper Engine `application` wallpaper is a
@@ -156,16 +180,14 @@ sniffed: that would mean reading files from a folder anyone can write to, to
 protect against nothing that runs them. Nothing is executed or probed to
 decide.
 
-Two things the source shows that stay as they are, for the owner to weigh:
+Something else the source shows, which stays as it is:
 
-- A web wallpaper runs its own JavaScript in CEF, as in Wallpaper Engine
-  itself, and linux-wallpaperengine starts CEF with `--disable-web-security`,
-  site isolation off (`WebBrowser/CEF/BrowserApp.cpp:21-37`).
 - CEF's helper processes are started with the engine's own arguments
   appended (`BrowserApp.cpp:49-53`), `--screen-root` included. The service
-  doesn't look for other engines, but the app's legacy applier
-  (`wallpaper.scenes.running_elsewhere`) would count those helpers as a
-  foreign engine on that output.
+  doesn't look for other engines. The app's legacy applier
+  (`wallpaper.scenes.running_elsewhere`) stops its own engine, helpers and
+  all, before it looks, so it no longer counts them (or its own engine) as a
+  foreign one.
 
 A preset is its **own** library item: its identity (`MediaItem.scene`, which
 keys pairings, stills, lifecycle locks and the service's taboo identity) is

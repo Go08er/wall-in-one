@@ -166,9 +166,10 @@ still is never judged against a guessed size or by its shape, and nothing is
 written without the engine or a measured display.
 
 A web wallpaper or a preset gets the same `<id>.png` from its own preview
-instead, through ffmpeg (the first frame of a `.gif`): the engine would
-capture a web page before it has drawn. It needs no display and is made once.
-A Wallpaper Engine item that can't play gets no still.
+instead (a preset of a web wallpaper, from that wallpaper's), through ffmpeg
+(the first frame of a `.gif`): the engine would capture a web page before it
+has drawn. It needs no display and is made once. A Wallpaper Engine item that
+can't play gets no still, and neither does a web wallpaper while they are off.
 
 Generated filenames include a digest of the video's absolute path. Two files
 named `intro.mp4` in different folders therefore get different stills rather
@@ -252,14 +253,24 @@ library folder. Steam's files are only read: never deleted, moved or written
 beside.
 
 - A **video** item with its file plays through mpvpaper like any other video.
-- A **scene** or **web** wallpaper plays through linux-wallpaperengine.
+- A **scene** plays through linux-wallpaperengine.
+- A **web** wallpaper plays through linux-wallpaperengine too, but only with
+  **Allow web wallpapers** on (**Settings → Library**), which is **off by
+  default**. A web wallpaper runs its page's JavaScript in
+  linux-wallpaperengine's built-in browser, an older Chromium, with web
+  security and site isolation off: the page can reach web services on your
+  computer and network, and send data out. While the setting is off, web
+  wallpapers (and presets of them) are listed but say **Can't play**, with a
+  way to the setting, and are never handed to a renderer or given a still.
+  Turning it on or off takes effect at once, like any other setting.
 - A **preset** (a set of settings someone published for another wallpaper) is
   its own item, with its own title and preview. It plays the wallpaper it is a
   preset of, which must be installed too, with the preset's settings. A
   preset whose wallpaper isn't installed is listed and says so; subscribe to
   that wallpaper in Steam. linux-wallpaperengine doesn't pass settings to a
-  web wallpaper's page yet, so a preset of a web wallpaper looks like that
-  wallpaper's defaults for now.
+  web wallpaper's page, so a preset of a web wallpaper plays that wallpaper as
+  it is, and says so ("plays as Electric Eye; its settings aren't applied");
+  its still and colours come from that wallpaper's preview.
 - **Executable Wallpaper Engine wallpapers** (the "application" type, and
   presets of them) are never run, for security: one is a program anyone can
   publish.
@@ -275,7 +286,9 @@ An item that can't play says **Can't play** on its card, with why, and has no
 Apply. In the Scenes view (classic: Videos and scenes) a notice counts the
 ones no renderer here runs, executable ones included, for example "2
 Wallpaper Engine wallpapers need a runtime linux-wallpaperengine doesn't
-support yet"; its tooltip names them.
+support yet"; its tooltip names them. Web wallpapers kept off are counted
+apart ("1 web wallpaper is off"), as a choice rather than a lack; in the new
+interface that line leads to the setting.
 
 Steam adds items whenever it likes. The Scenes and Videos views (classic:
 Videos and scenes) have **Check Wallpaper Engine for new wallpapers**, which

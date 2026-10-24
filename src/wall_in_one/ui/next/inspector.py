@@ -199,6 +199,8 @@ class Inspector(Gtk.Box):
         self.color_detail: Gtk.Box | None = None
         self.reset_button: Gtk.Button | None = None
         self.retry_button: Gtk.Button | None = None
+        #: Leads to the setting that would let it play, when there is one.
+        self.setting_button: Gtk.Button | None = None
         self.remove_button: Gtk.Button | None = None
 
         header = Adw.HeaderBar(
@@ -267,6 +269,7 @@ class Inspector(Gtk.Box):
         self._refresh_colors = None
         self.color_mode = self.theme_mode = self.color_detail = None
         self.reset_button = self.retry_button = self.remove_button = None
+        self.setting_button = None
         if same:
 
             def restore() -> bool:
@@ -407,6 +410,14 @@ class Inspector(Gtk.Box):
         top.append(heading)
         card.append(top)
         card.append(widgets.dim(wallpaper.unplayable))
+        if wallpaper.settings_target:
+            # A setting would let it play (web wallpapers): lead there.
+            target = wallpaper.settings_target
+            setting = Gtk.Button(label="Open the setting", halign=Gtk.Align.START)
+            setting.add_css_class("pill")
+            setting.connect("clicked", lambda *_: self.state.navigate(f"settings:{target}"))
+            self.setting_button = setting
+            card.append(setting)
         return card
 
     def _problem(self, wallpaper: WallpaperView) -> Gtk.Box:

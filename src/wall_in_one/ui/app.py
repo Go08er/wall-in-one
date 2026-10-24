@@ -47,6 +47,7 @@ from wall_in_one.library import (
     schedules,
     state_file,
     stills,
+    workshop,
 )
 from wall_in_one.library import filter as library_filter
 from wall_in_one.library.model import Library, MediaItem
@@ -2639,6 +2640,7 @@ class Application(Adw.Application):
             self._settings.preview_scheme,
             self._settings.follow_noctalia_palette,
         )
+        web_turned_on = settings.allow_web_wallpapers and not self._settings.allow_web_wallpapers
         self._settings = settings
         async_scan = library_sources_changed and not self._service_start
         self._session.update_settings(settings, rescan_library=not async_scan)
@@ -2651,6 +2653,10 @@ class Application(Adw.Application):
             self.refresh_library()
         else:
             self._publish_runtime_for_context()
+            if web_turned_on:
+                # Web wallpapers were left without stills while off; theirs are
+                # made now, and the rescan after them compiles them in.
+                self._make_missing_stills()
         if palette_source_changed:
             self.reload_palette()
         elif self._resolved is not None:
@@ -5657,7 +5663,12 @@ class Application(Adw.Application):
         roots = self._session.library.roots
         if not roots:
             return
-        self._stills.request(self._session.library.items, roots[0], self._on_stills_made)
+        # A web page while they are off is never played, so it gets no still.
+        allowed = self._settings.allow_web_wallpapers
+        wanted = [
+            item for item in self._session.library.items if not workshop.web_off(item, allowed)
+        ]
+        self._stills.request(wanted, roots[0], self._on_stills_made)
 
     def regenerate_scene_still(self, item: MediaItem) -> bool:
         """Queue an explicit scene recapture; return whether it could start."""
@@ -5667,7 +5678,9 @@ class Application(Adw.Application):
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
         roots = self._session.library.roots
-        if not roots or not item.scene or item.unplayable is not None:
+        if not roots or not item.scene:
+            return False
+        if workshop.why_not_played(item, self._settings.allow_web_wallpapers):
             return False
         self._stills.regenerate_scene(item, roots[0], self._on_stills_made)
         return True
@@ -7243,9 +7256,12 @@ class Application(Adw.Application):
                 self._window.show_library(self._session)
             elif not async_scan:
                 self._window.show_current(self._session)
+        web_turned_on = candidate.allow_web_wallpapers and not previous.allow_web_wallpapers
         if async_scan:
             self.refresh_library()
-        elif library_sources_changed:
+        elif library_sources_changed or web_turned_on:
+            # Web wallpapers got no stills while they were off: theirs are made
+            # now, and the rescan after them compiles them in.
             self._make_missing_stills()
         if self._suppress_palette_reload == 0 and (
             self._settings.preview_scheme != previous.preview_scheme

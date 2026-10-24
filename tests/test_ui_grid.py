@@ -456,9 +456,9 @@ def test_large_library_initial_work_is_bounded_and_fast(
         return real_order_key(each, sort)
 
     class CountedTile(WallpaperTile):
-        def __init__(self, shown: MediaItem) -> None:
+        def __init__(self, shown: MediaItem, *, allow_web: bool = False) -> None:
             built.append(shown.path)
-            super().__init__(shown)
+            super().__init__(shown, allow_web=allow_web)
 
     monkeypatch.setattr(library_filter, "matches", matches)
     monkeypatch.setattr(library_filter, "order_key", order_key)

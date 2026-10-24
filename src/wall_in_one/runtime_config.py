@@ -707,7 +707,18 @@ def _resolved_entry(
     item: MediaItem,
     session: Session,
     entry_id: str,
+    *,
+    allow_web: bool | None = None,
 ) -> tuple[str, ...] | None:
+    """One playlist entry's lines, or ``None`` when it isn't one the runtime can play.
+
+    ``allow_web``: the ``allow_web_wallpapers`` the document is compiled for;
+    ``None`` is the session's own.
+    """
+    allowed = session.settings.allow_web_wallpapers if allow_web is None else allow_web
+    if workshop.web_off(item, allowed):
+        # A web page while they are off: listed, never handed to the engine.
+        return None
     _bounded_text(entry_id, label="playlist entry id", maximum_bytes=MAX_IDENTIFIER_BYTES)
     bundle = session.pairings.resolve_accepted(item, session.library)
     if item.unplayable is not None:
@@ -827,10 +838,11 @@ def entry_playability(item: MediaItem | None, session: Session) -> Playability:
     """
     if item is None:
         return Playability(False, False, "it is not in the library now")
-    if item.unplayable is not None:
-        # A Wallpaper Engine item nothing can play as it is: never compiled,
-        # and no still would change that.
-        return Playability(False, False, item.unplayable_reason or "playback can\u2019t use it")
+    why = workshop.why_not_played(item, session.settings.allow_web_wallpapers)
+    if why:
+        # A Wallpaper Engine item nothing can play as it is (or a web page
+        # while they are off): never compiled, and no still would change that.
+        return Playability(False, False, why)
     try:
         kept = _resolved_entry(item, session, _PROBE_ENTRY_ID) is not None
     except RuntimeConfigError:
@@ -1798,7 +1810,7 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
                     LeftOut(PRESET_OWNER, item.scene, item.name, "", NEEDS_NEWER_SERVICE),
                 )
             return None
-        return _resolved_entry(item, session, entry_id)
+        return _resolved_entry(item, session, entry_id, allow_web=settings.allow_web_wallpapers)
 
     fallback_entries: list[tuple[str, ...]] = []
     for item in fallback_items:

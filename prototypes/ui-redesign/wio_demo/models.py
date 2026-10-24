@@ -41,6 +41,7 @@ class Wallpaper:
     never_plays: bool = False  # a Wallpaper Engine item nothing here runs
     kind_detail: str = ""  # a Wallpaper Engine item's own type, when not a scene
     kind_note: str = ""  # what a Wallpaper Engine preset plays, when not itself
+    settings_target: str = ""  # a Settings place whose setting would let it play
 
     @property
     def key(self) -> ArtKey:

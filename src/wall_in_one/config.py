@@ -370,6 +370,11 @@ class Settings:
     #: with none simply has none; off is for anyone who keeps the two
     #: collections deliberately apart.
     scan_workshop: bool = True
+    #: Play Wallpaper Engine web wallpapers (and presets of them). Off by
+    #: default, owner decision: one runs its page's JavaScript in the engine's
+    #: own older Chromium with web security and site isolation off
+    #: (docs/wallpaper-engine.md). Off, they are listed and never played.
+    allow_web_wallpapers: bool = False
 
     #: Default named playlist when no schedule rule matches. Empty selects the
     #: built-in all-media playlist. On-demand choices are runtime overrides and
@@ -487,6 +492,7 @@ class Settings:
             cycle_favourites_only=boolean("cycle_favourites_only", False),
             active_playlist=text("active_playlist", ""),
             scan_workshop=boolean("scan_workshop", True),
+            allow_web_wallpapers=boolean("allow_web_wallpapers", False),
             own_scene_renderer=boolean("own_scene_renderer", True),
             output=text("output", ""),
             roots=directories("roots"),
@@ -524,6 +530,10 @@ class Settings:
         # crash-resumable journals created before this option existed.
         if self.stop_animations_on_battery:
             lines += ("stop_animations_on_battery = true",)
+        # Written only when on, like the battery option, so a profile that
+        # never turns it on keeps exactly the bytes it had.
+        if self.allow_web_wallpapers:
+            lines += ("allow_web_wallpapers = true",)
         return "\n".join(lines) + "\n"
 
 
@@ -692,6 +702,7 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "video_hardware_decode",
         "cycle_favourites_only",
         "scan_workshop",
+        "allow_web_wallpapers",
         "own_scene_renderer",
     )
     for key in booleans:

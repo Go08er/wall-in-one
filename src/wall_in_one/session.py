@@ -2051,7 +2051,9 @@ class Session:
         return chosen if chosen else playable
 
     def _is_usable(self, item: MediaItem) -> bool:
-        return not self._pairings.health(pairings.Identity.of(item)).is_borked
+        return not self._pairings.health(
+            pairings.Identity.of(item)
+        ).is_borked and not workshop.why_not_played(item, self._settings.allow_web_wallpapers)
 
     def _select_first_usable(self) -> bool:
         """Keep a Borked entry visible in authoring, but never cue it to play."""
@@ -2168,6 +2170,10 @@ class Session:
     def _apply(self, item: MediaItem | None) -> Applied:
         if item is None:
             raise ApplyError("the library is empty")
+        why = workshop.why_not_played(item, self._settings.allow_web_wallpapers)
+        if why:
+            # Never handed to a renderer (docs/wallpaper-engine.md).
+            raise ApplyError(f"{item.name} can\u2019t play: {why}")
         if not self._is_usable(item):
             raise ApplyError(
                 f"{item.name} is marked Borked and cannot play; "
@@ -2232,6 +2238,9 @@ class Session:
         item = self._library.find(path)
         if item is None:
             raise ApplyError(f"not in the library: {path}")
+        why = workshop.why_not_played(item, self._settings.allow_web_wallpapers)
+        if why:
+            raise ApplyError(f"{item.name} can\u2019t play: {why}")
         if not self._is_usable(item):
             raise ApplyError(
                 f"{item.name} is marked Borked and cannot play; "

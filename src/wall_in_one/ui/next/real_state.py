@@ -192,6 +192,7 @@ class LibraryWallpaper:
     never_plays: bool = False
     kind_detail: str = ""
     kind_note: str = ""
+    settings_target: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +266,7 @@ def wallpaper_view(
     shown: pairings.PalettePolicy | None = None,
     still_missing: bool = False,
     unplayable: str = "",
+    allow_web: bool = False,
 ) -> LibraryWallpaper:
     """What the new interface shows of ``item``, from the stores alone.
 
@@ -299,10 +301,15 @@ def wallpaper_view(
         item=item,
         still_note=_still_note(item, pairing, still_missing),
         unplayable="" if health.is_borked else unplayable,
-        never_plays=item.unplayable is not None,
+        never_plays=bool(workshop.why_not_played(item, allow_web)),
         kind_detail=item.workshop_detail,
         kind_note=item.scene_note,
+        settings_target=WEB_SETTING if workshop.web_off(item, allow_web) else "",
     )
+
+
+#: Where Settings has "Allow web wallpapers" (`SettingsPage` targets).
+WEB_SETTING: Final = "library.web"
 
 
 def _is_quick_choice(playlist_id: str) -> bool:
@@ -350,6 +357,8 @@ class RealAppState(GObject.Object):
         self._folders: RealFolders | None = None
         self._scope = "all"
         self._scanning = False
+        #: ``allow_web_wallpapers`` as the views were last built for it.
+        self._web_allowed = False
         self._wallpapers: tuple[LibraryWallpaper, ...] = ()
         self._index: dict[str, LibraryWallpaper] = {}
         self._playlists: tuple[LibraryPlaylist, ...] = ()
@@ -461,6 +470,7 @@ class RealAppState(GObject.Object):
             shown=self._editing.pending_policy(item) if self._editing is not None else None,
             still_missing=missing,
             unplayable="" if can.compiles else can.reason,
+            allow_web=session.settings.allow_web_wallpapers,
         )
 
     def _indexed_stills(self) -> Callable[[], frozenset[Path]]:
@@ -484,6 +494,7 @@ class RealAppState(GObject.Object):
     def reload(self) -> None:
         """Adopt the session's newly installed library, playlists and favourites."""
         indexed = self._indexed_stills()
+        self._web_allowed = self._session.settings.allow_web_wallpapers
         views = [self._view_of(item, indexed) for item in self._session.library.items]
         self._wallpapers = tuple(views)
         self._index = {view.id: view for view in views}
@@ -547,6 +558,11 @@ class RealAppState(GObject.Object):
 
     def settings_changed(self) -> None:
         """The application adopted a new settings snapshot."""
+        allowed = self._session.settings.allow_web_wallpapers
+        if allowed != self._web_allowed:
+            # What a web wallpaper's card says follows the setting at once.
+            self._web_allowed = allowed
+            self.reload()
         self._adopt_status(self._view)
         self.emit_changed("settings")
 
@@ -746,6 +762,7 @@ class RealAppState(GObject.Object):
         return Workshop(
             unsupported=workshop.unsupported_titles(items),
             executable=workshop.runs_a_program(items),
+            web_off=workshop.web_off_titles(items, settings.allow_web_wallpapers),
         )
 
     # -- playlists ----------------------------------------------------------------

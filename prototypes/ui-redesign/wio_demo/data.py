@@ -539,6 +539,7 @@ RUNTIME_LOG_EXTRA = [
 # are AppState attributes the other pages act on, see AppState.setting).
 PREFERENCES = {
     "scan_workshop": True,
+    "allow_web_wallpapers": False,
     "shuffle": False,
     "cycle_enabled": True,
     "cycle_interval": 1800,

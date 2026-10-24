@@ -59,6 +59,7 @@ CLASSIC_KEYS = frozenset(
         "preview_scheme",
         "opacity",
         "scan_workshop",
+        "allow_web_wallpapers",
         "video_muted",
         "video_volume",
         "video_hardware_decode",

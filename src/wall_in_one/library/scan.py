@@ -502,6 +502,7 @@ def workshop_items(
                     scene_properties=plays.properties,
                     scene_note=plays.note,
                     runs_program=plays.program,
+                    web_page=plays.web,
                     unplayable=plays.unplayable,
                     unplayable_reason=plays.reason,
                 )

@@ -20,6 +20,7 @@ from gi.repository import Adw, Gdk, Gio, Gtk, Pango
 
 from wall_in_one import thumbnails as thumbnail_cache
 from wall_in_one.library import filter as library_filter
+from wall_in_one.library import workshop
 from wall_in_one.library.model import MediaItem, Ownership
 from wall_in_one.ui.next.catalog import kind_text
 from wall_in_one.ui.thumbnails import ThumbnailLoader
@@ -47,7 +48,7 @@ _PRESERVE_CURRENT: Final = _PreserveCurrent()
 class WallpaperTile(Gtk.Box):
     """One wallpaper: preview, name, and what kind of thing it is."""
 
-    def __init__(self, item: MediaItem) -> None:
+    def __init__(self, item: MediaItem, *, allow_web: bool = False) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.item = item
         self.add_css_class("wio-tile")
@@ -111,7 +112,7 @@ class WallpaperTile(Gtk.Box):
         badges.set_margin_start(6)
         #: Why it is never played here (`MediaItem.unplayable`): a Wallpaper
         #: Engine item no renderer runs. Turns Apply off, like a refusal.
-        self._never: str | None = item.unplayable_reason if item.unplayable is not None else None
+        self._never: str | None = workshop.why_not_played(item, allow_web) or None
         if item.is_moving:
             # Named for what it is, because a scene and a video are shown by
             # different programs and only one of them can be paused to a still
@@ -340,6 +341,8 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         #: filter and the tiles cannot disagree within one pass.
         self._favourites: frozenset[Path] = frozenset()
         self._borked: dict[Path, str] = {}
+        #: ``allow_web_wallpapers``, which decides whether a web page's tile can play.
+        self._allow_web = False
         self._tiles: dict[Path, WallpaperTile] = {}
         self._items: tuple[MediaItem, ...] = ()
         self._matches: tuple[MediaItem, ...] = ()
@@ -489,6 +492,17 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         for tile in self._tiles.values():
             tile.set_apply_targeting(independent)
 
+    def set_web_allowed(self, allowed: bool) -> None:
+        """Follow ``allow_web_wallpapers``: rebuild only the web pages' tiles."""
+        if allowed == self._allow_web:
+            return
+        self._allow_web = allowed
+        for path, tile in list(self._tiles.items()):
+            if tile.item.web_page:
+                self._flow.remove(tile)
+                del self._tiles[path]
+        self._apply_query()
+
     def _apply_query(self) -> None:
         self._matches = library_filter.apply(self._items, self._query, self._favourites)
         self._positions = {item.path: index for index, item in enumerate(self._matches)}
@@ -530,7 +544,7 @@ class WallpaperGrid(Gtk.ScrolledWindow):
         for item in self._matches:
             if item.path not in wanted or item.path in self._tiles:
                 continue
-            tile = WallpaperTile(item)
+            tile = WallpaperTile(item, allow_web=self._allow_web)
             if self._on_favourite is not None:
                 tile.connect_favourite(self._on_favourite)
             if self._menu_for is not None:

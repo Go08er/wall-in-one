@@ -22,7 +22,12 @@ from wall_in_one.theme import palettes, source
 from wall_in_one.ui import playback_verbs, runtime_truth
 from wall_in_one.ui.browse_dialog import BrowsePage
 from wall_in_one.ui.grid import WallpaperGrid
-from wall_in_one.ui.next.catalog import unsupported_details, unsupported_notice
+from wall_in_one.ui.next.catalog import (
+    unsupported_details,
+    unsupported_notice,
+    web_off_details,
+    web_off_notice,
+)
 from wall_in_one.ui.pairings_page import PairingsPage
 from wall_in_one.ui.palette_browser import PaletteBrowserDialog
 from wall_in_one.ui.palette_catalog import PaletteCatalog
@@ -471,6 +476,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._unsupported_label.set_margin_end(8)
         self.unsupported_notice.append(self._unsupported_label)
         bar.append(self.unsupported_notice)
+        # Web wallpapers while they are off: said apart, as a choice, not a lack.
+        self._web_off_titles: tuple[str, ...] = ()
+        self.web_off_notice = Gtk.Label(wrap=True, xalign=0, visible=False)
+        self.web_off_notice.add_css_class("caption")
+        self.web_off_notice.add_css_class("dimmed")
+        bar.append(self.web_off_notice)
         self.check_workshop = Gtk.Button(visible=False)
         self.check_workshop.set_child(
             Adw.ButtonContent(
@@ -494,6 +505,10 @@ class MainWindow(Adw.ApplicationWindow):
             or None
         )
         self.unsupported_notice.set_visible(bool(notice))
+        web = web_off_notice(len(self._web_off_titles)) if moving and scanned else ""
+        self.web_off_notice.set_label(web)
+        self.web_off_notice.set_tooltip_text(web_off_details(self._web_off_titles) or None)
+        self.web_off_notice.set_visible(bool(web))
         self.check_workshop.set_visible(moving and scanned)
         self.check_workshop.set_sensitive(not self._library_scanning)
         self.check_workshop.set_tooltip_text(
@@ -649,6 +664,12 @@ class MainWindow(Adw.ApplicationWindow):
     def apply_settings(self, settings: config.Settings) -> None:
         previous = self._settings
         self._settings = settings
+        if settings.allow_web_wallpapers != previous.allow_web_wallpapers:
+            self._grid.set_web_allowed(settings.allow_web_wallpapers)
+            if self._management_session is not None:
+                self._web_off_titles = workshop.web_off_titles(
+                    self._management_session.library.items, settings.allow_web_wallpapers
+                )
         self._update_workshop()
         self._grid.set_apply_targeting(settings.display_mode == config.DISPLAY_MODE_INDEPENDENT)
         self._settings_page.apply_settings(settings)
@@ -672,6 +693,7 @@ class MainWindow(Adw.ApplicationWindow):
         # since we last looked -- `ctl favourite` reaches it without going
         # anywhere near this window.
         self._grid.set_favourites(self._favourites.paths)
+        self._grid.set_web_allowed(self._settings.allow_web_wallpapers)
         self._apply_pairing_health(session)
         # Media is the complete crafting library, never a disguised view of
         # whichever playlist happens to be playing. Activating one item makes
@@ -680,6 +702,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._grid.populate(library.items)
         self._unsupported_titles = workshop.unsupported_titles(library.items)
         self._unsupported_executable = workshop.runs_a_program(library.items)
+        self._web_off_titles = workshop.web_off_titles(
+            library.items, self._settings.allow_web_wallpapers
+        )
         self._update_workshop()
 
         self._playable = len(library)

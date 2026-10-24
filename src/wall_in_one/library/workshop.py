@@ -617,6 +617,8 @@ class Playback:
     preview: Path | None = None
     #: It is, or would play, a program (`NEVER_RUN`): never run.
     program: bool = False
+    #: It plays a web page: a ``web`` wallpaper, or a preset of one.
+    web: bool = False
 
 
 def _type_phrase(kind: str) -> str:
@@ -677,7 +679,7 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
     Anything else is listed and never handed to the engine.
     """
     if item.kind != PRESET:
-        return _refusal(item) or Playback()
+        return _refusal(item) or Playback(web=item.kind == "web")
     if item.declared_type in NEVER_RUN:
         # A preset object on an item that says it is a program: still one.
         return _program(item.declared_type)
@@ -731,6 +733,7 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
             base=base.id,
             note=f"plays as {base.title}; its settings aren\u2019t applied",
             preview=base.preview or item.preview,
+            web=True,
         )
     properties = preset_properties(item, base)
     if len(properties) > MAX_PROPERTIES:
@@ -746,6 +749,33 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
 
 
 # -- what the Library says about them ----------------------------------------------
+
+
+#: Why a web wallpaper isn't played while ``allow_web_wallpapers`` is off.
+WEB_OFF_REASON: Final = (
+    "web wallpapers are off: turn on Allow web wallpapers in Settings \u2192 Library to play it"
+)
+
+
+def web_off(item: MediaItem, allowed: bool) -> bool:
+    """Whether ``item`` would play but for ``allow_web_wallpapers`` being off."""
+    return item.web_page and item.unplayable is None and not allowed
+
+
+def why_not_played(item: MediaItem, allow_web: bool) -> str:
+    """Why a Wallpaper Engine item is never played here as things are, or empty.
+
+    Its own reason (`MediaItem.unplayable`), or, for a web page while
+    ``allow_web`` is off, `WEB_OFF_REASON`. Never handed to a renderer then.
+    """
+    if item.unplayable is not None:
+        return item.unplayable_reason or "playback can\u2019t use it"
+    return WEB_OFF_REASON if web_off(item, allow_web) else ""
+
+
+def web_off_titles(items: Iterable[MediaItem], allowed: bool) -> tuple[str, ...]:
+    """The titles of web wallpapers (or presets of them) not played while they're off."""
+    return tuple(sorted((item.name for item in items if web_off(item, allowed)), key=str.casefold))
 
 
 def runs_a_program(items: Iterable[MediaItem]) -> bool:

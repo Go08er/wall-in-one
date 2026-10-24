@@ -979,6 +979,9 @@ class Store:
         # Distinguish an intentional direct seed from Store.open observing an
         # absent durable file.  A worker rebase may retain only the former.
         self._loaded = _loaded
+        # Identities whose record, as read under the lock of the mutation in
+        # progress, carries fields this build doesn't model.
+        self._carried: frozenset[str] = frozenset()
 
     @classmethod
     def open(cls, path: Path | None = None) -> Store:
@@ -1289,7 +1292,7 @@ class Store:
             if existing is None or not existing.health.is_borked:
                 return False, False
             cleared = replace(existing, health=Health())
-            if cleared.kept:
+            if self._worth_keeping(cleared):
                 records[identity.key] = cleared
             else:
                 del records[identity.key]
@@ -1311,7 +1314,7 @@ class Store:
             if existing is None:
                 return False, False
             left = Pairing(identity=identity, health=existing.health, renderer=existing.renderer)
-            if left.kept:
+            if self._worth_keeping(left):
                 records[identity.key] = left
             else:
                 del records[identity.key]
@@ -1363,7 +1366,7 @@ class Store:
             record = replace(existing, renderer=edit(existing.renderer))
             if record == existing:
                 return (record, False), False
-            if record.kept:
+            if self._worth_keeping(record):
                 records[identity.key] = record
             else:
                 records.pop(identity.key, None)
@@ -1487,6 +1490,14 @@ class Store:
 
         return self._mutate(forget, refuse_unreadable=True)
 
+    def _worth_keeping(self, record: Pairing) -> bool:
+        """Whether a record goes back in the file: it holds a choice, or fields we don't model.
+
+        Judged on the record as read under the lock, so a newer build's dial
+        rides through the removal of the last thing this build knows.
+        """
+        return record.kept or record.identity.key in self._carried
+
     def _mutate(
         self,
         operation: Callable[[dict[str, Pairing]], tuple[_MutationResult, bool]],
@@ -1531,6 +1542,7 @@ class Store:
                     # its own refusal of any fault.)
                     raise _unreadable_error(fault, target)
                 updated = dict(records)
+                self._carried = frozenset(reading.unknown.records.get("pairings", {}))
                 result, changed = operation(updated)
                 if changed:
                     previous_fault = self._fault

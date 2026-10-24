@@ -54,6 +54,41 @@ const REFUSED_ITEMS: &str = "no wallpaper here can start";
 /// was refused: not a fault, so `last_error` doesn't keep it.
 const REFUSED_REST: &str = "no other wallpaper here can start";
 
+/// Items asked in one walk past refused entries that the driver would start,
+/// by item and whether motion was asked for (`dynamics_enabled`): each is
+/// asked once a walk (`Runtime::ask_ahead`).
+type Cleared = HashSet<(String, bool)>;
+
+/// The entry indexes of a playlist in the order a cursor comes to them from
+/// its entry (`move_cursor_forward`, `move_route_forward`): that entry, the
+/// entries `previous` unwound (newest first), then the rest of its order
+/// after it and, from the start, before it. A shuffled cursor with nothing
+/// left after its entry deals the eligible ones again instead; the walk's
+/// next round asks along that new order, so it costs a round, not one per
+/// entry.
+fn visiting_order(cursor: &PlaylistCursor) -> Vec<usize> {
+    let count = cursor.order.len();
+    let mut seen = vec![false; count];
+    let mut found = Vec::with_capacity(count);
+    let mut visit = |index: usize| {
+        if index < count && !seen[index] {
+            seen[index] = true;
+            found.push(index);
+        }
+    };
+    if let Some(current) = cursor.order.get(cursor.position) {
+        visit(*current);
+    }
+    for index in cursor.forward.iter().rev() {
+        visit(*index);
+    }
+    for position in (cursor.position.saturating_add(1)..count).chain(0..cursor.position.min(count))
+    {
+        visit(cursor.order[position]);
+    }
+    found
+}
+
 fn clean_error(value: &str) -> String {
     value
         .chars()
@@ -2267,6 +2302,64 @@ impl<D: WallpaperDriver> Runtime<D> {
         true
     }
 
+    /// Ask the driver about the entries of `playlist_id` at `visiting`
+    /// (entry indexes, in the order a cursor comes to them), up to the first
+    /// it would start, and remember each it refuses: one pass, so a cursor
+    /// then moves past them all in one step instead of one refusal a round.
+    /// Taboo and known-refused entries are passed over without asking, as a
+    /// cursor passes them; a taboo first entry stays where it is when
+    /// `taboo_stays` (it shows its still with motion off, and isn't asked).
+    /// `cleared` holds what this walk already found startable. True when
+    /// something new was refused.
+    fn ask_ahead(
+        &mut self,
+        playlist_id: &str,
+        visiting: &[usize],
+        settings: &crate::config::Settings,
+        taboo_stays: bool,
+        cleared: &mut Cleared,
+    ) -> bool {
+        let mut learned = false;
+        for (step, index) in visiting.iter().enumerate() {
+            let Some(entry) = self
+                .config
+                .playlist(playlist_id)
+                .and_then(|playlist| playlist.entries.get(*index))
+            else {
+                break;
+            };
+            if self.is_taboo(playlist_id, &entry.id) {
+                if step == 0 && taboo_stays {
+                    break;
+                }
+                continue;
+            }
+            if self.is_refused(entry) {
+                continue;
+            }
+            let key = (entry.kind == EntryKind::Scene)
+                .then(|| entry.rendered_scene())
+                .flatten()
+                .map(|scene| (scene.clone(), settings.dynamics_enabled));
+            if key.as_ref().is_some_and(|key| cleared.contains(key)) {
+                break;
+            }
+            match self.driver.motion_refusal(entry, settings) {
+                Some(refusal) => {
+                    let entry = entry.clone();
+                    learned |= self.remember_refusal(playlist_id, &entry, refusal);
+                }
+                None => {
+                    if let Some(key) = key {
+                        cleared.insert(key);
+                    }
+                    break;
+                }
+            }
+        }
+        learned
+    }
+
     fn playlist_has_usable_entry(&self, playlist_id: &str) -> bool {
         self.config.playlist(playlist_id).is_some_and(|playlist| {
             playlist
@@ -2919,7 +3012,14 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// the entries the driver would not start now (`motion_refusal`): to its
     /// next entry, then to its stand-in (`stand_in`), or to nothing. A
     /// taboo entry shows its still with motion off, so it isn't asked.
+    ///
+    /// Each round asks ahead along each playlist in force (`ask_ahead`), up
+    /// to its first entry that can start, then moves each in one step: a run
+    /// of refused entries costs one pass, and each item is asked once a
+    /// walk. A round after the first only looks at a stand-in just put in
+    /// force, so there are at most as many as a playlist has stand-ins.
     fn skip_refused_mirrored(&mut self) {
+        let mut cleared = Cleared::new();
         loop {
             self.step_over_refused_mirrored();
             let mut learned = false;
@@ -2928,9 +3028,17 @@ impl<D: WallpaperDriver> Runtime<D> {
                     continue;
                 }
                 let settings = self.effective_motion_settings(&target.output, self.playback_state);
-                if let Some(refusal) = self.driver.motion_refusal(&target.entry, &settings) {
-                    learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
-                }
+                let Some(visiting) = self.cursors.get(&target.playlist_id).map(visiting_order)
+                else {
+                    continue;
+                };
+                learned |= self.ask_ahead(
+                    &target.playlist_id,
+                    &visiting,
+                    &settings,
+                    true,
+                    &mut cleared,
+                );
             }
             if !learned {
                 return;
@@ -3177,20 +3285,22 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     /// `skip_refused_mirrored` for the `selected` independent routes: each
     /// moves to its next entry that can play, then to its stand-in through
-    /// its decision (`route_decision`), or to nothing.
+    /// its decision (`route_decision`), or to nothing. Asked ahead the same
+    /// way, one pass along each route's playlist a round.
     fn skip_refused_routes(&mut self, selected: &HashSet<String>) {
         let mut connectors: Vec<String> = selected.iter().cloned().collect();
         connectors.sort();
+        let mut cleared = Cleared::new();
         loop {
             for connector in &connectors {
                 self.step_route_over_refused(connector);
             }
             let mut learned = false;
             for target in self.current_targets(&connectors) {
-                let Some(playback) = self
+                let Some((playback, visiting)) = self
                     .routes
                     .get(&target.output)
-                    .map(|route| route.playback_state)
+                    .map(|route| (route.playback_state, visiting_order(&route.cursor)))
                 else {
                     continue;
                 };
@@ -3198,9 +3308,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                     continue;
                 }
                 let settings = self.effective_motion_settings(&target.output, playback);
-                if let Some(refusal) = self.driver.motion_refusal(&target.entry, &settings) {
-                    learned |= self.remember_refusal(&target.playlist_id, &target.entry, refusal);
-                }
+                learned |= self.ask_ahead(
+                    &target.playlist_id,
+                    &visiting,
+                    &settings,
+                    true,
+                    &mut cleared,
+                );
             }
             if !learned {
                 return;

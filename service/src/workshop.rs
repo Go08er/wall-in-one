@@ -10,6 +10,7 @@
 //! web page or an item it can't classify (docs/wallpaper-engine.md). The
 //! runtime skips a refused entry to the next one that can play.
 
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -185,15 +186,104 @@ fn project_type(path: &Path) -> Result<String, ProjectError> {
             MAX_PROJECT_BYTES / 1024
         )));
     }
-    let project: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+    let not_json = |error: &dyn fmt::Display| {
         ProjectError::Unparsable(format!("{} is not JSON: {error}", path.display()))
-    })?;
-    match project.get("type") {
-        Some(serde_json::Value::String(kind)) => Ok(kind.to_ascii_lowercase()),
-        _ => Err(ProjectError::Unparsable(format!(
+    };
+    let kind = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(project) => match project.get("type") {
+            Some(serde_json::Value::String(kind)) => Some(kind.clone()),
+            _ => None,
+        },
+        // serde_json stops at 128 levels of nesting, where the app's scan
+        // and the engine's parser go on. Only the top level's `type` matters,
+        // so the rest is skipped, which serde_json does at any depth. That
+        // skip reads the text and its structure, not each number's range or
+        // each escape's code point, so past 128 levels those go unchecked.
+        Err(error) if error.to_string().starts_with("recursion limit exceeded") => {
+            let text = std::str::from_utf8(&bytes).map_err(|error| not_json(&error))?;
+            serde_json::from_str::<TopLevelType>(text)
+                .map_err(|error| not_json(&error))?
+                .0
+        }
+        Err(error) => return Err(not_json(&error)),
+    };
+    match kind {
+        Some(kind) => Ok(kind.to_ascii_lowercase()),
+        None => Err(ProjectError::Unparsable(format!(
             "{} names no type",
             path.display()
         ))),
+    }
+}
+
+/// A project's top-level `type` when it is a string, read past any depth of
+/// nesting beside it. The last `type` wins, as in a `serde_json::Value`.
+struct TopLevelType(Option<String>);
+
+impl<'de> Deserialize<'de> for TopLevelType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = TopLevelType;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<TopLevelType, A::Error> {
+                let mut kind = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "type" {
+                        kind = map.next_value::<TypeText>()?.0;
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(TopLevelType(kind))
+            }
+        }
+        deserializer.deserialize_map(Fields)
+    }
+}
+
+/// A `type` value: its text when it is a string; anything else is none, and
+/// what it holds is skipped like any other value.
+struct TypeText(Option<String>);
+
+impl<'de> Deserialize<'de> for TypeText {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Text;
+        impl<'de> Visitor<'de> for Text {
+            type Value = TypeText;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_str<E>(self, text: &str) -> Result<TypeText, E> {
+                Ok(TypeText(Some(text.to_string())))
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<TypeText, E> {
+                Ok(TypeText(None))
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<TypeText, E> {
+                Ok(TypeText(None))
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<TypeText, E> {
+                Ok(TypeText(None))
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<TypeText, E> {
+                Ok(TypeText(None))
+            }
+            fn visit_unit<E>(self) -> Result<TypeText, E> {
+                Ok(TypeText(None))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<TypeText, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(TypeText(None))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<TypeText, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(TypeText(None))
+            }
+        }
+        deserializer.deserialize_any(Text)
     }
 }
 
@@ -370,6 +460,56 @@ mod tests {
             let said = refusal_without_web(Some(&home), id).map(|refusal| refusal.to_string());
             assert_eq!(said, None, "{id}");
         }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// A scene's `project.json` with `depth` levels of arrays beside its type.
+    fn nested(kind: &str, depth: usize, tail: &str) -> String {
+        format!(
+            r#"{{"type":"{kind}","general":{}1{}{tail}}}"#,
+            "[".repeat(depth),
+            "]".repeat(depth)
+        )
+    }
+
+    #[test]
+    fn deep_nesting_beside_the_type_is_read_past() {
+        // r13 N1: serde_json refuses more than 128 levels, which the app's scan and the
+        // engine read; such a scene was refused as unparsable.
+        let home = home("deep");
+        item(&home, 0, "60", &nested("scene", 200, ""));
+        item(&home, 0, "61", &nested("web", 200, ""));
+        item(&home, 0, "62", &nested("scene", 200, r#","type":"web""#));
+        item(&home, 0, "63", &format!("{},", nested("scene", 200, "")));
+        item(
+            &home,
+            0,
+            "64",
+            &format!(
+                r#"{{"type":{}"scene"{}}}"#,
+                "[".repeat(200),
+                "]".repeat(200)
+            ),
+        );
+        assert_eq!(refusal_without_web(Some(&home), "60"), None);
+        assert!(refusal_without_web(Some(&home), "61").unwrap().web_page);
+        // The last `type` wins, as it does below the limit.
+        assert!(refusal_without_web(Some(&home), "62").unwrap().web_page);
+        for (id, said) in [("63", "is not JSON"), ("64", "names no type")] {
+            let refused = refusal_without_web(Some(&home), id).unwrap();
+            assert!(!refused.web_page);
+            assert!(refused.reason.contains(said), "{id}: {refused}");
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn control_nesting_below_the_limit_was_always_read() {
+        let home = home("shallow");
+        item(&home, 0, "65", &nested("scene", 100, ""));
+        item(&home, 0, "66", &nested("web", 100, ""));
+        assert_eq!(refusal_without_web(Some(&home), "65"), None);
+        assert!(refusal_without_web(Some(&home), "66").is_some());
         fs::remove_dir_all(home).unwrap();
     }
 

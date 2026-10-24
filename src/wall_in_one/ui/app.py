@@ -706,9 +706,6 @@ class Application(Adw.Application):
         # hold through its complete adoption/runtime tail.
         self._authoring_lifetime_holds = 0
         self._quit_requested = False
-        #: While `_hand_on_waiting_numbers` runs: what it hands on is admitted
-        #: even once a quit was asked, since the person entered it before.
-        self._handing_on_numbers = False
         self._removal_active = False
         self._removal_runtime_invalidated = False
         # A committed Delete/Trash retains a second hold until a post-delete
@@ -2189,14 +2186,22 @@ class Application(Adw.Application):
         `dial_rows.flush_all`, for every way the application ends: a window's
         close, ``ctl quit`` (`request_quit`) and a shutdown that comes another
         way (`do_shutdown`). Each takes the queued write its timer would have
-        taken, admitted even once a quit was asked; that write holds the
-        application until it is durable (`_maybe_finish_requested_quit`).
+        taken, admitted even once a quit was asked (`dial_rows.handing_on`);
+        that write holds the application until it is durable
+        (`_maybe_finish_requested_quit`).
         """
-        self._handing_on_numbers = True
-        try:
-            return dial_rows.flush_all()
-        finally:
-            self._handing_on_numbers = False
+        return dial_rows.flush_all()
+
+    def _admitted_during_quit(self, allow_during_quit: bool) -> bool:
+        """Whether a write may still be admitted while a requested quit waits for its tails.
+
+        What its caller allows, and a renderer number being handed on, by a
+        flush or by its own timer (`dial_rows.handing_on`): the person
+        entered it before the quit could end the process, so it is saved,
+        as a close or ``ctl quit`` with the number still waiting saves it,
+        and the quit waits for it too (review r13c, N-3).
+        """
+        return allow_during_quit or dial_rows.handing_on()
 
     def _settle_before_shutdown(self) -> None:
         """Run the loop until what a requested quit waits for has settled.
@@ -3508,7 +3513,7 @@ class Application(Adw.Application):
             if (
                 self._authoring_shutdown
                 or self._runtime_shutdown
-                or (self._quit_requested and not (allow_during_quit or self._handing_on_numbers))
+                or (self._quit_requested and not self._admitted_during_quit(allow_during_quit))
             ):
                 reply(Response.failure("application is shutting down"))
                 return
@@ -3802,7 +3807,7 @@ class Application(Adw.Application):
         """
         if self._authoring_shutdown or self._runtime_shutdown:
             return False
-        if self._quit_requested and not (allow_during_quit or self._handing_on_numbers):
+        if self._quit_requested and not self._admitted_during_quit(allow_during_quit):
             return False
         if requires_migration and not self._authoring_migration_ready:
             self.require_authoring_ready()

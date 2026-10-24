@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Iterator
+from contextlib import contextmanager
 from typing import Final
 
 import gi
@@ -42,6 +43,30 @@ def _digits(step: float) -> int:
 #: has dropped its own `Settling`, and a close has no pane to ask): token →
 #: (the wallpaper it is for, the row's key, its cancel, its flush).
 _PENDING: dict[object, tuple[Hashable, str, Callable[[], None], Callable[[], None]]] = {}
+
+
+#: How many waiting numbers are being handed on right now (`handing_on`).
+_HANDING_ON = 0
+
+
+def handing_on() -> bool:
+    """Whether a waiting number is being handed on right now: by its own timer, or a flush.
+
+    The application admits the write it asks for even once a quit was
+    asked (`Application._admitted_during_quit`): the person entered the
+    number before the quit could end the process. GTK's thread only.
+    """
+    return _HANDING_ON > 0
+
+
+@contextmanager
+def _handing() -> Iterator[None]:
+    global _HANDING_ON
+    _HANDING_ON += 1
+    try:
+        yield
+    finally:
+        _HANDING_ON -= 1
 
 
 def cancel_pending(owner: Hashable, key: str | None = None) -> None:
@@ -138,12 +163,14 @@ def _settled(
     def flush() -> None:
         if pending:
             cancel()
-            callback()
+            with _handing():
+                callback()
 
     def fire() -> bool:
         pending.clear()
         _PENDING.pop(token, None)
-        callback()
+        with _handing():
+            callback()
         return GLib.SOURCE_REMOVE
 
     def call() -> None:

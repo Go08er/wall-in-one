@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -269,22 +270,74 @@ fn a_failing_assertion_never_leaves_the_service_running() {
     let root = directory("guarded");
     let config = fixture(&root);
     let socket = root.join("runtime.sock");
-    let mut pid = None;
+    let mut process = None;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let child = spawn(&config, &socket);
-        pid = Some(child.id());
+        process = Some(ProcessHandle::of(&child));
         wait_for_socket(&socket);
         panic!("an assertion fails while the service runs");
     }));
     assert!(outcome.is_err());
-    let pid = pid.expect("the service was started") as libc::pid_t;
-    // The guard killed and reaped it. Whatever happened, end this one process.
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    let process = process.expect("the service was started");
+    // The guard killed and reaped it. Whatever happened, end this one process: through its
+    // handle, never its pid, which once reaped may be another's (review r13c N-4).
+    let alive = process.is_running();
     if alive {
+        process.kill();
+    }
+    let reaped = process.is_reaped();
+    fs::remove_dir_all(root).unwrap();
+    assert!(!alive, "the service outlived the failed test");
+    assert!(reaped, "the guard left the service unreaped");
+}
+
+/// A handle on one process (a pidfd), taken while it is a child of ours and unreaped. Unlike
+/// its pid, it never names another process once that one is reaped.
+struct ProcessHandle(OwnedFd);
+
+impl ProcessHandle {
+    fn of(child: &Child) -> Self {
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        Self(unsafe { OwnedFd::from_raw_fd(RawFd::try_from(fd).unwrap()) })
+    }
+
+    /// Whether the process still runs: its pidfd turns readable once it has exited.
+    fn is_running(&self) -> bool {
+        let mut poll = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut poll, 1, 0) == 0 }
+    }
+
+    /// Whether whoever started it has collected it: a pidfd of a process
+    /// already reaped has nothing left to wait for.
+    fn is_reaped(&self) -> bool {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                libc::id_t::try_from(self.0.as_raw_fd()).unwrap(),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+    }
+
+    /// SIGKILL to this one process, if it is still there.
+    fn kill(&self) {
         unsafe {
-            libc::kill(pid, libc::SIGKILL);
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.0.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            );
         }
     }
-    fs::remove_dir_all(root).unwrap();
-    assert!(!alive, "the service {pid} outlived the failed test");
 }

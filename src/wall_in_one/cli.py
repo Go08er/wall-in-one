@@ -607,6 +607,12 @@ def _prepare_service_start() -> int:
         result = _write_runtime_config()
         if result != 1:
             return result
+        refused = _retained_web_refusal()
+        if refused:
+            # Not a failure a restart cures (the unit forces one for exit 1):
+            # a person has to decide.
+            print(f"error: {refused}", file=sys.stderr)
+            return EXIT_CONFIG
         print(
             "warning: current authoring could not be compiled; validating the "
             "last-known-good runtime before service start",
@@ -615,6 +621,31 @@ def _prepare_service_start() -> int:
         return 0
 
     return _run_unattended_writer(publish_or_retain)
+
+
+def _retained_web_refusal() -> str:
+    """Why the last-known-good ``runtime.toml`` must not be kept, or empty.
+
+    "Allow web wallpapers" is off, yet the document compiled while it was on
+    still plays a web page, and the service can't tell one from a scene. A
+    service that starts on it plays what the person turned off.
+    """
+    from wall_in_one import config, runtime_config
+
+    try:
+        if config.load_strict().allow_web_wallpapers:
+            return ""
+    except config.ConfigError:
+        return ""  # settings.toml's own error is said by the compile
+    titles = runtime_config.retained_web_wallpapers()
+    if not titles:
+        return ""
+    return (
+        "the last-known-good runtime still plays web wallpapers "
+        f"({', '.join(titles)}), and Allow web wallpapers is off; the service was not "
+        "started on it. Fix what stops the compile (the message above), or turn "
+        "Allow web wallpapers on"
+    )
 
 
 def _sync_runtime_health(*, reload_runtime: bool = True) -> int:

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import config, file_io, paths, runtime_compatibility
-from wall_in_one.library import pairings, schedules, state_file, workshop
+from wall_in_one.library import pairings, scan, schedules, state_file, workshop
 from wall_in_one.library.model import Kind, MediaItem, Unseen, UnseenKind
 from wall_in_one.library.playlists import Entry, Playlist
 from wall_in_one.programs import find_program
@@ -684,6 +684,52 @@ def read_config_generation(path: Path | None = None) -> str:
         return document_generation(text)
     except RuntimeConfigError as error:
         raise RuntimeConfigError(f"runtime configuration {target}: {error}") from error
+
+
+def retained_web_wallpapers(path: Path | None = None) -> tuple[str, ...]:
+    """Titles of the web wallpapers the published ``runtime.toml`` still plays.
+
+    A document compiled while ``allow_web_wallpapers`` was on keeps naming
+    them after it is turned off, until a compile replaces it; the service
+    can't tell a web page from a scene. So a caller that is about to keep or
+    leave that document in force asks here (service start with a compile that
+    failed, the app after a publication that failed). The Workshop scan
+    doesn't depend on the library folders, so it usually works when the
+    compile didn't. An unreadable or malformed document says nothing: the
+    service's own validation judges that.
+    """
+    target = path if path is not None else paths.runtime_config_path()
+    try:
+        text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+        document = tomllib.loads(text) if text is not None else {}
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+        return ()
+    named: set[str] = set()
+    pending: list[object] = [document]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("scene_id", "scene_base") and isinstance(value, str):
+                    named.add(value)
+                else:
+                    pending.append(value)
+        elif isinstance(node, list):
+            pending.extend(node)
+    if not named:
+        return ()
+    items = scan.workshop_items(workshop.steam_roots())
+    web = {item.scene for item in items if item.web_page or item.workshop_type == "web"}
+    return tuple(
+        sorted(
+            (
+                item.name
+                for item in items
+                if item.scene in named and (item.scene in web or item.scene_base in web)
+            ),
+            key=str.casefold,
+        )
+    )
 
 
 def _program(name: str) -> Path:

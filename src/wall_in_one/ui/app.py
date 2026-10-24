@@ -4238,9 +4238,49 @@ class Application(Adw.Application):
     ) -> _RuntimePublication:
         """Serialize runtime publication with the physical removal boundary."""
         with self._runtime_removal_lock:
-            return self._compile_runtime_until_current_locked(
+            publication = self._compile_runtime_until_current_locked(
                 wait_for_library=wait_for_library,
             )
+        return self._stopping_web_after_failure(publication)
+
+    def _stopping_web_after_failure(self, publication: _RuntimePublication) -> _RuntimePublication:
+        """A publication that failed while web wallpapers are off must not leave one playing.
+
+        The setting is saved before its publication, so a compile or write
+        that fails leaves the service on the document it already holds. When
+        that document still plays a web page, playback is stopped and the
+        failure says so. (A reload the service refuses is not this: the new
+        document is on disk by then, and the page it replaced isn't known.)
+        Runs on the compile lane, never on GTK.
+        """
+        if not publication.error or publication.deferred or self._runtime_shutdown:
+            return publication
+        try:
+            if config.load_strict().allow_web_wallpapers:
+                return publication
+            titles = runtime_config.retained_web_wallpapers()
+        except Exception:  # the failure is already being said
+            return publication
+        if not titles:
+            return publication
+        try:
+            stopped = client.send_runtime("stop").ok
+        except client.NotRunningError:
+            return publication  # nothing is playing; the next start is guarded (cli)
+        except client.ControlError, OSError:
+            stopped = False
+        action = (
+            "Playback was stopped so it doesn\u2019t keep playing"
+            if stopped
+            else "It may still be playing; stop it from the wallpaper service"
+        )
+        return replace(
+            publication,
+            error=(
+                f"{publication.error}. Allow web wallpapers is off, but the published settings "
+                f"still play {', '.join(titles)}. {action}."
+            ),
+        )
 
     def _compile_runtime_until_current_locked(
         self,

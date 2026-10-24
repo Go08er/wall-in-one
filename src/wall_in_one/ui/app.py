@@ -4468,6 +4468,12 @@ class Application(Adw.Application):
         after an update, or one whose status can't be read) is told to quit,
         so that whatever starts it next runs the updated one through its
         ExecStartPre guard. Empty when there is nothing to end or say.
+
+        With no service running nothing plays, but the file on disk is what
+        the next one loads: one that allows web wallpapers is replaced as
+        above, under the lock (`_web_off_not_running`), so that a start
+        already past its own check, or one that doesn't run it, can't load
+        it (review r13c, D2).
         """
         try:
             settings = config.load_strict()
@@ -4500,9 +4506,7 @@ class Application(Adw.Application):
                 status_reply = client.send_runtime("status")
                 decoded = json.loads(status_reply.message) if status_reply.ok else None
             except client.NotRunningError:
-                # Nothing plays; the next start is guarded (ExecStartPre).
-                self._service_holds_what_is_on_disk()
-                return ""
+                return self._web_off_not_running(settings, on_disk, target, locked=locked)
             except client.ControlError, OSError, ValueError, RecursionError:
                 decoded = None
             status = decoded if isinstance(decoded, dict) else None
@@ -4547,8 +4551,7 @@ class Application(Adw.Application):
             try:
                 stopped = client.send_runtime("stop").ok
             except client.NotRunningError:
-                self._service_holds_what_is_on_disk()
-                return ""
+                return self._web_off_not_running(settings, on_disk, target, locked=locked)
             except client.ControlError, OSError:
                 stopped = False
             written = False
@@ -4629,6 +4632,57 @@ class Application(Adw.Application):
                 "can start it again (Resume, ctl play) until a publication gets through."
             )
         return f"{lead}. It may still be playing; stop it from the wallpaper service."
+
+    def _web_off_not_running(
+        self,
+        settings: config.Settings,
+        on_disk: str | None,
+        target: Path,
+        *,
+        locked: bool,
+    ) -> str:
+        """`_web_off_guard` with no service running: the file on disk is what the next one loads.
+
+        Nothing plays, so nothing is stopped. But ExecStartPre (or the
+        companion's own start, which runs the same check) may already be
+        past its check, made while web wallpapers were on, and a service run
+        by hand runs none. So a document that allows web wallpapers is
+        replaced with one that plays nothing (`runtime_config.nothing_to_play_document`),
+        exactly as for a running service that reads schema 8: the one it
+        replaces is schema 8 too, so whatever could load it loads this. The
+        caller holds the compiler lock (``locked``) and read ``on_disk`` under
+        it; without the lock, the publication that holds it installs only
+        what ``settings.toml`` says now (`runtime_config.publish_changes`).
+        Any other document is left: the next start compiles it again, or
+        refuses it with exit 78 when it plays a web page
+        (``--service-startup-prepare``). Empty when nothing was replaced.
+        """
+        self._service_holds_what_is_on_disk()
+        if not locked or on_disk is None or not runtime_config.allows_web_wallpapers(text=on_disk):
+            return ""
+        lead = (
+            "Allow web wallpapers is off, but the configuration on disk, which the wallpaper "
+            "service loads when it starts, allows web wallpapers"
+        )
+        try:
+            document = runtime_config.nothing_to_play_document(
+                settings, runtime_config.WEB_OFF_REASON
+            )
+            runtime_config.install_nothing_to_play(document, target)
+        except runtime_config.RuntimeConfigNotDurableError as uncertain:
+            state_file.report_not_durable(str(uncertain))
+        except runtime_config.RuntimeConfigError as error:
+            return (
+                f"{lead}, and it couldn\u2019t be replaced ({error}). The service isn\u2019t "
+                "running; its start check doesn\u2019t start it on that configuration while "
+                "they are off."
+            )
+        with self._runtime_config_lock:
+            self._runtime_document_generation += 1
+        return (
+            f"{lead}. The service isn\u2019t running, and that configuration was replaced with "
+            "one that plays nothing, until a publication gets through."
+        )
 
     @staticmethod
     def _held_text_loaded(status: dict[str, object] | None, texts: Sequence[str]) -> int | None:

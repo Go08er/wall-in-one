@@ -582,3 +582,76 @@ def test_web_wallpapers_left_out_are_published_again_once_the_service_is_confirm
         {**status, "runtime_instance": "b" * 32}
     )
     assert publications == ["p", "p", "p"], "and once more when it is started again"
+
+
+# -- no service running: what the next start loads (review r13c, D2) -------------------------
+#
+# Its start check (ExecStartPre, or the companion's own start) may already be past, made while
+# web wallpapers were on, and the guard's status read lands between that check and the service
+# binding its socket. Before, "not running" was taken as nothing to do: the service then started
+# on a document that allows web wallpapers.
+
+
+def _not_running(monkeypatch: pytest.MonkeyPatch, *, after_status: bool = False) -> list[str]:
+    """No service answers (``after_status``: one that answers its status, then is gone)."""
+    sent: list[str] = []
+
+    def send(verb: str, *_a: object, **_k: object) -> Response:
+        sent.append(verb)
+        if after_status and verb == "status":
+            return Response.success(
+                json.dumps(
+                    {
+                        "status_version": 2,
+                        "supported_config_schemas": READS_EIGHT,
+                        "allow_web_wallpapers": True,
+                        "playback_state": "playing",
+                    }
+                )
+            )
+        raise client.NotRunningError("no wallpaper service in this test")
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    return sent
+
+
+@pytest.mark.parametrize("gone", ["before-the-status", "before-the-stop"])
+def test_with_no_service_running_a_document_that_allows_web_wallpapers_is_replaced(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    gone: str,
+) -> None:
+    """Before: ``''``, and the document on disk still allowed web wallpapers."""
+    application = profiles().application
+    _scene_installed()
+    _held(application, _named(SCENE, allowing=True))
+    sent = _not_running(monkeypatch, after_status=gone == "before-the-stop")
+    said = application._web_off_guard()
+    assert sent == (["status"] if gone == "before-the-status" else ["status", "stop"]), said
+    assert _plays_nothing(), paths.runtime_config_path().read_text(encoding="utf-8")
+    assert said.startswith(
+        "Allow web wallpapers is off, but the configuration on disk, which the wallpaper "
+        "service loads when it starts, allows web wallpapers. The service isn\u2019t running"
+    ), said
+
+
+@pytest.mark.parametrize("held", ["names-a-scene", "names-a-web-page"])
+def test_control_with_no_service_running_a_document_without_the_key_is_left(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    held: str,
+) -> None:
+    """Its next start compiles it again, or refuses it with exit 78 when it plays a page
+    (``--service-startup-prepare``), and a service that reads 8 refuses the page itself."""
+    application = profiles().application
+    if held == "names-a-web-page":
+        _steam_with_web()
+        text = DOCUMENT
+    else:
+        _scene_installed()
+        text = _named(SCENE)
+    _held(application, text)
+    sent = _not_running(monkeypatch)
+    assert application._web_off_guard() == ""
+    assert sent == ["status"]
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == text

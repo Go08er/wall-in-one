@@ -200,7 +200,14 @@ a document that plays nothing, which also replaces the file on disk; one that
 can't read it is told to quit, and its next start is guarded. A service that
 reads 8, holding a document that doesn't allow web wallpapers with none on
 disk that does, is left alone: it refuses every page itself (below), and the
-app only says that the setting hasn't reached it yet.
+app only says that the setting hasn't reached it yet. With no service
+running, nothing is stopped, but a file on disk that allows web wallpapers is
+replaced the same way, so that a start already past its check can't load it.
+A publication that read the setting before it was turned off (a service start's
+compile, say, while the person turns it off in the window) installs nothing
+that allows web wallpapers either: the setting is read again just before the
+install, under the lock its own save takes, and the document is compiled
+again for what it says ([runtime-config.md](runtime-config.md)).
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
 a web page, names a Workshop item whose type can't be checked, or allows web

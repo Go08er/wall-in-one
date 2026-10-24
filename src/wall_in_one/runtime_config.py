@@ -2241,8 +2241,10 @@ def _compile(
     if dial_lines and not renderer_dials:
         withheld.add("")
         dial_lines = []
-    # Global scene sound waits with the dials (a released key, but a scene's own
-    # silence can't go with it); say so when that holds sound back.
+    # In a document stepped down without the dials (a service not confirmed for
+    # schema 7, or presets on one not confirmed for 6), global scene sound waits
+    # with them: a scene's own silence can't go with it. Say so when that holds
+    # sound back. Any other document keeps the global sound.
     scene_muted = settings.scene_muted or not renderer_dials
     if not renderer_dials and not settings.scene_muted:
         withheld.add("")

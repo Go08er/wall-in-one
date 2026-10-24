@@ -233,10 +233,14 @@ doesn't list 7 gets the document without the tables and the new keys (then,
 if it doesn't list 6, without presets and a scene's own values too: that scene
 still plays), and the app says once that those settings apply once the
 service is confirmed to read them (restarted after an update, its units
-current). Global scene sound (Settings, Silent and Volume) waits with them:
-that document keeps the constants of before, silent at volume 0, because the
-scene's own silence is one of the dials left out and sound must not play
-over it. Saving is never refused over them, unlike the battery option: an
+current). Global scene sound (Settings, Silent and Volume) waits only when
+the published document steps down that way: for a service not confirmed to
+read schema 7, or for a library with presets on a service not confirmed to
+read schema 6. That document keeps the constants of before, silent at volume
+0, because the scene's own silence is one of the dials left out and sound
+must not play over it. Otherwise (for example an older service and a library
+with neither presets nor renderer settings) the document is the full one and
+the global sound applies. Saving is never refused over them, unlike the battery option: an
 older service just doesn't apply them yet. The health sync accepts any of the
 documents publishing could have made (`compiled_as_published`), and the app
 publishes again when a status newly lists 7, and once when a publish that was

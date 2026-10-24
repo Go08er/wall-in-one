@@ -1890,16 +1890,19 @@ def _compile(settings: config.Settings, session: Session, *, presets: bool = Tru
     # Presets the live service hasn't confirmed it reads: left out of every
     # playlist and said once each, so everything else keeps publishing.
     presets_left_out: dict[str, LeftOut] = {}
+    allow_web = settings.allow_web_wallpapers
 
     def entry_lines(item: MediaItem, entry_id: str) -> tuple[str, ...] | None:
-        if not presets and _is_preset(item):
+        if not presets and _is_preset(item) and not workshop.web_off(item, allow_web):
+            # (A web preset while web is off is left out for that, said by the
+            # library as the owner's setting, not as a service that is too old.)
             if item.unplayable is None:
                 presets_left_out.setdefault(
                     item.scene,
                     LeftOut(PRESET_OWNER, item.scene, item.name, "", NEEDS_NEWER_SERVICE),
                 )
             return None
-        return _resolved_entry(item, session, entry_id, allow_web=settings.allow_web_wallpapers)
+        return _resolved_entry(item, session, entry_id, allow_web=allow_web)
 
     fallback_entries: list[tuple[str, ...]] = []
     for item in fallback_items:

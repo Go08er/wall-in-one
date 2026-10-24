@@ -505,7 +505,12 @@ def workshop_items(
                     scene=item.id,
                     title=item.title,
                     preview=plays.preview or item.preview,
-                    workshop_type=item.kind,
+                    # A program however its type is spelled is named so.
+                    workshop_type=(
+                        item.lenient_type
+                        if plays.program and item.kind == workshop.UNKNOWN_TYPE
+                        else item.kind
+                    ),
                     scene_base=plays.base,
                     scene_properties=plays.properties,
                     scene_note=plays.note,

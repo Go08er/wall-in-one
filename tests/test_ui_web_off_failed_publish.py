@@ -111,3 +111,42 @@ def test_a_failed_publication_over_a_document_without_web_stops_nothing(
     )
     assert "stop" not in sent
     assert "stopped" not in profile.application.publication_problem
+
+
+# -- the left-out notice follows the service (nits of the second review) -------------------------
+
+
+def test_presets_left_out_are_published_again_once_the_service_reads_them(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before: the notice stood until some other publication; a status change asked for none."""
+    application = profiles().application
+    publications: list[str] = []
+    monkeypatch.setattr(application, "_publish_runtime_async", lambda: publications.append("p"))
+    application._left_out_said = frozenset(
+        {
+            runtime_config.LeftOut(
+                runtime_config.PRESET_OWNER,
+                "3000000001",
+                "Bloom",
+                "",
+                runtime_config.NEEDS_NEWER_SERVICE,
+            )
+        }
+    )
+    old = {"status_version": 2, "supported_config_schemas": [4, 5]}
+    new = {"status_version": 2, "supported_config_schemas": [4, 5, 6]}
+
+    application._publish_again_when_presets_become_readable(old)
+    assert publications == []
+    application._publish_again_when_presets_become_readable(new)
+    assert publications == ["p"]
+    # Not on every poll: units that can't be verified would leave them out again.
+    application._publish_again_when_presets_become_readable(new)
+    assert publications == ["p"]
+    # And not when nothing is left out for that.
+    application._left_out_said = frozenset()
+    application._publish_again_when_presets_become_readable(old)
+    application._publish_again_when_presets_become_readable(new)
+    assert publications == ["p"]

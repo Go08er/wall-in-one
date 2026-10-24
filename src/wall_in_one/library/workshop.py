@@ -197,11 +197,11 @@ class WorkshopItem:
     #: For a preset (`kind` is `PRESET`): the Workshop id of the wallpaper it
     #: is a preset of, or empty when it names none that can be trusted.
     dependency: str = ""
-    #: Whether `type`, stripped and case-folded, says `video`: the lenient
-    #: reading mpvpaper's videos have always had (a Workshop video playing
-    #: through mpvpaper isn't judged as the engine judges its own types).
-    #: `kind` is the engine-strict one, for what is handed to the engine.
-    declared_video: bool = False
+    #: `type` stripped and case-folded, which is how a Workshop video has
+    #: always been read (mpvpaper plays it; the engine isn't asked), and how
+    #: a `NEVER_RUN` type is recognised however it is padded or cased. `kind`
+    #: is the engine-strict reading, for what is handed to the engine.
+    lenient_type: str = ""
     #: A preset's own values, as JSON gave them, under names the service
     #: would accept. Translated against its base by `preset_properties`.
     preset: tuple[tuple[str, bool | int | float | str], ...] = ()
@@ -216,7 +216,7 @@ class WorkshopItem:
     @property
     def is_video_type(self) -> bool:
         """It says `video` (leniently, `declared_video`) and isn't a preset."""
-        return (self.declared_video or self.kind == "video") and self.kind != PRESET
+        return (self.lenient_type == "video" or self.kind == "video") and self.kind != PRESET
 
     @property
     def still_preview(self) -> Path | None:
@@ -397,7 +397,7 @@ def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem 
             else _type_word(kind)
         ),
         declared_type=_type_word(kind) if isinstance(kind, str) else "",
-        declared_video=isinstance(kind, str) and kind.strip().casefold() == "video",
+        lenient_type=kind.strip().casefold() if isinstance(kind, str) else "",
         title=title.strip() if isinstance(title, str) and title.strip() else directory.name,
         entry=entry,
         preview=preview,
@@ -654,7 +654,10 @@ def _refusal(item: WorkshopItem) -> Playback | None:
 
     `NEVER_RUN` first, so no change to `SUPPORTED_TYPES` can let one through.
     """
-    executable = next((kind for kind in (item.kind, item.declared_type) if kind in NEVER_RUN), None)
+    executable = next(
+        (kind for kind in (item.kind, item.declared_type, item.lenient_type) if kind in NEVER_RUN),
+        None,
+    )
     if executable is not None:
         return _program(executable)
     if item.kind not in SUPPORTED_TYPES:
@@ -692,9 +695,10 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
     """
     if item.kind != PRESET:
         return _refusal(item) or Playback(web=item.kind == "web")
-    if item.declared_type in NEVER_RUN:
-        # A preset object on an item that says it is a program: still one.
-        return _program(item.declared_type)
+    for declared in (item.declared_type, item.lenient_type):
+        if declared in NEVER_RUN:
+            # A preset object on an item that says it is a program: still one.
+            return _program(declared)
     if not item.dependency:
         return Playback(
             unplayable=Unplayable.NEEDS_BASE,

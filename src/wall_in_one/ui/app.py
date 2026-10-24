@@ -795,6 +795,8 @@ class Application(Adw.Application):
         self._compiled_default_pointer = ""
         #: The set that was last said, so it is said again only when it changes.
         self._left_out_said: frozenset[runtime_config.LeftOut] = frozenset()
+        #: Whether the last status showed a service that reads presets.
+        self._presets_readable_seen = False
         self._default_pointer_said = ""
         # Runtime publication outlives the authoring actor callback which
         # queued it.  Keep one coalesced generation-target hold so closing the
@@ -5007,6 +5009,7 @@ class Application(Adw.Application):
             )
         # After the report above, which used to precede the window's render.
         self._status_model.adopt(status)
+        self._publish_again_when_presets_become_readable(status)
         reports = status.get("taboo_entries")
         if not isinstance(reports, list) or not reports:
             return
@@ -5033,6 +5036,22 @@ class Application(Adw.Application):
             self._apply_runtime_health_result(self._ingest_runtime_health(request))
             return
         self._queue_runtime_health(request)
+
+    def _publish_again_when_presets_become_readable(self, status: dict[str, object]) -> None:
+        """Presets left out for a service that didn't read them: publish again once it does.
+
+        The notice stands until the next publication, which the GUI would
+        otherwise not make after the service restarted. Only the change to
+        "reads presets" asks, so units that can't be verified (which leave
+        them out again) are not asked over and over.
+        """
+        reads = runtime_config.presets_supported(status)
+        newly = reads and not self._presets_readable_seen
+        self._presets_readable_seen = reads
+        if newly and any(
+            one.why == runtime_config.NEEDS_NEWER_SERVICE for one in self._left_out_said
+        ):
+            self._publish_runtime_for_context()
 
     def _queue_runtime_health(self, request: _RuntimeHealthRequest) -> None:
         """Coalesce health persistence through the total authoring order."""

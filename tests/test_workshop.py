@@ -775,3 +775,31 @@ def test_a_slider_value_is_one_stof_parses(value: float, written: str) -> None:
     against libstdc++), and the engine then exits: such a value is written as 0."""
     slider = workshop.Declared("s", "slider")
     assert workshop.property_value(slider, value) == written
+
+
+# -- types and files are judged as the engine judges them (review of r11, finding 5) --
+
+
+@pytest.mark.parametrize(
+    ("kind", "file", "plays"),
+    (
+        ("scene", "scene.json", True),
+        ("Scene", "scene.json", True),  # tolower, as ProjectParser.cpp:33
+        ("scene", "scene.JSON", True),
+        ("\u017fcene", "scene.json", False),  # long s: casefold() says "scene", tolower doesn't
+        (" scene", "scene.json", False),  # nothing is stripped
+        ("scene ", "scene.json", False),
+        ("scene", " scene.json", False),  # the engine opens the file exactly as written
+        ("scene", "scene.json ", False),
+        ("Application", "app.exe", False),
+        (" application ", "app.exe", False),
+    ),
+)
+def test_a_type_or_file_the_engine_refuses_never_plays(
+    tmp_path: Path, kind: str, file: str, plays: bool
+) -> None:
+    _install(_content(tmp_path), "1647046763", {"type": kind, "title": "T", "file": file})
+
+    (item,) = _listed(tmp_path).values()
+
+    assert (item.unplayable is None) is plays, item

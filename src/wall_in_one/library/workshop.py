@@ -34,6 +34,7 @@ import json
 import math
 import re
 import stat
+import string
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -377,8 +378,12 @@ def _parse_project(directory: Path, on_unseen: OnUnseen | None) -> WorkshopItem 
         title=title.strip() if isinstance(title, str) and title.strip() else directory.name,
         entry=entry,
         preview=preview,
-        complete=isinstance(title, str) and isinstance(file, str) and bool(file.strip()),
-        file=file.strip() if isinstance(file, str) else "",
+        # The engine opens `file` exactly as written (ProjectParser.cpp:44):
+        # one padded with spaces names nothing it can find.
+        complete=(
+            isinstance(title, str) and isinstance(file, str) and bool(file) and file == file.strip()
+        ),
+        file=file if isinstance(file, str) else "",
         dependency=(
             dependency.strip()
             if isinstance(dependency, str) and is_workshop_id(dependency.strip())
@@ -404,15 +409,23 @@ def _why(error: OSError) -> str:
     return "could not be read"
 
 
-def _type_word(kind: object) -> str:
-    """``type`` as it is compared and shown: case-folded, or `UNKNOWN_TYPE`.
+#: ASCII upper case to lower, and nothing else: C's ``tolower``.
+_ASCII_LOWER: Final = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
-    Case-folded because the real content spells it both `video` and `Video`,
-    and trusting the casing hid eight wallpapers out of forty-nine.
+
+def _type_word(kind: object) -> str:
+    """``type`` as the engine compares it, or `UNKNOWN_TYPE`.
+
+    Lower-cased because the real content spells it both `video` and `Video`,
+    and trusting the casing hid eight wallpapers out of forty-nine. But only
+    as ProjectParser.cpp:33 does it, byte by byte with ``tolower``, and with
+    nothing stripped: ``"\\u017fcene"`` (a long s, which `str.casefold` would make
+    ``"scene"``) and ``" scene"`` are types the engine refuses, so they are
+    not playable here either.
     """
     if not isinstance(kind, str):
         return UNKNOWN_TYPE
-    folded = kind.strip().casefold()
+    folded = kind.translate(_ASCII_LOWER)
     return folded if _TYPE_WORD.fullmatch(folded) else UNKNOWN_TYPE
 
 

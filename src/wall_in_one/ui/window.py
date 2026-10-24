@@ -671,6 +671,9 @@ class MainWindow(Adw.ApplicationWindow):
                 self._web_off_titles = workshop.web_off_titles(
                     self._management_session.library.items, settings.allow_web_wallpapers
                 )
+                # A web page's tile says "Can't play" with web off and "Can't play
+                # here" with it on: the summary counts the tiles marked now.
+                self._show_media_playback(self._management_session)
         self._update_workshop()
         self._grid.set_apply_targeting(settings.display_mode == config.DISPLAY_MODE_INDEPENDENT)
         self._settings_page.apply_settings(settings)

@@ -1815,13 +1815,13 @@ def _render_prepared_runtime(
         rendered = runtime_config.render(target_settings, session).encode("utf-8")
     except (OSError, runtime_config.RuntimeConfigError) as error:
         raise UpgradeError(
-            f"cannot dry-render the exact deployed profile as schema 4: {error}",
+            f"cannot dry-render the exact deployed profile's runtime document: {error}",
             status="conflict",
         ) from error
     finally:
         session.shutdown()
     if not rendered or len(rendered) > runtime_config.MAX_RUNTIME_CONFIG_BYTES:
-        raise UpgradeError("dry-rendered schema-4 runtime exceeds its byte bound")
+        raise UpgradeError("the dry-rendered runtime document exceeds its byte bound")
     return rendered
 
 

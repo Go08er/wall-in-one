@@ -967,8 +967,8 @@ did. A beaten global rule is not `selected` or `in_force` for that display
 | Field | Where | Meaning |
 | --- | --- | --- |
 | `supported_override_schemas` | top level | `[1]`. A service without this field never reads `runtime-overrides.toml`. |
-| `loaded_overrides_sha256` | top level | SHA-256 of the applied overrides file; `null` without one. |
-| `overrides_ignored` | top level | Why a present overrides file is not applied (a newer schema); `null` otherwise. |
+| `loaded_overrides_sha256` | top level | SHA-256 of the applied overrides file; `null` without one (absent instead from a reply at its size limit; see 0 under the status's size limit above). |
+| `overrides_ignored` | top level | Why a present overrides file is not applied (a newer schema); `null` otherwise (absent instead at the limit, as `loaded_overrides_sha256`). |
 | `cycle_interval_seconds` | top level | The summary route's interval; `null` when independent routes disagree. |
 | `cycle_interval_seconds` | each display row | The interval of the playlist the route is playing. |
 | `beats_global_rules` | each display row | The opt-in as it applies to that route; `false` in mirrored mode. |

@@ -6,6 +6,7 @@ A fake service only: a monkeypatched `client.send_runtime`; the install refused 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 import pytest
@@ -237,3 +238,46 @@ def test_s_n16_a_failed_install_tells_a_current_service_to_restart_without_calli
     assert any("couldn\u2019t be replaced at shutdown" in one for one in said), said
     assert any(RESTART in one for one in said), said
     assert not any(OLDER in one for one in said), said
+
+
+# -- r13m S-N17 --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("how", ["no-answer-in-time", "second-ctrl-c"])
+def test_s_n17_a_quit_not_answered_in_time_or_cut_says_to_restart(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+) -> None:
+    application = profiles().application
+    _workshop(1)
+    _on_disk(_naming([str(2_000_000_001)]))  # the web page `_workshop(1)` makes
+    _heard(monkeypatch, HEARD["an-older-service"])
+    monkeypatch.setattr(app_module, "SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS", 0.3)
+    sent: list[str] = []
+    release = threading.Event()
+
+    def send(verb: str, *_a: object, **_k: object) -> Response:
+        sent.append(verb)
+        if how == "second-ctrl-c":
+            application._settle_cut = True
+        release.wait(5.0)
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    caplog.set_level(logging.INFO, logger=app_module.LOGGER.name)
+    try:
+        application._web_off_on_disk_at_exit()
+        _judged_at_exit(application)
+    finally:
+        release.set()
+    said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
+    assert sent == ["quit"], sent
+    lines = [one for one in said if "was sent quit at shutdown" in one]
+    assert len(lines) == 1, said
+    expected = (
+        "didn\u2019t answer within 0.3 s" if how == "no-answer-in-time" else "a second Ctrl-C"
+    )
+    assert expected in lines[0], lines
+    assert RESTART in lines[0], lines

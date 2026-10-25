@@ -220,7 +220,7 @@ def test_a_held_document_that_allows_web_wallpapers_is_ended(
     said = application._web_off_guard()
     assert _acted(sent) == ["stop", "reload"], said
     assert _plays_nothing()
-    assert "still holds a configuration that allows web wallpapers" in said
+    assert "still holds a configuration that may allow web wallpapers" in said
     # What the display shows then (L3): no wallpaper plays, Noctalia's last still stays.
     assert "the last still Noctalia was given stays on screen" in said
 
@@ -240,7 +240,7 @@ def test_the_service_saying_it_allows_web_wallpapers_is_believed(
     said = application._web_off_guard()
     assert _acted(sent) == ["stop", "reload"], said
     assert _plays_nothing()
-    assert "still holds a configuration that allows web wallpapers" in said
+    assert "still holds a configuration that may allow web wallpapers" in said
 
 
 def test_the_service_saying_its_document_doesnt_allow_web_is_believed(
@@ -687,7 +687,7 @@ def test_a_document_the_service_reads_as_allowing_web_wallpapers_is_ended(
         return
     assert _acted(sent) == ["stop", "reload"], said
     assert _plays_nothing()
-    assert "still holds a configuration that allows web wallpapers" in said
+    assert "still holds a configuration that may allow web wallpapers" in said
 
 
 @pytest.mark.parametrize("name", ["x-escape-key", "control-no-key"])

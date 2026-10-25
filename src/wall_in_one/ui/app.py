@@ -5623,7 +5623,7 @@ class Application(Adw.Application):
         if allows:
             if titles:
                 return f"plays {', '.join(titles)}, from a configuration that allows web wallpapers"
-            return "holds a configuration that allows web wallpapers"
+            return "holds a configuration that may allow web wallpapers"
         if titles and not unchecked:
             return f"plays {', '.join(titles)}"
         if unchecked:

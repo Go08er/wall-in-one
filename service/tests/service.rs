@@ -15791,6 +15791,64 @@ fn a_mirrored_display_plugged_in_or_out_restarts_no_other() {
 }
 
 #[test]
+fn a_mirrored_reload_restarts_only_the_displays_whose_target_it_changes() {
+    // A document that moves DP-1 onto pages: DP-1 starts again, HDMI-A-1 (all-media-1 before
+    // and after) keeps its renderer, as an independent display would. At 27fa795 both were
+    // applied. The control: a reload that also turns motion on applies every display.
+    let root = directory("r13g-mirrored-reload");
+    let path = root.join("runtime.toml");
+    let generation = |document: String, generation: char| {
+        document.replace(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            &generation.to_string().repeat(64),
+        )
+    };
+    fs::write(&path, default_rule_document("all-media")).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let parsed = Config::load(&path).unwrap();
+    let at = on_the_third(12, 0);
+    let mut runtime = Runtime::new(path.clone(), parsed, RuntimeDriver(state.clone()), at).unwrap();
+    runtime.apply_current().unwrap();
+    let on_pages = default_rule_document("all-media").replace(
+        "connector = \"DP-1\"\nplaylist = \"mixed\"",
+        "connector = \"DP-1\"\nplaylist = \"pages\"",
+    );
+    for (label, document, started) in [
+        (
+            "DP-1 onto pages",
+            generation(on_pages.clone(), 'b'),
+            &["DP-1"][..],
+        ),
+        (
+            "motion on",
+            generation(
+                on_pages.replace("dynamics_enabled = false", "dynamics_enabled = true"),
+                'c',
+            ),
+            &["DP-1", "HDMI-A-1"][..],
+        ),
+    ] {
+        let before = applies_so_far(&state);
+        fs::write(&path, document).unwrap();
+        let reply = runtime_command(&mut runtime, at, "reload", None);
+        assert!(reply.ok, "{label}: {}", reply.message);
+        let mut applied = applied_since(&state, before);
+        applied.sort();
+        assert_eq!(applied, started, "{label}");
+        let problems = rows_off_screen(label, &mut runtime, &state, at);
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+    assert_eq!(
+        screen_of(&state).get("DP-1").map(String::as_str),
+        Some("pages-1")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn control_a_mirrored_display_whose_renderer_failed_is_started_again_at_a_boundary() {
     // A renderer that exited since the last apply: what the runtime knows to be on screen no
     // longer is, so the hand-over applies every display, HDMI-A-1 too, as Play would.

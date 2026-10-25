@@ -5355,6 +5355,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.power.observation = prepare_power(next.settings.stop_animations_on_battery);
         let mode_changed = next.settings.display_mode != self.config.settings.display_mode;
         let old_targets = self.current_targets(&self.target_outputs);
+        let resident = self.resident_targets();
         let old_theme_source = self.effective_theme_source().map(str::to_owned);
         let old_theme_entry = old_theme_source.as_deref().and_then(|connector| {
             old_targets
@@ -5588,8 +5589,18 @@ impl<D: WallpaperDriver> Runtime<D> {
             apply_attempted = true;
             let applied = if self.is_independent() {
                 self.apply_independent_selected(&independent_apply_outputs)
-            } else {
+            } else if mode_changed
+                || renderer_changed
+                || dynamics_changed
+                || web_policy_changed
+                || !recovered.is_empty()
+                || self.animations_inhibited() != self.applied_power_inhibition
+            {
                 self.apply_current()
+            } else {
+                // Only what some displays show changed: as independent
+                // displays do, the others keep their renderers.
+                self.apply_current_keeping(&resident)
             };
             if let Err(error) = applied {
                 failure = Some(error);

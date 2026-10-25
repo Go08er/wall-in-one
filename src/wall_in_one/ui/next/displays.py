@@ -569,7 +569,12 @@ class DisplaysPage(Page):
         elif reset and prior_id in play_ids[1:] and not unlisted:
             # A new model starts on row 0; keep the playlist the person left it on.
             self.play_row.set_selected(play_ids.index(prior_id))
-        elif reset or self.play_row.get_selected() == 0 or unlisted:
+        elif (
+            reset
+            or self.play_row.get_selected() == 0
+            or unlisted
+            or unnamed_pick.is_shown(self.play_row)
+        ):
             # Never "Follow the schedule" while a pick holds.
             unnamed_pick.show(self.play_row, _pick_label(route))
         self.play_row.set_sensitive(not runtime_off)

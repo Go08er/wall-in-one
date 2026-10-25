@@ -96,8 +96,9 @@ def _assignment_index(choices: tuple[Any, ...], playlist_id: str) -> int:
 
 def _pick_label(truth: runtime_truth.RuntimeTruth | None) -> str:
     """ "Your pick" where the reply names the pick, else the not-named item."""
-    named = truth is not None and truth.is_manual and not truth.route_unsure
-    named = named and not truth.pick_stood_in  # type: ignore[union-attr]
+    if truth is None:
+        return unnamed_pick.NAMED_PICK  # no reply to be "not named by": the app's record
+    named = truth.is_manual and not truth.route_unsure and not truth.pick_stood_in
     return unnamed_pick.NAMED_PICK if named else unnamed_pick.UNNAMED_PICK
 
 
@@ -730,6 +731,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
     ) -> int | None:
         """The selected row, or None to leave the selector where it is.
 
+        None also stands for a named pick this page lists no row for (All media).
         A pick the reply can't name (``pick_stood_in``), or can't tell from what stands in
         for it (``route_unsure``), is not placed: ``session.manual_playlist`` is written
         only by the app's own paths, not by a pick made through the service (``ctl``,
@@ -1163,16 +1165,22 @@ class SchedulesPage(Gtk.ScrolledWindow):
     def _place_playback(
         row: Adw.ComboRow, selected: int | None, label: str = unnamed_pick.UNNAMED_PICK
     ) -> None:
-        """Put the overall selector on ``selected``; None is a pick no field names.
+        """Put the overall selector on ``selected``; None is a pick with no row here.
 
         The row then stays where it is, except on "Follow schedule", which would say no
-        pick holds: that becomes the unnamed-pick item (`unnamed_pick`).
+        pick holds, and on the item already shown: those take ``label`` (`unnamed_pick`).
+        A named pick (``label`` "Your pick") is shown wherever the row was.
         """
         if selected is not None:
             unnamed_pick.drop(row)
             row.set_selected(selected)
-        elif label == unnamed_pick.NAMED_PICK or row.get_selected() == 0:
-            # A named pick this page has no row for is shown wherever the row was.
+        elif (
+            label == unnamed_pick.NAMED_PICK
+            or unnamed_pick.is_shown(row)
+            or row.get_selected() == 0
+        ):
+            # A named pick this page has no row for is shown wherever the row was; the
+            # item already shown takes the label this reply gives it.
             unnamed_pick.show(row, label)
 
     def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
@@ -1198,9 +1206,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 try:
                     truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
                     selected = self._playback_selected(self._app.session, choices, truth)
-                    # A pick no field names can't be told from the click, which may be
-                    # the one the service just refused: the unnamed-pick item, never
-                    # the click.
+                    # A pick with no row here (unnamed, or named but unlisted) can't be
+                    # told from the click, which may be the one the service just
+                    # refused: the unnamed-pick item, never the click.
                     if selected is None:
                         unnamed_pick.show(row, _pick_label(truth))
                     else:
@@ -1266,13 +1274,15 @@ class SchedulesPage(Gtk.ScrolledWindow):
     ) -> None:
         """Set service-owned selection without echoing it as a user command.
 
-        None is a pick the reply can't name: the unnamed-pick item (`unnamed_pick`).
+        None is a pick with no row here, named or not: the unnamed-pick item with ``label``
+        (`unnamed_pick`). A change of label alone waits for no echo.
         """
         model = row.get_model()
         if selected is None:
             count = model.get_n_items() if model is not None else 0
             if unnamed_pick.is_shown(row):
-                if row.get_selected() == count - 1 and model.get_string(count - 1) == label:  # type: ignore[union-attr]
+                if row.get_selected() == count - 1:
+                    unnamed_pick.show(row, label)  # only the label can differ: no echo
                     return
                 selected = count - 1
             else:

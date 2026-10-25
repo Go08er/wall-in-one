@@ -1,4 +1,7 @@
-"""A "Playing now" selector for a pick the reply cannot name (r13f N4, N7).
+"""A "Playing now" selector item for a pick with no row on the page (r13f N4, N7).
+
+The pick is either one the reply cannot name (``NAMED_PICK`` is for one it names, which
+the page just has no row for), or a named one the page does not list.
 
 At the reply ceiling the service leaves out ``stand_in_for``, and no field says which
 playlist a pick is. The app's own record of a pick is written only by its own paths,

@@ -271,12 +271,19 @@ on 78; the companion tries it again every 300 s, which runs the compile again.
 1.1 added: `\xHH` and `\e` escapes, an inline table spread over lines or with
 a trailing comma, a time without seconds. Only a hand edit has any of them, and
 one such as `"allow_web_wallpap\x65rs" = true` in `[settings]` is loaded by the
-service as allowing web wallpapers. So every check above (the guard's, the end
-of a quit's, the start's) counts a file the app can't read as TOML 1.0 as one
-that allows web wallpapers. A plainly malformed file is counted so too, since
-the two can't be told apart; the service refuses it anyway. A file the service
-can't read either (a symbolic link, not UTF-8, over 8 MiB) counts as nothing,
-as before.
+service as allowing web wallpapers. So the guard (for what the service's
+status doesn't say), its replacement of the file when no service runs, and the
+start's check of a kept file each count a file the app can't read as TOML 1.0
+as one that allows web wallpapers, whether or not the key is in it. A plainly
+malformed file is counted so too, since the two can't be told apart; the
+service refuses it anyway. The end of a quit counts such a file so only when
+the key may be in it: its name anywhere, or a quoted key that spells it with
+escapes. One with neither can't allow web wallpapers under either TOML (the
+service loads it allowing none), so the end of a quit judges it as a file that
+allows none (above), by the Workshop items it names: those it can read off the
+compiler's own lines, and otherwise ones that can't be checked. A file the
+service can't read either (a symbolic link, not UTF-8, over 8 MiB) counts as
+nothing, as before.
 
 **When it is on and can't reach the service either.** A service that lists
 schema 8 but isn't confirmed to read it (its installed units can't be

@@ -2004,13 +2004,6 @@ impl WallpaperDriver for RecordingDriver {
             .push((output.into(), entry.id.clone()));
         Ok(())
     }
-    fn apply_keeping_renderer(
-        &mut self,
-        _entry: &wall_in_one_service::config::Entry,
-        _output: &str,
-    ) -> Result<(), String> {
-        Ok(())
-    }
     fn set_paused(&mut self, _paused: bool) -> Result<(), String> {
         Ok(())
     }
@@ -2142,23 +2135,6 @@ impl WallpaperDriver for RuntimeDriver {
             state.active_outputs.remove(output);
         }
         Ok(())
-    }
-
-    fn apply_keeping_renderer(
-        &mut self,
-        entry: &wall_in_one_service::config::Entry,
-        output: &str,
-    ) -> Result<(), String> {
-        let mut state = self.0.lock().unwrap();
-        state
-            .stage_events
-            .push(format!("keep {output} {}", entry.id));
-        if state.fail_palette_attempts_remaining > 0 {
-            state.fail_palette_attempts_remaining -= 1;
-            Err("palette application failed".into())
-        } else {
-            Ok(())
-        }
     }
 
     fn stop_output_renderer(&mut self, output: &str) {
@@ -6656,9 +6632,7 @@ fn output_hotplug_reconciles_targets_without_a_second_probe() {
     {
         let recorded = state.lock().unwrap();
         assert_eq!(recorded.output_probes, 2, "one probe per apply batch");
-        // DP-2 stays, on the same entry, and keeps its renderer, as an independent display
-        // does; only DP-3 starts (review r13f N13). At f127a31 DP-2 was started again.
-        assert_eq!(recorded.applied_outputs, vec!["DP-3"]);
+        assert_eq!(recorded.applied_outputs, vec!["DP-2", "DP-3"]);
         assert!(recorded.applies.iter().all(|apply| apply.0 == "still-one"));
         assert_eq!(
             recorded.retained_outputs.last(),
@@ -6967,13 +6941,7 @@ fn transient_output_discovery_failure_keeps_the_last_live_targets() {
             )
             .ok
     );
-    // Both displays are still targets. DP-2 moves on; DP-1's playlist (night) has one entry,
-    // so it keeps its renderer (review r13f N13: at f127a31 it was started again).
-    assert_eq!(state.lock().unwrap().applied_outputs, vec!["DP-2"]);
-    assert_eq!(
-        state.lock().unwrap().retained_outputs.last(),
-        Some(&vec!["DP-1".into(), "DP-2".into()])
-    );
+    assert_eq!(state.lock().unwrap().applied_outputs, vec!["DP-1", "DP-2"]);
     let snapshot = status(&mut runtime, at);
     assert_eq!(snapshot["displays"][1]["connector"], "DP-2");
     assert!(
@@ -15804,13 +15772,11 @@ fn a_mirrored_rule_naming_the_default_that_changes_nothing_on_screen_applies_not
     );
 }
 
-// -- r13f N13: a mirrored hand-over restarts only the displays it changes ----------------------
+// -- A mirrored hand-over applies every display -------------------------------------------------
 //
-// Applying a mirrored display is break before make: its renderer stops and starts again. N9's
-// fix made the default's rule apply every display at its boundaries, the one that shows the
-// same entry before and after too; and a hand-over to any rule did so since 0.4.0. A display
-// whose target (playlist and entry) doesn't change keeps its renderer; only its palette is
-// applied, in its turn, so the shell's one palette ends where an apply of every display left it.
+// Applying a mirrored display is break before make: its renderer stops and starts again. A
+// hand-over, a rotation step, a command, a reload or a hotplug applies every mirrored display,
+// as 0.4.0 does (r13f N13's keeping was taken out again: review r13g R-L1 and R-L2).
 
 /// The outputs the driver applied (stopped and started) since `before` applies.
 fn applied_since(state: &Arc<Mutex<RuntimeDriverState>>, before: usize) -> Vec<String> {
@@ -15819,306 +15785,6 @@ fn applied_since(state: &Arc<Mutex<RuntimeDriverState>>, before: usize) -> Vec<S
 
 fn applies_so_far(state: &Arc<Mutex<RuntimeDriverState>>) -> usize {
     state.lock().unwrap().applied_outputs.len()
-}
-
-#[test]
-fn a_mirrored_rule_naming_the_default_restarts_only_the_display_it_moves() {
-    // DP-1 (assigned mixed) moves onto the default's rule at 16:00 and back at 17:00;
-    // HDMI-A-1 (assigned the default) shows all-media-1 throughout. At f127a31 both were
-    // applied at each boundary.
-    let (mut runtime, state) =
-        default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(15, 0));
-    let mut problems = Vec::new();
-    for (hour, entry, seconds) in [(16, "all-media-1", 1), (17, "mixed-1", 2)] {
-        let label = format!("{hour}:00");
-        let before = applies_so_far(&state);
-        state.lock().unwrap().stage_events.clear();
-        runtime.tick(
-            on_the_third(hour, 0),
-            Instant::now() + Duration::from_secs(seconds),
-        );
-        problems.extend(rows_off_screen(
-            &label,
-            &mut runtime,
-            &state,
-            on_the_third(hour, 0),
-        ));
-        assert_eq!(
-            applied_since(&state, before),
-            ["DP-1"],
-            "{label}: HDMI-A-1 restarted, its entry unchanged"
-        );
-        assert_eq!(
-            screen_of(&state).get("DP-1").map(String::as_str),
-            Some(entry),
-            "{label}"
-        );
-        assert_eq!(
-            state.lock().unwrap().stage_events,
-            ["keep HDMI-A-1 all-media-1"],
-            "{label}: HDMI-A-1's still and palette, in its turn"
-        );
-    }
-    assert!(problems.is_empty(), "{problems:#?}");
-}
-
-#[test]
-fn a_mirrored_rule_naming_what_every_display_shows_restarts_nothing() {
-    // The same class since 0.4.0: both displays assigned mixed, and a rule naming mixed. The
-    // playlist in force changes (the default, then mixed, then the default), what every
-    // display shows doesn't: nothing is started again, at either boundary.
-    let document = default_rule_document("mixed").replace(
-        "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
-        "connector = \"HDMI-A-1\"\nplaylist = \"mixed\"",
-    );
-    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
-    let before = applies_so_far(&state);
-    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
-    let snapshot = status(&mut runtime, on_the_third(16, 0));
-    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "eve");
-    assert_eq!(route(&snapshot, "HDMI-A-1")["schedule_rule_id"], "eve");
-    runtime.tick(on_the_third(17, 0), Instant::now() + Duration::from_secs(2));
-    let snapshot = status(&mut runtime, on_the_third(17, 0));
-    assert!(route(&snapshot, "DP-1")["schedule_rule_id"].is_null());
-    let problems = rows_off_screen("17:00", &mut runtime, &state, on_the_third(17, 0));
-    assert!(problems.is_empty(), "{problems:#?}");
-    assert_eq!(
-        applied_since(&state, before),
-        Vec::<String>::new(),
-        "started again"
-    );
-}
-
-#[test]
-fn a_mirrored_rotation_restarts_only_the_displays_whose_entry_moves() {
-    // Rotation moves each playlist in force on: mixed (DP-1) to its second entry, while pages
-    // (HDMI-A-1) has one entry, which stays. Only DP-1 is started again.
-    let document = default_rule_document("all-media")
-        .replace("cycle_enabled = false", "cycle_enabled = true")
-        .replace(
-            "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
-            "connector = \"HDMI-A-1\"\nplaylist = \"pages\"",
-        );
-    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(12, 0));
-    let before = applies_so_far(&state);
-    runtime.tick(
-        on_the_third(12, 6),
-        Instant::now() + Duration::from_secs(301),
-    );
-    let problems = rows_off_screen("12:06", &mut runtime, &state, on_the_third(12, 6));
-    assert!(problems.is_empty(), "{problems:#?}");
-    assert_eq!(applied_since(&state, before), ["DP-1"], "pages-1 restarted");
-    let screen = screen_of(&state);
-    assert_eq!(screen.get("DP-1").map(String::as_str), Some("mixed-2"));
-    assert_eq!(screen.get("HDMI-A-1").map(String::as_str), Some("pages-1"));
-}
-
-#[test]
-fn a_mirrored_display_plugged_in_or_out_restarts_no_other() {
-    // A hotplug applies the new set of displays: the one plugged in starts (DP-2, unassigned,
-    // on the default), the one unplugged stops; the others keep their renderers. At a5b370d
-    // DP-1 and HDMI-A-1 were applied again each time.
-    let (mut runtime, state) =
-        default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(12, 0));
-    let mut clock = Instant::now();
-    for (label, outputs, started) in [
-        (
-            "plugged in",
-            &["DP-1", "DP-2", "HDMI-A-1"][..],
-            &["DP-2"][..],
-        ),
-        ("unplugged", &["DP-1", "HDMI-A-1"][..], &[][..]),
-    ] {
-        let before = applies_so_far(&state);
-        state.lock().unwrap().connected_outputs =
-            Some(outputs.iter().map(|output| output.to_string()).collect());
-        clock += Duration::from_secs(6);
-        runtime.tick(on_the_third(12, 1), clock);
-        assert_eq!(applied_since(&state, before), started, "{label}");
-        assert_eq!(
-            state.lock().unwrap().retained_outputs.last().unwrap(),
-            outputs,
-            "{label}"
-        );
-        let snapshot = status(&mut runtime, on_the_third(12, 1));
-        let connected: Vec<&str> = snapshot["displays"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| row["connected"] == true)
-            .map(|row| row["connector"].as_str().unwrap())
-            .collect();
-        assert_eq!(connected, outputs, "{label}");
-    }
-    let problems = rows_off_screen("12:01", &mut runtime, &state, on_the_third(12, 1));
-    assert!(problems.is_empty(), "{problems:#?}");
-    assert_eq!(
-        screen_of(&state).get("DP-2").map(String::as_str),
-        Some("all-media-1")
-    );
-}
-
-#[test]
-fn a_mirrored_reload_restarts_only_the_displays_whose_target_it_changes() {
-    // A document that moves DP-1 onto pages: DP-1 starts again, HDMI-A-1 (all-media-1 before
-    // and after) keeps its renderer, as an independent display would. At 27fa795 both were
-    // applied. The control: a reload that also turns motion on applies every display.
-    let root = directory("r13g-mirrored-reload");
-    let path = root.join("runtime.toml");
-    let generation = |document: String, generation: char| {
-        document.replace(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            &generation.to_string().repeat(64),
-        )
-    };
-    fs::write(&path, default_rule_document("all-media")).unwrap();
-    let state = Arc::new(Mutex::new(RuntimeDriverState {
-        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
-        ..RuntimeDriverState::default()
-    }));
-    let parsed = Config::load(&path).unwrap();
-    let at = on_the_third(12, 0);
-    let mut runtime = Runtime::new(path.clone(), parsed, RuntimeDriver(state.clone()), at).unwrap();
-    runtime.apply_current().unwrap();
-    let on_pages = default_rule_document("all-media").replace(
-        "connector = \"DP-1\"\nplaylist = \"mixed\"",
-        "connector = \"DP-1\"\nplaylist = \"pages\"",
-    );
-    for (label, document, started) in [
-        (
-            "DP-1 onto pages",
-            generation(on_pages.clone(), 'b'),
-            &["DP-1"][..],
-        ),
-        (
-            "motion on",
-            generation(
-                on_pages.replace("dynamics_enabled = false", "dynamics_enabled = true"),
-                'c',
-            ),
-            &["DP-1", "HDMI-A-1"][..],
-        ),
-    ] {
-        let before = applies_so_far(&state);
-        fs::write(&path, document).unwrap();
-        let reply = runtime_command(&mut runtime, at, "reload", None);
-        assert!(reply.ok, "{label}: {}", reply.message);
-        let mut applied = applied_since(&state, before);
-        applied.sort();
-        assert_eq!(applied, started, "{label}");
-        let problems = rows_off_screen(label, &mut runtime, &state, at);
-        assert!(problems.is_empty(), "{problems:#?}");
-    }
-    assert_eq!(
-        screen_of(&state).get("DP-1").map(String::as_str),
-        Some("pages-1")
-    );
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn a_mirrored_command_restarts_only_the_displays_it_changes() {
-    // Next, Previous and Random move each playlist in force: pages (HDMI-A-1) has one entry,
-    // which stays. A pick of all-media, and Follow schedule back to the assignments, change
-    // only DP-1: HDMI-A-1 shows all-media-1 throughout. At cef3bbd each started every display.
-    let mut problems = Vec::new();
-    let on_pages = default_rule_document("all-media").replace(
-        "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
-        "connector = \"HDMI-A-1\"\nplaylist = \"pages\"",
-    );
-    let at = on_the_third(12, 0);
-    for (document, commands) in [
-        (
-            on_pages,
-            &[("next", None), ("previous", None), ("random", None)][..],
-        ),
-        (
-            default_rule_document("all-media"),
-            &[
-                ("playlist-use", Some("all-media")),
-                ("schedule-follow", None),
-            ][..],
-        ),
-    ] {
-        let (mut runtime, state) = default_rule_runtime(document, &[], at);
-        for (verb, argument) in commands {
-            let before = applies_so_far(&state);
-            let reply = runtime_command(&mut runtime, at, verb, *argument);
-            assert!(reply.ok, "{verb}: {}", reply.message);
-            assert_eq!(applied_since(&state, before), ["DP-1"], "{verb}");
-            problems.extend(rows_off_screen(verb, &mut runtime, &state, at));
-        }
-    }
-    assert!(problems.is_empty(), "{problems:#?}");
-}
-
-#[test]
-fn a_mirrored_display_refused_when_motion_resumes_moves_on_alone() {
-    // Back on AC after the battery stopped motion, each display's motion starts again; DP-1's
-    // entry is refused at its start this time (its item became a web page meanwhile), so DP-1
-    // moves on to its next entry. HDMI-A-1, whose motion just started, keeps it. At 5a9f887
-    // HDMI-A-1 was applied again for DP-1's refusal.
-    use wall_in_one_service::power::PowerSource::{Ac, Battery};
-    let document = default_rule_document("all-media")
-        .replace("dynamics_enabled = false", "dynamics_enabled = true")
-        .replace(
-            "id = \"mixed-1\"\nkind = \"still\"\n",
-            "id = \"mixed-1\"\nkind = \"scene\"\nscene_id = \"3000000001\"\n",
-        )
-        .replace(
-            "kind = \"still\"\n",
-            "kind = \"video\"\nmotion = \"/motion.mp4\"\n",
-        );
-    let mut parsed = Config::from_bytes(document.into_bytes()).unwrap();
-    parsed.schema_version = 5;
-    parsed.settings.stop_animations_on_battery = true;
-    let at = on_the_third(12, 0);
-    let state = Arc::new(Mutex::new(RuntimeDriverState {
-        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
-        ..RuntimeDriverState::default()
-    }));
-    let mut runtime = Runtime::new(
-        PathBuf::from("/tmp/runtime.toml"),
-        parsed,
-        RuntimeDriver(state.clone()),
-        at,
-    )
-    .unwrap();
-    runtime.apply_current().unwrap();
-    runtime.observe_power(power_observation(Battery));
-    assert!(state.lock().unwrap().active_outputs.is_empty());
-    state
-        .lock()
-        .unwrap()
-        .refuse_entry_ids
-        .insert("mixed-1".into());
-    let before = applies_so_far(&state);
-    runtime.observe_power(power_observation(Ac));
-    let applied = applied_since(&state, before);
-    // Each display's motion started once (the driver logs that as an apply); then DP-1 again.
-    assert_eq!(
-        applied
-            .iter()
-            .filter(|output| *output == "HDMI-A-1")
-            .count(),
-        1,
-        "HDMI-A-1 started again: {applied:?}"
-    );
-    assert_eq!(
-        applied.last().map(String::as_str),
-        Some("DP-1"),
-        "{applied:?}"
-    );
-    assert_eq!(
-        state.lock().unwrap().active_outputs,
-        HashSet::from(["DP-1".into(), "HDMI-A-1".into()])
-    );
-    assert_eq!(
-        screen_of(&state).get("DP-1").map(String::as_str),
-        Some("mixed-2")
-    );
-    let problems = rows_off_screen("on AC", &mut runtime, &state, at);
-    assert!(problems.is_empty(), "{problems:#?}");
 }
 
 /// A real driver over `default_rule_document` with videos and motion on, HDMI-A-1 assigned
@@ -16207,53 +15873,9 @@ fn the_shell_forgets(shell: &Path) {
 }
 
 #[test]
-fn a_kept_mirrored_display_is_handed_its_still_again() {
-    // Review r13g: a display a hand-over doesn't change keeps its renderer (N13), but a full
-    // apply also handed the shell its still again, which put back a still the shell had lost.
-    // A kept display still gets it: after `next`, and after a reload, HDMI-A-1 (pages' one
-    // entry throughout) shows pages-1's still again, though its mpvpaper isn't started again.
-    // At 56a0196 it was handed only its palette, and the shell kept showing nothing.
-    let (mut runtime, config_path, shell, launches) = shell_runtime("r13g-kept-still");
-    let mut first = launched_on(&launches, 2);
-    first.sort();
-    assert_eq!(first, ["DP-1", "HDMI-A-1"]);
-    let pages = Some("/stills/pages-1.png".to_string());
-    assert_eq!(shown_by_the_shell(&shell, "HDMI-A-1"), pages);
-    // A command that moves only DP-1.
-    the_shell_forgets(&shell);
-    let reply = runtime_command(&mut runtime, noon(), "next", None);
-    assert!(reply.ok, "{}", reply.message);
-    assert_eq!(
-        shown_by_the_shell(&shell, "HDMI-A-1"),
-        pages,
-        "after next: the kept display's still isn't back"
-    );
-    // A reload that moves only DP-1 (onto all-media).
-    the_shell_forgets(&shell);
-    let document = fs::read_to_string(&config_path).unwrap().replace(
-        "connector = \"DP-1\"\nplaylist = \"mixed\"",
-        "connector = \"DP-1\"\nplaylist = \"all-media\"",
-    );
-    fs::write(&config_path, document).unwrap();
-    let reply = runtime_command(&mut runtime, noon(), "reload", None);
-    assert!(reply.ok, "{}", reply.message);
-    assert_eq!(
-        shown_by_the_shell(&shell, "HDMI-A-1"),
-        pages,
-        "after the reload: the kept display's still isn't back"
-    );
-    // HDMI-A-1's renderer was kept both times: the two launches after the first two are DP-1's.
-    assert_eq!(&launched_on(&launches, 4)[2..], ["DP-1", "DP-1"]);
-    let snapshot = status(&mut runtime, noon());
-    assert_eq!(route(&snapshot, "HDMI-A-1")["entry_id"], "pages-1");
-    runtime.shutdown();
-    fs::remove_dir_all(config_path.parent().unwrap()).unwrap();
-}
-
-#[test]
 fn control_a_mirrored_display_a_command_moves_is_handed_its_new_still() {
-    // The other side, on both trees: DP-1, which `next` moves, is applied whole, so the shell
-    // shows its new still however much it lost, and its mpvpaper starts again.
+    // DP-1, which `next` moves, is applied whole: the shell shows its new still however much
+    // it lost, and its mpvpaper starts again.
     let (mut runtime, config_path, shell, launches) = shell_runtime("r13g-moved-still");
     launched_on(&launches, 2);
     assert_eq!(
@@ -16274,8 +15896,8 @@ fn control_a_mirrored_display_a_command_moves_is_handed_its_new_still() {
 
 #[test]
 fn control_a_mirrored_display_whose_renderer_failed_is_started_again_at_a_boundary() {
-    // A renderer that exited since the last apply: what the runtime knows to be on screen no
-    // longer is, so the hand-over applies every display, HDMI-A-1 too, as Play would.
+    // A renderer that exited since the last apply: the hand-over applies every display,
+    // HDMI-A-1 too, as Play would, and the failure is cleared.
     let (mut runtime, state) =
         default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(15, 0));
     state
@@ -16562,5 +16184,229 @@ fn a_mirrored_sequence_keeps_every_row_and_its_screen_on_one_decision() {
         true,
     ));
     fs::remove_dir_all(&root).unwrap();
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+// -- review r13g R-L1 and R-L2: a mirrored display shows what its row says ---------------------
+//
+// At 2a17a02 a mirrored display kept its renderer where the runtime inferred, from what it knew
+// then, that its target hadn't changed. A refusal learned at a rule's boundary (R-L1), or the
+// second apply round after a refusal at the start (R-L2), then kept a display on a renderer
+// its row didn't name, or on none, and blamed a good item for another's refusal. Every display
+// is applied again, as at f127a31; these are the review's probes.
+
+/// `default_rule_document(rule)` with motion on, DP-1 assigned `dp1` and HDMI-A-1 `hdmi`, and
+/// pages-1 a Workshop scene, which the driver refuses when asked (as a real one does for an
+/// item that became a web page, or was unsubscribed, since the document was compiled).
+fn refusable_pages_document(rule: &str, dp1: &str, hdmi: &str) -> String {
+    default_rule_document(rule)
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"pages-1\"\nkind = \"still\"\n",
+            "id = \"pages-1\"\nkind = \"scene\"\nscene_id = \"3000000001\"\n",
+        )
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            &format!("connector = \"DP-1\"\nplaylist = \"{dp1}\""),
+        )
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+            &format!("connector = \"HDMI-A-1\"\nplaylist = \"{hdmi}\""),
+        )
+}
+
+/// R-L1: DP-1 plays pages (pages-1, a scene), HDMI-A-1 mixed; rule eve puts pages on every
+/// display at 16:00. When pages-1 is refused before then, the boundary's ask-ahead learns it,
+/// and pages plays its stand-in, the default. What the boundary found wrong at 16:00, what it
+/// applied, and whether DP-1 still runs motion.
+fn refused_ahead_of_a_boundary(refuse: bool) -> (Vec<String>, Vec<String>, bool) {
+    let (mut runtime, state) = default_rule_runtime(
+        refusable_pages_document("pages", "pages", "mixed"),
+        &[],
+        on_the_third(15, 0),
+    );
+    let mut problems = rows_off_screen("15:00", &mut runtime, &state, on_the_third(15, 0));
+    assert!(state.lock().unwrap().active_outputs.contains("DP-1"));
+    if refuse {
+        state
+            .lock()
+            .unwrap()
+            .refuse_when_asked
+            .insert("pages-1".into());
+    }
+    let before = applies_so_far(&state);
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    problems.extend(rows_off_screen(
+        "16:00",
+        &mut runtime,
+        &state,
+        on_the_third(16, 0),
+    ));
+    let applied = applied_since(&state, before);
+    let motion = state.lock().unwrap().active_outputs.contains("DP-1");
+    (problems, applied, motion)
+}
+
+#[test]
+fn a_display_whose_entry_is_refused_ahead_of_a_boundary_is_not_kept_on_its_old_renderer() {
+    let (problems, applied, motion) = refused_ahead_of_a_boundary(true);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(applied.contains(&"DP-1".to_string()), "{applied:?}");
+    assert!(!motion, "pages-1's motion still runs on DP-1");
+}
+
+#[test]
+fn control_without_the_refusal_dp1_plays_pages_1_through_the_boundary() {
+    let (problems, _, motion) = refused_ahead_of_a_boundary(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(motion);
+}
+
+#[test]
+fn a_display_refused_ahead_of_a_boundary_is_not_kept_on_its_old_renderer_when_the_rule_ends() {
+    // R-L1, an hour on: at 17:00 eve ends, DP-1's own playlist (pages) is again its stand-in.
+    let (mut runtime, state) = default_rule_runtime(
+        refusable_pages_document("pages", "pages", "mixed"),
+        &[],
+        on_the_third(15, 0),
+    );
+    state
+        .lock()
+        .unwrap()
+        .refuse_when_asked
+        .insert("pages-1".into());
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let before = applies_so_far(&state);
+    runtime.tick(on_the_third(17, 0), Instant::now() + Duration::from_secs(2));
+    let applied = applied_since(&state, before);
+    let problems = rows_off_screen("17:00", &mut runtime, &state, on_the_third(17, 0));
+    assert!(
+        problems.is_empty(),
+        "17:00 applied {applied:?}: {problems:#?}"
+    );
+    assert!(!state.lock().unwrap().active_outputs.contains("DP-1"));
+}
+
+/// DP-1 plays pages (pages-1, a scene), HDMI-A-1 the default; rule eve puts pages on every
+/// display at 16:00, and a pick of the default follows at 16:05. What was found wrong at the
+/// boundary, and after the pick, and whether DP-1 still runs motion then.
+fn refused_at_a_boundary_then_a_pick(refuse: bool) -> (Vec<String>, Vec<String>, bool) {
+    let (mut runtime, state) = default_rule_runtime(
+        refusable_pages_document("pages", "pages", "all-media"),
+        &[],
+        on_the_third(15, 0),
+    );
+    if refuse {
+        state
+            .lock()
+            .unwrap()
+            .refuse_when_asked
+            .insert("pages-1".into());
+    }
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let at_boundary = rows_off_screen("16:00", &mut runtime, &state, on_the_third(16, 0));
+    let reply = runtime_command(
+        &mut runtime,
+        on_the_third(16, 5),
+        "playlist-use",
+        Some("all-media"),
+    );
+    assert!(reply.ok, "{}", reply.message);
+    let after_pick = rows_off_screen("pick", &mut runtime, &state, on_the_third(16, 5));
+    let motion = state.lock().unwrap().active_outputs.contains("DP-1");
+    (at_boundary, after_pick, motion)
+}
+
+#[test]
+fn a_pick_after_a_boundary_that_learned_a_refusal_moves_the_display_off_the_refused_entry() {
+    let (_, after_pick, motion) = refused_at_a_boundary_then_a_pick(true);
+    assert!(after_pick.is_empty(), "{after_pick:#?}");
+    assert!(!motion, "pages-1's motion still runs on DP-1");
+}
+
+#[test]
+fn control_without_the_refusal_the_boundary_and_the_pick_move_dp1() {
+    let (at_boundary, after_pick, _) = refused_at_a_boundary_then_a_pick(false);
+    assert!(at_boundary.is_empty(), "{at_boundary:#?}");
+    assert!(after_pick.is_empty(), "{after_pick:#?}");
+}
+
+/// R-L2: DP-1 plays mixed (mixed-1, a video, or a scene with `mixed_1_scene`; then mixed-2, a
+/// scene), HDMI-A-1 pages (one video). `next` moves mixed to mixed-2, which the driver refuses
+/// at its start when `refuse` (its item changed between the ask and the start), so mixed moves
+/// back to mixed-1 for a second apply round. What was found wrong, whether DP-1 runs motion,
+/// and the status.
+fn refused_at_its_start(
+    refuse: bool,
+    mixed_1_scene: bool,
+) -> (Vec<String>, bool, serde_json::Value) {
+    let mixed_1 = if mixed_1_scene {
+        "id = \"mixed-1\"\nkind = \"scene\"\nscene_id = \"3000000011\"\n"
+    } else {
+        "id = \"mixed-1\"\nkind = \"video\"\nmotion = \"/motion.mp4\"\n"
+    };
+    let document = default_rule_document("all-media")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace("id = \"mixed-1\"\nkind = \"still\"\n", mixed_1)
+        .replace(
+            "id = \"mixed-2\"\nkind = \"still\"\n",
+            "id = \"mixed-2\"\nkind = \"scene\"\nscene_id = \"3000000012\"\n",
+        )
+        .replace(
+            "id = \"pages-1\"\nkind = \"still\"\n",
+            "id = \"pages-1\"\nkind = \"video\"\nmotion = \"/motion.mp4\"\n",
+        )
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+            "connector = \"HDMI-A-1\"\nplaylist = \"pages\"",
+        );
+    let at = on_the_third(12, 0);
+    let (mut runtime, state) = default_rule_runtime(document, &[], at);
+    assert!(state.lock().unwrap().active_outputs.contains("DP-1"));
+    if refuse {
+        state
+            .lock()
+            .unwrap()
+            .refuse_entry_ids
+            .insert("mixed-2".into());
+    }
+    let reply = runtime_command(&mut runtime, at, "next", None);
+    assert!(reply.ok, "{}", reply.message);
+    let problems = rows_off_screen("next", &mut runtime, &state, at);
+    let motion = state.lock().unwrap().active_outputs.contains("DP-1");
+    (problems, motion, status(&mut runtime, at))
+}
+
+#[test]
+fn a_display_refused_at_its_start_that_moves_back_to_its_video_is_started_again() {
+    let (problems, motion, snapshot) = refused_at_its_start(true, false);
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "mixed-1");
+    assert!(motion, "DP-1 shows mixed-1 with no motion");
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_display_moved_back_is_not_blamed_for_the_refusal_its_first_round_entry_got() {
+    let (problems, motion, snapshot) = refused_at_its_start(true, true);
+    let refused = snapshot["refused"].to_string();
+    assert!(
+        !refused.contains("mixed-1") && !refused.contains("3000000011"),
+        "mixed-1 recorded as refused with mixed-2's refusal: {refused}"
+    );
+    assert!(refused.contains("3000000012"), "{refused}");
+    assert_eq!(
+        route(&snapshot, "DP-1")["entry_id"],
+        "mixed-1",
+        "{snapshot}"
+    );
+    assert!(motion, "DP-1 has no motion");
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn control_without_the_refusal_next_moves_dp1_to_mixed_2() {
+    let (problems, motion, snapshot) = refused_at_its_start(false, false);
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "mixed-2");
+    assert!(motion);
     assert!(problems.is_empty(), "{problems:#?}");
 }

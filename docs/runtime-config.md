@@ -834,14 +834,7 @@ because the schedule still moves a paused route, and is `null`:
 At the change the winner plays on every display it moves: a mirrored rule
 that names the default playlist moves a display assigned to another playlist
 onto the default, and back when it ends, though the playlist in force is the
-default either way. Only the displays a change moves start again: with
-assignments, a mirrored display that shows the same entry before and after a
-rule's boundary, a rotation step, a command, a reload or a hotplug keeps its
-renderer, as an independent one does. The shell is still handed its still and
-palette, as an apply of every display would, so one Noctalia lost meanwhile
-(restarted without its state, or another program's wallpaper set) is back;
-Noctalia does nothing for a still or palette it already shows. After a
-renderer failed, any of them starts every display again, as `play` does.
+default either way.
 
 The cycle deadline is `null` when the route is paused, does not cycle, or is
 not connected. Stopped routes keep rotating stills, so they keep a deadline.

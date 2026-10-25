@@ -37,13 +37,6 @@ impl WallpaperDriver for Quiet {
     ) -> Result<(), String> {
         Ok(())
     }
-    fn apply_keeping_renderer(
-        &mut self,
-        _entry: &wall_in_one_service::config::Entry,
-        _output: &str,
-    ) -> Result<(), String> {
-        Ok(())
-    }
     fn set_paused(&mut self, _paused: bool) -> Result<(), String> {
         Ok(())
     }

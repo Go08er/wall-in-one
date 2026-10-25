@@ -243,14 +243,6 @@ pub trait WallpaperDriver: Send {
         output: &str,
         settings: &crate::config::Settings,
     ) -> Result<(), String>;
-    /// Hand the shell what `apply` hands it, the paired still on `output`
-    /// and the palette, for a display whose renderer keeps running: neither
-    /// stopped nor started. A mirrored display a hand-over doesn't change
-    /// keeps its motion this way, and the shell still shows its still, even
-    /// one that lost it meanwhile (a restarted shell, or another program's
-    /// wallpaper). Noctalia does nothing for a still or palette it already
-    /// shows. Required: a driver with a shell must not leave it out.
-    fn apply_keeping_renderer(&mut self, entry: &Entry, output: &str) -> Result<(), String>;
     /// Stop only the renderer owned by one connector before a staged hand-over.
     fn stop_output_renderer(&mut self, _output: &str) {}
     /// Apply the paired still without launching motion or changing colours.
@@ -1624,12 +1616,6 @@ impl WallpaperDriver for SystemDriver {
         self.still(entry, output)?;
         self.palette(&entry.palette)?;
         self.start_motion(entry, output, runtime)
-    }
-
-    fn apply_keeping_renderer(&mut self, entry: &Entry, output: &str) -> Result<(), String> {
-        // `apply` without the stop and the start around these two.
-        self.still(entry, output)?;
-        self.palette(&entry.palette)
     }
 
     fn stop_output_renderer(&mut self, output: &str) {

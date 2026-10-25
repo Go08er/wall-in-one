@@ -1398,18 +1398,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.refresh_independent_last_error();
         }
         if !refused_outputs.is_empty() {
-            // The apply says what became of them, as any apply does. A
-            // mirrored display whose motion just started keeps it, as an
-            // independent one does; each refused one is applied.
+            // The apply says what became of them, as any apply does.
             let _ = if self.is_independent() {
                 self.apply_independent_selected(&refused_outputs)
             } else {
-                let resident: Vec<Target> = self
-                    .resident_targets()
-                    .into_iter()
-                    .filter(|target| !refused_outputs.contains(&target.output))
-                    .collect();
-                self.apply_current_keeping(&resident)
+                self.apply_current()
             };
         }
     }
@@ -1843,10 +1836,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 Ok(outputs) if self.live_outputs.as_ref() != Some(&outputs) => {
                     // The discovery call populated the driver's batch snapshot;
                     // reuse it for this hand-over instead of asking the
-                    // compositor twice. A display that stays keeps its
-                    // renderer: only one plugged in starts.
-                    let resident = self.resident_targets();
-                    let _ = self.apply_current_in_batch(Ok(outputs), &resident);
+                    // compositor twice.
+                    let _ = self.apply_current_in_batch(Ok(outputs));
                 }
                 Ok(outputs) => {
                     self.live_outputs = Some(outputs);
@@ -2368,14 +2359,6 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn attempt_automatic(&mut self, mut pending: PendingAutomatic, now: Instant) {
-        // A display the hand-over doesn't change keeps its renderer (review
-        // r13f N13): what shows now is the baseline's, unless a retry after
-        // a taboo has none of its own.
-        let resident = if pending.restore_baseline {
-            self.resident_targets()
-        } else {
-            Vec::new()
-        };
         self.restore_selection(&pending.candidate);
         let attempted: Vec<(EntryKey, String)> = self
             .current_targets(&self.target_outputs)
@@ -2391,7 +2374,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             })
             .collect();
         pending.attempts += 1;
-        match self.apply_current_keeping(&resident) {
+        match self.apply_current() {
             Ok(_) => {
                 // A successful automatic hand-over owns a complete residency
                 // interval. The candidate selection is already installed.
@@ -3539,7 +3522,12 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
-        self.apply_current_keeping(&[])
+        self.last_output_probe = Instant::now();
+        self.driver.begin_apply();
+        let discovered = self.probe_outputs();
+        let result = self.apply_current_in_batch(discovered);
+        self.driver.end_apply();
+        result
     }
 
     /// What status says of this binary's own path (`runtime_executable`),
@@ -3549,34 +3537,6 @@ impl<D: WallpaperDriver> Runtime<D> {
     #[cfg(feature = "test-support")]
     pub fn set_runtime_executable_for_tests(&mut self, executable: Option<&str>) {
         self.runtime_executable = executable.map(str::to_owned);
-    }
-
-    /// `apply_current`, where a mirrored display whose target is one of
-    /// `resident` (what it shows now, `resident_targets`) keeps its renderer.
-    fn apply_current_keeping(&mut self, resident: &[Target]) -> Result<String, String> {
-        self.last_output_probe = Instant::now();
-        self.driver.begin_apply();
-        let discovered = self.probe_outputs();
-        let result = self.apply_current_in_batch(discovered, resident);
-        self.driver.end_apply();
-        result
-    }
-
-    /// What the mirrored displays show now, as far as the runtime knows: the
-    /// targets of the selection last applied, each with the entry it plays.
-    /// Only with assignments (each display then has a target of its own),
-    /// after an apply that succeeded, and while nothing has failed since: a
-    /// failed display is applied again. Empty otherwise, which applies every
-    /// display.
-    fn resident_targets(&self) -> Vec<Target> {
-        if self.is_independent()
-            || self.config.displays.is_empty()
-            || self.renderer_failed
-            || self.authoritative_generation == 0
-        {
-            return Vec::new();
-        }
-        self.current_targets(&self.target_outputs)
     }
 
     fn probe_outputs(&mut self) -> Result<Vec<String>, String> {
@@ -3599,7 +3559,6 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn apply_current_in_batch(
         &mut self,
         discovered: Result<Vec<String>, String>,
-        resident: &[Target],
     ) -> Result<String, String> {
         let independent = self.is_independent();
         let previous_outputs: HashSet<String> = self.target_outputs.iter().cloned().collect();
@@ -3659,13 +3618,13 @@ impl<D: WallpaperDriver> Runtime<D> {
             return self.apply_independent_in_batch(&selected);
         }
         self.skip_refused_mirrored();
-        let mut result = self.apply_mirrored_targets(resident);
+        let mut result = self.apply_mirrored_targets();
         // An item whose type changed between the driver's answer and its
         // start is refused there instead, its still already up: it is
         // skipped the same way. Each round remembers one item more.
         while self.learn_refusals_after_apply() {
             self.skip_refused_mirrored();
-            result = self.apply_mirrored_targets(resident);
+            result = self.apply_mirrored_targets();
         }
         result
     }
@@ -3744,14 +3703,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         learned
     }
 
-    /// Apply every mirrored display's target, break before make. One whose
-    /// target is in `resident`, which it already shows, keeps its renderer
-    /// (review r13f N13): the shell is handed its still and palette again
-    /// (`apply_keeping_renderer`), in its turn, so the shell shows what an
-    /// apply of every display would leave, its one palette included, even
-    /// where it lost a still meanwhile. A taboo entry's still is applied all
-    /// the same.
-    fn apply_mirrored_targets(&mut self, resident: &[Target]) -> Result<String, String> {
+    fn apply_mirrored_targets(&mut self) -> Result<String, String> {
         let targets = self.current_targets(&self.target_outputs);
         let outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
         // Every renderer of ours on an output without a target stops here,
@@ -3775,25 +3727,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         let mut missing_programs: Vec<String> = Vec::new();
         for target in targets {
             let mut settings = self.effective_motion_settings(&target.output, self.playback_state);
-            let mut kept = resident.contains(&target);
             if let Some(diagnostic) =
                 self.taboo_fallback_diagnostic(&target.playlist_id, &target.entry.id)
             {
                 settings.dynamics_enabled = false;
-                kept = false;
                 static_fallbacks.push(if target.output.is_empty() {
                     diagnostic
                 } else {
                     format!("{}: {diagnostic}", target.output)
                 });
             }
-            let applied = if kept {
-                self.driver
-                    .apply_keeping_renderer(&target.entry, &target.output)
-            } else {
-                self.driver.apply(&target.entry, &target.output, &settings)
-            };
-            match applied {
+            match self.driver.apply(&target.entry, &target.output, &settings) {
                 Ok(()) => {
                     // A refusal at the start itself is skipped by the caller
                     // (`learn_refusals_after_apply`), never said as a fault.
@@ -5022,7 +4966,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !self.playlist_selectable(&playlist_id) {
             return self.fail(self.taboo_playlist_error(&playlist_id));
         }
-        let resident = self.resident_targets();
         let baseline = self.selection_state();
         let previous_manual = self.manual_playlist.clone();
         self.manual_playlist = Some(playlist_id.clone());
@@ -5033,8 +4976,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.restore_selection(&baseline);
             return self.fail(self.taboo_playlist_error(&playlist_id));
         }
-        // A display the pick doesn't change keeps its renderer.
-        let result = self.apply_current_keeping(&resident);
+        let result = self.apply_current();
         if result.is_ok() {
             self.last_cycle = Instant::now();
         }
@@ -5088,7 +5030,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         {
             return self.fail(self.taboo_playlist_error(blocked));
         }
-        let resident = self.resident_targets();
         let baseline = self.selection_state();
         let previous_manual = self.manual_playlist.take();
         self.schedule_rule = rule;
@@ -5102,7 +5043,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 return self.fail(self.taboo_playlist_error(effective_playlist));
             }
         }
-        let result = self.apply_current_keeping(&resident);
+        let result = self.apply_current();
         if result.is_ok() {
             self.last_cycle = Instant::now();
         }
@@ -5306,9 +5247,6 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn move_by_at(&mut self, delta: isize, now: Instant) -> Result<String, String> {
-        // A display on a playlist that doesn't move (one entry) keeps its
-        // renderer.
-        let resident = self.resident_targets();
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
             moved |= if delta < 0 {
@@ -5337,7 +5275,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "active display playlists are empty or taboo"
             });
         }
-        let result = self.apply_current_keeping(&resident);
+        let result = self.apply_current();
         if result.is_ok() {
             self.last_cycle = now;
         }
@@ -5345,7 +5283,6 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn random_entry(&mut self) -> Result<String, String> {
-        let resident = self.resident_targets();
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
             moved |= self.move_cursor_random(&playlist);
@@ -5363,7 +5300,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             return self.fail("active display playlists are empty or taboo");
         }
-        let result = self.apply_current_keeping(&resident);
+        let result = self.apply_current();
         if result.is_ok() {
             self.last_cycle = Instant::now();
         }
@@ -5381,7 +5318,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.power.observation = prepare_power(next.settings.stop_animations_on_battery);
         let mode_changed = next.settings.display_mode != self.config.settings.display_mode;
         let old_targets = self.current_targets(&self.target_outputs);
-        let resident = self.resident_targets();
         let old_theme_source = self.effective_theme_source().map(str::to_owned);
         let old_theme_entry = old_theme_source.as_deref().and_then(|connector| {
             old_targets
@@ -5615,18 +5551,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             apply_attempted = true;
             let applied = if self.is_independent() {
                 self.apply_independent_selected(&independent_apply_outputs)
-            } else if mode_changed
-                || renderer_changed
-                || dynamics_changed
-                || web_policy_changed
-                || !recovered.is_empty()
-                || self.animations_inhibited() != self.applied_power_inhibition
-            {
-                self.apply_current()
             } else {
-                // Only what some displays show changed: as independent
-                // displays do, the others keep their renderers.
-                self.apply_current_keeping(&resident)
+                self.apply_current()
             };
             if let Err(error) = applied {
                 failure = Some(error);

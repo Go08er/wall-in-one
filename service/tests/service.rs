@@ -11650,7 +11650,11 @@ fn a_scene_whose_item_became_a_web_page_is_not_started_while_web_is_off() {
     )
     .unwrap();
     assert!(!runtime_command(&mut runtime, noon(), "next", None).ok);
-    assert!(!arguments.exists());
+    // The service's own account: still on the still, nothing in motion (a stand-in's file,
+    // looked for at once, would prove nothing).
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(snapshot["entry_id"], "entry-2");
+    assert_eq!(snapshot["motion_active"], false);
     assert!(runtime_command(&mut runtime, noon(), "reload", None).ok);
     assert!(runtime_command(&mut runtime, noon(), "next", None).ok);
     assert_eq!(status(&mut runtime, noon())["entry_id"], "entry-1");
@@ -11701,7 +11705,9 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
     let reply = runtime_command(&mut runtime, noon(), "reload", None);
     assert!(reply.ok, "{}", reply.message);
     // What the service did, not what a stand-in wrote meanwhile: the page was asked about and
-    // refused (it would be running otherwise, its recorder sleeping), and the still plays.
+    // refused (it would be running otherwise, its recorder sleeping), and the still plays. The
+    // recorder's own file can't say: a stand-in writes in its own time, after an apply returns,
+    // so its absence straight after the reload proves nothing (review r13f N16).
     let snapshot = status(&mut runtime, noon());
     assert_eq!(snapshot["motion_active"], false);
     assert_eq!(snapshot["entry_id"], "entry-2");
@@ -11715,7 +11721,6 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
         }]),
         "{snapshot}"
     );
-    assert!(!arguments.exists(), "the page started again");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();

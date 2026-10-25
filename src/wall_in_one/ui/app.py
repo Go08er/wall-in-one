@@ -2621,7 +2621,8 @@ class Application(Adw.Application):
             if why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk may have "
-                    "allowed web wallpapers; it was replaced at shutdown with one that plays nothing"
+                    "allowed web wallpapers; it was replaced at shutdown with one that plays "
+                    "nothing"
                 )
             elif not older:
                 LOGGER.warning(

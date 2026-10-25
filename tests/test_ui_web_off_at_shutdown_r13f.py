@@ -1,4 +1,4 @@
-"""The last step of a shutdown while web wallpapers are off: tests of review r13f's findings and of later rounds'.
+"""The last step of a shutdown while web wallpapers are off: tests of reviews r13f and later.
 
 `Application._web_off_on_disk_at_exit`, called as `do_shutdown` calls it last, on a windowless
 application. Review r13f found, at f127a31:
@@ -1240,11 +1240,11 @@ def test_a_look_that_fails_once_its_wait_was_cut_is_logged(
     variant: str,
 ) -> None:
     """An older service heard, and a file naming scenes, whose look at the Workshop items
-    (`workshop.web_among`) is held, then fails. Past the look's bound (a second here, so the look has begun) the
-    step stops waiting: the ids count as web pages, the file is replaced, and the failure, once
-    the look is let go, is logged. Before: it landed on a future nothing read, and nothing said
-    it. The control: the look fails within the wait; the step's own handler logs it, once, and
-    nothing else does."""
+    (`workshop.web_among`) is held, then fails. Past the look's bound (a second here, so
+    the look has begun) the step stops waiting: the ids count as web pages, the file is
+    replaced, and the failure, once the look is let go, is logged. Before: it landed on a
+    future nothing read, and nothing said it. The control: the look fails within the wait;
+    the step's own handler logs it, once, and nothing else does."""
     application = profiles().application
     _content, scenes = _workshop(2)
     text = _naming(scenes)

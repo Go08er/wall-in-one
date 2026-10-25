@@ -412,13 +412,13 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, heard: str
 ) -> None:
     """r13e L1 (its p3): the same, but what the app last heard from the service is nothing, or a
-    service older than schema 8, and the file the service holds names Workshop scenes, none of
-    which the scan lists (written as the number's reload begins, after its publication
-    installed). Before: the end of the shutdown scanned the Workshop on GTK's thread to judge
-    that file, which took 2.2 s for 2,500 items, after the second SIGINT, with nothing to end it.
-    Now it judges only whether the file allows web wallpapers, and scans nothing: each scan on
-    GTK's thread once the shutdown has begun is recorded, and there must be none. The file, which
-    allows none, is left as it is."""
+    service older than schema 8, and the file on disk at the end names Workshop scenes, none of
+    which the scan lists (written under the compiler lock as the end of the shutdown begins, so
+    that no publication of the lane's can come between). Before: the end of the shutdown scanned
+    the Workshop on GTK's thread to judge that file, which took 2.2 s for 2,500 items, after the
+    second SIGINT, with nothing to end it; here it then installed a compile over it. Now it
+    judges only whether the file allows web wallpapers, which it doesn't: each scan and each
+    install on GTK's thread once the shutdown has begun is recorded, and there must be none."""
     application, clip, slow, _spans = _setup(
         monkeypatch,
         tmp_path,
@@ -441,11 +441,27 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
         return workshop_items(*arguments, **keywords)
 
     monkeypatch.setattr(scan, "workshop_items", recorded)
+    install = runtime_config._install
+    installed: list[bool] = []
+
+    def recorded_install(*arguments: Any, **keywords: Any) -> None:
+        if application._runtime_shutdown and (
+            threading.current_thread() is threading.main_thread()
+        ):
+            installed.append(True)
+        install(*arguments, **keywords)
+
+    monkeypatch.setattr(runtime_config, "_install", recorded_install)
+    step = application._web_off_on_disk_at_exit
+
+    def names_the_scenes_first() -> None:
+        with runtime_config.compiler_lock():
+            paths.runtime_config_path().write_text(named, encoding="utf-8")
+        step()
+
+    monkeypatch.setattr(application, "_web_off_on_disk_at_exit", names_the_scenes_first)
     marks: dict[str, float] = {}
     failures: list[str] = []
-
-    def names_the_scenes() -> None:
-        paths.runtime_config_path().write_text(named, encoding="utf-8")
 
     def second() -> bool:
         marks["second"] = time.monotonic()
@@ -457,7 +473,6 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
         speed, _brightness = _rows(application, clip)
         speed.set_value(1.5)
         _LANES.extend(application_lanes(application))
-        slow.first = names_the_scenes
         slow.armed = True
         _interrupt(failures)  # the first Ctrl-C: PyGObject calls application.quit()
         GLib.timeout_add(300, second)  # runs inside the settle's own iterations
@@ -475,9 +490,7 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
     assert own.dial("video", "speed") == 1.5, own
     assert "second" in marks, "the second SIGINT never ran"
     assert not scanned, "the end of the shutdown scanned the Workshop on GTK's thread"
-    assert paths.runtime_config_path().read_text(encoding="utf-8") == named, (
-        "a file that allows no web wallpaper was replaced"
-    )
+    assert not installed, "the end of the shutdown replaced a file that allows no web wallpaper"
     assert ended - marks["second"] < 1.0, (
         f"run() returned {ended - marks['second']:.2f}s after the second SIGINT"
     )

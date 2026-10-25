@@ -738,7 +738,7 @@ fn configured_taboo(
 #[derive(Clone)]
 struct SelectionState {
     active_playlist: String,
-    schedule_overrode_default: bool,
+    schedule_rule: Option<String>,
     cursors: HashMap<String, PlaylistCursor>,
     rng: XorShift64,
 }
@@ -797,7 +797,7 @@ struct ReloadSnapshot {
     power_released_outputs: HashSet<String>,
     manual_playlist: Option<String>,
     active_playlist: String,
-    schedule_overrode_default: bool,
+    schedule_rule: Option<String>,
     cursors: HashMap<String, PlaylistCursor>,
     playback_state: PlaybackState,
     shuffle_override: Option<bool>,
@@ -830,7 +830,11 @@ pub struct Runtime<D: WallpaperDriver> {
     power_released_outputs: HashSet<String>,
     manual_playlist: Option<String>,
     active_playlist: String,
-    schedule_overrode_default: bool,
+    /// The schedule rule whose playlist mirrored mode plays over the default
+    /// and the assignments, as of the decision `active_playlist` is (a tick,
+    /// a reload, Follow schedule); None while none does, or for a pick.
+    /// Status names it, as an independent route's own `schedule_rule_id`.
+    schedule_rule: Option<String>,
     cursors: HashMap<String, PlaylistCursor>,
     playback_state: PlaybackState,
     shuffle_override: Option<bool>,
@@ -902,9 +906,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             ));
         }
         let scheduled =
-            schedule::resolve_override(&config.schedules, at).map_err(|error| error.to_string())?;
-        let schedule_overrode_default = scheduled.is_some();
-        let active = scheduled.unwrap_or(&config.default_playlist).to_string();
+            schedule::resolve_rule(&config.schedules, at).map_err(|error| error.to_string())?;
+        let schedule_rule = scheduled.map(|rule| rule.id.clone());
+        let active = scheduled
+            .map_or(&config.default_playlist, |rule| &rule.playlist)
+            .to_string();
         let independent = config.settings.display_mode == DisplayMode::Independent;
         let mut target_outputs = if independent {
             config
@@ -934,7 +940,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             power_released_outputs: HashSet::new(),
             manual_playlist: None,
             active_playlist: active,
-            schedule_overrode_default,
+            schedule_rule,
             cursors: HashMap::new(),
             playback_state: PlaybackState::Playing,
             shuffle_override: None,
@@ -1151,7 +1157,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.power_released_outputs = snapshot.power_released_outputs;
         self.manual_playlist = snapshot.manual_playlist;
         self.active_playlist = snapshot.active_playlist;
-        self.schedule_overrode_default = snapshot.schedule_overrode_default;
+        self.schedule_rule = snapshot.schedule_rule;
         self.cursors = snapshot.cursors;
         self.playback_state = snapshot.playback_state;
         self.shuffle_override = snapshot.shuffle_override;
@@ -1177,7 +1183,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn selection_state(&self) -> SelectionState {
         SelectionState {
             active_playlist: self.active_playlist.clone(),
-            schedule_overrode_default: self.schedule_overrode_default,
+            schedule_rule: self.schedule_rule.clone(),
             cursors: self.cursors.clone(),
             rng: self.rng,
         }
@@ -1185,7 +1191,7 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn restore_selection(&mut self, state: &SelectionState) {
         self.active_playlist.clone_from(&state.active_playlist);
-        self.schedule_overrode_default = state.schedule_overrode_default;
+        self.schedule_rule.clone_from(&state.schedule_rule);
         self.cursors.clone_from(&state.cursors);
         self.rng = state.rng;
     }
@@ -1484,14 +1490,17 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !had_pending
             && self.pending_automatic.is_none()
             && self.manual_playlist.is_none()
-            && let Ok(scheduled) = schedule::resolve_override(&self.config.schedules, at)
+            && let Ok(scheduled) = schedule::resolve_rule(&self.config.schedules, at)
         {
             let overrode = scheduled.is_some();
+            let rule = scheduled.map(|rule| rule.id.clone());
             let wanted = scheduled
-                .unwrap_or(&self.config.default_playlist)
+                .map_or(&self.config.default_playlist, |rule| &rule.playlist)
                 .to_string();
             let playlist_changed = wanted != self.active_playlist;
-            let routing_changed = overrode != self.schedule_overrode_default;
+            // Which rule decides is part of the decision: a rule handing over
+            // to another of the same playlist changes what status names.
+            let routing_changed = rule != self.schedule_rule;
             if playlist_changed && (overrode || self.config.displays.is_empty()) {
                 // Known before the change is decided, not learned by
                 // applying it: a stand-in that already plays isn't started
@@ -1507,12 +1516,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 // Only provenance changed (for example, a schedule rule
                 // naming the already-active default). Commit the truth
                 // shown in status without restarting motion.
-                self.schedule_overrode_default = overrode;
+                self.schedule_rule = rule;
                 self.active_playlist = wanted;
             } else if shown_changed {
                 schedule_transition_attempted = true;
                 let baseline = self.selection_state();
-                self.schedule_overrode_default = overrode;
+                self.schedule_rule = rule;
                 let mut candidate_available = true;
                 if playlist_changed {
                     self.active_playlist = wanted.clone();
@@ -3863,8 +3872,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         } else {
             for output in outputs {
-                let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
-                {
+                let reference = if self.manual_playlist.is_some() || self.schedule_rule.is_some() {
                     &self.active_playlist
                 } else {
                     self.config
@@ -4646,7 +4654,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let previous_manual = self.manual_playlist.clone();
         self.manual_playlist = Some(playlist_id.clone());
         self.active_playlist = playlist_id.clone();
-        self.schedule_overrode_default = false;
+        self.schedule_rule = None;
         if !self.start_cursor_for(&playlist_id) && self.nothing_reason(&playlist_id).is_none() {
             self.manual_playlist = previous_manual;
             self.restore_selection(&baseline);
@@ -4662,15 +4670,15 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn scheduled_selection(
         &self,
         at: NaiveDateTime,
-    ) -> Result<(String, bool, Vec<String>), String> {
-        let scheduled = schedule::resolve_override(&self.config.schedules, at)
+    ) -> Result<(String, Option<String>, Vec<String>), String> {
+        let scheduled = schedule::resolve_rule(&self.config.schedules, at)
             .map_err(|error| error.to_string())?;
-        let overrode = scheduled.is_some();
+        let rule = scheduled.map(|rule| rule.id.clone());
         let active = scheduled
-            .unwrap_or(&self.config.default_playlist)
+            .map_or(&self.config.default_playlist, |rule| &rule.playlist)
             .to_string();
-        if overrode || self.config.displays.is_empty() {
-            return Ok((active.clone(), overrode, vec![active]));
+        if rule.is_some() || self.config.displays.is_empty() {
+            return Ok((active.clone(), rule, vec![active]));
         }
 
         // With no schedule override, mirrored mode returns to each connected
@@ -4695,11 +4703,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .then(|| playlist.id.clone())
             })
             .collect();
-        Ok((active, overrode, effective))
+        Ok((active, None, effective))
     }
 
     fn follow_schedule(&mut self, at: NaiveDateTime) -> Result<String, String> {
-        let (playlist_id, overrode, effective) = self.scheduled_selection(at)?;
+        let (playlist_id, rule, effective) = self.scheduled_selection(at)?;
         if let Some(blocked) = effective
             .iter()
             .find(|playlist| !self.playlist_selectable(playlist))
@@ -4708,7 +4716,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let baseline = self.selection_state();
         let previous_manual = self.manual_playlist.take();
-        self.schedule_overrode_default = overrode;
+        self.schedule_rule = rule;
         self.active_playlist.clone_from(&playlist_id);
         for effective_playlist in &effective {
             if !self.start_cursor_for(effective_playlist)
@@ -5022,14 +5030,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .cloned()
             })
             .flatten();
-        let (next_active, next_schedule_overrode_default) = if let Some(manual) = &next_manual {
-            (manual.clone(), false)
+        let (next_active, next_schedule_rule) = if let Some(manual) = &next_manual {
+            (manual.clone(), None)
         } else {
-            let scheduled = schedule::resolve_override(&next.schedules, at)
-                .map_err(|error| error.to_string())?;
+            let scheduled =
+                schedule::resolve_rule(&next.schedules, at).map_err(|error| error.to_string())?;
             (
-                scheduled.unwrap_or(&next.default_playlist).to_string(),
-                scheduled.is_some(),
+                scheduled
+                    .map_or(&next.default_playlist, |rule| &rule.playlist)
+                    .to_string(),
+                scheduled.map(|rule| rule.id.clone()),
             )
         };
         let video_audio_changed = (next.renderer.video_muted, next.renderer.video_volume)
@@ -5060,17 +5070,14 @@ impl<D: WallpaperDriver> Runtime<D> {
         let old_config = std::mem::replace(&mut self.config, next);
         let old_manual_playlist = std::mem::replace(&mut self.manual_playlist, next_manual);
         let old_active_playlist = std::mem::replace(&mut self.active_playlist, next_active);
-        let old_schedule_overrode_default = std::mem::replace(
-            &mut self.schedule_overrode_default,
-            next_schedule_overrode_default,
-        );
+        let old_schedule_rule = std::mem::replace(&mut self.schedule_rule, next_schedule_rule);
         let old_cursors = std::mem::take(&mut self.cursors);
         let snapshot = ReloadSnapshot {
             power_released_outputs: self.power_released_outputs.clone(),
             config: old_config,
             manual_playlist: old_manual_playlist,
             active_playlist: old_active_playlist,
-            schedule_overrode_default: old_schedule_overrode_default,
+            schedule_rule: old_schedule_rule,
             cursors: old_cursors,
             playback_state: self.playback_state,
             shuffle_override: self.shuffle_override,
@@ -5155,7 +5162,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let new_theme_source = self.effective_theme_source().map(str::to_owned);
         let residency_changed = snapshot.active_playlist != self.active_playlist
             || snapshot.manual_playlist != self.manual_playlist
-            || snapshot.schedule_overrode_default != self.schedule_overrode_default
+            || snapshot.schedule_rule.is_some() != self.schedule_rule.is_some()
             || targets_changed;
         let independent_apply_outputs: HashSet<String> = if self.is_independent() {
             if mode_changed || renderer_changed || dynamics_changed || web_policy_changed {
@@ -5644,7 +5651,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         // refused throughout (`stand_in`).
         if self.config.displays.is_empty()
             || self.manual_playlist.is_some()
-            || self.schedule_overrode_default
+            || self.schedule_rule.is_some()
         {
             return vec![self.shown_playlist_id(&self.active_playlist)];
         }
@@ -5955,7 +5962,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let active_playlist = self.stand_in(&in_force.id).unwrap_or(in_force);
         let effective_ids = self.effective_playlist_ids();
         let summary_playlist = if self.manual_playlist.is_some()
-            || self.schedule_overrode_default
+            || self.schedule_rule.is_some()
             || self.config.displays.is_empty()
         {
             Some(active_playlist)
@@ -6055,13 +6062,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                     motion_active: self.driver.motion_active(""),
                     route_source: if self.manual_playlist.is_some() {
                         "manual"
-                    } else if selected_rule.is_some() {
+                    } else if self.schedule_rule.is_some() {
                         "schedule"
                     } else {
                         "default"
                     },
                     manual_override: self.manual_playlist.is_some(),
-                    schedule_rule_id: selected_rule.map(|rule| rule.id.as_str()),
+                    schedule_rule_id: self.schedule_rule.as_deref(),
                     playback_state: playback_state(self.playback_state),
                     paused: self.playback_state == PlaybackState::Paused,
                     stopped: self.playback_state == PlaybackState::Stopped,
@@ -6127,8 +6134,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     .config
                     .playlist(assigned_reference)
                     .ok_or_else(|| format!("display {output} names a missing playlist"))?;
-                let reference = if self.manual_playlist.is_some() || self.schedule_overrode_default
-                {
+                let reference = if self.manual_playlist.is_some() || self.schedule_rule.is_some() {
                     &self.active_playlist
                 } else {
                     assigned_reference
@@ -6171,7 +6177,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             && self.driver.motion_active(output),
                         route_source: if self.manual_playlist.is_some() {
                             "manual"
-                        } else if selected_rule.is_some() {
+                        } else if self.schedule_rule.is_some() {
                             "schedule"
                         } else if explicit.is_some() {
                             "assignment"
@@ -6179,7 +6185,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                             "default"
                         },
                         manual_override: self.manual_playlist.is_some(),
-                        schedule_rule_id: selected_rule.map(|rule| rule.id.as_str()),
+                        schedule_rule_id: self.schedule_rule.as_deref(),
                         playback_state: playback_state(self.playback_state),
                         paused: self.playback_state == PlaybackState::Paused,
                         stopped: self.playback_state == PlaybackState::Stopped,

@@ -9185,8 +9185,10 @@ fn status_reports_the_next_rule_boundary_and_the_cycle_deadline() {
     assert_eq!(row["route_change_in_s"], 30);
     assert_eq!(row["until"], "18:00");
 
-    // After the window the default plays until tomorrow's window opens.
+    // After the window the default plays until tomorrow's window opens. (Once the tick has
+    // applied it: until then the row is the rule's decision, which still plays; r13d N3.)
     let evening = at_time(3, 19, 0);
+    runtime.tick(evening, Instant::now());
     let row = route(&status(&mut runtime, evening), "ALL");
     assert_eq!(row["route_source"], "default");
     assert_eq!(row["route_change_at"], "2026-08-04T12:00:00");
@@ -13648,4 +13650,138 @@ fn an_independent_rows_stand_in_is_named_as_of_the_decision_it_shows() {
         assert!(row.get("stand_in_for").is_none(), "{row}");
     }
     assert_eq!(route(&before, "HDMI-A-1")["playlist_id"], "all-media");
+}
+
+// -- r13d N3: a mirrored row's provenance is the decision it shows ---------------------------
+
+/// `rule_boundary_runtime`'s document left mirrored, started at `at`: DP-1 assigned `mixed`,
+/// HDMI-A-1 assigned All media, and `rules` (`NOON_RULE` puts `pages`, refused, in force).
+fn mirrored_rule_runtime(
+    label: &str,
+    rules: &str,
+    at: chrono::NaiveDateTime,
+) -> (Runtime<SystemDriver>, PathBuf, PathBuf, PathBuf) {
+    let root = directory(label);
+    let home = skip_home(&format!("{label}-home"), "web", false);
+    let document = skip_document(
+        "all-media",
+        &[
+            ("all-media", &[WEB_PAGE, ""]),
+            ("mixed", &["", ""]),
+            ("pages", &[WEB_PAGE]),
+        ],
+        &format!(
+            "{rules}[[displays]]\nconnector = \"DP-1\"\nplaylist = \"mixed\"\n\
+             [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"all-media\"\n"
+        ),
+    );
+    let (mut runtime, _arguments, log) =
+        skip_runtime_at(&root, &document, &home, &["DP-1", "HDMI-A-1"], at);
+    runtime.apply_current().unwrap();
+    (runtime, root, home, log)
+}
+
+#[test]
+fn a_mirrored_rows_provenance_is_the_decision_it_shows() {
+    // Review r13d N3: a mirrored row's `route_source` and `schedule_rule_id` asked the schedule
+    // again at the status's own moment, while its `playlist_id` and `stand_in_for` are the last
+    // decision. Between a rule's boundary and the tick that applies it the row said two things.
+    let one = noon() + chrono::TimeDelta::hours(1);
+    let (mut runtime, root, home, _log) = mirrored_rule_runtime("r13e-n3-end", NOON_RULE, noon());
+    let at_noon = status(&mut runtime, noon());
+    // 13:00, the rule's end, not applied yet: both still play All media for `pages`.
+    let before = status(&mut runtime, one);
+    runtime.tick(one, Instant::now());
+    let after = status(&mut runtime, one);
+    remove_skip_fixture(runtime, &root, &home);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        // The control: at noon both say the rule, and the stand-in for its playlist.
+        let row = route(&at_noon, connector);
+        assert_eq!(row["route_source"], "schedule", "{row}");
+        assert_eq!(row["schedule_rule_id"], "noon", "{row}");
+        assert_eq!(row["stand_in_for"], "pages", "{row}");
+        let row = route(&before, connector);
+        assert_eq!(row["playlist_id"], "all-media", "{row}");
+        assert_eq!(row["stand_in_for"], "pages", "{row}");
+        assert_eq!(row["route_source"], "schedule", "{connector}: {row}");
+        assert_eq!(row["schedule_rule_id"], "noon", "{connector}: {row}");
+        // Applied: each plays its own assignment, which no rule chose.
+        let row = route(&after, connector);
+        assert_eq!(row["route_source"], "assignment", "{row}");
+        assert!(row["schedule_rule_id"].is_null(), "{row}");
+        assert!(row.get("stand_in_for").is_none(), "{row}");
+    }
+    assert_eq!(route(&after, "DP-1")["playlist_id"], "mixed");
+    // What the schedule says now is still asked at the status's moment.
+    assert!(before["schedule"]["rule_id"].is_null(), "{before}");
+
+    // 11:00, the rule's start, not applied yet: each still plays its own assignment.
+    let eleven = noon() - chrono::TimeDelta::hours(1);
+    let (mut runtime, root, home, _log) = mirrored_rule_runtime(
+        "r13e-n3-start",
+        NOON_RULE,
+        eleven - chrono::TimeDelta::seconds(1),
+    );
+    let before = status(&mut runtime, eleven);
+    remove_skip_fixture(runtime, &root, &home);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&before, connector);
+        assert_eq!(row["route_source"], "assignment", "{connector}: {row}");
+        assert!(row["schedule_rule_id"].is_null(), "{connector}: {row}");
+    }
+    assert_eq!(route(&before, "DP-1")["playlist_id"], "mixed");
+    assert_eq!(before["schedule"]["rule_id"], "noon", "{before}");
+}
+
+#[test]
+fn a_mirrored_rule_handing_over_to_another_of_the_same_playlist_is_named_at_the_tick() {
+    // N3's guard: provenance is stored now, so a hand-over that changes nothing on screen (a
+    // rule ending onto another of the same playlist) must still change the rule rows name,
+    // and without telling Noctalia again.
+    let rules = "[[schedules]]\nid = \"first\"\nplaylist = \"mixed\"\nstart = \"11:00\"\nend = \"12:00\"\n\
+                 [[schedules]]\nid = \"second\"\nplaylist = \"mixed\"\nstart = \"12:00\"\nend = \"13:00\"\n";
+    let half_past = noon() - chrono::TimeDelta::minutes(30);
+    let (mut runtime, root, home, log) =
+        mirrored_rule_runtime("r13e-n3-handover", rules, half_past);
+    let first = status(&mut runtime, half_past);
+    let told = fs::read_to_string(&log).unwrap().lines().count();
+    runtime.tick(noon(), Instant::now());
+    let second = status(&mut runtime, noon());
+    let told_again = fs::read_to_string(&log).unwrap().lines().count() != told;
+    remove_skip_fixture(runtime, &root, &home);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        assert_eq!(route(&first, connector)["schedule_rule_id"], "first");
+        let row = route(&second, connector);
+        assert_eq!(row["route_source"], "schedule", "{row}");
+        assert_eq!(row["schedule_rule_id"], "second", "{row}");
+        assert_eq!(row["playlist_id"], "mixed", "{row}");
+    }
+    assert!(!told_again, "nothing changes on screen at noon");
+}
+
+#[test]
+fn a_picks_rows_name_no_rule_in_either_mode() {
+    // A pick is no rule's decision. An independent route says so (`schedule_rule_id` null);
+    // a mirrored row named the rule the schedule had in force, which isn't what plays.
+    for mode in ["mirrored", "independent"] {
+        let label = format!("r13e-n3-pick-{mode}");
+        let (mut runtime, root, home, _log) = if mode == "mirrored" {
+            mirrored_rule_runtime(&label, NOON_RULE, noon())
+        } else {
+            let (runtime, root, home) = rule_boundary_runtime(&label, noon());
+            (runtime, root, home, PathBuf::new())
+        };
+        let reply = runtime_command(&mut runtime, noon(), "playlist-use", Some("mixed"));
+        assert!(reply.ok, "{mode}: {}", reply.message);
+        let picked = status(&mut runtime, noon());
+        remove_skip_fixture(runtime, &root, &home);
+        for connector in ["DP-1", "HDMI-A-1"] {
+            let row = route(&picked, connector);
+            assert_eq!(row["route_source"], "manual", "{mode}: {row}");
+            assert_eq!(row["playlist_id"], "mixed", "{mode}: {row}");
+            assert!(row["schedule_rule_id"].is_null(), "{mode}: {row}");
+        }
+        // What following the schedule again would give is still said.
+        assert_eq!(picked["schedule"]["rule_id"], "noon", "{mode}: {picked}");
+    }
 }

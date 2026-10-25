@@ -221,12 +221,17 @@ hold a quit for. The setting and the file are read again under the compiler
 lock, and the replacement is installed in that same hold, so a document
 another writer installed meanwhile is judged as it is. A file that doesn't
 allow web wallpapers is left as it is when the service last heard reads schema
-8: it plays no web page from it (below). When none was heard, or the one heard
-is older than that (it has no check of its own), the Workshop items the file
-names are looked up, each by its own `project.json` (no scan of the Workshop),
-and the file is replaced in the same way when one is a web page, a preset of
-one, or can't be checked. That look stops at a second Ctrl-C, or after two
-seconds, and what it hasn't reached counts as a web page. An older service
+8: it plays no web page from it (below). When the one heard is older than that
+(it has no check of its own), the Workshop items the file names are looked up,
+each by its own `project.json` (no scan of the Workshop), and the file is
+replaced in the same way when one is a web page, a preset of one, or can't be
+checked. That look stops at a second Ctrl-C, or after two seconds, and what it
+hasn't reached counts as a web page. When no status was heard at all, only a
+web page the files confirm counts (or a preset whose base is one): an item that
+can't be checked, such as one unsubscribed since or on a Steam library that
+isn't mounted, leaves the file as it is. A service not heard from is either not
+running, and its start compiles again (or refuses with exit 78 a kept file that
+plays a web page), or current, and it refuses a page at launch itself. An older service
 that is still running after an update can't load the document that plays
 nothing, though: it keeps playing what it holds until it is restarted, as it
 should be after an update ([installing.md](installing.md)), and the app's log

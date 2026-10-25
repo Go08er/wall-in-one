@@ -960,18 +960,32 @@ def holds_web(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> bool
 
 
 def may_be_web(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> bool:
-    """Whether any Workshop item of ``ids`` is, or may be, a web wallpaper's (`holds_web`).
+    """Whether any Workshop item of ``ids`` is, or may be, a web wallpaper's (`web_among`).
+
+    Fails closed: what can't be checked counts as one.
+    """
+    confirmed, unchecked = web_among(ids, give_up)
+    return confirmed or unchecked
+
+
+def web_among(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> tuple[bool, bool]:
+    """Whether a Workshop item of ``ids`` is a web wallpaper's, and whether one can't be checked.
 
     Bounded by ``ids``, not by the library: no folder is listed. Each id is
     looked for in every content directory (`content_directories`), and every
     copy's `project.json` is read as the scan reads one (`_read_project`: at
     most `MAX_PROJECT_BYTES`, a regular file, no symbolic link); a preset's
-    base is read the same way. Fails closed: an id that isn't a Workshop id,
+    base is read the same way. For a service with no check of an item's type
+    of its own (`Application._web_off_on_disk_at_exit`; review r13f, L2).
+
+    The first answer is what the files confirm: an item's own type says
+    ``web`` (in any spelling `holds_web` counts), or a preset's base, installed
+    and read, does. The second is every doubt: an id that isn't a Workshop id,
     one installed nowhere this can look (Steam's folder unreadable or not
-    mounted, the item gone), one whose `project.json` can't be read, and all
-    of them once ``give_up`` says so, asked before each read, count as one.
-    For a service with no check of an item's type of its own
-    (`Application._web_off_on_disk_at_exit`; review r13f, L2).
+    mounted, the item gone), a `project.json` that can't be read, a preset
+    whose base is missing, unreadable or itself a preset, and all of them once
+    ``give_up`` says so, asked before each read. It stops at the first web
+    wallpaper it confirms.
     """
     directories = content_directories()
     read: dict[str, tuple[WorkshopItem | None, ...]] = {}
@@ -990,25 +1004,39 @@ def may_be_web(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) 
         read[identifier] = tuple(found)
         return read[identifier]
 
+    unchecked = False
     for identifier in ids:
         if not is_workshop_id(identifier):
-            return True
+            unchecked = True
+            continue
         items = copies(identifier)
+        if items is None:
+            return False, True  # given up
         if not items:
-            return True  # given up, or installed nowhere this can look
+            unchecked = True  # installed nowhere this can look
+            continue
         for item in items:
             if item is None:
-                return True
-            if item.kind != PRESET or not is_workshop_id(item.dependency):
-                if holds_web(item, {}):
-                    return True
+                unchecked = True
+                continue
+            if "web" in {item.kind, item.declared_type, item.lenient_type}:
+                return True, unchecked
+            if item.kind != PRESET:
+                continue
+            if not is_workshop_id(item.dependency):
+                unchecked = True
                 continue
             bases = copies(item.dependency)
-            if not bases or any(base is None for base in bases):
-                return True
-            if any(holds_web(item, {item.dependency: base}) for base in bases if base):
-                return True
-    return False
+            if bases is None:
+                return False, True
+            if not bases:
+                unchecked = True
+            for base in bases:
+                if base is None or base.kind == PRESET:
+                    unchecked = True
+                elif "web" in {base.kind, base.declared_type, base.lenient_type}:
+                    return True, unchecked
+    return False, unchecked
 
 
 def why_not_played(item: MediaItem, allow_web: bool) -> str:

@@ -134,3 +134,48 @@ def test_every_doubt_counts_as_a_web_page(doubt: str) -> None:
     else:
         give_up = True
     assert workshop.may_be_web(named, lambda: give_up), doubt
+
+
+# -- what the files confirm, apart from what they can't (none heard: only the first counts) ----
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("a-scene", (False, False)),
+        ("a-web-page", (True, False)),
+        ("a-type-spelled-WEB", (True, False)),
+        ("a-preset-of-a-web-page", (True, False)),
+        ("a-preset-of-a-scene", (False, False)),
+        ("not-installed", (False, True)),
+        ("a-preset-whose-base-isnt-installed", (False, True)),
+        ("a-preset-of-a-preset", (False, True)),
+        ("an-unreadable-project", (False, True)),
+        ("a-web-page-after-one-not-installed", (True, True)),
+    ],
+)
+def test_what_the_files_confirm_and_what_they_cant(case: str, expected: tuple[bool, bool]) -> None:
+    _item("101", SCENE)
+    _item("104", WEB)
+    named = {
+        "a-scene": ["101"],
+        "a-web-page": ["104"],
+        "a-type-spelled-WEB": ["107"],
+        "a-preset-of-a-web-page": ["105"],
+        "a-preset-of-a-scene": ["106"],
+        "not-installed": ["109"],
+        "a-preset-whose-base-isnt-installed": ["108"],
+        "a-preset-of-a-preset": ["110"],
+        "an-unreadable-project": ["111"],
+        "a-web-page-after-one-not-installed": ["104", "109"],
+    }[case]
+    _item("105", {"title": "Preset", "preset": {"a": 1}, "dependency": "104"})
+    _item("106", {"title": "Preset", "preset": {"a": 1}, "dependency": "101"})
+    _item("107", {**WEB, "type": " WEB "})
+    _item("108", {"title": "Preset", "preset": {"a": 1}, "dependency": "109"})
+    _item("110", {"title": "Preset", "preset": {"a": 1}, "dependency": "105"})
+    (_item("111", SCENE) / "project.json").write_text("{")
+    if case == "a-web-page-after-one-not-installed":
+        named = ["109", "104"]
+    assert workshop.web_among(named) == expected
+    assert workshop.may_be_web(named) is any(expected)

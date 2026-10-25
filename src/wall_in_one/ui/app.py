@@ -316,7 +316,7 @@ SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS: Final = runtime_config.COMPILER_LOCK_TIM
 #: That judgement's thread's name.
 WEB_OFF_AT_EXIT_THREAD: Final = "wio-web-off-at-exit"
 #: How long that step looks at the Workshop items a file names, at most, for a
-#: service with no check of an item's type of its own (`_may_name_a_web_page`):
+#: service with no check of an item's type of its own (`_web_named`):
 #: past it, those it hasn't looked at count as web pages.
 SHUTDOWN_WORKSHOP_LOOK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
@@ -379,28 +379,29 @@ def _may_allow_web_wallpapers(text: str, give_up: Callable[[], bool] = lambda: F
     )
 
 
-def _may_name_a_web_page(text: str, give_up: Callable[[], bool]) -> bool:
-    """Whether ``text`` names a Workshop item that is, or may be, a web wallpaper's.
+def _web_named(text: str, give_up: Callable[[], bool]) -> tuple[bool, bool]:
+    """Whether ``text`` names a Workshop web wallpaper, and whether it names what can't be checked.
 
     The ids it names are read off the compiler's own lines
     (`runtime_config.compiled_scenes`), or, from a hand edit, from a parse
     (`runtime_config.named_scenes`) on a thread of its own
     (`_unless_given_up`). Then each id's own ``project.json`` is read
-    (`workshop.may_be_web`), and nothing else: no scan of the Workshop
+    (`workshop.web_among`), and nothing else: no scan of the Workshop
     (review r13e, L1), so it takes as long as the file's ids make it, which
-    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` bounds. Fails closed: one that isn't TOML
-    1.0, an id that can't be checked, and every id left once ``give_up`` says
-    so or that bound has passed count as a web page.
+    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` bounds. The first answer is what the files
+    confirm. The second is every doubt: one that isn't TOML 1.0, an id that
+    can't be checked, and every id left once ``give_up`` says so or that bound
+    has passed.
     """
     named = runtime_config.compiled_scenes(text)
     if named is None:
         named = _unless_given_up(lambda: runtime_config.named_scenes(text), give_up, cut=None)
         if named is None:
-            return True
+            return False, True
     if not named:
-        return False
+        return False, False
     deadline = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
-    return workshop.may_be_web(sorted(named), lambda: give_up() or time.monotonic() > deadline)
+    return workshop.web_among(sorted(named), lambda: give_up() or time.monotonic() > deadline)
 
 
 #: Why the end of a shutdown replaces a file (`_may_play_web_while_off`).
@@ -413,16 +414,24 @@ def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], boo
 
     `_ALLOWS`: it may allow them, which any service obeys (`_may_allow_web_wallpapers`).
     Otherwise a service that reads schema 8 plays no page: it reads each
-    item's type before it starts the engine. One not confirmed to (``status``,
-    the last one heard, lists no 8, or none was heard) has no such check:
-    `_NAMES`, when the file names a web page, or an item that can't be
-    checked (`_may_name_a_web_page`; review r13f, L2).
+    item's type before it starts the engine. One older than that (``status``,
+    the last one heard, lists no 8) has no such check: `_NAMES`, when the file
+    names a web page, or an item that can't be checked, which may be one
+    (`_web_named`; review r13f, L2). With no status heard at all, only a web
+    page the files confirm counts (a preset whose base is one included): the
+    service is then not running, and its start compiles again (or refuses
+    with exit 78 a kept file that plays one), or it is current, and refuses a
+    page at launch itself; so an item that can't be checked (unsubscribed, or
+    on a library that isn't mounted) leaves the file as it is.
     """
     if _may_allow_web_wallpapers(text, give_up):
         return _ALLOWS
     if runtime_config.nothing_to_play_supported(status):
         return ""
-    return _NAMES if _may_name_a_web_page(text, give_up) else ""
+    confirmed, unchecked = _web_named(text, give_up)
+    if confirmed or (unchecked and status is not None):
+        return _NAMES
+    return ""
 
 
 @dataclass(slots=True)
@@ -2381,15 +2390,21 @@ class Application(Adw.Application):
 
         A file that doesn't allow web wallpapers lets no page play on a
         service that reads schema 8: it reads each item's type before it
-        starts the engine. One not confirmed to (the status last heard lists
-        no 8, or none was heard) has no such check, and plays a web page such
-        a file names: so for it, the file is replaced as well when it names a
-        Workshop item that is, or may be, a web page (review r13f, L2;
+        starts the engine. One older than that (the status last heard lists
+        no 8) has no such check, and plays a web page such a file names: so
+        for it, the file is replaced as well when it names a Workshop item
+        that is, or may be, a web page (review r13f, L2;
         `_may_play_web_while_off`). Only the ``project.json`` of each id the
         file names is read, never a scan of the Workshop (r13e, L1), so the
         look is bounded by the file; it stops at a second Ctrl-C, or after
-        `SHUTDOWN_WORKSHOP_LOOK_SECONDS`, and an id it can't check, or hasn't
-        reached, counts as a web page. That replacement can't stop a service
+        `SHUTDOWN_WORKSHOP_LOOK_SECONDS`, and for such a service an id it
+        can't check, or hasn't reached, counts as a web page. With no status
+        heard at all, only a web page the files confirm counts: such a
+        service isn't running, and its start compiles again (or refuses with
+        exit 78 a kept file that plays a web page while they are off), or it
+        is current and refuses a page at launch itself, so an item that can't
+        be checked (unsubscribed, or on a library that isn't mounted) leaves
+        the file as it is. That replacement can't stop a service
         older than schema 8 that is still running after an update, though:
         it can't load the document that plays nothing, and keeps playing what
         it holds until it is restarted, as it should be after an update (its
@@ -2530,13 +2545,14 @@ class Application(Adw.Application):
                 )
             else:
                 LOGGER.warning(
-                    "Allow web wallpapers is off, and the configuration on disk named a web "
-                    "wallpaper, or a Workshop item whose type couldn\u2019t be checked, for a "
-                    "wallpaper service with no check of its own (%s); it was replaced at "
-                    "shutdown with one that plays nothing. A wallpaper service older than this "
-                    "app can\u2019t load that, and keeps playing what it holds until it is "
-                    "restarted: systemctl --user restart wall-in-one",
-                    "none was heard from" if look.status is None else "it is older than this app",
+                    "Allow web wallpapers is off, and the configuration on disk named %s; it "
+                    "was replaced at shutdown with one that plays nothing. A wallpaper service "
+                    "older than this app can\u2019t load that, and keeps playing what it holds "
+                    "until it is restarted: systemctl --user restart wall-in-one",
+                    "a web wallpaper, and no wallpaper service was heard from"
+                    if look.status is None
+                    else "a web wallpaper, or a Workshop item whose type couldn\u2019t be "
+                    "checked, for a wallpaper service older than this app",
                 )
         return True
 

@@ -654,9 +654,10 @@ def test_a_file_naming_a_web_page_for_a_service_without_a_type_check(
     (or a preset of one, or 0.4.0's document whose scene became one since): a service older
     than schema 8 plays it. Before (f127a31): left, for none heard and for an older service.
     Now each id's own project.json is read, and nothing else: no scan. A hand edit is parsed for
-    its ids, and one that isn't TOML 1.0 can't be checked: replaced too. For a service that
-    reads 8 (the control status) every one is left: it checks each item itself; and the files
-    that name only scenes (the controls) are left whatever was heard."""
+    its ids; one that isn't TOML 1.0 can't be checked, which counts for an older service, and
+    not with no status heard (only a web page the files confirm counts then). For a service
+    that reads 8 (the control status) every one is left: it checks each item itself; and the
+    files that name only scenes (the controls) are left whatever was heard."""
     application = profiles().application
     content, scenes = _workshop(3)
     text = _naming_document(content, scenes, names)
@@ -667,7 +668,10 @@ def test_a_file_naming_a_web_page_for_a_service_without_a_type_check(
     _judged_at_exit(application)
     now = paths.runtime_config_path().read_text(encoding="utf-8")
     assert not scans, f"the step scanned the Workshop {len(scans)} time(s)"
-    if not names.startswith("control") and heard != "control-reads-eight":
+    confirmed = not names.startswith("control") and names != "a-hand-edit-in-toml-1-1"
+    if (heard == "an-older-service" and not names.startswith("control")) or (
+        heard == "nothing" and confirmed
+    ):
         assert now == _nothing_to_play(), (
             f"web wallpapers are off, {heard} has no check of an item's type, and the file on "
             f"disk still names a web page ({names})"
@@ -720,22 +724,25 @@ def test_only_the_ids_the_file_names_are_read(
     assert paths.runtime_config_path().read_text(encoding="utf-8") == text
 
 
+@pytest.mark.parametrize("heard", ["an-older-service", "nothing"])
 @pytest.mark.parametrize("variant", ["second-ctrl-c", "past-its-bound", "control"])
 def test_a_second_ctrl_c_or_the_bound_ends_the_look_and_fails_closed(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    heard: str,
     variant: str,
 ) -> None:
-    """The file names only scenes, for a service whose status wasn't heard. A second Ctrl-C (a
-    real SIGINT) after the first project.json is read ends the look: the ids it didn't reach
-    count as web pages, and the file is replaced. So does the look's bound, put behind it here.
-    The control: the look ends by itself (every id read: `test_only_the_ids_the_file_names_are_
-    read`), and the file is left."""
+    """The file names only scenes. A second Ctrl-C (a real SIGINT) after the first project.json
+    is read ends the look; so does the look's bound, put behind it here. For an older service
+    the ids it didn't reach count as web pages, and the file is replaced. With no status heard,
+    only a web page the files confirm counts, and none was: the file is left. The control: the
+    look ends by itself (every id read: `test_only_the_ids_the_file_names_are_read`), and the
+    file is left."""
     application = profiles().application
     _content, scenes = _workshop(5)
     text = _naming(scenes)
     _on_disk(text)
-    _heard(monkeypatch, HEARD["nothing"])
+    _heard(monkeypatch, HEARD[heard])
     if variant == "past-its-bound":
         # Not there at f127a31, which this test is also run against.
         monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", -1.0, raising=False)
@@ -751,6 +758,9 @@ def test_a_second_ctrl_c_or_the_bound_ends_the_look_and_fails_closed(
         assert now == text
         return
     assert len(reads) <= 1, f"the look went on after it was ended: {reads}"
+    if heard == "nothing":
+        assert now == text, "with no status heard, ids it didn't reach replaced the file"
+        return
     assert now == _nothing_to_play(), "a file the look couldn't finish with was left"
 
 
@@ -787,3 +797,58 @@ def test_the_later_judgement_reads_the_ids_too(
         _judged_at_exit(application)
     assert not failures, failures
     assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "an-unsubscribed-item",
+        "a-preset-whose-base-isnt-installed",
+        "a-library-that-isnt-mounted",
+        "control-a-web-page",
+        "control-a-preset-of-a-web-page",
+        "control-an-older-service-and-an-unsubscribed-item",
+    ],
+)
+def test_with_nothing_heard_only_a_web_page_the_files_confirm_counts(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """No status heard at all, web wallpapers off, and a file whose ids can't all be checked: an
+    item unsubscribed since, a preset whose base isn't installed, an item on a Steam library
+    that isn't mounted. Such a service is either not running (its start compiles again, or
+    refuses a kept file with exit 78) or current (it refuses a page at launch itself). Before
+    (a848d28): each of these replaced the file, so nothing played until a publication. Now they
+    are left. The controls: a web page, or a preset of one, which the files confirm, is
+    replaced; and for an older service heard, what can't be checked still counts."""
+    application = profiles().application
+    content, scenes = _workshop(2)
+    named = list(scenes)
+    if case in ("an-unsubscribed-item", "control-an-older-service-and-an-unsubscribed-item"):
+        named.append("2099999999")
+    elif case == "a-preset-whose-base-isnt-installed":
+        _preset(content, "2100000000", "2099999999")
+        named.append("2100000000")
+    elif case == "a-library-that-isnt-mounted":
+        steam = content.parents[3]  # .../Steam
+        library = steam.parent / "SecondDisk"
+        index = steam / "steamapps" / "libraryfolders.vdf"
+        index.write_text(f'"libraryfolders"\n{{\n "1"\n {{\n  "path" "{library}"\n }}\n}}\n')
+        named.append("2099999998")  # on that disk, which isn't there now
+    elif case == "control-a-web-page":
+        named.append(_web_page(2))
+    else:
+        assert case == "control-a-preset-of-a-web-page", case
+        _preset(content, "2100000000", _web_page(2))
+        named.append("2100000000")
+    text = _naming(named)
+    _on_disk(text)
+    older = case == "control-an-older-service-and-an-unsubscribed-item"
+    _heard(monkeypatch, HEARD["an-older-service" if older else "nothing"])
+    application._web_off_on_disk_at_exit()
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if case.startswith("control"):
+        assert now == _nothing_to_play(), f"{case}: left"
+        return
+    assert now == text, f"{case}: replaced, with no status heard and no web page confirmed"

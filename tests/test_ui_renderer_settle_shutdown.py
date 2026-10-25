@@ -425,10 +425,12 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
     second SIGINT, with nothing to end it; here it then installed a compile over it. Now it
     never scans: each scan on GTK's thread once the shutdown has begun is recorded, and there
     must be none. For a service that reads 8 it judges only whether the file allows web
-    wallpapers, which it doesn't, and installs nothing. For one with no check of an item's type of
-    its own, ids it can't check may be web pages it plays (review r13f, L2): the second SIGINT
-    ends its look at their project.json files, and the file is replaced with the document that
-    plays nothing, which is built from settings.toml alone: never a compile."""
+    wallpapers, which it doesn't, and installs nothing; with no status heard, only a web page the
+    files confirm counts, and none is installed, so nothing is installed either. For a service
+    older than 8, which has no check of an item's type of its own, ids it can't check may be web
+    pages it plays (review r13f, L2): the second SIGINT ends its look at their project.json
+    files, and the file is replaced with the document that plays nothing, which is built from
+    settings.toml alone: never a compile."""
     application, clip, slow, _spans = _setup(
         monkeypatch,
         tmp_path,
@@ -500,7 +502,7 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
     assert own.dial("video", "speed") == 1.5, own
     assert "second" in marks, "the second SIGINT never ran"
     assert not scanned, "the end of the shutdown scanned the Workshop on GTK's thread"
-    if heard == "control-reads-eight":
+    if heard != "an-older-service":
         assert not installed, "the end of the shutdown replaced a file that allows no web wallpaper"
     else:
         assert installed == [True], installed

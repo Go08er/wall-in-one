@@ -114,11 +114,11 @@ def test_the_step_judges_the_file_without_scanning_the_workshop(
     allows no web wallpaper; or one of them was unsubscribed since. Before, with no schema-8
     status: one scan of the Workshop, the cost that grows with the library, and for the
     unsubscribed one a compile installed over the file. Now: no scan in any case; one that names
-    only scenes is left. For a service with no check of an item's type of its own (none heard,
-    or one older than 8), an id that can't be checked may be a web page it plays, so that file is
-    replaced with the document that plays nothing (review r13f, L2), built from settings.toml
-    alone: never a compile. The control: a file that allows web wallpapers is replaced, whatever
-    was heard."""
+    only scenes is left. For a service older than 8, which has no check of an item's type of
+    its own, an id that can't be checked may be a web page it plays, so that file is replaced
+    with the document that plays nothing (review r13f, L2), built from settings.toml alone:
+    never a compile. With no status heard, only a web page the files confirm counts, so it is
+    left. The control: a file that allows web wallpapers is replaced, whatever was heard."""
     application = profiles().application
     settings, content, scenes = _with_workshop(application, 4)
     if held == "control-allows":
@@ -143,7 +143,7 @@ def test_the_step_judges_the_file_without_scanning_the_workshop(
         )
         return
     assert not scans, f"the step scanned the Workshop {len(scans)} time(s)"
-    if held == "names-one-unsubscribed" and heard != "control-reads-eight":
+    if held == "names-one-unsubscribed" and heard == "an-older-service":
         assert now == runtime_config.nothing_to_play_document(
             config.load_strict(), runtime_config.WEB_OFF_REASON
         ), "an id that can't be checked, for a service with no check of its own, was left"
@@ -161,10 +161,11 @@ def test_the_step_never_puts_a_compile_over_another_writers_newer_document(
     it for a service that reads schema 8; this process's Session never loaded that playlist. Then
     one scene it names was unsubscribed. Before, with no schema-8 status: that id couldn't be
     checked, so the step installed its own compile of the Session over the newer document, and
-    "Newer" was gone. Now nothing is compiled: for a service that reads 8, the document is
-    left; for one with no check of an item's type of its own, that id may be a web page it plays
-    (review r13f, L2), so the document is replaced with the one that plays nothing, which is
-    built from settings.toml alone, and "Newer" comes back with the next publication."""
+    "Newer" was gone. Now nothing is compiled: for a service that reads 8, or none heard, the
+    document is left; for one older than 8, which has no check of an item's type of its own,
+    that id may be a web page it plays (review r13f, L2), so the document is replaced with the
+    one that plays nothing, which is built from settings.toml alone, and "Newer" comes back with
+    the next publication."""
     application = profiles().application
     settings, content, scenes = _with_workshop(application, 4)
     other = Session(settings)
@@ -189,7 +190,7 @@ def test_the_step_never_puts_a_compile_over_another_writers_newer_document(
     _heard(monkeypatch, HEARD[heard])
     application._web_off_on_disk_at_exit()
     now = target.read_text(encoding="utf-8")
-    if heard == "control-reads-eight":
+    if heard != "an-older-service":
         assert now == newer, (
             "the step replaced another writer's newer document, which allows no web wallpaper"
         )

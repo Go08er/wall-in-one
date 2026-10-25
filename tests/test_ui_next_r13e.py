@@ -538,7 +538,14 @@ def test_l3_a_mirrored_default_at_the_ceiling_is_known_too() -> None:
         "playlist_id": "pages",
         "rule_id": None,
     }
-    status["displays"][0].update(route_source="default", manual_override=False)
+    # The row's own decision is the default "pages" (what the service writes as its
+    # assignment), whatever the schedule chooses now.
+    status["displays"][0].update(
+        route_source="default",
+        manual_override=False,
+        assigned_playlist="pages",
+        assigned_playlist_id="pages",
+    )
     truth = runtime_truth.from_status(status)
     assert truth is not None and truth.displays[0].stand_in_for == "pages"
 
@@ -760,14 +767,15 @@ def test_l3_a_false_flag_infers_nothing() -> None:
     assert truth is not None and truth.displays[0].stand_in_for is None
 
 
-def test_l3_the_flag_keeps_a_row_that_kept_its_own_stand_in() -> None:
+def test_l3_the_flag_comes_with_every_stand_in_gone_and_every_pick_hedged() -> None:
+    # The service drops every row's stand_in_for together (runtime.rs abridge_rows).
     status = _at_the_ceiling(_independent_two(second_stands_in_for=None))
-    status["displays"][0]["stand_in_for"] = "pages"
+    assert all("stand_in_for" not in row for row in status["displays"])
     truth = runtime_truth.from_status(status)
     assert truth is not None
     first, second = truth.displays
-    assert first.stand_in_for == "pages" and second.stand_in_for is None
-    assert second.route_source == "manual" and second.route_unsure
+    assert first.stand_in_for is None and second.stand_in_for is None
+    assert first.route_unsure and second.route_unsure
 
 
 # --------------------------------------------- ceiling flags (service b23081c) --
@@ -776,7 +784,6 @@ def test_l3_the_flag_keeps_a_row_that_kept_its_own_stand_in() -> None:
 def _rule_ids_left_out(status: dict[str, Any]) -> dict[str, Any]:
     status = copy.deepcopy(status)
     status["schedule_rule_id_omitted"] = True
-    status["schedule"]["rule_id"] = None
     for row in status["displays"]:
         row["schedule_rule_id"] = None
     return status
@@ -804,16 +811,24 @@ def test_control_rule_ids_present_the_rule_route_is_still_inferred() -> None:
     assert truth.displays[0].stand_in_for == "pages" and not truth.displays[0].route_unsure
 
 
-def test_rule_ids_left_out_a_mirrored_rule_route_follows_the_schedule() -> None:
-    # One answer for the whole screen: the schedule's own playlist.
+def test_rule_ids_left_out_a_mirrored_rule_route_hedges_like_an_independent_one() -> None:
+    # The row's rule is unknown, and the top-level schedule is what is chosen now, not
+    # the row's decision: the row says only what plays.
     status = _at_the_ceiling(copy.deepcopy(_status("pick-refused")))
     status["source"] = "schedule"
-    status["schedule"] = {"following": True, "playlist": "pages", "playlist_id": "pages"}
-    status["displays"][0].update(route_source="schedule", manual_override=False)
+    status["schedule"] = {
+        "following": True,
+        "playlist": "pages",
+        "playlist_id": "pages",
+        "rule_id": "r1",
+    }
+    status["displays"][0].update(
+        route_source="schedule", manual_override=False, schedule_rule_id="r1"
+    )
     status = _rule_ids_left_out(status)
     truth = runtime_truth.from_status(status)
     assert truth is not None
-    assert truth.displays[0].stand_in_for == "pages" and not truth.displays[0].route_unsure
+    assert truth.displays[0].stand_in_for is None and truth.displays[0].route_unsure
 
 
 def test_a_mirrored_pick_without_a_rule_id_is_still_a_pick() -> None:

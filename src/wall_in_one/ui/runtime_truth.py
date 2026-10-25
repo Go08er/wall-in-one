@@ -414,9 +414,6 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         parsed_displays = _inferred_stand_ins(
             parsed_displays,
             parsed_schedules,
-            independent=display_mode == "independent",
-            rule_ids_left_out=status.get("schedule_rule_id_omitted") is True,
-            scheduled_playlist_id=scheduled_playlist_id,
             names=names,
         )
         heard = {
@@ -456,22 +453,21 @@ def _inferred_stand_ins(
     displays: tuple[DisplayRuntimeTruth, ...],
     schedules: tuple[RuntimeScheduleTruth, ...],
     *,
-    independent: bool,
-    rule_ids_left_out: bool,
-    scheduled_playlist_id: str,
     names: Mapping[str, str],
 ) -> tuple[DisplayRuntimeTruth, ...]:
     """Each row's ``stand_in_for``, worked out from what the row still says.
 
     A default, an assignment and a rule play what they ask for unless the
     service refused it, so a row that plays another playlist stands in for it.
-    A pick is on no field: the row is marked unsure instead. A mirrored row
-    follows the schedule's playlist, not the connector's own assignment.
+    The playlist asked for is the row's own decision, never the top-level
+    ``schedule``, which is what the schedule chooses now: a default or an
+    assignment is the row's ``assigned_playlist_id``, a rule is its
+    ``schedule_rule_id``'s playlist. A pick is on no field: the row is marked
+    unsure instead.
 
-    With the rule ids left out, a rule's playlist can't be looked up. Mirrored,
-    the whole screen follows one answer, the schedule's own playlist, so that
-    stands. Independent, the top-level playlist is no one display's rule, so the
-    row is marked unsure like a pick.
+    With the rule's id left out (``schedule_rule_id_omitted``), or naming no rule
+    the inventory lists, the playlist can't be looked up, so the row is marked
+    unsure like a pick rather than guessed.
     """
     found: list[DisplayRuntimeTruth] = []
     for display in displays:
@@ -484,14 +480,12 @@ def _inferred_stand_ins(
         if display.route_source == "manual":
             found.append(replace(display, route_unsure=True))
             continue
-        if display.route_source == "schedule" and rule_ids_left_out and independent:
-            found.append(replace(display, route_unsure=True))
-            continue
-        rule = next((one for one in schedules if one.id == display.schedule_rule_id), None)
-        if display.route_source == "schedule" and rule is not None:
+        if display.route_source == "schedule":
+            rule = next((one for one in schedules if one.id == display.schedule_rule_id), None)
+            if rule is None:
+                found.append(replace(display, route_unsure=True))
+                continue
             asked = rule.playlist_id
-        elif display.route_source == "schedule" or not independent:
-            asked = scheduled_playlist_id
         else:
             asked = display.assigned_playlist_id
         stand_in_for = _stand_in_for(asked, display.playlist_id)

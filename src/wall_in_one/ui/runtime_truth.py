@@ -434,6 +434,11 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     route_unsure = False
     pick_stood_in = False
     if status_version == 2 and status.get("stand_in_for_omitted") is True:
+        # Reach (r13f N17): the service drops `stand_in_for` only at the reply ceiling.
+        # A mirrored document gets there with about 64 connected outputs or a
+        # hand-written `[[displays]]` document; the app's own (one row) leaves over
+        # 600 KB to spare (docs/runtime-config.md). The mirrored paths below are for
+        # those few.
         # The service says the reply's size dropped some `stand_in_for`. A row
         # that kept its own is left; the others still say what they asked for,
         # except for a pick (named by no field).
@@ -486,6 +491,32 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     )
 
 
+def sibling_rule_id(
+    displays: Iterable[DisplayRuntimeTruth], display: DisplayRuntimeTruth, *, independent: bool
+) -> str | None:
+    """A rule id for ``display``, which the reply left out, from a row that kept its own.
+
+    Mirrored, every row shares one decision (`runtime.rs`, the mirrored rows are built
+    from one reference), so any connected schedule row that kept its id names the
+    decision of all of them. Independent rows decide apart: nothing is borrowed. Rows
+    that disagree (which the service doesn't send) name nothing.
+
+    Reach: the service leaves rule ids out only at the reply ceiling (step 6 of the
+    fitting, `docs/runtime-config.md`), which a mirrored document reaches only with
+    about 64 connected outputs or a hand-written mirrored ``[[displays]]`` document.
+    The app's own one-row mirrored document never gets here, so this and its callers
+    are rare paths, kept honest rather than common.
+    """
+    if independent or display.route_source != "schedule":
+        return None
+    ids = {
+        one.schedule_rule_id
+        for one in displays
+        if one.connected and one.route_source == "schedule" and one.schedule_rule_id
+    }
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
 def _inferred_stand_ins(
     displays: tuple[DisplayRuntimeTruth, ...],
     schedules: tuple[RuntimeScheduleTruth, ...],
@@ -508,8 +539,9 @@ def _inferred_stand_ins(
     With the rule's id left out (``schedule_rule_id_omitted``), or naming no rule
     the inventory lists, the playlist can't be looked up, so the row is marked
     unsure like a pick rather than guessed. The service leaves ids out per row, so
-    a row that kept its id is trusted whatever the flag says; only a null one is
-    hedged.
+    a row that kept its id is trusted whatever the flag says. A null one takes the id of
+    a mirrored sibling that kept its own (`sibling_rule_id`); only with none to take is
+    it hedged.
     """
     found: list[DisplayRuntimeTruth] = []
     for display in displays:
@@ -530,7 +562,10 @@ def _inferred_stand_ins(
             )
             continue
         if display.route_source == "schedule":
-            rule = next((one for one in schedules if one.id == display.schedule_rule_id), None)
+            rule_id = display.schedule_rule_id or sibling_rule_id(
+                displays, display, independent=independent
+            )
+            rule = next((one for one in schedules if one.id == rule_id), None)
             if rule is None:
                 found.append(replace(display, route_unsure=True))
                 continue

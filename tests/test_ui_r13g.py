@@ -361,3 +361,118 @@ def test_the_why_popover_doesnt_call_a_route_that_plays_nothing_playing() -> Non
 
 def test_control_the_why_popover_calls_a_route_that_plays_playing() -> None:
     assert "Playing" in _why_pill(_mirrored_pick_plays_nothing(nothing=False))
+
+
+# ------------------------------------------------------------------ N5 ---------
+
+
+def test_n5_a_stalled_transition_isnt_named_as_the_rows_rule() -> None:
+    routes = _routes(_mirrored_rule_rows(on_screen="pages", rule="r1", stalled=True))
+    named = [route.rule_id for route in routes]
+    assert "r2" not in named, (
+        "r2's playlist (web2) is on no display; the rows are r1's decision, and the "
+        f"route names {named!r}"
+    )
+
+
+def test_n5_the_schedule_page_doesnt_call_the_stalled_rule_playing() -> None:
+    from wall_in_one.ui.next import schedule_model as model
+    from wall_in_one.ui.next.schedule_state import RuleView
+
+    [route, _second] = _routes(_mirrored_rule_rows(on_screen="pages", rule="r1", stalled=True))
+    winner = route.rule_id if route.route == "schedule" else None
+    said = model.reason(
+        RuleView(id="r2", playlist="web2"),
+        dt.datetime(2026, 10, 25, 12, 0),
+        "",
+        winner,
+        lambda *_a: True,
+        mirrored=True,
+    )
+    print(f"r2 reason={said!r}")
+    assert said != ("Playing", "playing"), "pages (r1's) is on screen; r2 is called Playing"
+
+
+def test_control_n5_a_rule_in_force_on_screen_is_named() -> None:
+    routes = _routes(_mirrored_rule_rows(on_screen="pages", rule="r1", stalled=False))
+    assert [route.rule_id for route in routes] == ["r1", "r1"]
+
+
+def test_control_n5_a_retried_transition_names_no_rule() -> None:
+    status = _mirrored_rule_rows(on_screen="pages", rule="r1", stalled=True)
+    for row in status["displays"]:
+        row["automatic_retry"] = {"attempt": 1, "maximum_attempts": 3, "reason": "schedule"}
+    assert [route.rule_id for route in _routes(status)] == [None, None]
+
+
+# ------------------------------------------------------------------ N6 ---------
+
+
+def _mirrored_rule_one_id_kept() -> dict[str, Any]:
+    """Mirrored ``[[displays]]``, rule r1 (-> pages, refused; ``scenes`` stands in) on
+    both rows; at the ceiling the service left DP-2's id out only (equal lengths: the
+    later row, abridge_rows :585-590)."""
+    status = copy.deepcopy(_status("pick-refused"))
+    status.update(source="schedule")
+    status["schedule"] = {
+        "following": True,
+        "playlist": "pages",
+        "playlist_id": "pages",
+        "rule_id": "r1",
+    }
+    status["schedules"] = [_rule("r1", "pages", in_force=True)]
+    [row] = status["displays"]
+    rows = []
+    for connector, rule in (("DP-1", "r1"), ("DP-2", None)):
+        rows.append(
+            {
+                **row,
+                "connector": connector,
+                "assignment_source": "explicit",
+                "assigned_playlist": "all-media",
+                "assigned_playlist_id": "all-media",
+                "manual_override": False,
+                "route_source": "schedule",
+                "schedule_rule_id": rule,
+                "stand_in_for": "pages",
+            }
+        )
+    status["displays"] = rows
+    status = _at_the_ceiling(status)
+    status["schedule_rule_id_omitted"] = True
+    return status
+
+
+def test_n6_a_mirrored_row_whose_sibling_kept_the_id_isnt_hedged() -> None:
+    truth = _truth(_mirrored_rule_one_id_kept())
+    second = truth.display("DP-2")
+    assert second is not None and second.stand_in_for == "pages" and not second.route_unsure, (
+        "mirrored rows share one decision and DP-1 says r1; DP-2 is hedged"
+    )
+
+
+def test_n6_the_schedule_page_and_the_inference_agree_on_the_row() -> None:
+    [_first, second] = _routes(_mirrored_rule_one_id_kept())
+    assert not (second.rule_id is not None and second.route_unsure), (
+        f"the Schedule page names {second.rule_id!r} for DP-2 while Displays and Playlists "
+        "say they can't tell what it asked for"
+    )
+
+
+def test_control_n6_the_row_that_kept_its_id_is_trusted() -> None:
+    truth = _truth(_mirrored_rule_one_id_kept())
+    first = truth.display("DP-1")
+    assert first is not None and first.stand_in_for == "pages" and not first.route_unsure
+
+
+def test_a_sibling_that_kept_its_id_is_borrowed_only_when_mirrored() -> None:
+    status = _mirrored_rule_one_id_kept()
+    status["display_mode"] = "independent"
+    first, second = _truth(status).displays
+    assert not first.route_unsure and second.route_unsure and second.stand_in_for is None
+
+
+def test_the_rule_in_force_is_named_when_its_playlist_is_on_screen() -> None:
+    # Every row's id left out, r1 (-> pages) in force and pages on screen: r1 it is.
+    routes = _routes(_mirrored_rule_rows(on_screen="pages", rule="r1", stalled=False))
+    assert [route.rule_id for route in routes] == ["r1", "r1"]

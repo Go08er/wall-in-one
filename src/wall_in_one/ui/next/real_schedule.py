@@ -224,20 +224,27 @@ _PICK_STOOD_IN: Final = "your pick"
 def _rule_in_force(
     truth: runtime_truth.RuntimeTruth, display: runtime_truth.DisplayRuntimeTruth
 ) -> str | None:
-    """The rule a row follows: its own id, or with the id left out, the rule in force.
+    """The rule a row follows: its own id, or with the id left out, the rows' own rule.
 
     The reply leaves ids null per row, only at its size ceiling
-    (``schedule_rule_id_omitted``); a row that kept its id is trusted as it is,
-    and only a null one is filled in. Mirrored, one rule is in force for the whole
-    screen, and ``schedules[].in_force`` still says which. A transition being
-    retried leaves the row on its earlier rule, so then nothing is named.
+    (``schedule_rule_id_omitted``); a row that kept its id is trusted as it is. A null
+    one takes the id of a mirrored sibling (all mirrored rows share one decision).
+    With none to take, ``schedules[].in_force`` is only the schedule's "now", which
+    the rows can trail (every entry of the new rule's playlist taboo: the tick keeps
+    the earlier rule with no retry pending), so it is named only when the playlist on
+    screen is that rule's own. Otherwise nothing is named. A transition being retried
+    leaves the row on its earlier rule, so then nothing is named either.
     """
     if display.schedule_rule_id or display.route_source != "schedule":
         return display.schedule_rule_id
-    if truth.display_mode != "mirrored" or display.automatic_retry is not None:
-        return None
-    in_force = [rule.id for rule in truth.schedules if rule.in_force]
-    return in_force[0] if len(in_force) == 1 else None
+    independent = truth.display_mode != "mirrored"
+    shared = runtime_truth.sibling_rule_id(truth.displays, display, independent=independent)
+    if shared is not None or independent or display.automatic_retry is not None:
+        return shared
+    in_force = [rule for rule in truth.schedules if rule.in_force]
+    if len(in_force) == 1 and in_force[0].playlist_id == display.playlist_id:
+        return in_force[0].id
+    return None
 
 
 def rule_view(rule: schedules.Rule) -> RuleView:

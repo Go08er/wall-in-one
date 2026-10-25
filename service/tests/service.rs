@@ -13786,6 +13786,369 @@ fn a_picks_rows_name_no_rule_in_either_mode() {
     }
 }
 
+// -- r13d L5: every document the budget passes gets a status reply ----------------------------
+//
+// The budget counts a row's connector, its two playlists and its entry, but not the
+// `schedule_rule_id` every row carries: a rule's id of 256 quotes is about 1 KB on the wire, on
+// each of 128 rows. A document at the budget's edge then had no reply small enough to send, not
+// even with every taboo record, `outputs` and `missing_renderers` gone, and every status query
+// got EOF. The reply now leaves the rows' rule ids null, then every diagnostic empty, and says
+// so (`Runtime::abridged`).
+
+/// The review's corner: 578 playlists and 512 rules (511 small, never in force, months and
+/// weekdays full; the last always in force, its id `rule_id`, TOML-escaped), 64 detached
+/// assignments with 256-byte connectors of quotes, and BIG (id, name, entry and the still `/`
+/// and `still` quotes) full of quotes, played on every row.
+fn floor_corner(mode: &str, rule_id: &str, still: usize) -> String {
+    let quotes = |count: usize| "\\\"".repeat(count);
+    let big = format!("{}B", quotes(255));
+    // Independent mode needs a theme source: the first assignment's connector.
+    let theme = if mode == "independent" {
+        format!("{}D00", quotes(253))
+    } else {
+        String::new()
+    };
+    let mut document = floor_corner_head(mode, &big, &theme)
+        + &format!(
+            "[[playlists]]\nid = \"{big}\"\nname = \"{}N\"\n[[playlists.entries]]\nid = \"{}E\"\n\
+             kind = \"still\"\nstill = \"/{}\"\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            quotes(119),
+            quotes(255),
+            quotes(still),
+        );
+    for index in 0..577 {
+        document.push_str(&format!(
+            "[[playlists]]\nid = \"{index:03}\"\nname = \"n{index:03}\"\n\
+             [[playlists.entries]]\nid = \"e\"\nkind = \"still\"\nstill = \"/s.png\"\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+        ));
+    }
+    for index in 0..511 {
+        document.push_str(&format!(
+            "[[schedules]]\nid = \"r{index:03}\"\nplaylist = \"{:03}\"\n\
+             months = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]\nweekdays = [0, 1, 2, 3, 4, 5, 6]\n\
+             start = \"00:00\"\nend = \"00:01\"\n",
+            index % 577
+        ));
+    }
+    document.push_str(&format!(
+        "[[schedules]]\nid = \"{rule_id}\"\nplaylist = \"{big}\"\n"
+    ));
+    for index in 0..64 {
+        document.push_str(&format!(
+            "[[displays]]\nconnector = \"{}D{index:02}\"\nplaylist = \"{big}\"\n",
+            quotes(253),
+        ));
+    }
+    document
+}
+
+fn floor_corner_head(mode: &str, default: &str, theme: &str) -> String {
+    format!(
+        r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+default_playlist = "{default}"
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = false
+display_mode = "{mode}"
+theme_source_connector = "{theme}"
+[renderer]
+noctalia_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = false
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 0
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+"#
+    )
+}
+
+/// `count` characters, each `"` or `\`: `index` in binary, after `lead`. TOML-escaped. A
+/// string of them is four times its length on the wire, as the budget counts every string.
+fn quoted_text(lead: &str, index: usize, count: usize) -> String {
+    let mut text = lead.to_string();
+    for bit in (0..count).rev() {
+        text.push(if index >> bit & 1 == 1 { '\\' } else { '"' });
+    }
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// The same ceilings, with every string the budget counts made of quotes and backslashes,
+/// so that none takes less on the wire than the budget counts (the review's corner has short
+/// plain ids, which do): what is left over is the budget's reserve less the structure. Rules
+/// have no time window (one counts 10 bytes four times, on the wire once) and the small ones
+/// are switched off; the one in force has `rule_chars` backslashes for an id.
+fn quoted_structure_corner(mode: &str, rule_chars: usize, still: usize) -> String {
+    let quotes = |count: usize| "\\\"".repeat(count);
+    let big = quotes(64);
+    let theme = if mode == "independent" {
+        format!("{}{}", quotes(250), quoted_text("", 0, 6))
+    } else {
+        String::new()
+    };
+    let months =
+        "months = [10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]\nweekdays = [0, 1, 2, 3, 4, 5, 6]\n";
+    let mut document = floor_corner_head(mode, &big, &theme)
+        + &format!(
+            "[[playlists]]\nid = \"{big}\"\nname = \"{}\"\n[[playlists.entries]]\nid = \"{}\"\n\
+             kind = \"still\"\nstill = \"/{}\"\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            "\\\\".repeat(32),
+            quotes(64),
+            quotes(still),
+        );
+    for index in 0..577 {
+        document.push_str(&format!(
+            "[[playlists]]\nid = \"{}\"\nname = \"{}\"\n\
+             [[playlists.entries]]\nid = \"e\"\nkind = \"still\"\nstill = \"/s.png\"\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            quoted_text("\"", index, 10),
+            quoted_text("\\", index, 10),
+        ));
+    }
+    for index in 0..511 {
+        document.push_str(&format!(
+            "[[schedules]]\nid = \"{}\"\nplaylist = \"{}\"\nenabled = false\n{months}",
+            quoted_text("\"", index, 10),
+            quoted_text("\"", index % 577, 10),
+        ));
+    }
+    document.push_str(&format!(
+        "[[schedules]]\nid = \"{}\"\nplaylist = \"{big}\"\n{months}",
+        "\\\\".repeat(rule_chars)
+    ));
+    for index in 0..64 {
+        document.push_str(&format!(
+            "[[displays]]\nconnector = \"{}{}\"\nplaylist = \"{big}\"\n",
+            quotes(250),
+            quoted_text("", index, 6)
+        ));
+    }
+    document
+}
+
+/// `corner(still)` with the longest still the budget passes: a document at its very edge.
+fn at_the_budgets_edge(corner: impl Fn(usize) -> String) -> String {
+    let (mut fits, mut over) = (0_usize, 4000_usize);
+    if let Err(error) = Config::from_bytes(corner(0).into_bytes()) {
+        panic!("the corner itself is refused: {error}");
+    }
+    assert!(Config::from_bytes(corner(over).into_bytes()).is_err());
+    while over - fits > 1 {
+        let middle = (fits + over) / 2;
+        if Config::from_bytes(corner(middle).into_bytes()).is_ok() {
+            fits = middle;
+        } else {
+            over = middle;
+        }
+    }
+    corner(fits)
+}
+
+/// The status of `document` with `outputs` live outputs of 256 quotes (each a row beside the 64
+/// assignments) and nothing taboo, refused or missing: at the ceiling its reply is the floor.
+/// With `failing_entry`, every apply of that entry fails, so every row and the summary carry
+/// the error. The snapshot, its size on the wire, and whether `write_response` sends it.
+fn floor_status(
+    document: &str,
+    outputs: usize,
+    failing_entry: Option<&str>,
+) -> (serde_json::Value, usize, Result<(), String>) {
+    let at = noon();
+    let parsed = Config::from_bytes(document.as_bytes().to_vec()).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(
+            (0..outputs)
+                .map(|index| {
+                    let mut name = "\"".repeat(249);
+                    name.push('\\');
+                    for bit in (0..6).rev() {
+                        name.push(if index >> bit & 1 == 1 { '\\' } else { '"' });
+                    }
+                    name
+                })
+                .collect(),
+        ),
+        fail_entry_id: failing_entry.map(str::to_string),
+        fail_entry_attempts_remaining: usize::MAX,
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    let applied = runtime.apply_current();
+    assert_eq!(applied.is_ok(), failing_entry.is_none(), "{applied:?}");
+    runtime.tick(at, Instant::now());
+    let response = runtime_command(&mut runtime, at, "status", None);
+    assert!(response.ok, "{}", response.message);
+    let mut encoded = Vec::new();
+    let written = write_response(&mut encoded, &response);
+    let wire = serde_json::to_vec(&response).unwrap().len() + 1;
+    let snapshot = serde_json::from_str(&response.message).unwrap();
+    (snapshot, wire, written)
+}
+
+/// What a 0.4.0 client reads of the configuration: every row, playlist and rule.
+fn assert_inventory_whole(snapshot: &serde_json::Value, rows: usize, label: &str) {
+    assert_eq!(
+        snapshot["displays"].as_array().unwrap().len(),
+        rows,
+        "{label}"
+    );
+    assert_eq!(
+        snapshot["playlists"].as_array().unwrap().len(),
+        578,
+        "{label}"
+    );
+    assert_eq!(
+        snapshot["schedules"].as_array().unwrap().len(),
+        512,
+        "{label}"
+    );
+}
+
+#[test]
+fn a_status_whose_rows_rule_ids_dont_fit_leaves_them_out_and_says_so() {
+    // The review's corner, at the budget's edge, with a 256-byte rule id of quotes in force
+    // (about 21 KB over the limit at 2adc5b4), in both modes; and with a 220-byte id, which
+    // 0.4.0 still answered and 0.4.1's fixed keys pushed over.
+    let long = format!("{}R", "\\\"".repeat(255));
+    let band = format!("{}R", "\\\"".repeat(219));
+    for (mode, rule_id) in [
+        ("mirrored", &long),
+        ("independent", &long),
+        ("mirrored", &band),
+    ] {
+        let label = format!(
+            "{mode}, {}-byte rule id",
+            rule_id.matches("\\\"").count() + 1
+        );
+        let document = at_the_budgets_edge(|still| floor_corner(mode, rule_id, still));
+        let (snapshot, wire, written) = floor_status(&document, 64, None);
+        println!("{label}: {wire} bytes on the wire");
+        assert!(
+            written.is_ok() && wire <= MAX_RESPONSE_BYTES,
+            "{label}: the reply is {wire} bytes: {written:?}"
+        );
+        assert_inventory_whole(&snapshot, 128, &label);
+        assert_eq!(snapshot["schedule_rule_id_omitted"], true, "{label}");
+        assert!(snapshot.get("diagnostics_omitted").is_none(), "{label}");
+        for row in snapshot["displays"].as_array().unwrap() {
+            assert_eq!(row["route_source"], "schedule", "{label}");
+            assert!(row["schedule_rule_id"].is_null(), "{label}");
+        }
+        // The rule itself is still listed, and still said to be in force.
+        let rule = snapshot["schedules"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(rule["in_force"], true, "{label}: {}", rule["id"]);
+    }
+}
+
+#[test]
+fn a_status_whose_rows_rule_ids_fit_keeps_them() {
+    // The control: the same corners with a one-byte rule id (BIG's still takes the bytes).
+    for mode in ["mirrored", "independent"] {
+        let document = at_the_budgets_edge(|still| floor_corner(mode, "R", still));
+        let (snapshot, wire, written) = floor_status(&document, 64, None);
+        println!("{mode}, 1-byte rule id: {wire} bytes on the wire");
+        assert!(written.is_ok(), "{mode}: {wire} bytes");
+        assert_inventory_whole(&snapshot, 128, mode);
+        assert!(snapshot.get("schedule_rule_id_omitted").is_none(), "{mode}");
+        for row in snapshot["displays"].as_array().unwrap() {
+            assert_eq!(row["schedule_rule_id"], "R", "{mode}");
+        }
+    }
+}
+
+#[test]
+fn the_rows_rule_ids_are_all_a_status_at_the_ceilings_needs_to_leave_out() {
+    // The worst structure the budget passes: every ceiling, and no string shorter on the wire
+    // than the budget counts it. Without the rows' rule ids its floor fits, with room to spare
+    // for the summary's own diagnostics (`last_error` is at most 12 KiB, four times that
+    // escaped); with a one-byte rule id it fits as it is.
+    for mode in ["mirrored", "independent"] {
+        for rule_chars in [256, 1] {
+            let label = format!("{mode}, {rule_chars}-byte rule id");
+            let document =
+                at_the_budgets_edge(|still| quoted_structure_corner(mode, rule_chars, still));
+            let (snapshot, wire, written) = floor_status(&document, 64, None);
+            println!("{label}: {wire} bytes on the wire");
+            assert!(written.is_ok(), "{label}: {wire} bytes");
+            assert_inventory_whole(&snapshot, 128, &label);
+            assert_eq!(
+                snapshot.get("schedule_rule_id_omitted").is_some(),
+                rule_chars == 256,
+                "{label}"
+            );
+            assert!(
+                MAX_RESPONSE_BYTES - wire > 4 * 12 * 1024 + 4 * 1024,
+                "{label}: {} bytes to spare",
+                MAX_RESPONSE_BYTES - wire
+            );
+        }
+    }
+}
+
+#[test]
+fn a_status_whose_diagnostics_dont_fit_leaves_them_out_and_says_so() {
+    // The other text the budget doesn't count on every row: a row's `last_error` (up to 384
+    // bytes each, which the budget's diagnostic reserve counts once, not four times). Every
+    // apply of BIG's entry, whose id is 256 quotes, fails, so all 128 rows carry the error.
+    let document = at_the_budgets_edge(|still| floor_corner("mirrored", "R", still));
+    let entry = format!("{}E", "\"".repeat(255));
+    let (snapshot, wire, written) = floor_status(&document, 64, Some(&entry));
+    println!("every row failing: {wire} bytes on the wire");
+    assert!(written.is_ok(), "{wire} bytes");
+    assert_inventory_whole(&snapshot, 128, "errors");
+    assert_eq!(snapshot["diagnostics_omitted"], true);
+    // A rule id of one byte isn't what was in the way, but it went first.
+    assert_eq!(snapshot["schedule_rule_id_omitted"], true);
+    assert_eq!(snapshot["last_error"], "");
+    assert_eq!(
+        snapshot["renderer_failed"], true,
+        "what failed is still said"
+    );
+    for row in snapshot["displays"].as_array().unwrap() {
+        assert_eq!(row["last_error"], "");
+        assert_eq!(row["renderer_failed"], true);
+    }
+
+    // The control: the same failure on 8 live displays, which leaves room for every error.
+    let (snapshot, _, written) = floor_status(&document, 8, Some(&entry));
+    assert!(written.is_ok());
+    assert!(snapshot.get("diagnostics_omitted").is_none());
+    assert!(snapshot.get("schedule_rule_id_omitted").is_none());
+    assert!(
+        snapshot["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("is borked")
+    );
+    for row in snapshot["displays"].as_array().unwrap() {
+        assert!(!row["last_error"].as_str().unwrap().is_empty(), "{row}");
+    }
+}
+
 // -- r13e: a reply that leaves out a stand-in says so ----------------------------------------
 
 #[test]

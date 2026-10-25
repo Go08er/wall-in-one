@@ -307,6 +307,17 @@ pub struct Status<'a> {
     /// A row without one may then still play a stand-in. Added in 0.4.1.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stand_in_for_omitted: bool,
+    /// True when, to fit at all, this reply left every display row's
+    /// `schedule_rule_id` null, which the document's status budget doesn't
+    /// count; absent otherwise. A row whose `route_source` is `schedule` then
+    /// names no rule. Added in 0.4.1.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub schedule_rule_id_omitted: bool,
+    /// True when, to fit at all, this reply also left every `last_error`
+    /// (the rows' and the summary's) and `output_discovery_error` empty;
+    /// absent otherwise. Added in 0.4.1.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_omitted: bool,
 }
 
 /// One item the service refused (`Status::refused`).
@@ -354,6 +365,22 @@ struct ReplyShape {
     /// Whether the display rows, and the summary, name the playlist a
     /// stand-in plays for (`stand_in_for`).
     stand_in_for: bool,
+    /// What a reply that wouldn't fit even without all of the above leaves
+    /// out of every row.
+    rows: RowDetail,
+}
+
+/// How much of what the status budget doesn't count on every display row a
+/// reply carries (`Runtime::abridged`). Each leaves out what the one before
+/// it does, too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RowDetail {
+    Whole,
+    /// `schedule_rule_id` null (`schedule_rule_id_omitted`).
+    WithoutRuleIds,
+    /// Every `last_error` and `output_discovery_error` empty as well
+    /// (`diagnostics_omitted`).
+    WithoutDiagnostics,
 }
 
 impl ReplyShape {
@@ -363,7 +390,47 @@ impl ReplyShape {
         missing: MissingDetail::Full,
         refused: MAX_REFUSED_STATUS_ENTRIES,
         stand_in_for: true,
+        rows: RowDetail::Whole,
     };
+}
+
+/// What a reply of `shape` left out of `displays` (`Status`'s `*_omitted`
+/// flags), each set only when something was there to leave out.
+#[derive(Clone, Copy, Default)]
+struct Omitted {
+    stand_in_for: bool,
+    schedule_rule_id: bool,
+    diagnostics: bool,
+}
+
+/// Leave out of `displays` what `shape` doesn't carry; `top_level_errors`
+/// says whether the summary has a diagnostic of its own to leave out.
+fn abridge_rows(
+    displays: &mut [DisplayStatus<'_>],
+    shape: ReplyShape,
+    top_level_errors: bool,
+) -> Omitted {
+    let mut omitted = Omitted::default();
+    if !shape.stand_in_for {
+        omitted.stand_in_for = displays.iter().any(|row| row.stand_in_for.is_some());
+        for row in displays.iter_mut() {
+            row.stand_in_for = None;
+        }
+    }
+    if shape.rows >= RowDetail::WithoutRuleIds {
+        omitted.schedule_rule_id = displays.iter().any(|row| row.schedule_rule_id.is_some());
+        for row in displays.iter_mut() {
+            row.schedule_rule_id = None;
+        }
+    }
+    if shape.rows >= RowDetail::WithoutDiagnostics {
+        omitted.diagnostics =
+            top_level_errors || displays.iter().any(|row| !row.last_error.is_empty());
+        for row in displays.iter_mut() {
+            row.last_error.clear();
+        }
+    }
+    omitted
 }
 
 impl MissingRendererStatus {
@@ -5825,13 +5892,18 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// 5. the oldest taboo records.
     ///
     /// None of the first four is ever kept at a taboo record's expense. With
-    /// all of them gone the reply is the one the budget bounds.
+    /// all of them gone, what is left (the floor) is what the budget bounds,
+    /// apart from what it doesn't count on every row: when even the floor
+    /// wouldn't fit, `abridged` leaves that out too (6 and 7 there).
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
         let everything = self.status_json(at, ReplyShape::WHOLE)?;
         if success_fits(&everything) {
             return Ok(everything);
         }
         let (shape, best) = self.fitting_without_additions(at)?;
+        if !success_fits(&best) {
+            return self.abridged(at, shape);
+        }
         // What room is left: every `stand_in_for`, then as many `refused`
         // rows as fit.
         let shape = ReplyShape {
@@ -5892,10 +5964,48 @@ impl<D: WallpaperDriver> Runtime<D> {
         Ok((shape, best))
     }
 
+    /// The floor (`shape`), which doesn't fit, without what the status
+    /// budget doesn't count on every row (review r13d L5), in order:
+    ///
+    /// 6. every row's `schedule_rule_id`, left null (a rule's id is up to
+    ///    256 bytes, on as many as 128 rows), which `schedule_rule_id_omitted`
+    ///    says;
+    /// 7. every `last_error`, the rows' and the summary's, and
+    ///    `output_discovery_error`, left empty (`diagnostics_omitted`).
+    ///
+    /// What is left after 7 is the budget's: its configured text, at most
+    /// four times over on the wire as the budget counts it, the fixed keys,
+    /// and the structure of at most 578 playlists, 512 rules and 128 rows.
+    /// At those ceilings, with every counted string made of quotes and
+    /// backslashes, that reply has about 60 KB to spare, more than the rows'
+    /// timing and retry fields and `config_path` can take
+    /// (docs/runtime-config.md). 6 alone is enough unless the diagnostics
+    /// are long and full of quotes. Nothing cut before is given back: this
+    /// is a reply for a document at the schema's ceilings that otherwise
+    /// gets none.
+    fn abridged(&self, at: NaiveDateTime, shape: ReplyShape) -> Result<String, String> {
+        let without_rule_ids = self.status_json(
+            at,
+            ReplyShape {
+                rows: RowDetail::WithoutRuleIds,
+                ..shape
+            },
+        )?;
+        if success_fits(&without_rule_ids) {
+            return Ok(without_rule_ids);
+        }
+        self.status_json(
+            at,
+            ReplyShape {
+                rows: RowDetail::WithoutDiagnostics,
+                ..shape
+            },
+        )
+    }
+
     /// The most of `0..=most` a reply shaped `shape(count)` has room for,
-    /// and that reply. 0 and its reply when none has room, which a document
-    /// the budget passed never reaches for taboo records (its writer refuses
-    /// such a document).
+    /// and that reply. 0 and its reply when none has room: for taboo
+    /// records, only when even the floor doesn't fit (`abridged`).
     fn most_that_fit(
         &self,
         at: NaiveDateTime,
@@ -6240,13 +6350,11 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         }
-        let stand_in_for_omitted =
-            !shape.stand_in_for && displays.iter().any(|row| row.stand_in_for.is_some());
-        if !shape.stand_in_for {
-            for row in &mut displays {
-                row.stand_in_for = None;
-            }
-        }
+        let omitted = abridge_rows(
+            &mut displays,
+            shape,
+            !self.last_error.is_empty() || !self.output_discovery_error.is_empty(),
+        );
         serde_json::to_string(&Status {
             loaded_config_sha256: self.config.source_sha256.as_deref(),
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
@@ -6316,8 +6424,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "config"
             },
             cycle_interval_seconds: Some(self.mirrored_cycle_interval_seconds()),
-            last_error: &self.last_error,
-            output_discovery_error: &self.output_discovery_error,
+            last_error: if omitted.diagnostics {
+                ""
+            } else {
+                &self.last_error
+            },
+            output_discovery_error: if omitted.diagnostics {
+                ""
+            } else {
+                &self.output_discovery_error
+            },
             automatic_retry: self
                 .pending_automatic
                 .as_ref()
@@ -6347,7 +6463,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
             refused: self.refused_rows(shape.refused),
             refused_omitted: self.refused_omitted(shape.refused),
-            stand_in_for_omitted,
+            stand_in_for_omitted: omitted.stand_in_for,
+            schedule_rule_id_omitted: omitted.schedule_rule_id,
+            diagnostics_omitted: omitted.diagnostics,
         })
         .map_err(|error| error.to_string())
     }
@@ -6654,13 +6772,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .target_outputs
             .iter()
             .find_map(|connector| self.pending_routes.get(connector));
-        let stand_in_for_omitted =
-            !shape.stand_in_for && displays.iter().any(|row| row.stand_in_for.is_some());
-        if !shape.stand_in_for {
-            for row in &mut displays {
-                row.stand_in_for = None;
-            }
-        }
+        let omitted = abridge_rows(
+            &mut displays,
+            shape,
+            !self.last_error.is_empty() || !self.output_discovery_error.is_empty(),
+        );
         serde_json::to_string(&Status {
             loaded_config_sha256: self.config.source_sha256.as_deref(),
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
@@ -6744,8 +6860,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "mixed"
             },
             cycle_interval_seconds: common_interval,
-            last_error: &self.last_error,
-            output_discovery_error: &self.output_discovery_error,
+            last_error: if omitted.diagnostics {
+                ""
+            } else {
+                &self.last_error
+            },
+            output_discovery_error: if omitted.diagnostics {
+                ""
+            } else {
+                &self.output_discovery_error
+            },
             automatic_retry: pending_summary.map(|pending| AutomaticRetryStatus {
                 attempt: pending.attempts,
                 maximum_attempts: AUTOMATIC_APPLY_ATTEMPTS,
@@ -6775,7 +6899,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
             refused: self.refused_rows(shape.refused),
             refused_omitted: self.refused_omitted(shape.refused),
-            stand_in_for_omitted,
+            stand_in_for_omitted: omitted.stand_in_for,
+            schedule_rule_id_omitted: omitted.schedule_rule_id,
+            diagnostics_omitted: omitted.diagnostics,
         })
         .map_err(|error| error.to_string())
     }

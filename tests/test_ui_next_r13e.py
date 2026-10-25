@@ -344,7 +344,8 @@ def _displays_rows(status: dict[str, Any]) -> tuple[str, str]:
 
     truth = runtime_truth.from_status(status)
     assert truth is not None
-    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    # The first row's (a mirrored document's rows share one decision).
+    [route, *_rest] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
     row = Adw.ComboRow()
     fake = SimpleNamespace(
         scheduling=SimpleNamespace(default_playlist="pages", display_assignments=lambda: {}),

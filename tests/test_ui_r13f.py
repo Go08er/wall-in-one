@@ -52,8 +52,11 @@ def _status(name: str) -> dict[str, Any]:
 
 
 def _at_the_ceiling(status: dict[str, Any]) -> dict[str, Any]:
-    """Steps 1 and 2 of the fitting (runtime.rs abridge_rows :408-419): no ``refused``
-    rows, every ``stand_in_for`` gone, and the flag that says so."""
+    """Steps 1 and 2 of the fitting (runtime.rs abridge_rows): no ``refused`` rows, every
+    ``stand_in_for`` gone, and the flag that says so. A mirrored status with a single row
+    is not what the service sends here (it leaves over 600 KB to spare, docs/
+    runtime-config.md): such a one is a test of the inference alone. tests/test_ui_r13g.py
+    has the two-row shapes and the lean step 0."""
     status = copy.deepcopy(status)
     had = any("stand_in_for" in row for row in status["displays"])
     status["refused_omitted"] = len(status.get("refused", [])) + status.get("refused_omitted", 0)
@@ -67,8 +70,9 @@ def _at_the_ceiling(status: dict[str, Any]) -> dict[str, Any]:
 
 
 def _rule_ids_left_out(status: dict[str, Any]) -> dict[str, Any]:
-    """Step 6 (abridge_rows :420-425): every row's ``schedule_rule_id`` null. The
-    top-level ``schedule.rule_id`` and ``schedules`` stay (runtime.rs:6503-6509)."""
+    """Step 6 (abridge_rows): the case where the service left out the rule id of every
+    row (it does so row by row, longest first, so a reply can keep some). The top-level
+    ``schedule.rule_id`` and ``schedules`` stay (runtime.rs:6503-6509)."""
     status = copy.deepcopy(status)
     if any(row.get("schedule_rule_id") for row in status["displays"]):
         status["schedule_rule_id_omitted"] = True
@@ -685,9 +689,18 @@ def test_control_q4_next_the_same_error_twice_is_said_once() -> None:
 
 
 def _mirrored_pick_stood_in() -> dict[str, Any]:
-    """pick-refused.json at the ceiling: the pick ``pages`` is refused, ``scenes`` stands in."""
-    status = _at_the_ceiling(_status("pick-refused"))
+    """A mirrored pick at the ceiling: ``pages`` is refused, ``scenes`` stands in.
+
+    Two rows, as a hand-written ``[[displays]]`` document makes them (the app's own
+    mirrored document has one, and the service never needs the ceiling for that:
+    docs/runtime-config.md), from the service's lean shape (tests/test_ui_r13g.py).
+    """
+    from tests.test_ui_r13g import _at_the_ceiling as ceiling
+    from tests.test_ui_r13g import _mirrored_pick_rows
+
+    status = ceiling(_mirrored_pick_rows())
     assert status["stand_in_for_omitted"] is True and status["display_mode"] == "mirrored"
+    assert len(status["displays"]) == 2
     return status
 
 
@@ -695,7 +708,7 @@ def test_q5_mirrored_pick_at_the_ceiling_is_certainly_stood_in_for() -> None:
     text, playing, _showing = _on_screen(_mirrored_pick_stood_in(), "scenes")
     hedge = getattr(runtime_truth, "PICK_OR_STAND_IN", "your pick, or what stands in for it")
     assert hedge not in text, (
-        f"mirrored, one row, the flag set: the pick is stood in for, and the detail says {text!r}"
+        f"mirrored, the flag set: the pick is stood in for, and the detail says {text!r}"
     )
     assert text == "Your pick can\u2019t play here, so \u201cscenes\u201d is playing"
     assert not playing
@@ -703,12 +716,13 @@ def test_q5_mirrored_pick_at_the_ceiling_is_certainly_stood_in_for() -> None:
 
 def test_n3_the_row_and_the_summary_are_a_pick_stood_in_not_unsure() -> None:
     truth = _truth(_mirrored_pick_stood_in())
-    [row] = truth.displays
-    assert not row.route_unsure and row.stand_in_for is None
+    for row in truth.displays:
+        assert not row.route_unsure and row.stand_in_for is None
+        assert getattr(row, "pick_stood_in", False)
+        # No field names the pick, so nothing is taken for it.
+        assert row.asked_playlist_id == ""
     assert not truth.route_unsure
-    assert getattr(row, "pick_stood_in", False) and getattr(truth, "pick_stood_in", False)
-    # No field names the pick, so nothing is taken for it.
-    assert row.asked_playlist_id == "" and truth.asked_playlist_id == ""
+    assert getattr(truth, "pick_stood_in", False) and truth.asked_playlist_id == ""
 
 
 def test_n3_the_next_pages_say_it_plainly() -> None:
@@ -718,9 +732,10 @@ def test_n3_the_next_pages_say_it_plainly() -> None:
 
     status = _mirrored_pick_stood_in()
     truth = _truth(status)
-    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
-    assert route.route == "pick" and route.quick and route.stand_in_for
-    assert not route.route_unsure
+    routes = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    for route in routes:
+        assert route.route == "pick" and route.quick and route.stand_in_for
+        assert not route.route_unsure
     model = RuntimeStatusModel()
     model.adopt(status)
     assert "your pick can\u2019t play here" in status_line.describe(model.view)
@@ -734,7 +749,7 @@ def test_n3_the_classic_pages_say_it_plainly(monkeypatch: pytest.MonkeyPatch) ->
     status = _mirrored_pick_stood_in()
     sentence = "Your pick can\u2019t play here, so \u201cscenes\u201d is playing"
     assert _classic_summary(status) == f"Manual override \u00b7 {sentence}."
-    assert sentence in _classic_row(status, "ALL")
+    assert all(sentence in _classic_row(status, one) for one in ("DP-1", "DP-2"))
     detail, button = _classic_playlists(status, monkeypatch, "scenes")
     assert "playing manually" not in detail and "pick" in detail, detail
     assert button == "Plays in place of your pick", button
@@ -776,7 +791,7 @@ def _next_selected(status: dict[str, Any]) -> int | None:
     from wall_in_one.ui.next.real_schedule import RealScheduling
 
     truth = _truth(status)
-    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    [route, *_rest] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
     fake = SimpleNamespace()
     return DisplaysPage._play_selected(fake, route, ["", "pages", "scenes"])  # type: ignore[arg-type]
 
@@ -807,8 +822,9 @@ def test_control_n3_below_the_ceiling_the_services_word_is_used() -> None:
 
 
 def test_control_n3_a_mirrored_pick_that_plays_nothing_is_not_a_stand_in() -> None:
+    # No row had a ``stand_in_for``, so the service sets no ``stand_in_for_omitted``.
     status = _at_the_ceiling(_mirrored_pick_plays_nothing(nothing=True))
-    status["stand_in_for_omitted"] = True
+    assert "stand_in_for_omitted" not in status
     truth = _truth(status)
     assert not getattr(truth.displays[0], "pick_stood_in", False)
     assert not getattr(truth, "pick_stood_in", False)

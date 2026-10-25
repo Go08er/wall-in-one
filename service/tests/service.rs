@@ -16850,3 +16850,51 @@ fn control_without_the_pause_failure_the_rules_end_skips_and_marks_nothing() {
     assert!(taboo.is_empty(), "{taboo:?}");
     assert_eq!(route(&snapshot, "DP-1")["entry_id"], "mixed-2");
 }
+
+/// The independent twin: DP-1 and HDMI-A-1 on the default all-media, paused, whose all-media-1
+/// and all-media-2 are scenes of two items; eve names pages, whose pages-1 is all-media-1's
+/// item, refused when asked. At 16:00 each route's ask-ahead learns it is refused and the apply
+/// steps over all-media-1 to all-media-2. With `fail_pause` the pause can't be set, through
+/// three attempts.
+fn paused_at_an_independent_boundary_after_a_skip(
+    fail_pause: bool,
+) -> (Vec<String>, serde_json::Value, Vec<String>) {
+    let document = independent_shared_item_document("pages", "3000000031").replace(
+        "id = \"all-media-2\"\nkind = \"still\"\n",
+        "id = \"all-media-2\"\nkind = \"scene\"\nscene_id = \"3000000032\"\n",
+    );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    let reply = runtime_command(&mut runtime, on_the_third(15, 5), "pause", None);
+    assert!(reply.ok, "{}", reply.message);
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("pages-1".into());
+        recorded.fail_pause = fail_pause;
+    }
+    let start = Instant::now();
+    for seconds in [1, 3, 5, 7, 9] {
+        runtime.tick(on_the_third(16, 0), start + Duration::from_secs(seconds));
+    }
+    taboo_and_rows("16:00", &mut runtime, &state, on_the_third(16, 0))
+}
+
+#[test]
+fn an_independent_pause_failure_after_a_skip_is_blamed_on_the_entry_put_up() {
+    let (taboo, snapshot, _) = paused_at_an_independent_boundary_after_a_skip(true);
+    assert_eq!(
+        taboo,
+        vec!["all-media-2".to_string()],
+        "entries of the refused item, never started, blamed for the pause: {}",
+        snapshot["taboo_entries"]
+    );
+}
+
+#[test]
+fn control_without_the_pause_failure_an_independent_boundary_skips_and_marks_nothing() {
+    let (taboo, snapshot, problems) = paused_at_an_independent_boundary_after_a_skip(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(taboo.is_empty(), "{taboo:?}");
+    for connector in ["DP-1", "HDMI-A-1"] {
+        assert_eq!(route(&snapshot, connector)["entry_id"], "all-media-2");
+    }
+}

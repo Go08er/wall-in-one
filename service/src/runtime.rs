@@ -2282,10 +2282,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         let connector = pending.connector.clone();
         self.routes
             .insert(connector.clone(), pending.candidate.clone());
-        let attempted = self.route_current_entry(&connector).map(|entry| EntryKey {
-            playlist_id: pending.candidate.active_playlist.clone(),
-            entry_id: entry.id.clone(),
-        });
         pending.attempts += 1;
         let selected = HashSet::from([connector.clone()]);
         match self.apply_independent_selected(&selected) {
@@ -2298,14 +2294,21 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             Err(error) => {
                 let mut failures = self.last_apply_failures.clone();
-                if failures.is_empty()
-                    && let Some(key) = attempted
-                {
-                    failures.push(ApplyFailure {
-                        key,
-                        output: connector.clone(),
-                        reason: error.clone(),
-                    });
+                if failures.is_empty() {
+                    // What the apply put up, past the refused entries it
+                    // stepped over, as in mirrored mode (review r13i R-N6).
+                    failures = self
+                        .current_targets(std::slice::from_ref(&connector))
+                        .into_iter()
+                        .map(|target| ApplyFailure {
+                            key: EntryKey {
+                                playlist_id: target.playlist_id,
+                                entry_id: target.entry.id,
+                            },
+                            output: target.output,
+                            reason: error.clone(),
+                        })
+                        .collect();
                 }
                 pending.failures = failures;
                 let rollback = if pending.restore_baseline {

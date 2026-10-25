@@ -71,16 +71,17 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
-  # Not optional: without it `cargo test --release` rebuilds
-  # target/release/wall-in-one-service as a `source` build in the same target
-  # directory, and package() would install that one. The Python suite also
-  # asserts that the module (set in prepare()) matches this variable.
+  # Not optional: the Python suite asserts that the module (set in prepare())
+  # matches this variable.
   export WALL_IN_ONE_INSTALL_KIND=system
   export RUSTUP_TOOLCHAIN=stable
-  export CARGO_TARGET_DIR=target
   # The service's integration tests exec scripts they have just written; run
-  # in parallel that races ("Text file busy"), so keep them serial.
-  RUST_TEST_THREADS=1 cargo test --frozen --release --manifest-path service/Cargo.toml
+  # in parallel that races ("Text file busy"), so keep them serial. They are
+  # built in a target directory of their own: they turn on the `test-support`
+  # feature, and in build()'s, `cargo test` would relink
+  # target/release/wall-in-one-service with it, which package() installs.
+  RUST_TEST_THREADS=1 cargo test --frozen --release --target-dir target-check \
+    --manifest-path service/Cargo.toml
   # The non-GUI suite only: no compositor in a build chroot, and no Noctalia
   # binary is driven. Neither renderer is needed: the tests stand in for them.
   # tests/conftest.py sandboxes HOME, XDG_* and the buses itself, and the

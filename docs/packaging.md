@@ -39,9 +39,10 @@ check makes sure they agree.
 - **Rust.** `option_env!("WALL_IN_ONE_INSTALL_KIND")` when the service is
   compiled, `source` when it is unset. Any other value fails the build. The
   flake sets it on the service's derivation; a PKGBUILD exports it in every
-  function that runs cargo (`build()` and `check()`): cargo rebuilds when the
-  variable changes, so a `check()` without it would replace the binary that
-  `package()` installs with a `source` one.
+  function that runs cargo (`build()` and `check()`). `check()` builds in a
+  target directory of its own (`target-check`), so nothing it builds, the
+  tests' `test-support` feature included, replaces the binary `package()`
+  installs.
 
 `tools/check-install-kind.sh <kind> <wall-in-one> <wall-in-one-service>` runs
 both programs' `--version` and fails unless both report `<kind>`. The flake's

@@ -2628,6 +2628,12 @@ class Application(Adw.Application):
                         "That service is older than this app, so it keeps playing what it "
                         "holds until it is restarted: systemctl --user restart wall-in-one"
                     )
+                elif why == _ALLOWS and look.status is not None:  # a current service
+                    LOGGER.warning(
+                        "That service keeps the configuration it holds until it is restarted, "
+                        "and its start check then compiles that file again or refuses it: "
+                        "systemctl --user restart wall-in-one"
+                    )
             elif why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk may have "

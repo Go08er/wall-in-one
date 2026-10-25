@@ -213,3 +213,27 @@ def test_control_s_n15_a_quit_answered_ok_says_it_is_quitting(
     )
     assert sent == ["quit"]
     assert any("it is quitting" in one for one in said), said
+
+
+# -- r13m S-N16 --------------------------------------------------------------------------------
+
+
+def test_s_n16_a_failed_install_tells_a_current_service_to_restart_without_calling_it_older(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The service reads schema 8 and holds a file that allows web wallpapers: the install
+    failed, so it keeps that file until restarted. The control above has an older one."""
+    sent, said = _step(
+        profiles,
+        monkeypatch,
+        caplog,
+        heard="control-reads-eight",
+        text=document("control-compiler-line")[0],
+        installed=False,
+    )
+    assert sent == []
+    assert any("couldn\u2019t be replaced at shutdown" in one for one in said), said
+    assert any(RESTART in one for one in said), said
+    assert not any(OLDER in one for one in said), said

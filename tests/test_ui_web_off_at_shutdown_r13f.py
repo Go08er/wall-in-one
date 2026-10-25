@@ -1609,7 +1609,7 @@ def test_a_failed_install_over_a_file_that_allows_web_for_an_older_service_says_
     caplog: pytest.LogCaptureFixture,
     installed: bool,
 ) -> None:
-    """Before: the same missing line when the file on disk allows web wallpapers."""
+    """The restart line is said when the file on disk allows web wallpapers, installed or not."""
     application = profiles().application
     _on_disk(document("control-compiler-line")[0])
     _heard(monkeypatch, HEARD["an-older-service"])
@@ -1631,4 +1631,4 @@ def test_a_failed_install_over_a_file_that_allows_web_for_an_older_service_says_
     _judged_at_exit(application)
     said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
     assert sent == [], "no quit is sent for a file that only may allow web wallpapers"
-    assert any("systemctl --user restart wall-in-one" in one for one in said) is not installed, said
+    assert any("systemctl --user restart wall-in-one" in one for one in said), said

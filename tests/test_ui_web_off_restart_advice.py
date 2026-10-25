@@ -122,3 +122,41 @@ def test_control_s_n13_a_failed_install_for_an_older_service_says_it_is_older(
     )
     assert sent == []
     assert any(OLDER in one and RESTART in one for one in said), said
+
+
+# -- p2 (S-N14) ------------------------------------------------------------------------------
+
+
+def test_s_n14_an_installed_file_that_allowed_web_says_the_older_service_keeps_what_it_holds(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sent, said = _step(
+        profiles,
+        monkeypatch,
+        caplog,
+        heard="an-older-service",
+        text=document("control-compiler-line")[0],
+        installed=True,
+    )
+    assert sent == [], "no quit for `_ALLOWS`"
+    assert any("it was replaced at shutdown" in one for one in said), said
+    assert any(RESTART in one for one in said), said
+
+
+def test_control_s_n14_an_installed_file_naming_an_unchecked_item_says_it(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sent, said = _step(
+        profiles,
+        monkeypatch,
+        caplog,
+        heard="an-older-service",
+        text=_naming(["4000000099"]),  # no such item: `_NAMES`
+        installed=True,
+    )
+    assert sent == []
+    assert any("it was replaced at shutdown" in one and RESTART in one for one in said), said

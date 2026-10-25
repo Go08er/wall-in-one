@@ -2634,6 +2634,11 @@ class Application(Adw.Application):
                     "allowed web wallpapers; it was replaced at shutdown with one that plays "
                     "nothing"
                 )
+                if older:
+                    LOGGER.warning(
+                        "That service is older than this app, so it keeps playing what it "
+                        "holds until it is restarted: systemctl --user restart wall-in-one"
+                    )
             elif not older:
                 LOGGER.warning(
                     "Allow web wallpapers is off, and the configuration on disk named a web "

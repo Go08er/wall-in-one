@@ -724,6 +724,38 @@ def test_control_classic_overall_combo_an_unnamed_pick_keeps_the_not_named_item(
     assert _classic_changed(_at_the_ceiling(_mirrored_pick_rows()), 0) == PLACEHOLDER
 
 
+def _independent_all_media_pick() -> dict[str, Any]:
+    return _independent_named({"scenes": "all-media", "all-media": "gone"})
+
+
+def test_classic_display_row_an_all_media_pick_isnt_follow_schedule() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = runtime_truth.from_status(_independent_all_media_pick())
+    assert truth is not None
+    [display] = truth.displays
+    assert display.manual_override and display.asked_playlist_id == "all-media"
+    choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
+    selected = SchedulesPage._display_playback_selected(display, choices)
+    assert selected is None
+    from wall_in_one.ui.schedules_page import _display_pick_label
+
+    row = Adw.ComboRow(model=Gtk.StringList.new(["Follow schedule", "pages", "scenes"]))
+    fake = SimpleNamespace(_loading=False, _display_selected_echo={})
+    SchedulesPage._set_display_selected(fake, "DP-1", row, selected, _display_pick_label(display))  # type: ignore[arg-type]
+    assert _shown_item(row) == "Your pick"
+
+
+def test_control_classic_display_row_a_listed_pick_is_its_row() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = runtime_truth.from_status(_independent_named({"scenes": "scenes"}))
+    assert truth is not None
+    [display] = truth.displays
+    choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
+    assert SchedulesPage._display_playback_selected(display, choices) == 2
+
+
 # ============================================================ pick_holders (U-N5) =====
 
 

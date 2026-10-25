@@ -101,6 +101,12 @@ def _pick_label(truth: runtime_truth.RuntimeTruth | None) -> str:
     return unnamed_pick.NAMED_PICK if named else unnamed_pick.UNNAMED_PICK
 
 
+def _display_pick_label(display: runtime_truth.DisplayRuntimeTruth | None) -> str:
+    """ "Your pick" where the reply names this row's pick, else the not-named item."""
+    named = display is not None and display.manual_override and not display.route_unsure
+    return unnamed_pick.NAMED_PICK if named else unnamed_pick.UNNAMED_PICK
+
+
 class SchedulesPage(Gtk.ScrolledWindow):
     """Choose the default, per-screen playlists, and timed overrides."""
 
@@ -482,6 +488,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             display.connector,
             controls.playlist,
             self._display_playback_selected(display, choices),
+            _display_pick_label(display),
         )
         # A renderer failure leaves the resolved still on screen and keeps
         # the route's transport state (playing, paused or stopped) as the
@@ -537,7 +544,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         for index, playlist in enumerate(choices, start=1):
             if playlist.id == display.asked_playlist_id:
                 return index
-        return 0
+        # Named, but this page lists no row for it (All media): not "Follow schedule".
+        return None
 
     @staticmethod
     def _rule_names(session: Session | None) -> dict[str, str]:
@@ -1240,6 +1248,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                         self._display_playback_selected(display, choices)
                         if display is not None
                         else 0,
+                        _display_pick_label(display),
                     )
                 finally:
                     self._loading = False
@@ -1253,6 +1262,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         connector: str,
         row: Adw.ComboRow,
         selected: int | None,
+        label: str = unnamed_pick.UNNAMED_PICK,
     ) -> None:
         """Set service-owned selection without echoing it as a user command.
 
@@ -1262,13 +1272,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
         if selected is None:
             count = model.get_n_items() if model is not None else 0
             if unnamed_pick.is_shown(row):
-                if row.get_selected() == count - 1:
+                if row.get_selected() == count - 1 and model.get_string(count - 1) == label:  # type: ignore[union-attr]
                     return
                 selected = count - 1
             else:
                 selected = count
             self._display_selected_echo[connector] = selected
-            unnamed_pick.show(row)
+            unnamed_pick.show(row, label)
             return
         if unnamed_pick.is_shown(row):
             self._display_selected_echo.pop(connector, None)

@@ -5003,6 +5003,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !self.playlist_selectable(&playlist_id) {
             return self.fail(self.taboo_playlist_error(&playlist_id));
         }
+        let resident = self.resident_targets();
         let baseline = self.selection_state();
         let previous_manual = self.manual_playlist.clone();
         self.manual_playlist = Some(playlist_id.clone());
@@ -5013,7 +5014,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.restore_selection(&baseline);
             return self.fail(self.taboo_playlist_error(&playlist_id));
         }
-        let result = self.apply_current();
+        // A display the pick doesn't change keeps its renderer.
+        let result = self.apply_current_keeping(&resident);
         if result.is_ok() {
             self.last_cycle = Instant::now();
         }
@@ -5067,6 +5069,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         {
             return self.fail(self.taboo_playlist_error(blocked));
         }
+        let resident = self.resident_targets();
         let baseline = self.selection_state();
         let previous_manual = self.manual_playlist.take();
         self.schedule_rule = rule;
@@ -5080,7 +5083,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 return self.fail(self.taboo_playlist_error(effective_playlist));
             }
         }
-        let result = self.apply_current();
+        let result = self.apply_current_keeping(&resident);
         if result.is_ok() {
             self.last_cycle = Instant::now();
         }
@@ -5284,6 +5287,9 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn move_by_at(&mut self, delta: isize, now: Instant) -> Result<String, String> {
+        // A display on a playlist that doesn't move (one entry) keeps its
+        // renderer.
+        let resident = self.resident_targets();
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
             moved |= if delta < 0 {
@@ -5312,7 +5318,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "active display playlists are empty or taboo"
             });
         }
-        let result = self.apply_current();
+        let result = self.apply_current_keeping(&resident);
         if result.is_ok() {
             self.last_cycle = now;
         }
@@ -5320,6 +5326,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn random_entry(&mut self) -> Result<String, String> {
+        let resident = self.resident_targets();
         let mut moved = false;
         for playlist in self.effective_playlist_ids() {
             moved |= self.move_cursor_random(&playlist);
@@ -5337,7 +5344,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
             return self.fail("active display playlists are empty or taboo");
         }
-        let result = self.apply_current();
+        let result = self.apply_current_keeping(&resident);
         if result.is_ok() {
             self.last_cycle = Instant::now();
         }

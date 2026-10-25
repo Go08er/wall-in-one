@@ -6943,7 +6943,13 @@ fn transient_output_discovery_failure_keeps_the_last_live_targets() {
             )
             .ok
     );
-    assert_eq!(state.lock().unwrap().applied_outputs, vec!["DP-1", "DP-2"]);
+    // Both displays are still targets. DP-2 moves on; DP-1's playlist (night) has one entry,
+    // so it keeps its renderer (review r13f N13: at f127a31 it was started again).
+    assert_eq!(state.lock().unwrap().applied_outputs, vec!["DP-2"]);
+    assert_eq!(
+        state.lock().unwrap().retained_outputs.last(),
+        Some(&vec!["DP-1".into(), "DP-2".into()])
+    );
     let snapshot = status(&mut runtime, at);
     assert_eq!(snapshot["displays"][1]["connector"], "DP-2");
     assert!(
@@ -15846,6 +15852,42 @@ fn a_mirrored_reload_restarts_only_the_displays_whose_target_it_changes() {
         Some("pages-1")
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_mirrored_command_restarts_only_the_displays_it_changes() {
+    // Next, Previous and Random move each playlist in force: pages (HDMI-A-1) has one entry,
+    // which stays. A pick of all-media, and Follow schedule back to the assignments, change
+    // only DP-1: HDMI-A-1 shows all-media-1 throughout. At cef3bbd each started every display.
+    let mut problems = Vec::new();
+    let on_pages = default_rule_document("all-media").replace(
+        "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+        "connector = \"HDMI-A-1\"\nplaylist = \"pages\"",
+    );
+    let at = on_the_third(12, 0);
+    for (document, commands) in [
+        (
+            on_pages,
+            &[("next", None), ("previous", None), ("random", None)][..],
+        ),
+        (
+            default_rule_document("all-media"),
+            &[
+                ("playlist-use", Some("all-media")),
+                ("schedule-follow", None),
+            ][..],
+        ),
+    ] {
+        let (mut runtime, state) = default_rule_runtime(document, &[], at);
+        for (verb, argument) in commands {
+            let before = applies_so_far(&state);
+            let reply = runtime_command(&mut runtime, at, verb, *argument);
+            assert!(reply.ok, "{verb}: {}", reply.message);
+            assert_eq!(applied_since(&state, before), ["DP-1"], "{verb}");
+            problems.extend(rows_off_screen(verb, &mut runtime, &state, at));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
 }
 
 #[test]

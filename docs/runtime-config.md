@@ -416,6 +416,7 @@ entries; a reload, the file poll's included, forgets.
 | `stand_in_for` | each display row; top level | The playlist the display asked for (its pick, rule, assignment or the default) while `playlist_id` stands in for it. Absent otherwise, never `null`. At the top level, only when every connected display plays the same stand-in for the same playlist. Added in 0.4.1. |
 | `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none. Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
 | `refused_omitted` | top level | How many more items were refused than `refused` lists. Added in 0.4.1. |
+| `stand_in_for_omitted` | top level | `true` when the reply left out at least one `stand_in_for`, a row's or the top level's, to fit its size limit (2 below). Absent otherwise, never `false`. A row without `stand_in_for` may then still play a stand-in. Added in 0.4.1. |
 
 Neither status budget counts these, so the budget is 0.4.0's, and any
 document 0.4.0 published still loads. (Counting them refused a document near
@@ -425,8 +426,14 @@ anything a 0.4.0 reply carries. When a reply would not fit, the service leaves
 out, in order:
 
 1. `refused` rows, the last listed first, each counted in `refused_omitted`;
-2. every `stand_in_for`, on the rows and at the top level (the app then can't
-   tell the stand-in from what was asked for);
+2. every `stand_in_for`, on the rows and at the top level, and says so with
+   `stand_in_for_omitted`, whose own bytes are counted in every reply measured
+   without them. A row's `playlist_id` is then the stand-in, and what was asked
+   for is left to what 0.4.0's fields say. When the flag is set, the app works
+   it out from `assigned_playlist_id` (a display on its assignment or the
+   default) and from `schedules[].playlist_id` of the row's `schedule_rule_id`
+   (a rule); for a pick (`route_source` `manual`) nothing says it, so the app
+   hedges;
 3. as at 0.4.0, `outputs`, then `missing_renderers`' paths, then its rows, then
    the oldest taboo records.
 

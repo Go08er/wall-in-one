@@ -302,6 +302,11 @@ pub struct Status<'a> {
     /// reload forgets them and asks again. Added in 0.4.1.
     pub refused: Vec<RefusedStatus<'a>>,
     pub refused_omitted: usize,
+    /// True when this reply left out at least one `stand_in_for` (a row's or
+    /// the summary's) to fit its size limit; absent otherwise, never false.
+    /// A row without one may then still play a stand-in. Added in 0.4.1.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stand_in_for_omitted: bool,
 }
 
 /// One item the service refused (`Status::refused`).
@@ -5811,7 +5816,9 @@ impl<D: WallpaperDriver> Runtime<D> {
     ///
     /// 1. `refused` rows, the last listed first, each counted in
     ///    `refused_omitted`;
-    /// 2. every `stand_in_for`, on the rows and in the summary;
+    /// 2. every `stand_in_for`, on the rows and in the summary, which
+    ///    `stand_in_for_omitted` then says (its bytes are part of every reply
+    ///    measured without them);
     /// 3. the compositor's display snapshot (`outputs`);
     /// 4. `missing_renderers`' paths, then its rows (the renderers the
     ///    service could not run);
@@ -6233,6 +6240,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         }
+        let stand_in_for_omitted =
+            !shape.stand_in_for && displays.iter().any(|row| row.stand_in_for.is_some());
         if !shape.stand_in_for {
             for row in &mut displays {
                 row.stand_in_for = None;
@@ -6338,6 +6347,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
             refused: self.refused_rows(shape.refused),
             refused_omitted: self.refused_omitted(shape.refused),
+            stand_in_for_omitted,
         })
         .map_err(|error| error.to_string())
     }
@@ -6644,6 +6654,8 @@ impl<D: WallpaperDriver> Runtime<D> {
             .target_outputs
             .iter()
             .find_map(|connector| self.pending_routes.get(connector));
+        let stand_in_for_omitted =
+            !shape.stand_in_for && displays.iter().any(|row| row.stand_in_for.is_some());
         if !shape.stand_in_for {
             for row in &mut displays {
                 row.stand_in_for = None;
@@ -6763,6 +6775,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
             refused: self.refused_rows(shape.refused),
             refused_omitted: self.refused_omitted(shape.refused),
+            stand_in_for_omitted,
         })
         .map_err(|error| error.to_string())
     }

@@ -13785,3 +13785,34 @@ fn a_picks_rows_name_no_rule_in_either_mode() {
         assert_eq!(picked["schedule"]["rule_id"], "noon", "{mode}: {picked}");
     }
 }
+
+// -- r13e: a reply that leaves out a stand-in says so ----------------------------------------
+
+#[test]
+fn a_reply_that_leaves_out_a_stand_in_says_so() {
+    // At the ceiling, with 64 taboo records, every `stand_in_for` gives way: the app can't tell
+    // from the rows that BIG plays for ASK, so the reply says it left them out.
+    let (dropped, encoded) = refusal_ceiling_status("ASK", 20, 64);
+    assert!(encoded <= MAX_RESPONSE_BYTES, "{encoded} bytes");
+    assert_eq!(stand_ins(&dropped), 0);
+    assert_eq!(dropped["stand_in_for_omitted"], true);
+    // Controls: with 28 records every stand-in fits; a pick of BIG has none to leave out.
+    let (kept, _) = refusal_ceiling_status("ASK", 20, 28);
+    assert_eq!(stand_ins(&kept), 129);
+    assert!(
+        kept.get("stand_in_for_omitted").is_none(),
+        "nothing was left out"
+    );
+    let (none, _) = refusal_ceiling_status("BIG", 20, 64);
+    assert_eq!(stand_ins(&none), 0);
+    assert!(
+        none.get("stand_in_for_omitted").is_none(),
+        "nothing stands in"
+    );
+    // And far below the ceiling, a stand-in is named, with no flag.
+    let (mut runtime, root, home) = rule_boundary_runtime("r13e-stand-in-flag", noon());
+    let snapshot = status(&mut runtime, noon());
+    remove_skip_fixture(runtime, &root, &home);
+    assert_eq!(route(&snapshot, "DP-1")["stand_in_for"], "pages");
+    assert!(snapshot.get("stand_in_for_omitted").is_none(), "{snapshot}");
+}

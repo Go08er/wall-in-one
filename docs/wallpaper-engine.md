@@ -225,8 +225,9 @@ allow web wallpapers is left as it is when the service last heard reads schema
 (it has no check of its own), the Workshop items the file names are looked up,
 each by its own `project.json` (no scan of the Workshop), and the file is
 replaced in the same way when one is a web page, a preset of one, or can't be
-checked. That look stops at a second Ctrl-C, or after two seconds, and what it
-hasn't reached counts as a web page. When no status was heard at all, only a
+checked. The wait for that look ends at a second Ctrl-C, or after two seconds,
+even while a slow disk or a hung mount holds it, and what it hasn't reached
+counts as a web page. When no status was heard at all, only a
 web page the files confirm counts (or a preset whose base is one): an item that
 can't be checked, such as one unsubscribed since or on a Steam library that
 isn't mounted, leaves the file as it is. A service not heard from is either not

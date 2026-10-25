@@ -404,11 +404,14 @@ def _web_named(text: str, give_up: Callable[[], bool]) -> tuple[bool, bool]:
     (`runtime_config.named_scenes`) on a thread of its own
     (`_unless_given_up`). Then each id's own ``project.json`` is read
     (`workshop.web_among`), and nothing else: no scan of the Workshop
-    (review r13e, L1), so it takes as long as the file's ids make it, which
-    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` bounds. The first answer is what the files
-    confirm. The second is every doubt: one that isn't TOML 1.0, an id that
-    can't be checked, and every id left once ``give_up`` says so or that bound
-    has passed.
+    (review r13e, L1), so it takes as long as the file's ids make it. That
+    look runs on a thread of its own too, Steam's list of libraries
+    included, and the wait for it ends once ``give_up`` says so or
+    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` has passed, though one call of it is
+    still slow (review r13g, S-L1: a library on a disk spinning up, or a hung
+    mount). The first answer is what the files confirm. The second is every
+    doubt: one that isn't TOML 1.0, an id that can't be checked, and every id
+    left once ``give_up`` says so or that bound has passed.
     """
     named = runtime_config.compiled_scenes(text)
     if named is None:
@@ -417,8 +420,12 @@ def _web_named(text: str, give_up: Callable[[], bool]) -> tuple[bool, bool]:
             return False, True
     if not named:
         return False, False
+    ids = sorted(named)
     deadline = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
-    return workshop.web_among(sorted(named), lambda: give_up() or time.monotonic() > deadline)
+    over = lambda: give_up() or time.monotonic() > deadline  # noqa: E731
+    return _unless_given_up(
+        lambda: workshop.web_among(ids, over), give_up, cut=(False, True), until=deadline
+    )
 
 
 #: Why the end of a shutdown replaces a file (`_may_play_web_while_off`).
@@ -2417,10 +2424,11 @@ class Application(Adw.Application):
         that is, or may be, a web page (review r13f, L2;
         `_may_play_web_while_off`). Only the ``project.json`` of each id the
         file names is read, never a scan of the Workshop (r13e, L1), so the
-        look is bounded by the file; it stops at a second Ctrl-C, or after
-        `SHUTDOWN_WORKSHOP_LOOK_SECONDS`, and for such a service an id it
-        can't check, or hasn't reached, counts as a web page. With no status
-        heard at all, only a web page the files confirm counts: such a
+        look is bounded by the file; it runs on a thread of its own, whose
+        wait ends at a second Ctrl-C, or after `SHUTDOWN_WORKSHOP_LOOK_SECONDS`,
+        though one of its calls is slow (review r13g, S-L1), and for such a
+        service an id it can't check, or hasn't reached, counts as a web page.
+        With no status heard at all, only a web page the files confirm counts: such a
         service isn't running, and its start compiles again (or refuses with
         exit 78 a kept file that plays a web page while they are off), or it
         is current and refuses a page at launch itself, so an item that can't
@@ -2464,7 +2472,10 @@ class Application(Adw.Application):
         document never has; only a hand edit that has one is parsed, on a
         thread a second Ctrl-C stops waiting for (review r13f, N2). So a quit
         takes at most the settle's bound, that save's bound while one is being
-        written, and the lock's.
+        written, the lock's, and, unless the service last heard reads schema
+        8, the look's at the Workshop items (for each text judged) and the
+        ``quit``'s; on top of those, only a hand edit's parses, each about a
+        second at most.
 
         What those waits leave is judged once it has settled, before the
         process exits (`_web_off_judged_once_landed`; review r13f, L1): a
@@ -2670,7 +2681,10 @@ class Application(Adw.Application):
         process's exit waits for it, as it waits for the save's worker and the
         lane's (`_runtime_lane_at_exit`), so it takes no longer than they do
         but for its own wait for the compiler lock
-        (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`) and its look at the file.
+        (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`) and its look at the file: a
+        hand edit's parses, each about a second at most, the look at the
+        Workshop items it names (`SHUTDOWN_WORKSHOP_LOOK_SECONDS`), and the
+        ``quit`` (`SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS`).
         ``target`` and ``source`` are the files as the step found them, and
         ``status`` what it had last heard. Only files and that lock are
         touched, nothing of GTK; the one socket call is `_quit_older_service`'s,

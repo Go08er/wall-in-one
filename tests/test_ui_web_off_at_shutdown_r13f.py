@@ -756,13 +756,19 @@ def test_a_second_ctrl_c_or_the_bound_ends_the_look_and_fails_closed(
     if variant == "past-its-bound":
         # Not there at f127a31, which this test is also run against.
         monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", -1.0, raising=False)
+    failures: list[str] = []
+
+    def second_ctrl_c() -> None:
+        os.kill(os.getpid(), signal.SIGINT)
+        # Handled on the main thread, which may be waiting for the look's own (review r13g,
+        # S-L1): the look then asks for it before its next read.
+        _until(lambda: application._settle_cut, "the second Ctrl-C to be handled", failures)
+
     reads = _reads_of(
-        monkeypatch,
-        then=(lambda: os.kill(os.getpid(), signal.SIGINT))
-        if variant == "second-ctrl-c"
-        else lambda: None,
+        monkeypatch, then=second_ctrl_c if variant == "second-ctrl-c" else lambda: None
     )
     application._web_off_on_disk_at_exit()
+    assert not failures, failures
     now = paths.runtime_config_path().read_text(encoding="utf-8")
     if variant == "control":
         assert now == text
@@ -771,6 +777,148 @@ def test_a_second_ctrl_c_or_the_bound_ends_the_look_and_fails_closed(
     if heard == "nothing":
         assert now == text, "with no status heard, ids it didn't reach replaced the file"
         return
+    assert now == _nothing_to_play(), "a file the look couldn't finish with was left"
+
+
+#: The most the held call below holds the look, standing in for one slow filesystem call (a
+#: library on a disk spinning up, a hung mount): before review r13g's S-L1 was fixed, the step
+#: took this long, whatever its bound or a second Ctrl-C said.
+SLOW_CALL_SECONDS: float = 3.0
+
+
+def _held_call(
+    monkeypatch: pytest.MonkeyPatch, where: str, order: list[str]
+) -> tuple[threading.Event, threading.Event, threading.Event]:
+    """One call of the Workshop look held, as one slow filesystem call holds it: Steam's library
+    list and a stat of each library (``content-directories``: made before the look first asks
+    whether to give up), or the first ``project.json`` read (``a-read``). It is held until the
+    test lets it go, or `SLOW_CALL_SECONDS`, and then says so in ``order``. The Events: it
+    began, let it go, it returned. ``control-fast``: nothing is held."""
+    began, release, ended = threading.Event(), threading.Event(), threading.Event()
+
+    def hold() -> None:
+        began.set()
+        release.wait(SLOW_CALL_SECONDS)
+        order.append("the slow call returned")
+        ended.set()
+
+    if where == "content-directories":
+        content_directories = workshop.content_directories
+
+        def held_directories(*arguments: Any, **keywords: Any) -> Any:
+            hold()
+            return content_directories(*arguments, **keywords)
+
+        monkeypatch.setattr(workshop, "content_directories", held_directories)
+    elif where == "a-read":
+        read_project = workshop._read_project
+
+        def held_read(directory: Any, *arguments: Any, **keywords: Any) -> Any:
+            if not began.is_set():
+                hold()
+            return read_project(directory, *arguments, **keywords)
+
+        monkeypatch.setattr(workshop, "_read_project", held_read)
+    else:
+        assert where == "control-fast", where
+    return began, release, ended
+
+
+@pytest.mark.parametrize("where", ["content-directories", "a-read", "control-fast"])
+def test_a_second_ctrl_c_ends_the_wait_for_a_slow_look(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """Review r13g, S-L1 (its p1): nothing heard, and a file naming three scenes, one call of
+    whose look is held (`_held_call`). The look's bound is put out of reach, so only a second
+    Ctrl-C (a real SIGINT, sent once the call is held) can end the wait for it: the step returns
+    while the call is still held, and, with no status heard, the ids it didn't reach leave the
+    file. Before: the look ran on GTK's thread, where the SIGINT only set what the look asks
+    between calls, and the step returned once the call did. The control: nothing held, no
+    Ctrl-C; every id is read, and the file, naming only scenes, is left."""
+    application = profiles().application
+    _content, scenes = _workshop(3)
+    text = _naming(scenes)
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["nothing"])
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", GIVE_UP)
+    order: list[str] = []
+    failures: list[str] = []
+    began, release, ended = _held_call(monkeypatch, where, order)
+
+    def second_ctrl_c() -> None:
+        if not began.wait(GIVE_UP):
+            failures.append("the look never made the held call")
+            return
+        os.kill(os.getpid(), signal.SIGINT)  # as the terminal sends it: to the process
+
+    sender = threading.Thread(target=second_ctrl_c, name="test-ctrl-c")
+    if where != "control-fast":
+        sender.start()
+    start = time.monotonic()
+    try:
+        application._web_off_on_disk_at_exit()
+        took = time.monotonic() - start
+        order.append("the step returned")
+    finally:
+        release.set()
+        if where != "control-fast":
+            sender.join(GIVE_UP)
+            assert ended.wait(GIVE_UP), "the held call never returned"
+    _judged_at_exit(application)
+    assert not failures, failures
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if where == "control-fast":
+        assert order == ["the step returned"], order
+        assert now == text, "a file naming only scenes was replaced"
+        return
+    assert application._settle_cut, "the second Ctrl-C was never handled"
+    assert order == ["the step returned", "the slow call returned"], (
+        f"the step waited for the slow call: it took {took:.2f} s ({order})"
+    )
+    assert now == text, "with no status heard, ids the look didn't reach replaced the file"
+
+
+@pytest.mark.parametrize("where", ["content-directories", "a-read", "control-fast"])
+def test_the_bound_ends_the_wait_for_a_slow_look(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """Review r13g, S-L1 (its p2): an older service heard, no Ctrl-C, and a file naming three
+    scenes, one call of whose look is held (`_held_call`). The look's bound (put at 0.5 s here,
+    well short of the hold) ends the wait for it: the step returns while the call is still
+    held, and the ids it didn't reach count as web pages, as they do once the bound passes
+    between calls, so the file is replaced. Before: the step returned once the call did, past
+    the bound. The control: nothing held; every id is read within the bound, and the file,
+    naming only scenes, is left."""
+    application = profiles().application
+    _content, scenes = _workshop(3)
+    text = _naming(scenes)
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["an-older-service"])
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", 0.5)
+    order: list[str] = []
+    _began, release, ended = _held_call(monkeypatch, where, order)
+    start = time.monotonic()
+    try:
+        application._web_off_on_disk_at_exit()
+        took = time.monotonic() - start
+        order.append("the step returned")
+    finally:
+        release.set()
+        if where != "control-fast":
+            assert ended.wait(GIVE_UP), "the held call never returned"
+    _judged_at_exit(application)
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if where == "control-fast":
+        assert order == ["the step returned"], order
+        assert now == text, "a file naming only scenes was replaced"
+        return
+    assert order == ["the step returned", "the slow call returned"], (
+        f"the step waited for the slow call: it took {took:.2f} s, past its 0.5 s bound ({order})"
+    )
     assert now == _nothing_to_play(), "a file the look couldn't finish with was left"
 
 

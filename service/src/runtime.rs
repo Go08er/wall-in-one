@@ -1837,7 +1837,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     // The discovery call populated the driver's batch snapshot;
                     // reuse it for this hand-over instead of asking the
                     // compositor twice.
-                    let _ = self.apply_current_in_batch(Ok(outputs));
+                    let _ = self.apply_current_in_batch(Ok(outputs), &[]);
                 }
                 Ok(outputs) => {
                     self.live_outputs = Some(outputs);
@@ -2359,6 +2359,14 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn attempt_automatic(&mut self, mut pending: PendingAutomatic, now: Instant) {
+        // A display the hand-over doesn't change keeps its renderer (review
+        // r13f N13): what shows now is the baseline's, unless a retry after
+        // a taboo has none of its own.
+        let resident = if pending.restore_baseline {
+            self.resident_targets()
+        } else {
+            Vec::new()
+        };
         self.restore_selection(&pending.candidate);
         let attempted: Vec<(EntryKey, String)> = self
             .current_targets(&self.target_outputs)
@@ -2374,7 +2382,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             })
             .collect();
         pending.attempts += 1;
-        match self.apply_current() {
+        match self.apply_current_keeping(&resident) {
             Ok(_) => {
                 // A successful automatic hand-over owns a complete residency
                 // interval. The candidate selection is already installed.
@@ -3522,12 +3530,35 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     pub fn apply_current(&mut self) -> Result<String, String> {
+        self.apply_current_keeping(&[])
+    }
+
+    /// `apply_current`, where a mirrored display whose target is one of
+    /// `resident` (what it shows now, `resident_targets`) keeps its renderer.
+    fn apply_current_keeping(&mut self, resident: &[Target]) -> Result<String, String> {
         self.last_output_probe = Instant::now();
         self.driver.begin_apply();
         let discovered = self.probe_outputs();
-        let result = self.apply_current_in_batch(discovered);
+        let result = self.apply_current_in_batch(discovered, resident);
         self.driver.end_apply();
         result
+    }
+
+    /// What the mirrored displays show now, as far as the runtime knows: the
+    /// targets of the selection last applied, each with the entry it plays.
+    /// Only with assignments (each display then has a target of its own),
+    /// after an apply that succeeded, and while nothing has failed since: a
+    /// failed display is applied again. Empty otherwise, which applies every
+    /// display.
+    fn resident_targets(&self) -> Vec<Target> {
+        if self.is_independent()
+            || self.config.displays.is_empty()
+            || self.renderer_failed
+            || self.authoritative_generation == 0
+        {
+            return Vec::new();
+        }
+        self.current_targets(&self.target_outputs)
     }
 
     fn probe_outputs(&mut self) -> Result<Vec<String>, String> {
@@ -3550,6 +3581,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     fn apply_current_in_batch(
         &mut self,
         discovered: Result<Vec<String>, String>,
+        resident: &[Target],
     ) -> Result<String, String> {
         let independent = self.is_independent();
         let previous_outputs: HashSet<String> = self.target_outputs.iter().cloned().collect();
@@ -3609,13 +3641,13 @@ impl<D: WallpaperDriver> Runtime<D> {
             return self.apply_independent_in_batch(&selected);
         }
         self.skip_refused_mirrored();
-        let mut result = self.apply_mirrored_targets();
+        let mut result = self.apply_mirrored_targets(resident);
         // An item whose type changed between the driver's answer and its
         // start is refused there instead, its still already up: it is
         // skipped the same way. Each round remembers one item more.
         while self.learn_refusals_after_apply() {
             self.skip_refused_mirrored();
-            result = self.apply_mirrored_targets();
+            result = self.apply_mirrored_targets(resident);
         }
         result
     }
@@ -3694,7 +3726,12 @@ impl<D: WallpaperDriver> Runtime<D> {
         learned
     }
 
-    fn apply_mirrored_targets(&mut self) -> Result<String, String> {
+    /// Apply every mirrored display's target, break before make. One whose
+    /// target is in `resident`, which it already shows, keeps its renderer
+    /// (review r13f N13): only its palette is applied, in its turn, so the
+    /// shell's one palette ends as an apply of every display leaves it. A
+    /// taboo entry's still is applied all the same.
+    fn apply_mirrored_targets(&mut self, resident: &[Target]) -> Result<String, String> {
         let targets = self.current_targets(&self.target_outputs);
         let outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
         // Every renderer of ours on an output without a target stops here,
@@ -3718,17 +3755,24 @@ impl<D: WallpaperDriver> Runtime<D> {
         let mut missing_programs: Vec<String> = Vec::new();
         for target in targets {
             let mut settings = self.effective_motion_settings(&target.output, self.playback_state);
+            let mut kept = resident.contains(&target);
             if let Some(diagnostic) =
                 self.taboo_fallback_diagnostic(&target.playlist_id, &target.entry.id)
             {
                 settings.dynamics_enabled = false;
+                kept = false;
                 static_fallbacks.push(if target.output.is_empty() {
                     diagnostic
                 } else {
                     format!("{}: {diagnostic}", target.output)
                 });
             }
-            match self.driver.apply(&target.entry, &target.output, &settings) {
+            let applied = if kept {
+                self.driver.apply_palette_only(&target.entry)
+            } else {
+                self.driver.apply(&target.entry, &target.output, &settings)
+            };
+            match applied {
                 Ok(()) => {
                     // A refusal at the start itself is skipped by the caller
                     // (`learn_refusals_after_apply`), never said as a fault.

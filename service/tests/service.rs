@@ -15634,6 +15634,185 @@ fn a_mirrored_rule_naming_the_default_that_changes_nothing_on_screen_applies_not
     );
 }
 
+// -- r13f N13: a mirrored hand-over restarts only the displays it changes ----------------------
+//
+// Applying a mirrored display is break before make: its renderer stops and starts again. N9's
+// fix made the default's rule apply every display at its boundaries, the one that shows the
+// same entry before and after too; and a hand-over to any rule did so since 0.4.0. A display
+// whose target (playlist and entry) doesn't change keeps its renderer; only its palette is
+// applied, in its turn, so the shell's one palette ends where an apply of every display left it.
+
+/// The outputs the driver applied (stopped and started) since `before` applies.
+fn applied_since(state: &Arc<Mutex<RuntimeDriverState>>, before: usize) -> Vec<String> {
+    state.lock().unwrap().applied_outputs[before..].to_vec()
+}
+
+fn applies_so_far(state: &Arc<Mutex<RuntimeDriverState>>) -> usize {
+    state.lock().unwrap().applied_outputs.len()
+}
+
+#[test]
+fn a_mirrored_rule_naming_the_default_restarts_only_the_display_it_moves() {
+    // DP-1 (assigned mixed) moves onto the default's rule at 16:00 and back at 17:00;
+    // HDMI-A-1 (assigned the default) shows all-media-1 throughout. At f127a31 both were
+    // applied at each boundary.
+    let (mut runtime, state) =
+        default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(15, 0));
+    let mut problems = Vec::new();
+    for (hour, entry, seconds) in [(16, "all-media-1", 1), (17, "mixed-1", 2)] {
+        let label = format!("{hour}:00");
+        let before = applies_so_far(&state);
+        state.lock().unwrap().stage_events.clear();
+        runtime.tick(
+            on_the_third(hour, 0),
+            Instant::now() + Duration::from_secs(seconds),
+        );
+        problems.extend(rows_off_screen(
+            &label,
+            &mut runtime,
+            &state,
+            on_the_third(hour, 0),
+        ));
+        assert_eq!(
+            applied_since(&state, before),
+            ["DP-1"],
+            "{label}: HDMI-A-1 restarted, its entry unchanged"
+        );
+        assert_eq!(
+            screen_of(&state).get("DP-1").map(String::as_str),
+            Some(entry),
+            "{label}"
+        );
+        assert_eq!(
+            state.lock().unwrap().stage_events,
+            ["palette all-media-1"],
+            "{label}: HDMI-A-1's palette, in its turn"
+        );
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_mirrored_rule_naming_what_every_display_shows_restarts_nothing() {
+    // The same class since 0.4.0: both displays assigned mixed, and a rule naming mixed. The
+    // playlist in force changes (the default, then mixed, then the default), what every
+    // display shows doesn't: nothing is started again, at either boundary.
+    let document = default_rule_document("mixed").replace(
+        "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+        "connector = \"HDMI-A-1\"\nplaylist = \"mixed\"",
+    );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    let before = applies_so_far(&state);
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let snapshot = status(&mut runtime, on_the_third(16, 0));
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "eve");
+    assert_eq!(route(&snapshot, "HDMI-A-1")["schedule_rule_id"], "eve");
+    runtime.tick(on_the_third(17, 0), Instant::now() + Duration::from_secs(2));
+    let snapshot = status(&mut runtime, on_the_third(17, 0));
+    assert!(route(&snapshot, "DP-1")["schedule_rule_id"].is_null());
+    let problems = rows_off_screen("17:00", &mut runtime, &state, on_the_third(17, 0));
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(
+        applied_since(&state, before),
+        Vec::<String>::new(),
+        "started again"
+    );
+}
+
+#[test]
+fn a_mirrored_rotation_restarts_only_the_displays_whose_entry_moves() {
+    // Rotation moves each playlist in force on: mixed (DP-1) to its second entry, while pages
+    // (HDMI-A-1) has one entry, which stays. Only DP-1 is started again.
+    let document = default_rule_document("all-media")
+        .replace("cycle_enabled = false", "cycle_enabled = true")
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+            "connector = \"HDMI-A-1\"\nplaylist = \"pages\"",
+        );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(12, 0));
+    let before = applies_so_far(&state);
+    runtime.tick(
+        on_the_third(12, 6),
+        Instant::now() + Duration::from_secs(301),
+    );
+    let problems = rows_off_screen("12:06", &mut runtime, &state, on_the_third(12, 6));
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(applied_since(&state, before), ["DP-1"], "pages-1 restarted");
+    let screen = screen_of(&state);
+    assert_eq!(screen.get("DP-1").map(String::as_str), Some("mixed-2"));
+    assert_eq!(screen.get("HDMI-A-1").map(String::as_str), Some("pages-1"));
+}
+
+#[test]
+fn control_a_mirrored_display_whose_renderer_failed_is_started_again_at_a_boundary() {
+    // A renderer that exited since the last apply: what the runtime knows to be on screen no
+    // longer is, so the hand-over applies every display, HDMI-A-1 too, as Play would.
+    let (mut runtime, state) =
+        default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(15, 0));
+    state
+        .lock()
+        .unwrap()
+        .failures
+        .push("HDMI-A-1: the motion renderer exited".into());
+    runtime.tick(
+        on_the_third(15, 30),
+        Instant::now() + Duration::from_secs(1),
+    );
+    assert_eq!(
+        status(&mut runtime, on_the_third(15, 30))["renderer_failed"],
+        true
+    );
+    let before = applies_so_far(&state);
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(2));
+    let mut applied = applied_since(&state, before);
+    applied.sort();
+    assert_eq!(applied, ["DP-1", "HDMI-A-1"]);
+    let snapshot = status(&mut runtime, on_the_third(16, 0));
+    assert_eq!(snapshot["renderer_failed"], false);
+    let problems = rows_off_screen("16:00", &mut runtime, &state, on_the_third(16, 0));
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn control_a_mirrored_startup_retry_after_a_taboo_applies_the_entry_it_moves_to() {
+    // The startup retry has no baseline of its own (it is its own candidate), and its displays
+    // failed: after three failed attempts on DP-1's entry it is marked taboo, the cursor moves,
+    // and the next entry is applied.
+    let (mut runtime, state) = {
+        let parsed = Config::from_bytes(default_rule_document("all-media").into_bytes()).unwrap();
+        let state = Arc::new(Mutex::new(RuntimeDriverState {
+            connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+            fail_entry_id: Some("mixed-1".into()),
+            fail_entry_attempts_remaining: 3,
+            ..RuntimeDriverState::default()
+        }));
+        let runtime = Runtime::new(
+            PathBuf::from("/tmp/runtime.toml"),
+            parsed,
+            RuntimeDriver(state.clone()),
+            on_the_third(12, 0),
+        )
+        .unwrap();
+        (runtime, state)
+    };
+    let at = on_the_third(12, 0);
+    let started = Instant::now();
+    assert!(runtime.apply_current().is_err());
+    assert!(runtime.schedule_initial_apply_retry(started));
+    for seconds in [2, 4, 6] {
+        runtime.tick(at, started + Duration::from_secs(seconds));
+    }
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(snapshot["taboo_entries"][0]["entry_id"], "mixed-1");
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+    assert_eq!(
+        screen_of(&state).get("DP-1").map(String::as_str),
+        Some("mixed-2")
+    );
+    let problems = rows_off_screen("12:00", &mut runtime, &state, at);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
 /// The r13e sequence's document: rules noon (pages), aft-a and aft-b (mixed, back to back),
 /// eve (the default, all-media) and late, with DP-1 assigned mixed and HDMI-A-1 all-media.
 fn mirrored_sequence_document(generation: char, rename_second: bool) -> String {

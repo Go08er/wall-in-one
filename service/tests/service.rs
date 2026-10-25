@@ -11680,7 +11680,8 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
         )],
     );
     let (mut runtime, arguments, config_path) = p2_runtime(&root, WITH_STILL_ON, &home);
-    assert!(runtime.apply_current().is_ok());
+    let applied = without_text_file_busy(|| runtime.apply_current());
+    assert!(applied.is_ok(), "{applied:?}");
     assert!(engine_started(&arguments), "allowed, the page plays");
     // The same document without the permission (the entries unchanged): every display
     // starts again, and the page is skipped this time.
@@ -11691,12 +11692,22 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
     fs::remove_file(&arguments).unwrap();
     let reply = runtime_command(&mut runtime, noon(), "reload", None);
     assert!(reply.ok, "{}", reply.message);
-    thread::sleep(Duration::from_millis(300));
-    assert!(!arguments.exists(), "the page started again");
+    // What the service did, not what a stand-in wrote meanwhile: the page was asked about and
+    // refused (it would be running otherwise, its recorder sleeping), and the still plays.
     let snapshot = status(&mut runtime, noon());
     assert_eq!(snapshot["motion_active"], false);
     assert_eq!(snapshot["entry_id"], "entry-2");
     assert_eq!(snapshot["last_error"], "");
+    assert_eq!(
+        snapshot["refused"],
+        serde_json::json!([{
+            "scene_id": WEB_PAGE,
+            "web_page": true,
+            "reason": snapshot["refused"][0]["reason"],
+        }]),
+        "{snapshot}"
+    );
+    assert!(!arguments.exists(), "the page started again");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();

@@ -21,8 +21,9 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from tests.test_next_schedule_mapping import _playlist  # noqa: E402
 from tests.test_next_state import _session  # noqa: E402
 from tests.test_ui_next_displays import Shown, backend, items, monitors  # noqa: E402,F401
-from tests.test_ui_r13g import _shown_item  # noqa: E402
+from tests.test_ui_r13g import _at_the_ceiling, _mirrored_pick_rows, _shown_item  # noqa: E402
 from tests.test_ui_r13i import (  # noqa: E402
+    _following,
     _independent_named,
     _independent_unsure,
     _mirrored_ceiling_on_layout,
@@ -56,6 +57,14 @@ def _all_media_named(ids: dict[str, str]) -> dict[str, Any]:
 def _ceiling(ids: dict[str, str]) -> dict[str, Any]:
     """Mirrored, two rows: the pick can't be named (pick_stood_in at the ceiling)."""
     return _mirrored_ceiling_on_layout({"pages": ids["pages"], "scenes": ids["scenes"]})
+
+
+def _following_rows(ids: dict[str, str]) -> dict[str, Any]:
+    """Mirrored, DP-1 + HDMI-A-1, no pick: every display on its default "Scenes"."""
+    status = _following(ids, independent=False)
+    [row] = status["displays"]
+    status["displays"] = [{**row, "connector": one} for one in ("DP-1", "HDMI-A-1")]
+    return status
 
 
 def _independent_all_media(ids: dict[str, str]) -> dict[str, Any]:
@@ -288,7 +297,7 @@ def _no_reply_with_an_unlisted_record(
     return page, session
 
 
-def test_u_n11_no_reply_is_not_named_by_this_reply(
+def test_u_n11_no_reply_names_the_apps_record_as_your_pick(
     items: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,5 +464,135 @@ def test_u_n12_control_build_playback_labels_an_unnamed_pick(
     page, _app, _ids, session = _classic(items, monkeypatch, independent=False, status=_ceiling)
     try:
         assert _shown_item(_overall(page)) == UNNAMED
+    finally:
+        session.shutdown()
+
+
+# ================================================================ U-N15 ========
+# Three label clauses that no test caught: `_pick_label`'s route_unsure, the per-display
+# click's label, and the next page's `_pick_label` route_unsure.
+
+
+def _mirrored_ceiling_split(ids: dict[str, str]) -> dict[str, Any]:
+    """Mirrored at the ceiling: DP-1 shows the stand-in, HDMI-A-1 the pick itself.
+
+    The top level is then route_unsure, and not pick_stood_in.
+    """
+    status = _mirrored_pick_rows()
+    second = status["displays"][1]
+    second.pop("stand_in_for", None)
+    second.update(connector="HDMI-A-1", playlist_id="pages", playlist="pages")
+    return _renamed(_at_the_ceiling(status), {"pages": ids["pages"], "scenes": ids["scenes"]})
+
+
+def test_u_n15_classic_overall_a_mirrored_unsure_pick_is_not_named(
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wall_in_one.ui import runtime_truth
+
+    page, app, ids, session = _classic(
+        items, monkeypatch, independent=False, status=_all_media_named
+    )
+    try:
+        status = _mirrored_ceiling_split(ids)
+        truth = runtime_truth.from_status(status)
+        assert truth is not None and truth.is_manual  # precondition
+        assert truth.route_unsure and not truth.pick_stood_in  # precondition
+        app.runtime_status = status
+        page.runtime_status_changed(session)
+        assert _shown_item(_overall(page)) == UNNAMED
+    finally:
+        session.shutdown()
+
+
+def test_u_n15_classic_display_click_labels_the_item_from_the_reply(
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, app, ids, session = _classic(
+        items, monkeypatch, independent=True, status=_independent_all_media
+    )
+    try:
+        row = _display(page)
+        assert _shown_item(row) == NAMED
+        row.set_selected(_index(session, ids["pages"]))
+        assert app.sent == [("DP-1", "playlist-use", ids["pages"])], app.sent
+        assert _shown_item(row) == NAMED
+    finally:
+        session.shutdown()
+
+
+def test_u_n15_control_classic_display_click_keeps_the_unnamed_label(
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, _app, ids, session = _classic(
+        items, monkeypatch, independent=True, status=_independent_ceiling
+    )
+    try:
+        row = _display(page)
+        row.set_selected(_index(session, ids["pages"]))
+        assert _shown_item(row) == UNNAMED
+    finally:
+        session.shutdown()
+
+
+def test_u_n15_next_page_an_unsure_display_pick_is_not_named(
+    backend: Any,  # noqa: F811
+    items: Any,  # noqa: F811
+) -> None:
+    view, ids = _next_page(backend, items)
+    try:
+        view.answer(_independent_ceiling(ids))
+        view.select("DP-1")
+        assert _shown_item(view.page.play_row) == UNNAMED
+    finally:
+        view.close()
+
+
+# ================================================================ U-L-c ========
+# One click on the classic overall "Active playlist" starts one command. The handler's
+# own revert is re-emitted by GObject after it returns; it must not start a second.
+
+
+@pytest.mark.parametrize("answer", [_pages_named, _following_rows])
+def test_u_l_c_one_click_on_the_overall_row_sends_one_command(
+    answer: Any,
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, app, ids, session = _classic(items, monkeypatch, independent=False, status=answer)
+    try:
+        _overall(page).set_selected(_index(session, ids["scenes"]))
+        assert app.sent == [("playlist-use", ids["scenes"])], app.sent
+    finally:
+        session.shutdown()
+
+
+@pytest.mark.parametrize("answer", [_all_media_named, _ceiling])
+def test_u_l_c_control_a_revert_onto_the_item_sends_nothing_more(
+    answer: Any,
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, app, ids, session = _classic(items, monkeypatch, independent=False, status=answer)
+    try:
+        _overall(page).set_selected(_index(session, ids["scenes"]))
+        assert app.sent == [("playlist-use", ids["scenes"])], app.sent
+    finally:
+        session.shutdown()
+
+
+def test_u_l_c_a_second_click_after_the_first_is_still_a_click(
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, app, ids, session = _classic(items, monkeypatch, independent=False, status=_pages_named)
+    try:
+        row = _overall(page)
+        row.set_selected(_index(session, ids["scenes"]))
+        row.set_selected(_index(session, ids["scenes"]))
+        assert app.sent == [("playlist-use", ids["scenes"])] * 2, app.sent
     finally:
         session.shutdown()

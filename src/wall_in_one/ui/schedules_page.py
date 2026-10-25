@@ -95,7 +95,7 @@ def _assignment_index(choices: tuple[Any, ...], playlist_id: str) -> int:
 
 
 def _pick_label(truth: runtime_truth.RuntimeTruth | None) -> str:
-    """ "Your pick" where the reply names the pick, else the not-named item."""
+    """ "Your pick" for no reply or a reply that names the pick, else the not-named item."""
     if truth is None:
         return unnamed_pick.NAMED_PICK  # no reply to be "not named by": the app's record
     named = truth.is_manual and not truth.route_unsure and not truth.pick_stood_in
@@ -729,7 +729,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         choices: tuple[Any, ...],
         truth: runtime_truth.RuntimeTruth | None,
     ) -> int | None:
-        """The selected row, or None to leave the selector where it is.
+        """The selected row, or None for a pick with no row here (`_place_playback`).
 
         None also stands for a named pick this page lists no row for (All media).
         A pick the reply can't name (``pick_stood_in``), or can't tell from what stands in
@@ -1184,10 +1184,16 @@ class SchedulesPage(Gtk.ScrolledWindow):
             unnamed_pick.show(row, label)
 
     def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
+        echo: int | None = None  # the index the revert below put the row on
+
         def changed(row: Adw.ComboRow, _property: object) -> None:
+            nonlocal echo
+            index = row.get_selected()
+            if echo == index:
+                echo = None  # GObject re-emits the revert's notify after we return
+                return
             if self._loading:
                 return
-            index = row.get_selected()
             if index > len(choices):
                 return  # the unnamed-pick item: it names nothing to ask for
             try:
@@ -1206,14 +1212,17 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 try:
                     truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
                     selected = self._playback_selected(self._app.session, choices, truth)
-                    # A pick with no row here (unnamed, or named but unlisted) can't be
-                    # told from the click, which may be the one the service just
-                    # refused: the unnamed-pick item, never the click.
+                    # A pick with no row here (unnamed, or named but unlisted) is shown
+                    # as the unnamed-pick item, never the click, which may be the one
+                    # the service just refused. (A named All-media pick could be told
+                    # from a click, but is not.)
                     if selected is None:
                         unnamed_pick.show(row, _pick_label(truth))
                     else:
                         unnamed_pick.drop(row)
                         row.set_selected(selected)
+                    if row.get_selected() != index:
+                        echo = row.get_selected()
                 finally:
                     self._loading = False
             # The next accepted status reconciles this row.  Do not invalidate

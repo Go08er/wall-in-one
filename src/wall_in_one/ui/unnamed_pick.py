@@ -1,7 +1,7 @@
 """A "Playing now" selector item for a pick with no row on the page (r13f N4, N7).
 
-The pick is either one the reply cannot name (``NAMED_PICK`` is for one it names, which
-the page just has no row for), or a named one the page does not list.
+The pick is one the reply cannot name (``UNNAMED_PICK``), or one the page has no row for:
+named by the reply (``NAMED_PICK``) or, with no reply, by the app's own record.
 
 At the reply ceiling the service leaves out ``stand_in_for``, and no field says which
 playlist a pick is. The app's own record of a pick is written only by its own paths,
@@ -22,7 +22,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 UNNAMED_PICK = "Your pick (not named by this reply)"
-#: For a pick the reply does name, which the page just has no row for.
+#: For a pick the reply names (or, with no reply, the app's record), which the page has no row for.
 NAMED_PICK = "Your pick"
 #: Set on the row's model while its last item is the placeholder, so a playlist
 #: named like it is not taken for it.

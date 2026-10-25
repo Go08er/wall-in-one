@@ -293,6 +293,9 @@ MAX_GUI_AUTHORING_QUEUE: Final = 32
 #: (SIGINT's ``quit()``) keeps running the loop for the numbers it hands on to
 #: be saved, and published: as long as ``ctl`` gives one authoring change.
 SHUTDOWN_SETTLE_SECONDS: Final = client.AUTHORING_TIMEOUT
+#: How long the last step of a shutdown waits, all told, for a settings save
+#: still being written and for the compiler lock (`Application._web_off_on_disk_at_exit`).
+SHUTDOWN_WEB_OFF_SECONDS: Final = 2.0
 PACKAGE_SOURCE_ACTION: Final = "package-source"
 PRESENT_PACKAGE_ACTION: Final = "present-package"
 # Installed Nix package directories are immutable and distinguish revisions
@@ -731,6 +734,10 @@ class Application(Adw.Application):
         #: The task the authoring worker has now, from the head of the queue
         #: until it completes (`_numbers_unsettled`).
         self._authoring_current: _AuthoringTask | None = None
+        #: The worker's run of the latest task started, which the last step of
+        #: a shutdown waits for, briefly: a settings save may still be being
+        #: written (`_web_off_on_disk_at_exit`).
+        self._authoring_future: Future[Any] | None = None
         #: A renderer number's write asked for the publication now held
         #: (`_runtime_publication_held`): the shutdown settle waits for it too.
         self._number_publication = False
@@ -2159,6 +2166,9 @@ class Application(Adw.Application):
             # work too; no completion may reach the destroyed window.
             self._runtime_jobs.shutdown(wait=False, cancel_futures=True)
             self._runtime_jobs = None
+        # What a publication the shutdown cut would have replaced, while web
+        # wallpapers are off, is replaced on disk now, file-only (r13d, N11).
+        self._web_off_on_disk_at_exit()
         self._stills.shutdown()
         self._session.shutdown()
         with self._browse_lock:
@@ -2180,6 +2190,111 @@ class Application(Adw.Application):
             self._control = None
         self._held = False
         Adw.Application.do_shutdown(self)
+
+    def _web_off_on_disk_at_exit(self) -> None:
+        """Last in `do_shutdown`: a file that may play a web page while they are off is replaced.
+
+        A move of ``allow_web_wallpapers`` saved while the shutdown settles is
+        published on the runtime lane, ``--service`` included, and the
+        shutdown can cut that publication (the settle's bound, a second
+        Ctrl-C) before it installs anything; the web-off guard after it is
+        skipped then (`_stopping_web_after_failure`), and nothing publishes
+        after it. A save still being written when the loop ended gets no
+        publication at all. Either way the service would go on playing a web
+        page while the setting is off, until it next starts (review r13d,
+        N11).
+
+        So, once a save still being written has landed: when ``settings.toml``
+        says web wallpapers are off and the file on disk may let a web page
+        play (it allows them; or, for a service not known to read schema 8,
+        it names a web page or a Workshop item whose type can't be checked,
+        as `_web_off_guard` judges), the file is replaced, under the compiler
+        lock, with what a publication would install now: compiled for them
+        off, for the service the last status described, from the library in
+        memory (`runtime_config.web_off_document`); or, when that can't be
+        compiled (the library isn't a valid inventory, or is for other
+        folders, or the compile fails), with the document that plays nothing.
+        The service's own poll of the file loads it; a service older than
+        schema 8 can load only the compiled one. Nothing else is written, and
+        nothing is asked of the service: the shutdown has cut the socket
+        calls off, and one would hold the exit.
+
+        Bounded: the save and the lock are waited for `SHUTDOWN_WEB_OFF_SECONDS`
+        all told, so the quit takes at most the settle's bound and this; the
+        compile is the library's in memory, and isn't interrupted. A lock
+        still held then is another publication's, which reads the setting
+        under it and installs only what it allows (review r13c, D2), so
+        nothing is written here. What that leaves is this process's own lane
+        holding it past the wait and then failing. Never raises.
+        """
+        try:
+            self._replace_web_off_on_disk(time.monotonic() + SHUTDOWN_WEB_OFF_SECONDS)
+        except Exception:
+            LOGGER.exception(
+                "the runtime configuration on disk could not be checked against "
+                "Allow web wallpapers at shutdown"
+            )
+
+    def _replace_web_off_on_disk(self, deadline: float) -> None:
+        """`_web_off_on_disk_at_exit`'s work, every wait ending by ``deadline``."""
+        saving = self._authoring_future
+        if saving is not None:
+            with contextlib.suppress(Exception):  # landed, failed or still running: read below
+                saving.result(timeout=max(0.0, deadline - time.monotonic()))
+        try:
+            settings = config.load_strict()
+        except config.ConfigError:
+            return  # as for `_web_off_guard`: the next compile says what is wrong with it
+        if settings.allow_web_wallpapers:
+            return
+        target = paths.runtime_config_path()
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(
+                    runtime_config.compiler_lock(timeout=max(0.0, deadline - time.monotonic()))
+                )
+            except runtime_config.RuntimeConfigError:
+                return  # a publication holds it, and installs only what the setting allows
+            try:
+                on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
+            except OSError, UnicodeDecodeError:
+                return
+            if on_disk is None:
+                return
+            status = self.runtime_status
+            plays = runtime_config.allows_web_wallpapers(text=on_disk)
+            if not plays and not runtime_config.nothing_to_play_supported(status):
+                titles, unchecked = runtime_config.web_wallpapers_in([on_disk])
+                plays = bool(titles or unchecked)
+            if not plays:
+                return
+            document = self._web_off_document_now(settings, status)
+            if document == on_disk:
+                return
+            try:
+                runtime_config.install_web_off(document, target)
+            except runtime_config.RuntimeConfigNotDurableError as uncertain:
+                LOGGER.warning("%s", uncertain)  # installed: only its folder sync failed
+            LOGGER.info(
+                "Allow web wallpapers is off, but the configuration on disk could play a web "
+                "wallpaper; it was replaced at shutdown"
+            )
+
+    def _web_off_document_now(self, settings: config.Settings, status: object) -> str:
+        """What `_web_off_on_disk_at_exit` installs: a web-off compile, else nothing to play."""
+        with self._runtime_config_lock:
+            sources = self._accepted_library_sources
+        if sources is None:
+            sources = (self._session.library.roots, self._settings.scan_workshop)
+        if self._inventory_installable(None) and sources == (
+            settings.roots,
+            settings.scan_workshop,
+        ):
+            try:
+                return runtime_config.web_off_document(settings, self._session, status)
+            except (runtime_config.RuntimeConfigError, config.ConfigError, OSError) as error:
+                LOGGER.info("no web-off document could be compiled at shutdown: %s", error)
+        return runtime_config.nothing_to_play_document(settings, runtime_config.WEB_OFF_REASON)
 
     def _on_close_request(self, window: Gtk.Window) -> bool:
         # Every settings edit is persisted by ``update_settings``.  Saving the
@@ -3433,8 +3548,9 @@ class Application(Adw.Application):
         # From `do_shutdown` on, ``--service`` too: its synchronous publication
         # would hold the loop for as long as the service takes to answer (a
         # reload waits up to RUNTIME_ACTION_TIMEOUT), past the settle's bound
-        # (review r13c, G1-L1). On the lane, the shutdown cuts it off, and the
-        # web-off guard after one it cut isn't needed (`_stopping_web_after_failure`).
+        # (review r13c, G1-L1). On the lane, the shutdown cuts it off; the web-off
+        # guard after one it cut is skipped, and the end of the shutdown replaces on
+        # disk what it would have (`_stopping_web_after_failure`).
         if not self._service_start or self._shutting_down:
             published = self._publish_runtime_async()
             if published and self._removal_convergence_held:
@@ -3766,6 +3882,7 @@ class Application(Adw.Application):
             finally:
                 self._authoring_task_completed(task)
             return
+        self._authoring_future = future
         # The adoption, the reply and the next queued task all wait on this
         # delivery: above redraw.
         future.add_done_callback(
@@ -4570,8 +4687,11 @@ class Application(Adw.Application):
         it. What is left is work the shutdown itself cut off, by closing its
         socket; the document it installed is on disk for the service's own
         poll of the file, and the next service start is guarded
-        (``--service-startup-prepare``). Socket calls past that point would
-        hold the process's exit for as long as they wait.
+        (``--service-startup-prepare``). One cut before it installed leaves
+        the file it would have replaced, which the end of the shutdown
+        replaces while web wallpapers are off (`_web_off_on_disk_at_exit`).
+        Socket calls past that point would hold the process's exit for as
+        long as they wait.
 
         Under ``--service`` that includes the publications from `do_shutdown`
         on, which run on this lane too (`_publish_runtime_for_context`), and
@@ -4589,9 +4709,10 @@ class Application(Adw.Application):
         (`runtime_config.publish_changes`), for the service's poll to load.
         One that wasn't compiled yet installs nothing and fails nothing.
         What is left is a move of the setting saved while the settle's loop
-        runs (a gesture in a window still open, a save already under way):
-        its publication, or the number's, which reads the file, is the
-        window's case above, as at any quit of the window's own process.
+        runs (a gesture in a window still open, a save already under way),
+        whose publication, or the number's, which reads the file, the
+        shutdown cuts before it installs: the window's case above, which the
+        end of the shutdown closes (`_web_off_on_disk_at_exit`).
         """
         if publication.deferred or self._runtime_shutdown:
             return publication

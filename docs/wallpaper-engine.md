@@ -208,6 +208,15 @@ compile, say, while the person turns it off in the window) installs nothing
 that allows web wallpapers either: the setting is read again just before the
 install, under the lock its own save takes, and the document is compiled
 again for what it says ([runtime-config.md](runtime-config.md)).
+When the app ends, a publication of the setting that the quit cut off before
+it installed anything (it was turned off just before Ctrl-C, say) leaves the
+file it would have replaced. So, last, while the setting is off, a file on
+disk that would play a web page, judged as above, is replaced with what a
+publication would install, or with the document that plays nothing, without
+asking the service anything: its own check of the file loads it. That step
+waits at most two seconds, for a save of the setting still being written and
+for the lock; another writer holding the lock past that installs only what
+the setting allows.
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
 a web page, names a Workshop item whose type can't be checked, or allows web

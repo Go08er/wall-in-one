@@ -17,6 +17,9 @@ loop until they settle (review r13b, G1). Review r13c found four things wrong wi
   installed when it lands), as the kernel delivers one.
 * **N-3, a number nudged while ``ctl quit`` waits** was refused without a word when its timer
   fired. Now it is saved, as one still waiting when the quit ends is.
+* **r13d N11, web wallpapers turned off while the shutdown settles:** that publication, on the
+  runtime lane, was cut before it installed, and the file on disk still allowed web wallpapers.
+  Now the end of the shutdown replaces it, file-only.
 
 Real Application, both interfaces where it matters; the service is the suite's fake runtime,
 made to hang on ``reload`` where said. Nothing outside the test's sandbox is touched.
@@ -58,7 +61,7 @@ from tests.test_ui_next_window import (  # noqa: E402
 )
 from tests.test_ui_renderer_dials import _own, toolkit  # noqa: E402,F401
 from tests.test_ui_renderer_settle_quit import _after, _clip, _rows, _scanned  # noqa: E402
-from wall_in_one import runtime_compatibility  # noqa: E402
+from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.library import pairings  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
@@ -70,6 +73,7 @@ class _Slow:
     """`client.send_runtime` that sleeps ``seconds`` on "reload" once armed, then answers.
 
     ``on_gtk``: for each reload while armed, whether it was sent from GTK's own thread.
+    ``first``: called once, as the first reload while armed begins.
     """
 
     def __init__(self, inner: Callable[..., Any], seconds: float) -> None:
@@ -77,10 +81,14 @@ class _Slow:
         self.seconds = seconds
         self.armed = False
         self.on_gtk: list[bool] = []
+        self.first: Callable[[], None] | None = None
 
     def __call__(self, verb: str, *arguments: Any, **keywords: Any) -> Any:
         if verb == "reload" and self.armed:
             self.on_gtk.append(threading.current_thread() is threading.main_thread())
+            first, self.first = self.first, None
+            if first is not None:
+                first()
             time.sleep(self.seconds)
         return self.inner(verb, *arguments, **keywords)
 
@@ -108,9 +116,12 @@ def _setup(
     service: bool,
     settle_seconds: float,
     reload_seconds: float = 0.0,
+    allow_web: bool = False,
 ) -> tuple[Application, Path, _Slow, _Settles]:
     """The application, its video, the faked service, and how long each settle took."""
     fake = sandboxed_runtime(monkeypatch, tmp_path)
+    if allow_web:
+        config.update({"allow_web_wallpapers": True})
     monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
     monkeypatch.setattr(app_module, "SHUTDOWN_SETTLE_SECONDS", settle_seconds)
     slow = _Slow(fake.send_runtime, reload_seconds)
@@ -523,3 +534,104 @@ def test_a_quit_or_close_during_the_settle_is_harmless(
     if ui == "classic":
         # The next window logs teardown criticals with no dial touched (r13b observation).
         assert not criticals, criticals[:3]
+
+
+# -- r13d N11: web wallpapers turned off while the shutdown settles ----------------------------
+
+
+def _identity() -> tuple[int, int] | None:
+    """Which ``runtime.toml`` is on disk: a rename makes another."""
+    try:
+        found = paths.runtime_config_path().stat()
+    except FileNotFoundError:
+        return None
+    return found.st_ino, found.st_mtime_ns
+
+
+@pytest.mark.parametrize(
+    ("mode", "variant"),
+    [
+        ("service", "turned-off-during-the-settle"),
+        ("windowed", "turned-off-during-the-settle"),
+        ("service", "turned-off-and-no-compile-at-the-end"),
+        ("service", "control-left-on"),
+        ("service", "control-off-throughout"),
+        ("windowed", "control-off-throughout"),
+    ],
+)
+def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, variant: str
+) -> None:
+    """Ctrl-C with a number waiting; its publication's reload hangs past the settle's bound.
+    While it hangs, inside the settle, the person turns web wallpapers off in the window: that
+    save lands, and its publication waits on the lane behind the hung reload until the shutdown
+    cuts it, before it installs anything. Before: ``[*-turned-off-during-the-settle]`` left the
+    number's document, which allows web wallpapers, on disk for the service's poll, while
+    settings.toml said they are off. What replaces it is compiled for web wallpapers off, so the
+    library still plays; when that compile fails at the end, it is the document that plays
+    nothing. The controls change nothing during the settle, and nothing more is written."""
+    service = mode == "service"
+    turning_off = variant.startswith("turned-off")
+    application, clip, slow, spans = _setup(
+        monkeypatch,
+        tmp_path,
+        ui="classic",
+        service=service,
+        settle_seconds=2.0,
+        reload_seconds=4.0,
+        allow_web=variant != "control-off-throughout",
+    )
+    installed: list[tuple[int, int] | None] = []
+    turned: list[bool] = []
+    if variant == "turned-off-and-no-compile-at-the-end":
+        compile_ = runtime_config._compile
+
+        def no_compile_once_shut_down(*arguments: Any, **keywords: Any) -> Any:
+            if application._runtime_shutdown:
+                raise runtime_config.RuntimeConfigError("a store can't be read (this test)")
+            return compile_(*arguments, **keywords)
+
+        monkeypatch.setattr(runtime_config, "_compile", no_compile_once_shut_down)
+
+    def turn_off() -> bool:
+        turned.append(application.update_settings_async(allow_web_wallpapers=False))
+        return GLib.SOURCE_REMOVE
+
+    def hung() -> None:
+        # On the lane, the number's document already installed, before the reload hangs.
+        installed.append(_identity())
+        if turning_off:
+            GLib.idle_add(turn_off)  # the window's gesture, run by the settle's loop
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        speed, _brightness = _rows(application, clip)
+        speed.set_value(1.5)
+        slow.first = hung
+        slow.armed = True
+        application.quit()  # what SIGINT's fallback calls
+
+    _run(application, scenario(), service=service)
+    own = _own(clip, Kind.VIDEO)
+    assert own.dial("video", "speed") == 1.5, own
+    assert spans, "no settle ran"
+    assert installed and installed[0] is not None, "the number's publication never installed"
+    on_disk = runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+    if turning_off:
+        assert turned == [True], f"the toggle was never saved: {turned}"
+        assert config.load_strict().allow_web_wallpapers is False
+        assert not on_disk, (
+            "settings.toml says web wallpapers are off, and the file on disk still allows them"
+        )
+        assert _identity() != installed[0]
+        text = paths.runtime_config_path().read_text(encoding="utf-8")
+        if variant == "turned-off-and-no-compile-at-the-end":
+            assert "nothing_to_play" in text, "not the document that plays nothing"
+        else:
+            assert "nothing_to_play" not in text and str(clip) in text, (
+                "not a compile for web wallpapers off of the library"
+            )
+        return
+    assert config.load_strict().allow_web_wallpapers is (variant == "control-left-on")
+    assert on_disk is (variant == "control-left-on")
+    assert _identity() == installed[0], "something was written after the publication"

@@ -504,7 +504,8 @@ def pick_holders(
     own paths, not by a pick made through the service (``ctl``, the companion), so it can
     be stale. Where the service names the pick (the playlist asked for by a manual route,
     its ``stand_in_for`` when a stand-in plays) that answer wins; the record is used only
-    where it names none (an older service, nothing heard, the reply ceiling).
+    where it names none because it cannot (nothing heard, the reply ceiling). A status that
+    says no pick holds is a definite answer: the record doesn't count.
     """
     connectors: list[str] = []
     if truth is None:
@@ -519,11 +520,18 @@ def pick_holders(
         ]
         named = any(row.asked_playlist_id for row in rows)
         connectors = [row.connector for row in rows if row.asked_playlist_id == playlist_id]
-        whole = not named and record == playlist_id
+        # Rows that are all non-manual are a definite "no pick"; unsure manual rows are not.
+        unsure = any(r.connected and r.manual_override and r.route_unsure for r in truth.displays)
+        whole = not named and unsure and record == playlist_id
     else:
         named = truth.is_manual and not truth.route_unsure and bool(truth.asked_playlist_id)
         # The service's answer wins; the app's record only where it names no pick.
-        whole = truth.asked_playlist_id == playlist_id if named else record == playlist_id
+        # A running service that says no pick holds (not manual) is a definite answer.
+        whole = (
+            truth.asked_playlist_id == playlist_id
+            if named
+            else (truth.is_manual and record == playlist_id)
+        )
     return whole, tuple(connectors)
 
 

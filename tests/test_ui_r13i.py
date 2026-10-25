@@ -58,9 +58,9 @@ def _renamed(status: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
 
 
 # ===================================================================== P1 ======
-# displays.py:536-550: on a new model, the *index* the row was on is kept, so after a
-# playlist is created (or removed / renamed into another order) the row names another
-# playlist than the one it was on, or turns the unnamed-pick item into a real playlist.
+# On a new model (a playlist created, removed or renamed into another order) the row
+# keeps the playlist it was on by id, not by index, and the unnamed-pick item stays the
+# item rather than turning into a real playlist.
 
 
 def _next_after_change(
@@ -172,11 +172,8 @@ def test_p1_real_page_a_new_playlist_isnt_shown_as_the_unnamed_pick(
 
 
 # ===================================================================== P2 ======
-# runtime_truth.py:519-523: independent, a pick the reply can't tell from its stand-in
-# (route_unsure) is listed as held by the playlist on screen, which may be the stand-in.
-# Both delete warnings then say the delete "removes the current manual override" while
-# the delete itself (app.py:7713, which ignores the connectors) releases nothing, and
-# the service keeps a pick whose playlist is still there.
+# Independent, a pick the reply can't tell from its stand-in (route_unsure) is held by
+# no connector: neither delete warning claims it, and the delete releases nothing.
 
 
 def _independent_unsure(ids: dict[str, str]) -> dict[str, Any]:
@@ -195,19 +192,12 @@ def _independent_named(ids: dict[str, str]) -> dict[str, Any]:
 
 
 def _warnings(application: Any, pid: str) -> tuple[str, str]:
-    import inspect
-
     from wall_in_one.ui import playlists_page
     from wall_in_one.ui.next.real_playlists import RealPlaylists
 
     session = application.session
-    extra = (
-        # As the page calls it (playlists_page.py:2052-2056); f127a31's takes no truth.
-        (runtime_truth.from_status(getattr(application, "runtime_status", None)),)
-        if "truth" in inspect.signature(playlists_page._deletion_body).parameters
-        else ()
-    )
-    classic = playlists_page._deletion_body(session, session.playlists.get(pid), *extra)
+    truth = runtime_truth.from_status(getattr(application, "runtime_status", None))
+    classic = playlists_page._deletion_body(session, session.playlists.get(pid), truth)
     fake = SimpleNamespace(
         _backend=SimpleNamespace(status_model=application._status_model),
         _session=session,
@@ -272,10 +262,8 @@ def test_control_p2_a_named_independent_pick_is_named_by_both_warnings(
 
 
 # ===================================================================== P3 ======
-# real_playlists.py:825-827 judges the pick only while view.service == "running";
-# playlists_page.py:2052-2056 and app.py:7713 read the retained snapshot whatever the
-# service state. mark_unavailable(forget=False) (a failed reload or publication: app.py
-# 3941, 5892, 6069, 6083, 6642) keeps the snapshot with service "unavailable".
+# Both delete warnings and the delete judge the pick whatever the service state, so a
+# kept snapshot (mark_unavailable(forget=False)) is judged like a live one.
 
 
 def _pick_refused_named(ids: dict[str, str]) -> dict[str, Any]:
@@ -325,9 +313,8 @@ def test_control_p3_while_running_both_warnings_and_the_delete_agree(
 
 
 # ===================================================================== P4 ======
-# displays.py:504-505 (pre-existing at d159a20, displays.py:506-507 there): the next UI
-# lists no "Your pick" (real_state.py:558), so a pick of it falls to row 0, "Follow the
-# schedule", the one thing 29c3854's comment says the row is never on while a pick holds.
+# The next UI lists no "Your pick" (real_state.py), so a pick of it is the item
+# "Your pick", never row 0, "Follow the schedule".
 
 
 def test_p4_real_page_your_pick_isnt_shown_as_follow_the_schedule(
@@ -382,8 +369,8 @@ def test_control_p4_real_page_a_named_pick_is_the_row(
 
 
 # ===================================================================== P5 ======
-# unnamed_pick.py:30-33: the placeholder is known by its text. A playlist named so, last
-# in the list, is taken for it: drop() removes the real playlist from the row's model.
+# The unnamed-pick item is known by a mark on the row's model, not by its text: a
+# playlist named like it, last in the list, is not dropped.
 
 
 def test_p5_a_playlist_named_like_the_item_isnt_dropped() -> None:
@@ -406,13 +393,8 @@ def test_control_p5_the_item_itself_is_dropped() -> None:
 
 
 # ===================================================================== P6 ======
-# runtime_truth.py:515 (`whole = record == playlist_id`) and app.py:7713-7724: the app's
-# record of a pick wins over the service's answer even when the reply names another
-# pick. The record is the quick choice after "Use as wallpaper" (app.py:6946) and is not
-# rewritten by a pick through the combos (`activate_playlist_async`), the companion or
-# ctl. Deleting "Quick choice" on the classic Playlists page then releases the person's
-# current pick of another playlist (schedule-follow), which the service would have kept.
-# Pre-existing: d159a20 app.py:6277 and f127a31 judged by the record alone.
+# Where the service names the pick, its answer wins over the app's record: deleting
+# "Quick choice" doesn't release the person's current pick of another playlist.
 
 
 def _record_is_quick_pick_is_pages(application: Any) -> dict[str, str]:
@@ -462,6 +444,132 @@ def test_control_p6_deleting_the_playlist_the_service_names_releases_it(
         assert _released(application, monkeypatch, ids["pages"], "pages")
     finally:
         _close(application)
+
+
+# ============================================================== U-L-b ========
+# A running service that says no pick holds is a definite answer: the app's record of a
+# pick (Use as wallpaper, never cleared by a resume through the service) doesn't count.
+# Both delete warnings and the delete's schedule-follow read it through pick_holders.
+
+
+def _following(ids: dict[str, str], *, independent: bool = False) -> dict[str, Any]:
+    """pick-plays.json with the pick released: every display on its default "scenes"."""
+    status = copy.deepcopy(_status("pick-plays"))
+    status["source"] = "schedule"
+    status["playlist_id"] = status["playlist"] = "scenes"
+    status["entry_id"] = "scenes-1"
+    status["schedule"] = {
+        "following": True,
+        "playlist": "scenes",
+        "playlist_id": "scenes",
+        "rule_id": None,
+    }
+    status.pop("stand_in_for", None)
+    for playlist in status["playlists"]:
+        playlist["active"] = playlist["id"] == "scenes"
+    [row] = status["displays"]
+    row.pop("stand_in_for", None)
+    row.update(
+        route_source="default",
+        manual_override=False,
+        playlist="scenes",
+        playlist_id="scenes",
+        entry_id="scenes-1",
+        assigned_playlist="scenes",
+        assigned_playlist_id="scenes",
+    )
+    if independent:
+        status["display_mode"] = "independent"
+        row["connector"] = "DP-1"
+    return _renamed(status, ids)
+
+
+def _quick_record(application: Any) -> str:
+    from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME
+
+    session = application.session
+    first = session.playlists.by_name("pages").entries[0].path
+    session.playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, first)
+    session.use_playlist(QUICK_CHOICE_ID)  # "Use as wallpaper": the record
+    assert session.manual_playlist == QUICK_CHOICE_ID  # precondition
+    return QUICK_CHOICE_ID
+
+
+@pytest.mark.parametrize("independent", [False, True], ids=["mirrored", "independent"])
+def test_u_l_b_a_running_service_that_says_no_pick_beats_a_stale_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, independent: bool
+) -> None:
+    from tests.test_ui_runtime import _close
+    from wall_in_one.session import QUICK_CHOICE_NAME
+
+    application, _window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    try:
+        quick = _quick_record(application)
+        ids = {one.name: one.id for one in application.session.playlists.all()}
+        # "Resume schedule" through the service: the status says no pick holds; the
+        # record is unchanged (resume_schedule_async doesn't touch it).
+        application._status_model.adopt(_following(ids, independent=independent))
+        view = application._status_model.view
+        truth = view.truth
+        assert truth is not None and not truth.is_manual  # precondition
+        assert not any(row.manual_override for row in truth.displays)  # precondition
+        assert truth.display_mode == ("independent" if independent else "mirrored")
+        assert not truth.route_unsure and not truth.pick_stood_in  # not the ceiling
+        print(f"holders={runtime_truth.pick_holders(truth, quick, quick)}")
+        classic, _next = _warnings(application, quick)
+        released = _released(application, monkeypatch, quick, QUICK_CHOICE_NAME)
+        assert "manual override" not in classic, classic
+        assert not released, "the delete sends schedule-follow though no pick holds"
+    finally:
+        _close(application)
+
+
+def test_control_u_l_b_the_quick_pick_the_service_names_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_ui_runtime import _close
+    from wall_in_one.session import QUICK_CHOICE_NAME
+
+    application, _window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    try:
+        quick = _quick_record(application)
+        ids = {one.name: one.id for one in application.session.playlists.all()}
+        status = _renamed(
+            copy.deepcopy(_status("pick-plays")), {"pages": quick, "scenes": ids["scenes"]}
+        )
+        application._status_model.adopt(status)
+        classic, _next = _warnings(application, quick)
+        assert "the current manual override" in classic
+        assert _released(application, monkeypatch, quick, QUICK_CHOICE_NAME)
+    finally:
+        _close(application)
+
+
+def test_control_u_l_b_with_no_status_the_record_decides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_ui_runtime import _close
+    from wall_in_one.session import QUICK_CHOICE_NAME
+
+    application, _window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    try:
+        quick = _quick_record(application)
+        assert application.runtime_status is None  # precondition: nothing heard
+        assert _released(application, monkeypatch, quick, QUICK_CHOICE_NAME)
+    finally:
+        _close(application)
+
+
+def test_control_u_l_b_independent_unsure_manual_row_keeps_the_record() -> None:
+    status = _independent_unsure({"pages": "p", "scenes": "s"})
+    assert _holders(status, "s", "s") == (True, ())
+    assert _holders(status, None, "s") == (False, ())
+
+
+def test_u_l_b_pick_holders_a_service_that_says_no_pick_beats_the_record() -> None:
+    for independent in (False, True):
+        status = _following({"pages": "p", "scenes": "s"}, independent=independent)
+        assert _holders(status, "p", "p") == (False, ())
 
 
 # ============================================================ pick_holders (U-N5) =====

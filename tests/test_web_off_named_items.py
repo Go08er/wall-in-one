@@ -105,7 +105,9 @@ def test_control_scenes_and_a_preset_of_one_are_not() -> None:
         "given-up",
     ],
 )
-def test_every_doubt_counts_as_a_web_page(doubt: str) -> None:
+def test_every_doubt_is_unchecked_and_confirms_no_web_page(doubt: str) -> None:
+    """`web_among` answers (False, True) for a doubt: nothing confirmed, something unchecked.
+    Only the caller, for an older service that was heard, counts that as a web page."""
     _item("101", SCENE)
     named = ["101"]
     give_up = False

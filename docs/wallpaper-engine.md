@@ -227,7 +227,9 @@ each by its own `project.json` (no scan of the Workshop), and the file is
 replaced in the same way when one is a web page, a preset of one, or can't be
 checked. The wait for that look ends at a second Ctrl-C, or after two seconds,
 even while a slow disk or a hung mount holds it, and what it hasn't reached
-counts as a web page. When no status was heard at all, only a
+counts as a web page. A hand edit's parses share those same two seconds, and
+one cut counts as allowing web wallpapers (or as naming what can't be checked).
+The two seconds cover the judgements before the lock and under it together. When no status was heard at all, only a
 web page the files confirm counts (or a preset whose base is one): an item that
 can't be checked, such as one unsubscribed since or on a Steam library that
 isn't mounted, leaves the file as it is. A service not heard from is either not
@@ -256,7 +258,8 @@ the app's own publication has ended, the setting and the file are read again
 under the lock (waited for five seconds), and a file that allows web
 wallpapers while the setting is off is replaced. That covers the app's own
 publication that read the setting before the save landed, and so rightly, then,
-installed a file that allows them. A save that fails leaves the setting on, and
+installed a file that allows them. That later judgement's look at Workshop
+items is bounded by two seconds, and its quit by one. A save that fails leaves the setting on, and
 the file as it is. Only a third Ctrl-C, which ends the process at once, or
 another program holding the lock past those five seconds, leaves such a file;
 the next start's compile, or its check of a kept file (below), judges it.

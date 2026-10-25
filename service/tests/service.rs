@@ -16487,3 +16487,92 @@ fn control_without_the_refusal_the_defaults_rule_applies_nothing() {
     assert_eq!(applied, Vec::<String>::new());
     assert!(motion);
 }
+
+// -- review r13i: R-L3 per independent route ------------------------------------------------
+//
+// An independent route's ask-ahead at a rule's boundary asks about the rule's playlist. A
+// refusal is kept by item, so what it learns can be that the entry the display shows, the same
+// item in another playlist, is refused. With the rule's playlist then standing in for by the
+// default, which the route already plays, the route kept its cursor on that entry, and the
+// boundary changed only what status says: the display kept the refused entry's renderer. It is
+// applied now, and moves on as any apply does: to the next entry.
+
+/// Independent DP-1 and HDMI-A-1 on the default, all-media, whose first entry is a scene; eve
+/// names pages, whose one entry is a scene the driver refuses when asked: the same item as
+/// all-media-1's when `shared`, another otherwise. Each display's row and screen at 16:00, the
+/// status, what the boundary applied, and whether DP-1 runs motion.
+fn refused_at_an_independent_boundary(
+    shared: bool,
+) -> (Vec<String>, serde_json::Value, Vec<String>, bool) {
+    let pages_1 = if shared { "3000000031" } else { "3000000032" };
+    let document = default_rule_document("pages")
+        .replace(
+            "display_mode = \"mirrored\"",
+            "display_mode = \"independent\"",
+        )
+        .replace(
+            "theme_source_connector = \"\"",
+            "theme_source_connector = \"DP-1\"",
+        )
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"all-media-1\"\nkind = \"still\"\n",
+            "id = \"all-media-1\"\nkind = \"scene\"\nscene_id = \"3000000031\"\n",
+        )
+        .replace(
+            "id = \"pages-1\"\nkind = \"still\"\n",
+            &format!("id = \"pages-1\"\nkind = \"scene\"\nscene_id = \"{pages_1}\"\n"),
+        )
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+        );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    assert!(state.lock().unwrap().active_outputs.contains("DP-1"));
+    state
+        .lock()
+        .unwrap()
+        .refuse_when_asked
+        .insert("pages-1".into());
+    let before = applies_so_far(&state);
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let problems = rows_off_screen("16:00", &mut runtime, &state, on_the_third(16, 0));
+    let motion = state.lock().unwrap().active_outputs.contains("DP-1");
+    (
+        problems,
+        status(&mut runtime, on_the_third(16, 0)),
+        applied_since(&state, before),
+        motion,
+    )
+}
+
+#[test]
+fn an_independent_boundary_that_learns_the_shown_entry_is_refused_skips_to_the_next_entry() {
+    let (problems, snapshot, applied, motion) = refused_at_an_independent_boundary(true);
+    assert!(problems.is_empty(), "{problems:#?}");
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&snapshot, connector);
+        assert_eq!(row["stand_in_for"], "pages", "{row}");
+        assert_eq!(
+            row["entry_id"], "all-media-2",
+            "{connector} still shows the refused all-media-1; applied {applied:?}"
+        );
+    }
+    assert!(!motion, "all-media-1's motion still runs on DP-1");
+}
+
+#[test]
+fn control_an_independent_boundary_that_learns_another_refusal_applies_nothing() {
+    // pages-1 is another item: what the displays show isn't refused, and the stand-in they
+    // already play isn't started again.
+    let (problems, snapshot, applied, motion) = refused_at_an_independent_boundary(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&snapshot, connector);
+        assert_eq!(row["stand_in_for"], "pages", "{row}");
+        assert_eq!(row["entry_id"], "all-media-1", "{row}");
+        assert_eq!(row["schedule_rule_id"], "eve", "{row}");
+    }
+    assert_eq!(applied, Vec::<String>::new());
+    assert!(motion);
+}

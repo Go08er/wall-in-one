@@ -1972,6 +1972,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             if pending_at_start.contains(connector) || self.pending_routes.contains_key(connector) {
                 continue;
             }
+            let mut shown_refused = false;
             if let Some(route) = self.routes.get(connector)
                 && route.manual_playlist.is_none()
                 && let Ok((wanted, _, _)) = self.automatic_route(connector, at)
@@ -1984,6 +1985,12 @@ impl<D: WallpaperDriver> Runtime<D> {
                 // throughout is known to be before the route changes, so a
                 // stand-in that already plays isn't started again.
                 self.ask_ahead_of_route_change(connector, &wanted);
+                // What it learns can be that the entry the display shows
+                // (it moves no route) is refused: the change is then
+                // applied, which moves the display on (review r13g R-L3).
+                shown_refused = self
+                    .route_current_entry(connector)
+                    .is_some_and(|entry| self.is_refused(entry));
             }
             let Some(route) = self.routes.get(connector) else {
                 continue;
@@ -2025,6 +2032,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                         .map(|entry| entry.id.as_str());
                     if before.active_playlist == candidate.active_playlist
                         && before_entry == candidate_entry
+                        && !shown_refused
                     {
                         // The schedule/source/rule label changed, but the
                         // fully resolved target did not. Keep the renderer and

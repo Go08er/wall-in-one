@@ -20,6 +20,9 @@ round's run of the same check on every document here).
 
 from __future__ import annotations
 
+import random
+import tomllib
+
 import pytest
 
 from wall_in_one import cli, config, paths, runtime_config
@@ -169,3 +172,56 @@ def test_control_execstartpre_with_web_on_keeps_any() -> None:
     target.write_text(document("x-escape-key")[0], encoding="utf-8")
     config.save(config.Settings(allow_web_wallpapers=True))
     assert cli._retained_web_refusal() == ""
+
+
+# -- `runtime_config.may_spell_key`: what the end of a quit looks for unparsed (r13f, N2) ---------
+
+KEYS = ("allow_web_wallpapers", "scene_id", "scene_base")
+
+
+def _escaped(key: str, seed: int) -> str:
+    """``key`` as a basic-string key, each character as itself or one of its escapes."""
+    choices = random.Random(f"{key}-{seed}")
+    return "".join(
+        choices.choice(
+            (
+                character,
+                f"\\u{ord(character):04x}",
+                f"\\u{ord(character):04X}",
+                f"\\U{ord(character):08x}",
+                f"\\x{ord(character):02X}",
+            )
+        )
+        for character in key
+    )
+
+
+@pytest.mark.parametrize("key", KEYS)
+def test_every_spelling_of_a_key_is_found(key: str) -> None:
+    """Every key a reader of either TOML finds is found, with no parse. Where TOML 1.0 can read
+    the spelling (no ``\\x``), ``tomllib`` confirms it is the key."""
+    for seed in range(300):
+        spelled = _escaped(key, seed)
+        text = f'[settings]\n"{spelled}" = true\n'
+        assert runtime_config.may_spell_key(text, key), spelled
+        if "\\x" not in spelled:
+            assert tomllib.loads(text) == {"settings": {key: True}}, spelled
+    for literal in (f"{key} = 1\n", f"'{key}' = 1\n", f"a.{key}.b = 1\n", f"[{key}]\n"):
+        assert runtime_config.may_spell_key(literal, key), literal
+
+
+@pytest.mark.parametrize("key", KEYS)
+def test_control_a_compiled_document_without_the_key_has_none(key: str) -> None:
+    """Nor any near miss: an escaped backslash before a ``u`` is a backslash, not an escape.
+    (One that holds the name itself is found: a parse tells it from the key.)"""
+    base = _base()[0]
+    assert not runtime_config.may_spell_key(base, key)
+    misses = (
+        f'"{key[:-1]}"',
+        f'"x{key[1:]}"',
+        f'"\\\\u{ord(key[0]):04x}{key[1:]}"',  # \\u0061...: a backslash, then "u0061..."
+        f'"\\u{ord(key[0]):04x}{key[1:-1]}"',
+        f'"\\u00{ord(key[0]):02x}{key[1:]}\\"',  # the closing quote is escaped
+    )
+    for miss in misses:
+        assert not runtime_config.may_spell_key(f"a = {miss}\n", key), miss

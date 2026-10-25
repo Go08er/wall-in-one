@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -998,6 +999,41 @@ def not_toml_1_0(path: Path | None = None, *, text: str | None = None) -> bool:
     except tomllib.TOMLDecodeError, RecursionError:
         return True
     return False
+
+
+def _escaped_key(key: str) -> re.Pattern[str]:
+    """A basic-string key that spells ``key``, any of its characters written as an escape.
+
+    TOML 1.0's ``\\u`` (four hex digits) and ``\\U`` (eight), and 1.1's
+    ``\\x`` (two), in either case of hex digit. Only for an ASCII ``key``.
+    """
+    units = "".join(
+        f"(?:{re.escape(character)}|\\\\(?:u00|U000000|x)(?i:{ord(character):02X}))"
+        for character in key
+    )
+    return re.compile(f'"{units}"')
+
+
+#: The keys a document's web state is judged by, as `may_spell_key` looks for them.
+_ESCAPED_KEYS: Final = {
+    key: _escaped_key(key) for key in ("allow_web_wallpapers", "scene_id", "scene_base")
+}
+
+
+def may_spell_key(text: str, key: str) -> bool:
+    """Whether ``text`` may hold the TOML key ``key`` anywhere, as either TOML reads keys.
+
+    Unparsed, in one search of the text: a key can only be ``key`` itself
+    (bare, or quoted with no escape in it: then the name is in the text as
+    it is), or a basic-string key with some of its characters written as
+    escapes (`_escaped_key`). A dotted key or a table header splits nothing
+    inside one name, and a multi-line string is never a key. So false means
+    no reader, of TOML 1.0 or 1.1, finds ``key`` in it; true may be only the
+    name inside a value or a comment. ``key``: one of ``allow_web_wallpapers``,
+    ``scene_id`` and ``scene_base`` (review r13f, N2: the step at the end of a
+    quit, which a full parse made slow).
+    """
+    return key in text or _ESCAPED_KEYS[key].search(text) is not None
 
 
 def web_wallpapers_in(texts: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:

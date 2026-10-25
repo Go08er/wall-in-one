@@ -315,25 +315,58 @@ SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
 #: (`runtime_config._document_head`). Nothing else it writes starts a line with
 #: the key: every value is one quoted line after its own key.
 _COMPILED_WEB_ALLOWED: Final = re.compile(r"^allow_web_wallpapers = true$", re.MULTILINE)
-#: What a quoted TOML key could spell the key's name with, but for the name itself.
-_KEY_ESCAPES: Final = ("\\u", "\\U", "\\x")
 
 
-def _may_allow_web_wallpapers(text: str) -> bool:
-    """Whether ``text`` (a ``runtime.toml``) allows web wallpapers, unparsed where it can be told.
+def _unless_given_up[Judged](
+    work: Callable[[], Judged], give_up: Callable[[], bool], cut: Judged
+) -> Judged:
+    """``work()``, run on a thread of its own and waited for in slices; ``cut`` once ``give_up``.
+
+    For what the end of a shutdown can't bound, such as a parse of a large
+    document: a second Ctrl-C (``give_up``) ends the wait, and Python runs its
+    handler between the slices (`SHUTDOWN_INTERRUPT_POLL_SECONDS`). The thread
+    is a daemon, so the process doesn't wait for work it stopped waiting for.
+    What ``work`` raises is raised here.
+    """
+    done: Future[Judged] = Future()
+
+    def run() -> None:
+        try:
+            done.set_result(work())
+        except BaseException as error:  # handed to the waiter
+            done.set_exception(error)
+
+    threading.Thread(target=run, name="wio-shutdown-look", daemon=True).start()
+    while not done.done():
+        if give_up():
+            return cut
+        futures.wait((done,), timeout=SHUTDOWN_INTERRUPT_POLL_SECONDS)
+    return done.result()
+
+
+def _may_allow_web_wallpapers(text: str, give_up: Callable[[], bool] = lambda: False) -> bool:
+    """Whether ``text`` (a ``runtime.toml``) may allow web wallpapers, unparsed where it can be.
 
     One the compiler wrote has the key on a line of its own exactly when it
-    allows them (`_COMPILED_WEB_ALLOWED`); one that doesn't name the key, nor
-    has an escape a quoted key could spell it with, can't. Anything else (a
-    hand edit) is parsed (`runtime_config.allows_web_wallpapers`). A parse
-    takes about a third of a second for each megabyte, and a second Ctrl-C
-    can't end it: the shutdown's last step asks here (`Application._web_off_on_disk_at_exit`).
+    allows them (`_COMPILED_WEB_ALLOWED`). One that can't hold the key at all
+    (`runtime_config.may_spell_key`: not the name itself, nor a quoted key
+    that spells it with escapes) doesn't: so a compiled document is never
+    parsed, though a value in it (a still's path, a title) has a ``\\u`` in
+    it (review r13f, N2: such a one was parsed, about 0.13 s for each
+    megabyte, up to a second at the cap, with nothing to end it). Anything
+    else, a hand edit, is parsed (`runtime_config.allows_web_wallpapers`,
+    which counts one that isn't TOML 1.0 as allowing them), on a thread of its
+    own (`_unless_given_up`): once ``give_up`` says so (a second Ctrl-C at the
+    end of a shutdown), the wait for it ends, and the document counts as
+    allowing them (fail closed).
     """
     if _COMPILED_WEB_ALLOWED.search(text) is not None:
         return True
-    if "allow_web_wallpapers" not in text and not any(escape in text for escape in _KEY_ESCAPES):
+    if not runtime_config.may_spell_key(text, "allow_web_wallpapers"):
         return False
-    return runtime_config.allows_web_wallpapers(text=text)
+    return _unless_given_up(
+        lambda: runtime_config.allows_web_wallpapers(text=text), give_up, cut=True
+    )
 
 
 PACKAGE_SOURCE_ACTION: Final = "package-source"
@@ -2300,9 +2333,12 @@ class Application(Adw.Application):
         what it allows (review r13c, D2), so nothing is written here; what
         that leaves is this process's own lane holding it past the wait and
         then failing. Looking at the file costs a search of its text for the
-        compiler's own line for the key (`_may_allow_web_wallpapers`). So a
-        quit takes at most the settle's bound, that save's bound while one is
-        being written, and the lock's.
+        compiler's own line for the key, and for any spelling of the key
+        (`_may_allow_web_wallpapers`), which a compiled document never has;
+        only a hand edit that has one is parsed, on a thread a second Ctrl-C
+        stops waiting for (review r13f, N2). So a quit takes at most the
+        settle's bound, that save's bound while one is being written, and the
+        lock's.
 
         A second Ctrl-C, during the settle or here, ends these waits at once
         (review r13c, N-2): the save still being written is then not waited
@@ -2361,11 +2397,13 @@ class Application(Adw.Application):
                 "wallpapers; it was replaced at shutdown with one that plays nothing"
             )
 
-    @staticmethod
-    def _web_off_but_allowed_on_disk(target: Path, *, turning_off: bool) -> config.Settings | None:
+    def _web_off_but_allowed_on_disk(
+        self, target: Path, *, turning_off: bool
+    ) -> config.Settings | None:
         """``settings.toml`` as read now, when it says web wallpapers are off, or a save still
-        being written turns them off (``turning_off``), and ``target`` allows them
-        (`_may_allow_web_wallpapers`); otherwise None."""
+        being written turns them off (``turning_off``), and ``target`` may allow them
+        (`_may_allow_web_wallpapers`, whose parse a second Ctrl-C ends: then it counts as
+        allowing them); otherwise None."""
         try:
             settings = config.load_strict()
         except config.ConfigError:
@@ -2376,7 +2414,7 @@ class Application(Adw.Application):
             on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
         except OSError, UnicodeDecodeError:
             return None
-        if on_disk is None or not _may_allow_web_wallpapers(on_disk):
+        if on_disk is None or not _may_allow_web_wallpapers(on_disk, lambda: self._settle_cut):
             return None
         return replace(settings, allow_web_wallpapers=False)
 

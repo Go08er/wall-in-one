@@ -98,7 +98,10 @@ class _Library:
 
 
 def _classic(
-    items: tuple[MediaItem, ...], text: str = "", refused: list[dict[str, Any]] | None = None
+    items: tuple[MediaItem, ...],
+    text: str = "",
+    refused: list[dict[str, Any]] | None = None,
+    omitted: int = 0,
 ) -> tuple[str, Any]:
     from wall_in_one.library import filter as library_filter
     from wall_in_one.ui.grid import WallpaperGrid
@@ -114,7 +117,7 @@ def _classic(
     status = {
         **_status("pick-refused"),
         "refused": [NOT_FOUND] if refused is None else refused,
-        "refused_omitted": 0,
+        "refused_omitted": omitted,
     }
     fake = SimpleNamespace(
         _runtime_media_status=status,

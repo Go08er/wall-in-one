@@ -317,7 +317,10 @@ def test_c_the_count_follows_the_marked_tiles_and_the_omitted() -> None:
     assert marked == 1
     status = {**_status("pick-refused"), "refused": [NOT_FOUND], "refused_omitted": 3}
     fake = _window_for(status, (_scene("2910000004"), _scene("12345")))
-    assert _said(fake._summary) == 4, fake._summary  # one marked, three the service left out
+    # One marked item, and three more the service refused and left out: two counts.
+    assert fake._summary.endswith(" \u00b7 1 can\u2019t play here, and 3 more refused"), (
+        fake._summary
+    )
     older = {k: v for k, v in _status("pick-refused").items() if not k.startswith("refused")}
     assert _said(_window_for(older, (_scene("12345"),))._summary) == 0
 

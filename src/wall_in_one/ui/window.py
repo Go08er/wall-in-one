@@ -762,13 +762,13 @@ class MainWindow(Adw.ApplicationWindow):
         # `refused`): marked, never saved as a playback warning.
         refused, refused_omitted = runtime_truth.refused_from_status(self._runtime_media_status)
         self._grid.set_refused(runtime_truth.refused_paths(refused, library.items))
-        # The library's items that would show the mark, and the rows the reply left
-        # out: not the service's rows (a preset and its base are one, a web page may
-        # say web off), and not the tiles built (a search hides some).
-        marked = self._grid.refused_marked_count() + refused_omitted
+        # The library's items that would show the mark: not the service's rows (a preset
+        # and its base are one, a web page may say web off), and not the tiles built (a
+        # search hides some). The rows the reply left out are counted apart.
+        marked = self._grid.refused_marked_count()
         truth = runtime_truth.from_status(self._runtime_media_status)
         if truth is not None and truth.nothing_to_play:
-            playing = f"nothing ({truth.nothing_to_play})"
+            playing = f"nothing to play: {truth.nothing_to_play}"
         else:
             playing = f"playing {playing}"
         summary = (
@@ -780,7 +780,12 @@ class MainWindow(Adw.ApplicationWindow):
         if self._borked_count:
             summary += f" · {self._borked_count} with playback disabled"
         if marked:
+            # Library items with a mark; the service's unlisted rows are its own count.
             summary += f" · {marked} can\u2019t play here"
+            if refused_omitted:
+                summary += f", and {refused_omitted} more refused"
+        elif refused_omitted:
+            summary += f" · {refused_omitted} can\u2019t play here"
         self._summary = summary
         self._update_subtitle()
 

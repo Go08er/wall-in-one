@@ -700,3 +700,34 @@ def test_control_gate_no_flag_no_inference_on_classic_pages() -> None:
     summary = SchedulesPage._playback_description(None, truth)  # type: ignore[arg-type]
     print(f"classic row={text!r} summary={summary!r}")
     assert CANT not in text and CANT not in summary
+
+
+# ------------------------------------------------------------------ N5 ---------
+
+
+def _classic_count(items: tuple[Any, ...], omitted: int) -> str:
+    from tests.test_ui_next_r13e import _classic
+
+    summary, _grid = _classic(items, omitted=omitted)
+    return summary
+
+
+def test_n5_classic_count_keeps_library_items_and_the_services_rows_apart() -> None:
+    from tests.test_ui_next_r13e import _scene
+
+    summary = _classic_count((_scene("2910000004"),), omitted=3)
+    assert summary.endswith(" · 1 can\u2019t play here, and 3 more refused"), summary
+
+
+def test_control_n5_classic_count_with_no_item_marked_is_the_services_count() -> None:
+    from tests.test_ui_next_r13e import _scene
+
+    summary = _classic_count((_scene("12345"),), omitted=3)
+    assert summary.endswith(" · 3 can\u2019t play here"), summary
+
+
+def test_control_n5_classic_count_of_marked_items_alone() -> None:
+    from tests.test_ui_next_r13e import _scene
+
+    summary = _classic_count((_scene("2910000004"),), omitted=0)
+    assert summary.endswith(" · 1 can\u2019t play here"), summary

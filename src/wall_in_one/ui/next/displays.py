@@ -251,6 +251,8 @@ class DisplaysPage(Page):
                 route.until,
                 stand_in_for="" if route.quick else route.stand_in_for_name,
                 pick_stood_in=route.quick and stood_in,
+                pick_unsure=route.pick_unsure,
+                nothing_to_play=route.nothing_to_play,
             )
         )
 
@@ -526,7 +528,9 @@ class DisplaysPage(Page):
             runtime_off
             or (
                 self.why(connector)
-                if route is not None and route.route == "pick" and route.stand_in_for
+                if route is not None
+                and route.route == "pick"
+                and (route.stand_in_for or route.pick_unsure)
                 else "Your pick"
                 if route and route.quick
                 else ""
@@ -596,6 +600,11 @@ class DisplaysPage(Page):
             self.plays_row.set_subtitle(blocked)
         elif route is None:
             self.plays_row.set_subtitle("")
+        elif route.nothing_to_play:
+            # Nothing of it can play and nothing can stand in: it isn't in use.
+            self.plays_row.set_subtitle(
+                runtime_truth.nothing_to_play_sentence(route.nothing_to_play)
+            )
         elif route.route == "display" and route.stand_in_for:
             # The service refused every entry of it: another plays instead.
             self.plays_row.set_subtitle(
@@ -629,6 +638,9 @@ class DisplaysPage(Page):
                     )
                 )
             )
+        elif route.route == "pick" and route.pick_unsure:
+            # The reply left out what stands in for what; say only what plays.
+            self.plays_row.set_subtitle(f"Not in use now · {self.why(connector)}")
         elif route.route == "pick":
             self.plays_row.set_subtitle("Not in use now · your pick is showing")
         elif route.stand_in_for and not assigned:

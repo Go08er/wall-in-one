@@ -1389,6 +1389,8 @@ class PlaylistsPage(Gtk.Box):
         self._play_button.set_label(
             "Picked · can\u2019t play here"
             if manual and stood_in
+            else "Playing now · pick or stand-in"
+            if manual and truth is not None and truth.pick_unsure
             else "Playing now · manual override"
             if manual
             else "Use as manual override"

@@ -99,6 +99,11 @@ class RouteView:
     #: in for it: the wallpaper service refused every entry of it. Else empty.
     stand_in_for: str = ""
     stand_in_for_name: str = ""
+    #: Why it plays nothing (the runtime's ``nothing_to_play``), or empty.
+    nothing_to_play: str = ""
+    #: A pick that may be standing in for another (the reply left out every
+    #: ``stand_in_for``), so "your pick" would be a guess.
+    pick_unsure: bool = False
     #: ``playing``, ``paused`` or ``stopped``.
     playback: str = "playing"
     cycle: bool = False

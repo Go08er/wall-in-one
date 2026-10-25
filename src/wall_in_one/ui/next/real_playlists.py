@@ -445,6 +445,8 @@ class RealPlaylists:
             # A version-1 runtime: one answer for every display.
             if truth.playlist_id != pid:
                 return "", False, ()
+            if truth.nothing_to_play:
+                return runtime_truth.nothing_to_play_sentence(truth.nothing_to_play), False, ()
             if truth.stand_in_for:
                 # It stands in for what was asked for: not the pick, not scheduled.
                 return (
@@ -452,20 +454,29 @@ class RealPlaylists:
                     False,
                     (),
                 )
+            if truth.pick_unsure:
+                return f"On screen now \u00b7 {runtime_truth.PICK_OR_STAND_IN}", False, ()
             why = "your pick" if truth.is_manual else "from schedule"
-            return f"On screen now · {why}", truth.is_manual, ()
-        showing = [display for display in rows if display.playlist_id == pid]
+            return f"On screen now \u00b7 {why}", truth.is_manual, ()
+        here = [display for display in rows if display.playlist_id == pid]
+        # A display that plays nothing of it isn't showing it.
+        nothing = [display for display in here if display.nothing_to_play]
+        here = [display for display in here if not display.nothing_to_play]
         # A display that shows it only because the service refused what was asked
         # for isn't showing it by pick or by schedule.
-        stood = [display for display in showing if display.stand_in_for]
-        showing = [display for display in showing if not display.stand_in_for]
+        stood = [display for display in here if display.stand_in_for]
+        showing = [display for display in here if not display.stand_in_for]
+        # Each display that shows it has an entry on screen, a stand-in's too.
+        entries = tuple(
+            (display.entry_id, display.connector) for display in here if display.entry_id
+        )
+        if nothing and not here:
+            return runtime_truth.nothing_to_play_sentence(nothing[0].nothing_to_play), False, ()
         if stood and not showing:
-            asked = dict.fromkeys(display.stand_in_for_name for display in stood)
-            return (
-                runtime_truth.stand_in_sentence(" and ".join(asked), stood[0].playlist),
-                False,
-                (),
+            text = runtime_truth.stand_ins_sentence(
+                (display.stand_in_for_name for display in stood), stood[0].playlist
             )
+            return text, False, entries
         if not showing:
             # Asked for, but the service refused every entry of it: another
             # playlist stands in.
@@ -486,13 +497,17 @@ class RealPlaylists:
         )
         routes = {display.route_source for display in showing}
         why = _ROUTE_WORDS.get(next(iter(routes)), "") if len(routes) == 1 else ""
-        playing = everywhere and routes == {"manual"}
-        entries = tuple(
-            (display.entry_id, display.connector) for display in showing if display.entry_id
-        )
-        text = f"{where} · {why}" if why else where
+        unsure = routes == {"manual"} and any(display.pick_unsure for display in showing)
+        if unsure:
+            # The reply can't tell the pick from what stands in for it.
+            why = runtime_truth.PICK_OR_STAND_IN
+        playing = everywhere and routes == {"manual"} and not unsure
+        text = f"{where} \u00b7 {why}" if why else where
         if stood:
             text += f" \u00b7 stands in on {' and '.join(display.connector for display in stood)}"
+        if nothing:
+            where_nothing = " and ".join(display.connector for display in nothing)
+            text += f" \u00b7 nothing to play on {where_nothing}"
         return text, playing, entries
 
     def _rotation_note(self) -> str:

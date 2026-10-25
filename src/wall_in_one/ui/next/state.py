@@ -266,6 +266,11 @@ class Reason:
     stand_in_for: str = ""
     #: The same for a pick of one wallpaper, which has no name to quote.
     pick_stood_in: bool = False
+    #: A pick that the reply can't tell from its stand-in (it left out every
+    #: ``stand_in_for``): not said to be the pick.
+    pick_unsure: bool = False
+    #: Why nothing plays (the runtime's ``nothing_to_play``), or empty.
+    nothing_to_play: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +320,15 @@ def reason_text(reason: Reason) -> str:
 
     "until" appears only when the runtime said when the reason ends.
     """
+    if reason.nothing_to_play:
+        return f"Nothing to play: {reason.nothing_to_play}"
+    if reason.pick_unsure:
+        # Playing is true; that it is the pick is not known.
+        return (
+            f"\u201c{reason.playlist}\u201d is playing"
+            if reason.playlist
+            else "Your pick, or what plays in its place"
+        )
     if reason.pick_stood_in and reason.playlist:
         return f"Your pick can\u2019t play here, so \u201c{reason.playlist}\u201d is playing"
     named = (

@@ -38,6 +38,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.next import schedule_model as model
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.page import Page, not_ported
@@ -610,10 +611,24 @@ class SchedulePage(Page):
         """The runtime's routes, grouped where displays agree (one group while mirrored)."""
         groups: list[Outcome] = []
         for route in self.scheduling.routes():
-            key = (route.route, route.playlist_id, route.rule_id, route.until)
+            key = (
+                route.route,
+                route.playlist_id,
+                route.rule_id,
+                route.until,
+                route.nothing_to_play,
+                route.pick_unsure,
+            )
             for index, group in enumerate(groups):
                 other = group.route
-                if (other.route, other.playlist_id, other.rule_id, other.until) == key:
+                if (
+                    other.route,
+                    other.playlist_id,
+                    other.rule_id,
+                    other.until,
+                    other.nothing_to_play,
+                    other.pick_unsure,
+                ) == key:
                     groups[index] = Outcome((*group.connectors, route.connector), other)
                     break
             else:
@@ -665,7 +680,12 @@ class SchedulePage(Page):
                 title.set_markup(f"<span weight='800'>{escape(name or 'Your pick')}</span>")
                 line.append(title)
                 note = Gtk.Label(
-                    label="in place of your pick" if stood_in else "your pick", xalign=0
+                    label="in place of your pick"
+                    if stood_in
+                    else runtime_truth.PICK_OR_STAND_IN
+                    if route.pick_unsure
+                    else "your pick",
+                    xalign=0,
                 )
                 note.add_css_class("pick-note")
                 line.append(note)
@@ -681,6 +701,10 @@ class SchedulePage(Page):
             self._now_lines.append(line)
             if stood_in:
                 self._now_lines.append(widgets.dim(stood_in))
+            if route.nothing_to_play:
+                self._now_lines.append(
+                    widgets.dim(runtime_truth.nothing_to_play_sentence(route.nothing_to_play))
+                )
             if multi:
                 continue
             detail = Gtk.Box(spacing=6)

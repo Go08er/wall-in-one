@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from wall_in_one import runtime_config
@@ -34,6 +34,28 @@ class RefusedTruth:
 def stand_in_sentence(asked: str, playing: str) -> str:
     """Say that ``asked`` can't play and ``playing`` stands in for it."""
     return f"\u201c{asked}\u201d can\u2019t play here, so \u201c{playing}\u201d is playing"
+
+
+def stand_ins_sentence(asked: Iterable[str], playing: str) -> str:
+    """`stand_in_sentence` for a playing playlist that stands in for several.
+
+    Each asked-for playlist is quoted on its own; one is the plain sentence.
+    """
+    names = list(dict.fromkeys(asked))
+    if len(names) <= 1:
+        return stand_in_sentence(names[0] if names else "", playing)
+    quoted = " and ".join(f"\u201c{name}\u201d" for name in names)
+    return f"{quoted} can\u2019t play here, so \u201c{playing}\u201d is playing"
+
+
+#: What a pick may be when the reply left out every ``stand_in_for``: it can't be
+#: told from the playlist that stands in for it.
+PICK_OR_STAND_IN = "your pick, or what stands in for it"
+
+
+def nothing_to_play_sentence(reason: str) -> str:
+    """Say that a display plays nothing, and the service's reason."""
+    return f"Nothing to play: {reason}"
 
 
 @dataclass(frozen=True)
@@ -90,6 +112,12 @@ class DisplayRuntimeTruth:
     #: That playlist's name, from the snapshot's own playlist inventory (its
     #: id when the inventory doesn't name it). Empty with no ``stand_in_for``.
     stand_in_for_name: str = ""
+    #: Why this display plays nothing (``nothing_to_play``): the playlist asked
+    #: for has nothing that can play and nothing can stand in. Else empty.
+    nothing_to_play: str = ""
+    #: A pick on a reply that left out every ``stand_in_for``: what plays may be
+    #: the pick, or what stands in for it. The app can't tell.
+    pick_unsure: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
@@ -202,6 +230,10 @@ class RuntimeTruth:
     #: many more it left out of this snapshot.
     refused: tuple[RefusedTruth, ...] = ()
     refused_omitted: int = 0
+    #: Why every display plays nothing (``nothing_to_play``), or empty.
+    nothing_to_play: str = ""
+    #: The summary's pick, on a reply that left out every ``stand_in_for``.
+    pick_unsure: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
@@ -359,6 +391,34 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
 
     stand_in_for = _stand_in_for(status.get("stand_in_for"), playlist_id)
     refused, refused_omitted = refused_from_status(status)
+    nothing_to_play = status.get("nothing_to_play")
+    pick_unsure = False
+    if (
+        status_version == 2
+        and refused_omitted > 0
+        and not refused
+        and stand_in_for is None
+        and not any(display.stand_in_for for display in parsed_displays)
+    ):
+        # The reply's size ceiling dropped every `stand_in_for`. The rows still
+        # say what each asked for, except for a pick.
+        parsed_displays = _inferred_stand_ins(
+            parsed_displays,
+            parsed_schedules,
+            independent=display_mode == "independent",
+            scheduled_playlist_id=scheduled_playlist_id,
+            names=names,
+        )
+        heard = {
+            (display.stand_in_for, display.playlist_id)
+            for display in parsed_displays
+            if display.connected and not display.nothing_to_play
+        }
+        if len(heard) == 1:
+            [(asked, playing)] = heard
+            if asked and playing == playlist_id:
+                stand_in_for = asked
+        pick_unsure = source == "manual" and stand_in_for is None
     return RuntimeTruth(
         playlist_id=playlist_id,
         playlist=playlist,
@@ -377,7 +437,50 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         stand_in_for_name=names.get(stand_in_for, stand_in_for) if stand_in_for else "",
         refused=refused,
         refused_omitted=refused_omitted,
+        nothing_to_play=nothing_to_play if isinstance(nothing_to_play, str) else "",
+        pick_unsure=pick_unsure,
     )
+
+
+def _inferred_stand_ins(
+    displays: tuple[DisplayRuntimeTruth, ...],
+    schedules: tuple[RuntimeScheduleTruth, ...],
+    *,
+    independent: bool,
+    scheduled_playlist_id: str,
+    names: Mapping[str, str],
+) -> tuple[DisplayRuntimeTruth, ...]:
+    """Each row's ``stand_in_for``, worked out from what the row still says.
+
+    A default, an assignment and a rule play what they ask for unless the
+    service refused it, so a row that plays another playlist stands in for it.
+    A pick is on no field: the row is marked unsure instead. A mirrored row
+    follows the schedule's playlist, not the connector's own assignment.
+    """
+    found: list[DisplayRuntimeTruth] = []
+    for display in displays:
+        if not display.connected or display.nothing_to_play:
+            found.append(display)
+            continue
+        if display.route_source == "manual":
+            found.append(replace(display, pick_unsure=True))
+            continue
+        rule = next((one for one in schedules if one.id == display.schedule_rule_id), None)
+        if display.route_source == "schedule" and rule is not None:
+            asked = rule.playlist_id
+        elif display.route_source == "schedule" or not independent:
+            asked = scheduled_playlist_id
+        else:
+            asked = display.assigned_playlist_id
+        stand_in_for = _stand_in_for(asked, display.playlist_id)
+        found.append(
+            replace(
+                display,
+                stand_in_for=stand_in_for,
+                stand_in_for_name=names.get(stand_in_for, stand_in_for) if stand_in_for else "",
+            )
+        )
+    return tuple(found)
 
 
 def _playlist_names(raw: object) -> dict[str, str]:
@@ -627,6 +730,7 @@ def _display_truth(
         )
         until = record.get("until")
         stand_in_for = _stand_in_for(record.get("stand_in_for"), playlist_id)
+        nothing = record.get("nothing_to_play")
         parsed.append(
             DisplayRuntimeTruth(
                 connector=connector,
@@ -667,6 +771,7 @@ def _display_truth(
                 stand_in_for_name=(
                     (names or {}).get(stand_in_for, stand_in_for) if stand_in_for else ""
                 ),
+                nothing_to_play=nothing if isinstance(nothing, str) else "",
             )
         )
     return tuple(parsed)

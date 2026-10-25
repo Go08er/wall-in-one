@@ -439,6 +439,8 @@ class RealScheduling:
                     quick=_is_quick_choice(display.asked_playlist_id),
                     stand_in_for=display.stand_in_for or "",
                     stand_in_for_name=display.stand_in_for_name,
+                    nothing_to_play=display.nothing_to_play,
+                    pick_unsure=display.pick_unsure,
                     playback=display.playback_state,
                     cycle=display.cycle_enabled,
                     cycle_default=display.cycle_default,
@@ -460,6 +462,8 @@ class RealScheduling:
                 quick=_is_quick_choice(truth.asked_playlist_id),
                 stand_in_for=truth.stand_in_for or "",
                 stand_in_for_name=truth.stand_in_for_name,
+                nothing_to_play=truth.nothing_to_play,
+                pick_unsure=truth.pick_unsure,
             ),
         )
 

@@ -13476,7 +13476,7 @@ fn refusal_ceiling_status(pick: &str, refused: usize, taboo: usize) -> (serde_js
         ..RuntimeDriverState::default()
     }));
     let mut runtime = Runtime::new(
-        PathBuf::from("/tmp/runtime.toml"),
+        config_path_with_the_references_room(),
         parsed,
         RuntimeDriver(state),
         at,
@@ -13525,6 +13525,7 @@ fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
     // 0.4.0's: what was cut, and what wasn't, is exactly what the same status without them cuts
     // (a pick of BIG). The stand-ins, about 112 KB, don't fit; what room is left goes back to
     // `refused` rows (review r13e L6: at 040b3aa none, beside 109 KB to spare at 32 records).
+    let mut checked = 0;
     for taboo in [64, 32] {
         let (plain, _) = refusal_ceiling_status("BIG", 20, taboo);
         let (shown, encoded) = refusal_ceiling_status("ASK", 20, taboo);
@@ -13552,8 +13553,15 @@ fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
         );
         // As many rows as fit: one more (about 1.1 KB on the wire) would not. Some come back,
         // with this build's strings no more than 1 KB beyond the band's reference.
-        if build_beyond_the_reference(&shown) <= 1_000 {
+        let beyond = build_beyond_the_reference(&shown);
+        if beyond <= 1_000 {
+            checked += 1;
             assert!(listed >= 1, "{taboo}: no refused row given back");
+        } else {
+            eprintln!(
+                "{taboo} records: NOT CHECKED that a refused row comes back: this build's \
+                 strings take {beyond} bytes beyond the reference's"
+            );
         }
         if listed < 16 {
             assert!(
@@ -13562,13 +13570,17 @@ fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
             );
         }
     }
+    assert_some_checked("a refused row given back", checked);
     let (at_64, _) = refusal_ceiling_status("BIG", 20, 64);
-    if build_beyond_the_reference(&at_64) <= 1_000 {
-        assert_eq!(
-            at_64["taboo_entries_omitted"], 2,
-            "the ceiling cuts 0.4.0's fields"
-        );
-    }
+    // Two records out, with this build's strings no more than 1 KB beyond the reference's.
+    assert_some_checked(
+        "the ceiling's two records out",
+        usize::from(build_beyond_the_reference(&at_64) <= 1_000),
+    );
+    assert_eq!(
+        at_64["taboo_entries_omitted"], 2,
+        "the ceiling cuts 0.4.0's fields"
+    );
     assert!(
         at_64["taboo_entries_omitted"].as_u64().unwrap() > 0,
         "the ceiling cuts 0.4.0's fields"
@@ -14412,10 +14424,12 @@ fn at_the_ceiling_only_as_many_taboo_records_go_as_must() {
     );
     // 62 with build strings as long as the band's reference (about 3 KB was left beside a
     // 4 KB record, so 1 KB either way keeps it).
-    if build_beyond_the_reference(&snapshot) <= 1_000 {
-        assert_eq!(kept.len(), 62);
-        assert_eq!(snapshot["taboo_entries_omitted"], 2);
-    }
+    assert_some_checked(
+        "62 records kept",
+        usize::from(build_beyond_the_reference(&snapshot) <= 1_000),
+    );
+    assert_eq!(kept.len(), 62);
+    assert_eq!(snapshot["taboo_entries_omitted"], 2);
     // A record's bytes on the wire: its JSON, each quote and backslash escaped once more.
     let record = serde_json::to_string(&kept[0]).unwrap();
     let on_wire = record.len() + record.matches(['"', '\\']).count();
@@ -14830,20 +14844,24 @@ const BAND_AT_0_4_0: [(BandCorner, BandSent); 13] = [
 
 /// What every reply in `BAND_AT_0_4_0` carried that depends on how its test binary was built
 /// and where: that binary's path (`runtime_executable`), `install_kind` (`source` in a dev
-/// shell, `nix` in the package's build) and `runtime_version`. A reply measured here carries its
-/// own, and has as much less room as they take more (`build_beyond_the_reference`).
-const BAND_REFERENCE_BUILD: [(&str, &str); 3] = [
+/// shell, `nix` in the package's build) and `runtime_version`; and the configuration's path,
+/// `config_path`, which a band reply here sets to make up for the others
+/// (`config_path_with_the_references_room`). A reply measured here carries its own, and has as
+/// much less room as they take more (`build_beyond_the_reference`).
+const BAND_REFERENCE_BUILD: [(&str, &str); 4] = [
     (
         "runtime_executable",
         "/home/goober/Documents/wall-in-one/.project-notes/wt/cargo-target-r13f-d159a20/debug/deps/service-5e4e8374fbeba07c",
     ),
     ("install_kind", "source"),
     ("runtime_version", "0.4.0"),
+    ("config_path", "/tmp/runtime.toml"),
 ];
 
 /// How many bytes on the wire `snapshot` takes beyond the reference replies in what depends on
 /// its build (`BAND_REFERENCE_BUILD`): the room it has less than they had, through no change of
-/// the reply's. Negative in the package's build, whose binary lives under a shorter path.
+/// the reply's. 0 for a band reply here, whose configuration path makes up for this build's
+/// strings, unless they take more than 15 bytes beyond the reference's.
 fn build_beyond_the_reference(snapshot: &serde_json::Value) -> i64 {
     BAND_REFERENCE_BUILD
         .iter()
@@ -14852,6 +14870,35 @@ fn build_beyond_the_reference(snapshot: &serde_json::Value) -> i64 {
                 - json_wire_len(&serde_json::Value::from(*reference)) as i64
         })
         .sum()
+}
+
+/// How many bytes on the wire this test binary's own build strings take beyond the band
+/// reference's, measured once from a reply at the reference's configuration path. Negative in
+/// the package's build, whose binary lives under a shorter path and says `nix`.
+fn this_builds_strings_beyond_the_reference() -> i64 {
+    static BEYOND: OnceLock<i64> = OnceLock::new();
+    *BEYOND.get_or_init(|| {
+        let (mut runtime, _) =
+            default_rule_runtime(default_rule_document("all-media"), &[], noon());
+        let snapshot = status(&mut runtime, noon());
+        assert_eq!(snapshot["config_path"], "/tmp/runtime.toml");
+        build_beyond_the_reference(&snapshot)
+    })
+}
+
+/// A configuration path as much shorter than the reference's `/tmp/runtime.toml` as this
+/// build's strings take more on the wire, or longer as they take less (each of its bytes is one
+/// on the wire), so that a reply here has the reference's room to the byte, wherever the test
+/// binary was built. No path is shorter than `/r`: a build whose strings take more than 15
+/// bytes beyond the reference's has the rest less room all the same.
+fn config_path_with_the_references_room() -> PathBuf {
+    let reference = "/tmp/runtime.toml".len() as i64;
+    let length = reference - this_builds_strings_beyond_the_reference();
+    if length >= reference {
+        config_path_longer_by(usize::try_from(length - reference).unwrap())
+    } else {
+        PathBuf::from(format!("/{}", "r".repeat(length.max(2) as usize - 1)))
+    }
 }
 
 /// One of the band's published monitors.
@@ -14912,7 +14959,7 @@ fn band_status(corner: BandCorner) -> (serde_json::Value, usize) {
     }));
     let parsed = Config::from_bytes(document.into_bytes()).unwrap();
     let mut runtime = Runtime::new(
-        PathBuf::from("/tmp/runtime.toml"),
+        config_path_with_the_references_room(),
         parsed,
         RuntimeDriver(state),
         at,
@@ -14976,23 +15023,52 @@ fn assert_at_least_what_0_4_0_sent(label: &str, tip: BandSent, reference: BandSe
 }
 
 /// Whether a reply built here has at least the room 0.4.0's had at a corner (`reference`), the
-/// lean saving counted: where it has less, through its build alone, it is not compared.
+/// lean saving counted: where it has less, through its build alone, it is not compared, and
+/// says so on stderr.
 fn comparable_to_0_4_0(label: &str, snapshot: &serde_json::Value, reference: &BandSent) -> bool {
     let beyond = build_beyond_the_reference(snapshot);
     let comparable = beyond <= (reference.spare + LEAN_UNDER_0_4_0) as i64;
     if !comparable {
-        println!("{label}: not compared: this build's strings take {beyond} bytes more");
+        eprintln!(
+            "{label}: NOT COMPARED with 0.4.0: this build's strings take {beyond} bytes beyond \
+             the reference's, more than its {} bytes to spare and the lean saving",
+            reference.spare
+        );
     }
     comparable
 }
 
+/// That a check skipped where this build leaves too little room (each skip said on stderr) was
+/// made at least once (`checked` times): a test that checked nothing fails rather than pass.
+fn assert_some_checked(what: &str, checked: usize) {
+    assert!(
+        checked > 0,
+        "{what}: skipped every time: this build's strings take {} bytes beyond the reference's, \
+         which a configuration path can't make up for past 15; build from a shorter path",
+        this_builds_strings_beyond_the_reference()
+    );
+}
+
+/// The rule every band reply holds whatever room this build leaves it: nothing of what it left
+/// out would fit, rows' rule ids and errors, taboo records, `missing_renderers` and `outputs`.
+fn assert_band_rule(label: &str, corner: BandCorner, snapshot: &serde_json::Value, wire: usize) {
+    let rule = format!("{}R", "\"".repeat(corner.rule_chars - 1));
+    assert_row_units_left_out_wouldnt_fit(label, snapshot, wire, &rule);
+    assert_given_back_where_it_fits(label, corner, snapshot, wire);
+}
+
+/// Each corner of `corners` holds the rule (`assert_band_rule`), and, where this build has the
+/// room 0.4.0 had, sends at least what 0.4.0 sent; at least one is compared.
 fn assert_band_at_least_0_4_0(corners: std::ops::Range<usize>) {
-    for (corner, reference) in &BAND_AT_0_4_0[corners] {
+    let mut compared = 0;
+    for (corner, reference) in &BAND_AT_0_4_0[corners.clone()] {
         let label = format!("{corner:?}");
         let (snapshot, wire) = band_status(*corner);
+        assert_band_rule(&label, *corner, &snapshot, wire);
         if !comparable_to_0_4_0(&label, &snapshot, reference) {
             continue;
         }
+        compared += 1;
         let tip = band_sent(&snapshot, wire);
         println!("{label}: 0.4.0 {reference:?}; now {tip:?}");
         assert_at_least_what_0_4_0_sent(&label, tip, *reference);
@@ -15003,6 +15079,7 @@ fn assert_band_at_least_0_4_0(corners: std::ops::Range<usize>) {
         );
         assert!(snapshot.get("diagnostics_omitted").is_none(), "{label}");
     }
+    assert_some_checked(&format!("band corners {corners:?} beside 0.4.0"), compared);
 }
 
 #[test]
@@ -15035,7 +15112,12 @@ fn assert_given_back_where_it_fits(
     snapshot: &serde_json::Value,
     wire: usize,
 ) {
-    assert_next_record_wouldnt_fit(label, snapshot, wire);
+    assert_next_record_wouldnt_fit(
+        label,
+        snapshot,
+        wire,
+        &band_record(corner.records.saturating_sub(1)),
+    );
     let room = MAX_RESPONSE_BYTES - wire;
     let sent = band_sent(snapshot, wire);
     assert_eq!(sent.missing_paths, 0, "{label}: {sent:?}");
@@ -15069,21 +15151,28 @@ fn what_is_left_beside_the_records_goes_back_to_missing_renderers_and_outputs() 
     // at 0.4.0. Whatever room this build leaves, nothing left out would fit, and nothing came
     // back at a record's expense.
     assert_band_at_least_0_4_0(11..13);
+    let mut compared = 0;
     for (corner, reference) in &BAND_AT_0_4_0[11..13] {
         let label = format!("{corner:?}");
         let (snapshot, wire) = band_status(*corner);
-        assert_given_back_where_it_fits(&label, *corner, &snapshot, wire);
         let sent = band_sent(&snapshot, wire);
         println!("{label}: 0.4.0 {reference:?}; now {sent:?}");
-        if build_beyond_the_reference(&snapshot) <= 0 {
-            // With this build's strings no longer than the reference's: something more than
-            // 0.4.0 sent (the two rows, or one more record), in the documented order.
-            assert!(
-                (sent.taboo, sent.missing) > (reference.taboo, reference.missing),
-                "{label}: nothing came back: {sent:?}"
+        // With at least the reference's room: something more than 0.4.0 sent (the two rows, or
+        // one more record), in the documented order. With less, it may not fit, and a reply
+        // that sent nothing more says nothing either way.
+        let more = (sent.taboo, sent.missing) > (reference.taboo, reference.missing);
+        let beyond = build_beyond_the_reference(&snapshot);
+        if beyond > 0 && !more {
+            eprintln!(
+                "{label}: NOT COMPARED for more than 0.4.0 sent: this build's strings take \
+                 {beyond} bytes beyond the reference's"
             );
+            continue;
         }
+        compared += 1;
+        assert!(more, "{label}: nothing came back: {sent:?}");
     }
+    assert_some_checked("more than 0.4.0 sent beside the records", compared);
 }
 
 #[test]
@@ -15201,17 +15290,43 @@ fn a_lean_reply_that_fits_whole_keeps_its_outputs() {
 
 // -- r13e L6 and N6: past what 0.4.0 answered, only as much goes as must ----------------------
 
+/// The taboo record a band document's playlist `index` carries, as status lists it.
+fn band_record(index: usize) -> serde_json::Value {
+    serde_json::json!({
+        "playlist_id": format!("{index:03}"),
+        "playlist": format!("n{index:03}"),
+        "entry_id": "e",
+        "kind": "still",
+        "scene_id": null,
+        "reason": format!("band {index:03}"),
+        "source": "review",
+        "durable": true,
+        "observed_config_epoch": 1,
+    })
+}
+
 /// That no taboo record left out would fit in the room `snapshot` has: listing one more adds
-/// it (`record`, a listed one's wire size), a comma, and makes `taboo_entries_omitted` no
-/// longer.
-fn assert_next_record_wouldnt_fit(label: &str, snapshot: &serde_json::Value, wire: usize) {
+/// it (each as long as `newest`, the first listed, which a band's records all are), a comma
+/// after the first, and makes `taboo_entries_omitted` no longer. With none listed, the first
+/// would be `newest`.
+fn assert_next_record_wouldnt_fit(
+    label: &str,
+    snapshot: &serde_json::Value,
+    wire: usize,
+    newest: &serde_json::Value,
+) {
     let listed = snapshot["taboo_entries"].as_array().unwrap();
     let omitted = snapshot["taboo_entries_omitted"].as_u64().unwrap();
-    if omitted == 0 || listed.is_empty() {
+    if omitted == 0 {
+        // Every record is listed: none is left out.
         return;
     }
+    if let Some(first) = listed.first() {
+        assert_eq!(first, newest, "{label}: the newest record first");
+    }
+    let comma = usize::from(!listed.is_empty());
     let digits = |count: u64| count.to_string().len();
-    let cost = json_wire_len(&listed[0]) + 1 - (digits(omitted) - digits(omitted - 1));
+    let cost = json_wire_len(newest) + comma - (digits(omitted) - digits(omitted - 1));
     assert!(
         MAX_RESPONSE_BYTES - wire < cost,
         "{label}: {} bytes to spare beside a {cost}-byte record left out",
@@ -15238,7 +15353,12 @@ fn past_the_band_only_as_many_rule_ids_go_as_must_and_records_come_back() {
         assert!(tip.rule_ids >= 64, "{label}: {tip:?}");
         assert!(tip.rule_ids < 128, "{label}: {tip:?}");
         assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, &rule);
-        assert_next_record_wouldnt_fit(&label, &snapshot, wire);
+        assert_next_record_wouldnt_fit(
+            &label,
+            &snapshot,
+            wire,
+            &band_record(corner.records.saturating_sub(1)),
+        );
     }
 }
 

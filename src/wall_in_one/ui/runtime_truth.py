@@ -495,6 +495,32 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     )
 
 
+def pick_holders(
+    truth: RuntimeTruth | None, record: str | None, playlist_id: str
+) -> tuple[bool, tuple[str, ...]]:
+    """Where a manual pick of ``playlist_id`` holds: (the whole screen, these connectors).
+
+    The app's own record of a pick (``session.manual_playlist``) is written only by its
+    own paths, not by a pick made through the service (``ctl``, the companion), so the
+    service's status is read too, where it names the pick: the playlist asked for by a
+    manual route (its ``stand_in_for`` when a stand-in plays). A pick no field names
+    (the reply ceiling) is named by neither, and so not here.
+    """
+    whole = record == playlist_id
+    connectors: list[str] = []
+    if truth is not None:
+        independent = truth.display_mode == "independent"
+        if not independent and truth.is_manual and truth.asked_playlist_id == playlist_id:
+            whole = True
+        if independent:
+            connectors = [
+                row.connector
+                for row in truth.displays
+                if row.connected and row.manual_override and row.asked_playlist_id == playlist_id
+            ]
+    return whole, tuple(connectors)
+
+
 def sibling_rule_id(
     displays: Iterable[DisplayRuntimeTruth], display: DisplayRuntimeTruth, *, independent: bool
 ) -> str | None:

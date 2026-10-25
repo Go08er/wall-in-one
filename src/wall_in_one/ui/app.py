@@ -69,7 +69,7 @@ from wall_in_one.session import (
     removal_lock_refusal,
 )
 from wall_in_one.theme import css, noctalia, source
-from wall_in_one.ui import dial_rows, monitors
+from wall_in_one.ui import dial_rows, monitors, runtime_truth
 from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.real_schedule import ColorsForgotten
@@ -7704,7 +7704,17 @@ class Application(Adw.Application):
             with self._settings_authoring_lock:
                 self._settings_requested = result.settings
             self._adopt_settings(previous, result.settings)
-        manual = self._session.manual_playlist == result.playlist_id
+        # The app's own record of a pick isn't written for one made through the service
+        # (ctl, the companion), so the service's status names it too. A pick the reply
+        # can't name is not released on doubt: it may be another playlist's, which the
+        # person still wants. The service itself drops a pick (the whole screen's or a
+        # display's) whose playlist the published document no longer has, so this
+        # release is for the one this app can name.
+        manual, _displays = runtime_truth.pick_holders(
+            runtime_truth.from_status(self.runtime_status),
+            self._session.manual_playlist,
+            result.playlist_id,
+        )
         self.playlists_changed()
         if manual:
             try:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -902,3 +903,81 @@ def test_control_n9_with_none_marked_both_say_the_same() -> None:
     from tests.test_ui_next_r13e import _count_line
 
     assert _count_line(5, marked=False).endswith(f" · 5 {CANT}")
+
+
+# --------------------------------------------- a delete and the service's pick ----
+
+
+def _status_naming(pick_id: str, other_id: str) -> dict[str, Any]:
+    """pick-refused.json (the pick is refused, another stands in) on these ids."""
+    names = {'"pages"': json.dumps(pick_id), '"scenes"': json.dumps(other_id)}
+    text = re.sub(
+        '"pages"|"scenes"', lambda m: names[m.group(0)], json.dumps(_status("pick-refused"))
+    )
+    status = json.loads(text)
+    assert isinstance(status, dict)
+    return status
+
+
+def _delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pick: str,
+    record: str | None = None,
+    ceiling: bool = False,
+) -> bool:
+    """Delete "pages" while the service's pick is ``pick`` (a name): was the pick released?"""
+    from tests.test_ui_runtime import _close
+    from wall_in_one.ui.app import _PlaylistDeleteResult
+
+    application, _window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    released: list[bool] = []
+    # (Sending it needs a library current with the saved sources, which this fixture
+    # isn't; what is judged is whether the delete asks to release the pick.)
+
+    def release() -> bool:
+        released.append(True)
+        return True
+
+    monkeypatch.setattr(application, "resume_schedule_async", release)
+    try:
+        ids = {one.name: one.id for one in application.session.playlists.all()}
+        status = _status_naming(ids[pick], ids["scenes" if pick == "pages" else "pages"])
+        if ceiling:
+            status = _at_the_ceiling(status)
+        application._status_model.adopt(status)
+        if record is not None:
+            application.session.use_playlist(ids[record])
+        # A pick made through the service leaves the app's record as it was.
+        failures = application._adopt_playlist_delete(_PlaylistDeleteResult(ids["pages"], "pages"))
+        assert failures == ()
+        return bool(released)
+    finally:
+        _close(application)
+
+
+def test_deleting_the_playlist_the_service_names_as_the_pick_releases_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _delete(tmp_path, monkeypatch, pick="pages")
+
+
+def test_control_deleting_another_playlist_than_the_pick_keeps_the_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert not _delete(tmp_path, monkeypatch, pick="scenes")
+
+
+def test_control_deleting_the_playlist_the_apps_record_names_releases_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _delete(tmp_path, monkeypatch, pick="scenes", record="pages")
+
+
+def test_a_pick_the_reply_cant_name_isnt_released_on_doubt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # It may be another playlist's pick, which the person wants; the service drops a
+    # pick whose playlist the published document no longer has.
+    assert not _delete(tmp_path, monkeypatch, pick="pages", ceiling=True)

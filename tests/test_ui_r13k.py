@@ -2,7 +2,8 @@
 
 U-N9, U-N10 and U-N11 each have a test that failed at ed7c249 and a control. The U-N12
 section covers the five label clauses r13j found untested, each with a control. U-N15
-(the next page's labels) and U-L-c (one click, one command, and a spent echo) follow it.
+(the classic page's two labels and the next page's route_unsure) and U-L-c (one click,
+one command, and a spent echo) follow it.
 """
 
 from __future__ import annotations

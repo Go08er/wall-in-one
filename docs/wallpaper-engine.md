@@ -211,15 +211,26 @@ again for what it says ([runtime-config.md](runtime-config.md)).
 When the app ends, a publication of the setting that the quit cut off before
 it installed anything (it was turned off just before Ctrl-C, say) leaves the
 file it would have replaced. So, last, while the setting is off, a file on
-disk that would play a web page, judged as above, is replaced with what a
-publication would install, or with the document that plays nothing, without
-asking the service anything: its own check of the file loads it. A save of
-the setting still being written then is waited for, as long as such a save
-can take (its locks, and the check of the service that "Stop animations on
-battery" makes: about 70 seconds at most); with none, nothing is waited for.
-The lock is waited for two seconds at most; another writer holding it past
-that installs only what the setting allows. A second Ctrl-C ends both waits
-at once, and the save it cuts off is then not acted on.
+disk that allows web wallpapers is replaced with the document that plays
+nothing, without asking the service anything: its own check of the file
+loads it. No wallpaper plays then until a publication gets through: the
+app's next start, or the service's, whose start compiles again. Nothing is
+compiled at the end: a compile that can't put an older document over a newer
+one reads all the library's authoring again from disk, which is too long to
+hold a quit for. The setting and the file are read again under the compiler
+lock, and the replacement is installed in that same hold, so a document
+another writer installed meanwhile is judged as it is. A file that doesn't
+allow web wallpapers is left as it is: a service that reads schema 8 plays no
+web page from it (below). Only a service older than that, still running after
+an update, plays a web page such a file names, until it is restarted, as it
+should be after an update ([installing.md](installing.md)); its start then
+runs the check below. A save of the setting still being written then is
+waited for, as long as such a save can take (its locks, and the check of the
+service that "Stop animations on battery" makes: about 70 seconds at most);
+with none, nothing is waited for. The lock is waited for two seconds at most,
+and only when there is a file to replace; another writer holding it past that
+installs only what the setting allows. A second Ctrl-C ends both waits at
+once, and the save it cuts off is then not acted on.
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
 a web page, names a Workshop item whose type can't be checked, or allows web

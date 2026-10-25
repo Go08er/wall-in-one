@@ -311,6 +311,31 @@ SETTINGS_SAVE_SECONDS: Final = (
 SHUTDOWN_WEB_OFF_LOCK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
+#: The line the compiler writes in ``[settings]`` while it allows web wallpapers
+#: (`runtime_config._document_head`). Nothing else it writes starts a line with
+#: the key: every value is one quoted line after its own key.
+_COMPILED_WEB_ALLOWED: Final = re.compile(r"^allow_web_wallpapers = true$", re.MULTILINE)
+#: What a quoted TOML key could spell the key's name with, but for the name itself.
+_KEY_ESCAPES: Final = ("\\u", "\\U", "\\x")
+
+
+def _may_allow_web_wallpapers(text: str) -> bool:
+    """Whether ``text`` (a ``runtime.toml``) allows web wallpapers, unparsed where it can be told.
+
+    One the compiler wrote has the key on a line of its own exactly when it
+    allows them (`_COMPILED_WEB_ALLOWED`); one that doesn't name the key, nor
+    has an escape a quoted key could spell it with, can't. Anything else (a
+    hand edit) is parsed (`runtime_config.allows_web_wallpapers`). A parse
+    takes about a third of a second for each megabyte, and a second Ctrl-C
+    can't end it: the shutdown's last step asks here (`Application._web_off_on_disk_at_exit`).
+    """
+    if _COMPILED_WEB_ALLOWED.search(text) is not None:
+        return True
+    if "allow_web_wallpapers" not in text and not any(escape in text for escape in _KEY_ESCAPES):
+        return False
+    return runtime_config.allows_web_wallpapers(text=text)
+
+
 PACKAGE_SOURCE_ACTION: Final = "package-source"
 PRESENT_PACKAGE_ACTION: Final = "present-package"
 # Installed Nix package directories are immutable and distinguish revisions
@@ -2207,7 +2232,7 @@ class Application(Adw.Application):
         Adw.Application.do_shutdown(self)
 
     def _web_off_on_disk_at_exit(self) -> None:
-        """Last in `do_shutdown`: a file that may play a web page while they are off is replaced.
+        """Last in `do_shutdown`: a file that allows web wallpapers while they are off is replaced.
 
         A move of ``allow_web_wallpapers`` saved while the shutdown settles is
         published on the runtime lane, ``--service`` included, and the
@@ -2220,31 +2245,59 @@ class Application(Adw.Application):
         N11).
 
         So, once a save still being written has landed: when ``settings.toml``
-        says web wallpapers are off and the file on disk may let a web page
-        play (it allows them; or, for a service not known to read schema 8,
-        it names a web page or a Workshop item whose type can't be checked,
-        as `_web_off_guard` judges), the file is replaced, under the compiler
-        lock, with what a publication would install now: compiled for them
-        off, for the service the last status described, from the library in
-        memory (`runtime_config.web_off_document`); or, when that can't be
-        compiled (the library isn't a valid inventory, or is for other
-        folders, or the compile fails), with the document that plays nothing.
-        The service's own poll of the file loads it; a service older than
-        schema 8 can load only the compiled one. Nothing else is written, and
-        nothing is asked of the service: the shutdown has cut the socket
-        calls off, and one would hold the exit.
+        says web wallpapers are off and the file on disk allows them
+        (``allow_web_wallpapers = true``, compiled while they were on, which
+        turns the service's own check off), the file is replaced with the
+        document that plays nothing (`runtime_config.nothing_to_play_document`),
+        as `_web_off_not_running` replaces it when no service runs. Both are
+        schema 8, so whatever could load the one loads the other, and the
+        service's own poll of the file loads it. Nothing plays then until a
+        publication gets through: the app's next start, or the service's,
+        whose start check compiles again. The library isn't compiled here
+        (review r13e, L1, L2): a compile that can't put an older document over
+        a newer one reads every authoring store again from disk, under the
+        migration guard, as the runtime lane does, and that takes a fifth of
+        a second or more for a large library, with nothing to end it at a
+        second Ctrl-C. The one this step made from the Session in memory put
+        an older compile over another writer's newer document.
+
+        Nothing else is replaced. A file that doesn't allow web wallpapers
+        lets no page play on a service that reads schema 8: it reads each
+        item's type before it starts the engine. Only a service older than
+        that, still running after an update, has no such check and plays a
+        web page such a file names. That is left as it is until that service
+        next starts (it is to be restarted after an update): its start check
+        then compiles again, or refuses with exit 78 a kept file that plays a
+        web page while they are off, and the updated service checks each
+        item itself. Judging that here needs a scan of the Workshop, seconds
+        long for a large library (L1), and the service's status, which is
+        the last one heard; neither is asked for here.
+
+        Judged and installed in one hold of the compiler lock, on what is on
+        disk then: ``settings.toml`` and the file are read again under it, so
+        a document another writer installed before the lock was had is judged
+        as it is (one compiled for web wallpapers on, once the setting is on
+        again, is left), and nothing installed after it is touched (L2). The
+        migration guard isn't taken: no authoring store is read, and the
+        legacy import never writes this file. Nothing else is written, and
+        nothing is asked of the service: the shutdown has cut the socket calls
+        off, and one would hold the exit.
 
         Bounded, and waiting only for what can matter. A settings save still
         being written is waited for, for as long as such a save itself can
         take (`SETTINGS_SAVE_SECONDS`, its locks and its check of the
-        service); with none, nothing is waited for. The compiler lock is
-        waited for briefly (`SHUTDOWN_WEB_OFF_LOCK_SECONDS`): a lock still held
-        then is another publication's, which reads the setting under it and
-        installs only what it allows (review r13c, D2), so nothing is written
-        here; what that leaves is this process's own lane holding it past
-        the wait and then failing. So a quit takes at most the settle's
-        bound, that save's bound while one is being written, and the lock's;
-        the compile is the library's in memory, and isn't interrupted.
+        service); with none, nothing is waited for. Then the setting and the
+        file are looked at without the lock (every writer replaces each by a
+        rename), and with nothing to replace, the lock isn't waited for
+        either. Otherwise it is waited for briefly
+        (`SHUTDOWN_WEB_OFF_LOCK_SECONDS`): a lock still held then is another
+        publication's, which reads the setting under it and installs only
+        what it allows (review r13c, D2), so nothing is written here; what
+        that leaves is this process's own lane holding it past the wait and
+        then failing. Looking at the file costs a search of its text for the
+        compiler's own line for the key (`_may_allow_web_wallpapers`). So a
+        quit takes at most the settle's bound, that save's bound while one is
+        being written, and the lock's.
 
         A second Ctrl-C, during the settle or here, ends these waits at once
         (review r13c, N-2): the save still being written is then not waited
@@ -2269,13 +2322,9 @@ class Application(Adw.Application):
     def _replace_web_off_on_disk(self) -> None:
         """`_web_off_on_disk_at_exit`'s work."""
         self._settings_save_landed()
-        try:
-            settings = config.load_strict()
-        except config.ConfigError:
-            return  # as for `_web_off_guard`: the next compile says what is wrong with it
-        if settings.allow_web_wallpapers:
-            return
         target = paths.runtime_config_path()
+        if self._web_off_but_allowed_on_disk(target) is None:
+            return  # nothing to replace: the lock isn't waited for
         with contextlib.ExitStack() as held:
             try:
                 held.enter_context(
@@ -2286,30 +2335,39 @@ class Application(Adw.Application):
                 )
             except runtime_config.RuntimeConfigError:
                 return  # a publication holds it, and installs only what the setting allows
+            # Judged again, on what is on disk now, and installed in this same hold.
+            settings = self._web_off_but_allowed_on_disk(target)
+            if settings is None:
+                return
+            document = runtime_config.nothing_to_play_document(
+                settings, runtime_config.WEB_OFF_REASON
+            )
             try:
-                on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
-            except OSError, UnicodeDecodeError:
-                return
-            if on_disk is None:
-                return
-            status = self.runtime_status
-            plays = runtime_config.allows_web_wallpapers(text=on_disk)
-            if not plays and not runtime_config.nothing_to_play_supported(status):
-                titles, unchecked = runtime_config.web_wallpapers_in([on_disk])
-                plays = bool(titles or unchecked)
-            if not plays:
-                return
-            document = self._web_off_document_now(settings, status)
-            if document == on_disk:
-                return
-            try:
-                runtime_config.install_web_off(document, target)
+                runtime_config.install_nothing_to_play(document, target)
             except runtime_config.RuntimeConfigNotDurableError as uncertain:
                 LOGGER.warning("%s", uncertain)  # installed: only its folder sync failed
             LOGGER.info(
-                "Allow web wallpapers is off, but the configuration on disk could play a web "
-                "wallpaper; it was replaced at shutdown"
+                "Allow web wallpapers is off, but the configuration on disk allowed web "
+                "wallpapers; it was replaced at shutdown with one that plays nothing"
             )
+
+    @staticmethod
+    def _web_off_but_allowed_on_disk(target: Path) -> config.Settings | None:
+        """``settings.toml`` as read now, when it says web wallpapers are off and ``target``
+        allows them (`_may_allow_web_wallpapers`); otherwise None."""
+        try:
+            settings = config.load_strict()
+        except config.ConfigError:
+            return None  # as for `_web_off_guard`: the next compile says what is wrong with it
+        if settings.allow_web_wallpapers:
+            return None
+        try:
+            on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
+        except OSError, UnicodeDecodeError:
+            return None
+        if on_disk is None or not _may_allow_web_wallpapers(on_disk):
+            return None
+        return settings
 
     def _settings_save_landed(self) -> None:
         """Wait for a settings save still being written: until it ends, its bound, or a Ctrl-C.
@@ -2332,22 +2390,6 @@ class Application(Adw.Application):
                 return
             # In slices: Python runs the Ctrl-C handler between them.
             futures.wait((saving,), timeout=min(remaining, SHUTDOWN_INTERRUPT_POLL_SECONDS))
-
-    def _web_off_document_now(self, settings: config.Settings, status: object) -> str:
-        """What `_web_off_on_disk_at_exit` installs: a web-off compile, else nothing to play."""
-        with self._runtime_config_lock:
-            sources = self._accepted_library_sources
-        if sources is None:
-            sources = (self._session.library.roots, self._settings.scan_workshop)
-        if self._inventory_installable(None) and sources == (
-            settings.roots,
-            settings.scan_workshop,
-        ):
-            try:
-                return runtime_config.web_off_document(settings, self._session, status)
-            except (runtime_config.RuntimeConfigError, config.ConfigError, OSError) as error:
-                LOGGER.info("no web-off document could be compiled at shutdown: %s", error)
-        return runtime_config.nothing_to_play_document(settings, runtime_config.WEB_OFF_REASON)
 
     def _on_close_request(self, window: Gtk.Window) -> bool:
         # Every settings edit is persisted by ``update_settings``.  Saving the
@@ -4745,7 +4787,8 @@ class Application(Adw.Application):
         poll of the file, and the next service start is guarded
         (``--service-startup-prepare``). One cut before it installed leaves
         the file it would have replaced, which the end of the shutdown
-        replaces while web wallpapers are off (`_web_off_on_disk_at_exit`).
+        replaces with one that plays nothing when it allows web wallpapers
+        while they are off (`_web_off_on_disk_at_exit`).
         Socket calls past that point would hold the process's exit for as
         long as they wait.
 
@@ -4768,7 +4811,9 @@ class Application(Adw.Application):
         runs (a gesture in a window still open, a save already under way),
         whose publication, or the number's, which reads the file, the
         shutdown cuts before it installs: the window's case above, which the
-        end of the shutdown closes (`_web_off_on_disk_at_exit`).
+        end of the shutdown closes for a file that allows web wallpapers
+        (`_web_off_on_disk_at_exit`; one for a service older than schema 8
+        is left to that service's next start).
         """
         if publication.deferred or self._runtime_shutdown:
             return publication

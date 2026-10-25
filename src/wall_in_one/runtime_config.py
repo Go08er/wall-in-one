@@ -2822,43 +2822,6 @@ def install_nothing_to_play(document: str, path: Path | None = None) -> None:
     _install(document, path if path is not None else paths.runtime_config_path())
 
 
-def web_off_document(settings: config.Settings, session: Session, status: object) -> str:
-    """What publishing compiles for ``settings``, web wallpapers off, asking the service nothing.
-
-    `_fitted`'s choice made from a status the caller already holds: presets,
-    the dials and schema 8's additions only when ``status`` lists them
-    (`presets_supported`, `dials_supported`, `nothing_to_play_supported`),
-    without its socket calls or its check of the loaded units. For a caller
-    that may make none (`Application._web_off_on_disk_at_exit`, the last step
-    of a shutdown). An All media that plays nothing, for a service not shown
-    to read schema 8, is refused (`NothingToPlayNeedsNewerServiceError`), as
-    by publishing; so is ``settings`` that allows web wallpapers.
-    """
-    if settings.allow_web_wallpapers:
-        raise RuntimeConfigError("web wallpapers are on: this document is compiled only while off")
-    return _compile(
-        settings,
-        session,
-        presets=presets_supported(status),
-        renderer_dials=dials_supported(status),
-        nothing_to_play=nothing_to_play_supported(status),
-    ).document
-
-
-def install_web_off(document: str, path: Path | None = None) -> None:
-    """Replace ``runtime.toml`` with ``document`` (`web_off_document`), durably.
-
-    As `install_nothing_to_play`: the caller holds `compiler_lock` and has read
-    what it replaces under it, and the overrides file is left as it is. A
-    document that allows web wallpapers is refused, and nothing is written.
-    """
-    if allows_web_wallpapers(text=document):
-        raise RuntimeConfigError(
-            "a document compiled for web wallpapers off never allows them; it was not installed"
-        )
-    _install(document, path if path is not None else paths.runtime_config_path())
-
-
 def _read_overrides(target: Path) -> str | None:
     sidecar = overrides_path(target)
     try:

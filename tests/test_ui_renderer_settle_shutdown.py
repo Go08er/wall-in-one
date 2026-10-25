@@ -19,7 +19,9 @@ loop until they settle (review r13b, G1). Review r13c found four things wrong wi
   fired. Now it is saved, as one still waiting when the quit ends is.
 * **r13d N11, web wallpapers turned off while the shutdown settles:** that publication, on the
   runtime lane, was cut before it installed, and the file on disk still allowed web wallpapers.
-  Now the end of the shutdown replaces it, file-only.
+  Now the end of the shutdown replaces it, file-only, with the document that plays nothing; it
+  compiles nothing and scans nothing (r13e, L1 and L2), and a second Ctrl-C ends its wait for
+  the compiler lock too.
 
 Real Application, both interfaces where it matters; the service is the suite's fake runtime,
 made to hang on ``reload`` where said. Nothing outside the test's sandbox is touched.
@@ -40,7 +42,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +68,7 @@ from tests.test_ui_renderer_dials import _own, toolkit  # noqa: E402,F401
 from tests.test_ui_renderer_settle_quit import _after, _clip, _rows, _scanned  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
-from wall_in_one.library import pairings  # noqa: E402
+from wall_in_one.library import pairings, scan  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
 from wall_in_one.ui import dial_rows  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
@@ -383,6 +385,105 @@ def test_a_second_sigint_cuts_the_settle_short(
         )
 
 
+#: What the app last heard from the service, for the end of the shutdown to judge by.
+HEARD: dict[str, dict[str, object] | None] = {
+    "nothing": None,
+    "an-older-service": {
+        "status_version": 2,
+        "supported_config_schemas": [4, 5, 6, 7],
+        "playback_state": "playing",
+    },
+    "control-reads-eight": {
+        "status_version": 2,
+        "supported_config_schemas": [4, 5, 6, 7, 8],
+        "playback_state": "playing",
+    },
+}
+
+
+def _naming(scenes: Sequence[str]) -> str:
+    """A document that plays ``scenes`` (named as the compiler names one: its ``scene_id``)."""
+    head = 'schema_version = 4\nconfig_generation = "' + "d" * 64 + '"\n[[playlists]]\nid = "p"\n'
+    return head + "".join(f'[[playlists.entries]]\nscene_id = "{scene}"\n' for scene in scenes)
+
+
+@pytest.mark.parametrize("heard", list(HEARD))
+def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, heard: str
+) -> None:
+    """r13e L1 (its p3): the same, but what the app last heard from the service is nothing, or a
+    service older than schema 8, and the file the service holds names Workshop scenes, none of
+    which the scan lists (written as the number's reload begins, after its publication
+    installed). Before: the end of the shutdown scanned the Workshop on GTK's thread to judge
+    that file, which took 2.2 s for 2,500 items, after the second SIGINT, with nothing to end it.
+    Now it judges only whether the file allows web wallpapers, and scans nothing: each scan on
+    GTK's thread once the shutdown has begun is recorded, and there must be none. The file, which
+    allows none, is left as it is."""
+    application, clip, slow, _spans = _setup(
+        monkeypatch,
+        tmp_path,
+        ui="classic",
+        service=False,
+        settle_seconds=app_module.SHUTDOWN_SETTLE_SECONDS,
+        reload_seconds=HANG,
+    )
+    status = HEARD[heard]
+    monkeypatch.setattr(Application, "runtime_status", property(lambda _self: status))
+    named = _naming([str(2_000_000_000 + index) for index in range(3)])
+    workshop_items = scan.workshop_items
+    scanned: list[bool] = []
+
+    def recorded(*arguments: Any, **keywords: Any) -> Any:
+        if application._runtime_shutdown and (
+            threading.current_thread() is threading.main_thread()
+        ):
+            scanned.append(True)
+        return workshop_items(*arguments, **keywords)
+
+    monkeypatch.setattr(scan, "workshop_items", recorded)
+    marks: dict[str, float] = {}
+    failures: list[str] = []
+
+    def names_the_scenes() -> None:
+        paths.runtime_config_path().write_text(named, encoding="utf-8")
+
+    def second() -> bool:
+        marks["second"] = time.monotonic()
+        _interrupt(failures)
+        return GLib.SOURCE_REMOVE
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        speed, _brightness = _rows(application, clip)
+        speed.set_value(1.5)
+        _LANES.extend(application_lanes(application))
+        slow.first = names_the_scenes
+        slow.armed = True
+        _interrupt(failures)  # the first Ctrl-C: PyGObject calls application.quit()
+        GLib.timeout_add(300, second)  # runs inside the settle's own iterations
+
+    _LANES.clear()
+    ended = 0.0
+    with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+        try:
+            run_application(application, scenario())
+        finally:
+            ended = time.monotonic()
+            _join_lanes()
+    assert not failures, failures
+    own = _own(clip, Kind.VIDEO)
+    assert own.dial("video", "speed") == 1.5, own
+    assert "second" in marks, "the second SIGINT never ran"
+    assert not scanned, "the end of the shutdown scanned the Workshop on GTK's thread"
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == named, (
+        "a file that allows no web wallpaper was replaced"
+    )
+    assert ended - marks["second"] < 1.0, (
+        f"run() returned {ended - marks['second']:.2f}s after the second SIGINT"
+    )
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, "handler not restored"
+
+
 @pytest.mark.parametrize("ended_by", ["the-bound", "a-second-sigint"])
 def test_a_number_still_queued_when_the_settle_ends_is_still_saved(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ended_by: str
@@ -584,7 +685,6 @@ def _until(condition: Callable[[], bool], failures: list[str], what: str) -> Non
     [
         ("service", "turned-off-during-the-settle"),
         ("windowed", "turned-off-during-the-settle"),
-        ("service", "turned-off-and-no-compile-at-the-end"),
         ("service", "control-left-on"),
         ("service", "control-off-throughout"),
         ("windowed", "control-off-throughout"),
@@ -598,9 +698,10 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
     and is adopted, and its publication waits on the lane behind the hung reload. Then a second
     Ctrl-C ends the settle, and the shutdown cuts that publication before it installs anything.
     Before: ``[*-turned-off-*]`` left the number's document, which allows web wallpapers, on disk
-    for the service's poll, while settings.toml said they are off. What replaces it is compiled
-    for web wallpapers off, so the library still plays; when that compile fails at the end, it is
-    the document that plays nothing. The controls change nothing during the settle, and nothing
+    for the service's poll, while settings.toml said they are off. What replaces it is the
+    document that plays nothing, and nothing is compiled on GTK's thread once the shutdown has
+    begun (r13e, L1 and L2: the compile at the end was of the Session in memory, and took as
+    long as the library made it). The controls change nothing during the settle, and nothing
     more is written."""
     service = mode == "service"
     turning_off = variant.startswith("turned-off")
@@ -615,15 +716,17 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
     installed: list[tuple[int, int] | None] = []
     turned: list[bool] = []
     failures: list[str] = []
-    if variant == "turned-off-and-no-compile-at-the-end":
-        compile_ = runtime_config._compile
+    compiled_at_the_end: list[bool] = []
+    compile_ = runtime_config._compile
 
-        def no_compile_once_shut_down(*arguments: Any, **keywords: Any) -> Any:
-            if application._runtime_shutdown:
-                raise runtime_config.RuntimeConfigError("a store can't be read (this test)")
-            return compile_(*arguments, **keywords)
+    def watched_compile(*arguments: Any, **keywords: Any) -> Any:
+        if application._runtime_shutdown and (
+            threading.current_thread() is threading.main_thread()
+        ):
+            compiled_at_the_end.append(True)
+        return compile_(*arguments, **keywords)
 
-        monkeypatch.setattr(runtime_config, "_compile", no_compile_once_shut_down)
+    monkeypatch.setattr(runtime_config, "_compile", watched_compile)
 
     def cut() -> bool:
         application._settle_cut = True  # what a second Ctrl-C sets
@@ -676,16 +779,15 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
         )
         assert _identity() != installed[0]
         text = paths.runtime_config_path().read_text(encoding="utf-8")
-        if variant == "turned-off-and-no-compile-at-the-end":
-            assert "nothing_to_play" in text, "not the document that plays nothing"
-        else:
-            assert "nothing_to_play" not in text and str(clip) in text, (
-                "not a compile for web wallpapers off of the library"
-            )
+        assert text == runtime_config.nothing_to_play_document(
+            config.load_strict(), runtime_config.WEB_OFF_REASON
+        ), "not the document that plays nothing"
+        assert not compiled_at_the_end, "the end of the shutdown compiled the library on GTK"
         return
     assert config.load_strict().allow_web_wallpapers is (variant == "control-left-on")
     assert on_disk is (variant == "control-left-on")
     assert _identity() == installed[0], "something was written after the publication"
+    assert not compiled_at_the_end, "the end of the shutdown compiled the library on GTK"
 
 
 def test_web_turned_off_as_the_loop_ends_leaves_no_file_that_allows_them(

@@ -15038,6 +15038,47 @@ fn a_reply_at_its_limit_leaves_out_first_what_says_nothing() {
     );
 }
 
+#[test]
+fn a_lean_reply_that_fits_whole_keeps_its_outputs() {
+    // The lean whole reply is measured from the whole one and built only when it fits. Here the
+    // whole reply, nulls and all, is over by less than what the nulls take, so the lean one is
+    // the reply, with the compositor's snapshot: were the saving ever measured short, the
+    // fitting would go on without `outputs`, and nothing else would tell.
+    let corner = BandCorner {
+        published: 1,
+        ..band("mirrored", 216, 0)
+    };
+    let (snapshot, wire) = band_status(corner);
+    let tip = band_sent(&snapshot, wire);
+    assert_eq!((tip.rule_ids, tip.outputs), (128, 1), "{tip:?}");
+    for flag in [
+        "stand_in_for_omitted",
+        "schedule_rule_id_omitted",
+        "diagnostics_omitted",
+    ] {
+        assert!(snapshot.get(flag).is_none(), "{flag}");
+    }
+    let rows = snapshot["displays"].as_array().unwrap();
+    assert!(
+        rows.iter().all(|row| row.get("entry_name").is_none()),
+        "not lean"
+    );
+    // With its nulls (each a `,"key":value` on the wire) it would not have fit.
+    let null = |key: &str, value: &str| escaped_len(&format!(",\"{key}\":{value}"));
+    let nulls = rows.len() * (null("nothing_to_play", "null") + null("entry_name", "null"))
+        + null("nothing_to_play", "null")
+        + null("allow_web_wallpapers", "false")
+        + null("refused", "[]")
+        + null("refused_omitted", "0")
+        + null("loaded_overrides_sha256", "null")
+        + null("overrides_ignored", "null");
+    assert!(
+        tip.spare < nulls,
+        "{} bytes to spare beside {nulls} of nulls",
+        tip.spare
+    );
+}
+
 // -- r13e L6 and N6: past what 0.4.0 answered, only as much goes as must ----------------------
 
 /// That no taboo record left out would fit in the room `snapshot` has: listing one more adds

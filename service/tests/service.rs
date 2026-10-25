@@ -588,6 +588,121 @@ fn explicit_reload_is_not_repeated_by_the_file_watcher() {
     fs::remove_dir_all(root).unwrap();
 }
 
+// -- r13d L2: a document installed while the service starts is loaded by its poll --------------
+
+/// The generation the service at `socket` says it holds.
+fn held_generation(socket: &Path) -> String {
+    let reply = request(socket, "status", None);
+    assert_eq!(reply["ok"], true, "{reply}");
+    let status: serde_json::Value =
+        serde_json::from_str(reply["message"].as_str().unwrap()).unwrap();
+    status["config_generation"].as_str().unwrap().to_string()
+}
+
+const INSTALLED_GENERATION: &str =
+    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// A service started on one document, and a second installed over it (a rename, as the app
+/// installs one, with no `reload`): by its noctalia the first time that runs, which is in the
+/// first apply, after the read and the bind (`in_first_apply`), or else once the service has
+/// answered. `--wait-for-config` is the companion's direct start; without it, the unit's.
+/// Whether the rename was done by the time the service first answered, and the generation it
+/// holds once its poll has had five chances to load the second.
+fn generation_after_an_install(
+    label: &str,
+    wait_for_config: bool,
+    in_first_apply: bool,
+) -> (bool, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory(label);
+    let config_path = root.join("runtime.toml");
+    let next = root.join("next.toml");
+    let marker = root.join("installed");
+    let socket = root.join("runtime.sock");
+    let stub = root.join("noctalia");
+    fs::write(
+        &stub,
+        if in_first_apply {
+            format!(
+                "#!/bin/sh\nif [ -e {next:?} ]; then mv -f {next:?} {config_path:?} && : > {marker:?}; fi\n"
+            )
+        } else {
+            "#!/bin/sh\nexit 0\n".into()
+        },
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let first = config(&stub, &stub, false);
+    fs::write(&config_path, &first).unwrap();
+    fs::write(
+        &next,
+        first
+            .replace(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                INSTALLED_GENERATION,
+            )
+            .replace("/tmp/one.png", "/tmp/one-installed.png"),
+    )
+    .unwrap();
+    let mut command = service_command();
+    command
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--socket")
+        .arg(&socket);
+    if wait_for_config {
+        command.arg("--wait-for-config");
+    }
+    let mut child = ServiceChild(command.spawn().unwrap());
+    let _ = held_generation(&socket);
+    let installed_in_the_start = marker.exists();
+    if !in_first_apply {
+        fs::rename(&next, &config_path).unwrap();
+    }
+    // The poll looks once a second.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut held = held_generation(&socket);
+    while held != INSTALLED_GENERATION && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        held = held_generation(&socket);
+    }
+    stop(&mut child, &socket);
+    fs::remove_dir_all(root).unwrap();
+    (installed_in_the_start, held)
+}
+
+#[test]
+fn a_document_installed_while_the_service_starts_is_loaded_by_its_poll() {
+    // Review r13d L2: the service took its file's fingerprint only after its read, its bind and
+    // its first apply, so a document installed in between counted as loaded, and nothing loaded
+    // it until the next publication. The app's web-off guard installs one there with no reload
+    // when no service answers, as does a toggle whose reload finds no socket.
+    for wait_for_config in [false, true] {
+        let (in_the_start, held) =
+            generation_after_an_install("start-window-install", wait_for_config, true);
+        assert!(
+            in_the_start,
+            "{wait_for_config}: the install wasn't in the start"
+        );
+        assert_eq!(
+            held, INSTALLED_GENERATION,
+            "--wait-for-config {wait_for_config}: the document installed during the first apply \
+             was never loaded"
+        );
+    }
+}
+
+#[test]
+fn a_document_installed_once_the_service_answers_is_loaded_by_its_poll() {
+    // The control: the same install once the service has answered.
+    for wait_for_config in [false, true] {
+        let (in_the_start, held) =
+            generation_after_an_install("answered-install", wait_for_config, false);
+        assert!(!in_the_start);
+        assert_eq!(held, INSTALLED_GENERATION, "{wait_for_config}");
+    }
+}
+
 #[test]
 fn renderer_applies_still_then_mode_then_palette_then_motion() {
     use std::os::unix::fs::PermissionsExt;

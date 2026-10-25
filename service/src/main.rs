@@ -544,6 +544,14 @@ fn run() -> Result<(), ServiceError> {
     if options.wait_for_config && !wait_for_config(&options.config)? {
         return Ok(());
     }
+    // Taken before the read, as `serve` and the poll take theirs: what is read
+    // is this generation or a newer one, so a document installed at any point
+    // after the read (while the socket is bound, or the first apply runs)
+    // differs from `known`, and the poll loads it. Taken after the first
+    // apply, as it was, it could name bytes this process never read, and
+    // nothing loaded them until the next publication. A rename between the
+    // two costs one harmless extra reload.
+    let mut known = fingerprint(&options.config);
     let config = Config::load(&options.config).map_err(ServiceError::Config)?;
     if options.check_config {
         return Ok(());
@@ -563,7 +571,6 @@ fn run() -> Result<(), ServiceError> {
     runtime.observe_power(power.synchronize(runtime.battery_policy_enabled()));
     let mut startup_retry = initial_apply(&mut runtime, Instant::now());
     release_startup_allocator_slack();
-    let mut known = fingerprint(&options.config);
     let mut next_config_check = Instant::now() + Duration::from_secs(1);
     while !runtime.should_quit() && !TERMINATE.load(Ordering::Relaxed) {
         if let Err(error) = accept_ready_batch(listener, |stream| {

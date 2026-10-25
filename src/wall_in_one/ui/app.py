@@ -2621,7 +2621,11 @@ class Application(Adw.Application):
                     error,
                 )
             if not replaced:
-                pass  # the warning above is what happened
+                if older and why == _NAMES:  # no quit is sent: restarting is the remedy
+                    LOGGER.warning(
+                        "That service is older than this app, so it keeps playing what it "
+                        "holds until it is restarted: systemctl --user restart wall-in-one"
+                    )
             elif why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk may have "

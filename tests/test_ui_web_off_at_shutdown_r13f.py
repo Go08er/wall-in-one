@@ -1564,3 +1564,39 @@ def test_an_older_service_is_told_to_quit_and_the_log_says_so_whether_or_not_it_
         assert len(replaced) == 1 and not failed, said
     else:
         assert len(failed) == 1 and not replaced, said
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_a_failed_install_for_an_older_service_still_says_to_restart_it(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    installed: bool,
+) -> None:
+    """Before: after a failed install, for a service older than 8 and a file naming an item whose
+    type couldn't be checked, the log didn't say to restart it. The control (installed) did."""
+    application = profiles().application
+    _content, scenes = _workshop(1)
+    text = _naming([*scenes, "4000000099"])  # no such item: its type can't be checked
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["an-older-service"])
+    sent: list[str] = []
+
+    def send(verb: str, *_a: object, **_k: object) -> Response:
+        sent.append(verb)
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    if not installed:
+
+        def refuse(*_a: object, **_k: object) -> None:
+            raise runtime_config.RuntimeConfigError("the disk is full")
+
+        monkeypatch.setattr(runtime_config, "install_nothing_to_play", refuse)
+    caplog.set_level(logging.INFO, logger=app_module.LOGGER.name)
+    application._web_off_on_disk_at_exit()
+    _judged_at_exit(application)
+    said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
+    assert sent == [], "no quit is sent for an item whose type can't be checked"
+    assert any("systemctl --user restart wall-in-one" in one for one in said), said
+    assert any("it was replaced at shutdown" in one for one in said) is installed, said

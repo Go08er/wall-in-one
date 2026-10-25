@@ -1053,8 +1053,9 @@ def compiled_scenes(text: str) -> frozenset[str] | None:
     ``scene_id`` and ``scene_base`` in it is on such a line (`_COMPILED_SCENE`)
     and no quoted key spells either (`may_spell_key`), those lines are all it
     names, as any reader of TOML 1.0 or 1.1 reads it. A document the compiler
-    wrote, 0.4.0's included, is always one. Otherwise (a hand edit, or the
-    name in a title) None: `named_scenes` parses it.
+    wrote, 0.4.0's included, is one unless a value in it has either name in
+    it (a still's path, a title). Otherwise (a hand edit, or such a value)
+    None: `named_scenes` parses it.
     """
     found = _COMPILED_SCENE.findall(text)
     for key in ("scene_id", "scene_base"):

@@ -811,6 +811,9 @@ class SchedulePage(Page):
                 if kind == "overridden" and route.route == "schedule" and winner is None:
                     # The reply left the rule's id out: whether this one wins isn't known.
                     continue
+                if kind == "playing" and route.nothing_to_play:
+                    # It decides, and nothing of its playlist can play.
+                    text = "Nothing to play"
                 if kind in ("playing", "overridden"):
                     active.append(self._why_row(rule, text, kind))
                     self.why_entries.append((rule.id, text, kind))
@@ -866,7 +869,10 @@ class SchedulePage(Page):
         sub.add_css_class("dimmed")
         texts.append(sub)
         inner.append(texts)
-        pill = Gtk.Label(label="Playing", valign=Gtk.Align.CENTER)
+        pill = Gtk.Label(
+            label="Nothing to play" if route.nothing_to_play else "Playing",
+            valign=Gtk.Align.CENTER,
+        )
         pill.add_css_class("why-reason")
         pill.add_css_class("playing")
         inner.append(pill)

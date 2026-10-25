@@ -229,6 +229,10 @@ class DisplaysPage(Page):
         if service == "stopped":
             return "Not running", "media-playback-stop-symbolic", True
         route = self._route(connector)
+        if route is not None and route.nothing_to_play:
+            # Nothing of what it asked for can play and nothing can stand in: whatever
+            # the transport says, it isn't playing.
+            return "Nothing to play", "media-playback-stop-symbolic", False
         playback = route.playback if route is not None else "playing"
         if playback == "stopped":
             return "Still only", "media-playback-stop-symbolic", False

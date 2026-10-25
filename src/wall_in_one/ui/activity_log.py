@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from wall_in_one import paths
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.status_model import RuntimeStatusView, StatusChange
 
 #: Entries kept; the oldest go first.
@@ -234,7 +235,7 @@ class ActivityLog:
         self._listeners: list[tuple[object, Listener]] = []
         # The last status said, so each change is said once.
         self._service = "checking"
-        self._playing: tuple[str, str] | None = None
+        self._playing: tuple[str, str, str] | None = None
         self._renderer = ""
         self._displays = ""
         self._power = ""
@@ -344,10 +345,17 @@ class ActivityLog:
         self._delayed = False
         self._invalid = ""
         playlist, source = status.get("playlist"), status.get("source")
+        nothing = status.get("nothing_to_play")
         if isinstance(playlist, str) and isinstance(source, str):
-            playing = (playlist, source)
+            # Every display plays nothing (schema 8): say why, never "Playing".
+            playing = (playlist, source, nothing if isinstance(nothing, str) else "")
             if playing != self._playing and playlist:
-                self.record("playback", f"Playing {playlist} ({source})")
+                self.record(
+                    "playback",
+                    runtime_truth.nothing_to_play_sentence(playing[2])
+                    if playing[2]
+                    else f"Playing {playlist} ({source})",
+                )
             self._playing = playing
         last_error = status.get("last_error")
         last_error = last_error if isinstance(last_error, str) else ""

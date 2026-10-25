@@ -353,6 +353,8 @@ def _unless_given_up[Judged](
     stopped waiting for. What ``work`` raises is raised here, or, once the
     wait was cut, logged: nothing reads it then.
     """
+    if give_up() or (until is not None and until <= time.monotonic()):
+        return cut  # already cut: not even started
     done: Future[Judged] = Future()
 
     def unread(finished: Future[Judged]) -> None:

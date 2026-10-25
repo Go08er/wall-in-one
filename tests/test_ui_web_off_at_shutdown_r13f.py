@@ -1,4 +1,4 @@
-"""The last step of a shutdown while web wallpapers are off: review r13f's findings, made tests.
+"""The last step of a shutdown while web wallpapers are off: tests of review r13f's findings and of later rounds'.
 
 `Application._web_off_on_disk_at_exit`, called as `do_shutdown` calls it last, on a windowless
 application. Review r13f found, at f127a31:
@@ -22,7 +22,8 @@ What the step can't settle itself (a turn-off still being written, a lock it did
 judged again on a thread once the save and this process's lane are done (`_web_off_deferred`);
 each test joins it before it looks at the file.
 
-Each case has a control that passes before and after.
+Each case has a control; most pass before and after the fix, and a control that exercises a
+fix's own path may not.
 """
 
 from __future__ import annotations
@@ -1239,7 +1240,7 @@ def test_a_look_that_fails_once_its_wait_was_cut_is_logged(
     variant: str,
 ) -> None:
     """An older service heard, and a file naming scenes, whose look at the Workshop items
-    (`workshop.web_among`) is held, then fails. Past the look's bound (put behind it here) the
+    (`workshop.web_among`) is held, then fails. Past the look's bound (a second here, so the look has begun) the
     step stops waiting: the ids count as web pages, the file is replaced, and the failure, once
     the look is let go, is logged. Before: it landed on a future nothing read, and nothing said
     it. The control: the look fails within the wait; the step's own handler logs it, once, and
@@ -1250,7 +1251,7 @@ def test_a_look_that_fails_once_its_wait_was_cut_is_logged(
     _on_disk(text)
     _heard(monkeypatch, HEARD["an-older-service"])
     cut = variant == "after-the-cut"
-    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", -1.0 if cut else GIVE_UP)
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", 1.0 if cut else GIVE_UP)
     began, release = threading.Event(), threading.Event()
     looks: list[threading.Thread] = []
 
@@ -1470,3 +1471,30 @@ def test_a_file_judged_again_under_the_lock_has_only_what_is_left_of_the_bound(
         "the file judged again under the lock had a bound of its own: its look read every id "
         "after the step's look had spent the bound, and left it"
     )
+
+
+@pytest.mark.parametrize("state", ["a-second-ctrl-c-has-come", "the-deadline-is-spent", "control"])
+def test_a_wait_already_cut_starts_no_work(state: str) -> None:
+    """r13i S-N4. `_unless_given_up` with a wait already cut (a second Ctrl-C, or a spent
+    deadline) returns the cut result without starting the work. Before: the work was started
+    and its answer discarded. The control: an open wait runs it."""
+    started = threading.Event()
+
+    def work() -> str:
+        started.set()
+        return "worked"
+
+    cut = state != "control"
+    give_up = state == "a-second-ctrl-c-has-come"
+    until = time.monotonic() - 1.0 if state == "the-deadline-is-spent" else None
+    answer = app_module._unless_given_up(work, lambda: give_up, "cut", until=until)
+    if not cut:
+        assert answer == "worked" and started.is_set()
+        return
+    assert answer == "cut"
+    # The thread (if one was started) has had the whole wait to run; joining by name is not
+    # needed: an Event, not a sleep, says whether it began.
+    for thread in threading.enumerate():
+        if thread.name == app_module.SHUTDOWN_LOOK_THREAD:
+            thread.join(GIVE_UP)
+    assert not started.is_set(), f"{state}: the wait was already cut, and the work was started"

@@ -446,6 +446,119 @@ def test_control_p6_deleting_the_playlist_the_service_names_releases_it(
         _close(application)
 
 
+# ============================================================== U-N6 =========
+# A quick pick the reply names is the item "Your pick"; "not named by this reply" is
+# said only of a pick the reply cannot name.
+
+
+def _quick_pick_page(backend: Any, items: Any) -> tuple[Shown, Any]:  # noqa: F811
+    from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME
+
+    session = backend.session
+    pages = _playlist(session, "Pages", items[0])
+    session.playlists.set_singleton(QUICK_CHOICE_ID, QUICK_CHOICE_NAME, items[1].path)
+    status = _renamed(_mirrored_pick_rows_playing(), {"pages": QUICK_CHOICE_ID, "scenes": pages})
+    view = Shown(backend)
+    view.answer(status)
+    view.select("DP-1")
+    route = view.page._route("DP-1")
+    assert route is not None and route.route == "pick" and route.quick  # precondition
+    assert not route.pick_stood_in and not route.route_unsure  # precondition: named
+    return view, route
+
+
+def test_u_n6_a_named_quick_pick_isnt_said_to_be_unnamed_by_the_reply(
+    backend: Any,  # noqa: F811
+    items: Any,  # noqa: F811
+) -> None:
+    view, route = _quick_pick_page(backend, items)
+    try:
+        page = view.page
+        shown = _shown_item(page.play_row)
+        print(f"route={route!r}\nrow={shown!r} subtitle={page.play_row.get_subtitle()!r}")
+        assert shown != "Follow the schedule", "U-L2 itself"
+        assert shown == "Your pick", f"the reply names the pick; the row says {shown!r}"
+    finally:
+        view.close()
+
+
+def test_control_u_n6_a_pick_the_reply_cant_name_shows_the_unnamed_item(
+    backend: Any,  # noqa: F811
+    items: Any,  # noqa: F811
+) -> None:
+    session = backend.session
+    pages = _playlist(session, "Pages", items[0])
+    scenes = _playlist(session, "Scenes", items[1])
+    view = Shown(backend)
+    try:
+        view.answer(_mirrored_ceiling_on_layout({"pages": pages, "scenes": scenes}))
+        view.select("DP-1")
+        assert _shown_item(view.page.play_row) == PLACEHOLDER
+    finally:
+        view.close()
+
+
+# ============================================================== U-L-a ========
+# The next UI's play_ids leave out every automatic playlist, All media included. A pick
+# of one is the item "Your pick", never row 0, "Follow the schedule".
+
+
+def _all_media_pick(pages: str) -> dict[str, Any]:
+    # pick-plays.json with the pick "pages" -> "all-media" (the inventory's own
+    # all-media row renamed out of the way), "scenes" -> the session's Pages.
+    return _renamed(
+        _mirrored_pick_rows_playing(),
+        {"pages": "all-media", "all-media": "gone", "scenes": pages},
+    )
+
+
+def test_u_l_a_an_all_media_pick_isnt_shown_as_follow_the_schedule(
+    backend: Any,  # noqa: F811
+    items: Any,  # noqa: F811
+) -> None:
+    session = backend.session
+    pages = _playlist(session, "Pages", items[0])
+    view = Shown(backend)
+    try:
+        view.answer(_all_media_pick(pages))
+        view.select("DP-1")
+        page = view.page
+        route = page._route("DP-1")
+        print(f"route={route!r}")
+        assert route is not None and route.route == "pick"  # precondition
+        assert route.playlist_id == "all-media" and not route.quick  # precondition
+        shown = _shown_item(page.play_row)
+        print(f"row={shown!r} subtitle={page.play_row.get_subtitle()!r} ids={page._play_ids}")
+        assert shown == "Your pick", f"a pick of All media holds; the row says {shown!r}"
+    finally:
+        view.close()
+
+
+def test_u_l_a_unit_play_selected_doesnt_put_an_unlisted_pick_on_row_0() -> None:
+    from wall_in_one.ui.next.displays import DisplaysPage
+
+    [route, *_rest] = _routes(_all_media_pick("p"))
+    assert route.route == "pick" and route.playlist_id == "all-media"  # precondition
+    selected = DisplaysPage._play_selected(SimpleNamespace(), route, ["", "p"])  # type: ignore[arg-type]
+    assert selected is None, "row 0 is Follow the schedule"
+
+
+def test_control_u_l_a_a_listed_pick_is_its_row(
+    backend: Any,  # noqa: F811
+    items: Any,  # noqa: F811
+) -> None:
+    session = backend.session
+    pages = _playlist(session, "Pages", items[0])
+    scenes = _playlist(session, "Scenes", items[1])
+    view = Shown(backend)
+    try:
+        view.answer(_renamed(_mirrored_pick_rows_playing(), {"pages": pages, "scenes": scenes}))
+        view.select("DP-1")
+        assert _shown_item(view.page.play_row) == "Pages"
+    finally:
+        view.close()
+
+
 # ============================================================== U-L-b ========
 # A running service that says no pick holds is a definite answer: the app's record of a
 # pick (Use as wallpaper, never cleared by a resume through the service) doesn't count.

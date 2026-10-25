@@ -87,6 +87,12 @@ def _meta(display: DisplayInfo) -> str:
     return " · ".join(bits)
 
 
+def _pick_label(route: RouteView | None) -> str:
+    """ "Your pick" where the reply names the pick, else the not-named item."""
+    named = route is not None and not route.route_unsure and not route.pick_stood_in
+    return unnamed_pick.NAMED_PICK if named else unnamed_pick.UNNAMED_PICK
+
+
 class DisplaysPage(Page):
     name = "displays"
     title = "Displays"
@@ -493,8 +499,10 @@ class DisplaysPage(Page):
         The person's pick, also while a stand-in plays for it. A pick no field names
         (`pick_stood_in`), or can't be told from its stand-in (`route_unsure`), is not
         placed: the app's own record of a pick isn't written for one made through the
-        service, so it can be stale. The selector is never put on the stand-in or on
-        "Follow the schedule" (see `_refresh_details`).
+        service, so it can be stale. A named pick this page lists no row for (a quick
+        choice, an automatic playlist such as All media) is not placed either. The
+        selector is never put on the stand-in or on "Follow the schedule" (see
+        `_refresh_details`).
         """
         if route is None or route.route != "pick":
             return 0
@@ -505,8 +513,9 @@ class DisplaysPage(Page):
         picked = route.stand_in_for or route.playlist_id
         if picked in play_ids:
             return play_ids.index(picked)
-        # The next UI lists no quick choice: row 0 would be "Follow the schedule".
-        return None if route.quick else 0
+        # Not listed here (no quick choice, no automatic playlist): row 0 would be
+        # "Follow the schedule".
+        return None
 
     def _refresh_details(self, display: DisplayInfo, mirrored: bool) -> None:
         scheduling = self.scheduling
@@ -546,23 +555,23 @@ class DisplaysPage(Page):
             )
         # The person's pick, also while a stand-in plays for it.
         selected = self._play_selected(route, play_ids)
-        # A quick pick has no row, and the row mustn't rest on another playlist.
-        quick = (
+        # A named pick with no row here, and the row mustn't rest on another playlist.
+        unlisted = (
             selected is None
             and route is not None
-            and route.quick
+            and route.route == "pick"
             and not route.pick_stood_in
             and not route.route_unsure
         )
         if selected is not None:
             unnamed_pick.drop(self.play_row)
             self.play_row.set_selected(selected)
-        elif reset and prior_id in play_ids[1:] and not quick:
+        elif reset and prior_id in play_ids[1:] and not unlisted:
             # A new model starts on row 0; keep the playlist the person left it on.
             self.play_row.set_selected(play_ids.index(prior_id))
-        elif reset or self.play_row.get_selected() == 0 or quick:
+        elif reset or self.play_row.get_selected() == 0 or unlisted:
             # Never "Follow the schedule" while a pick holds.
-            unnamed_pick.show(self.play_row)
+            unnamed_pick.show(self.play_row, _pick_label(route))
         self.play_row.set_sensitive(not runtime_off)
         self.play_row.set_subtitle(
             runtime_off
@@ -882,10 +891,10 @@ class DisplaysPage(Page):
         connector = "" if self._mirrored() else self._selected
         self.scheduling.play_now(connector, self._play_ids[index])
         if self._play_selected(self._route(self._selected), self._play_ids) is None:
-            # A pick no field names: the click can't be confirmed, so it isn't shown.
+            # A pick with no row here, or that no field names: the click isn't shown.
             self._loading = True
             try:
-                unnamed_pick.show(row)
+                unnamed_pick.show(row, _pick_label(self._route(self._selected)))
             finally:
                 self._loading = False
         # The runtime's next status moves this row; until then it shows the last one.

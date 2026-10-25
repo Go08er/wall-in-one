@@ -19,6 +19,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 UNNAMED_PICK = "Your pick (not named by this reply)"
+#: For a pick the reply does name, which the page just has no row for.
+NAMED_PICK = "Your pick"
 #: Set on the row's model while its last item is the placeholder, so a playlist
 #: named like it is not taken for it.
 _MARK = "_wio_unnamed_pick"
@@ -36,14 +38,16 @@ def is_shown(row: Adw.ComboRow) -> bool:
     return model is not None and count > 0 and getattr(model, _MARK, False)
 
 
-def show(row: Adw.ComboRow) -> None:
-    """Select the placeholder, adding it if the row has none."""
+def show(row: Adw.ComboRow, label: str = UNNAMED_PICK) -> None:
+    """Select the placeholder with ``label``, adding it if the row has none."""
     model = _strings(row)
     if model is None:
         return
     if not is_shown(row):
-        model.append(UNNAMED_PICK)
+        model.append(label)
         setattr(model, _MARK, True)
+    elif model.get_string(model.get_n_items() - 1) != label:
+        model.splice(model.get_n_items() - 1, 1, [label])
     row.set_selected(model.get_n_items() - 1)
 
 

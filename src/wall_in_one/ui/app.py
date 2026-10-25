@@ -2621,7 +2621,7 @@ class Application(Adw.Application):
                     error,
                 )
             if not replaced:
-                if older and why == _NAMES:  # no quit is sent: restarting is the remedy
+                if older and not quit_older:  # no quit is sent: restarting is the remedy
                     LOGGER.warning(
                         "That service is older than this app, so it keeps playing what it "
                         "holds until it is restarted: systemctl --user restart wall-in-one"

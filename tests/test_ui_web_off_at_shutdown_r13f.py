@@ -1600,3 +1600,35 @@ def test_a_failed_install_for_an_older_service_still_says_to_restart_it(
     assert sent == [], "no quit is sent for an item whose type can't be checked"
     assert any("systemctl --user restart wall-in-one" in one for one in said), said
     assert any("it was replaced at shutdown" in one for one in said) is installed, said
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_a_failed_install_over_a_file_that_allows_web_for_an_older_service_says_to_restart_it(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    installed: bool,
+) -> None:
+    """Before: the same missing line when the file on disk allows web wallpapers."""
+    application = profiles().application
+    _on_disk(document("control-compiler-line")[0])
+    _heard(monkeypatch, HEARD["an-older-service"])
+    sent: list[str] = []
+
+    def send(verb: str, *_a: object, **_k: object) -> Response:
+        sent.append(verb)
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    if not installed:
+
+        def refuse(*_a: object, **_k: object) -> None:
+            raise runtime_config.RuntimeConfigError("the disk is full")
+
+        monkeypatch.setattr(runtime_config, "install_nothing_to_play", refuse)
+    caplog.set_level(logging.INFO, logger=app_module.LOGGER.name)
+    application._web_off_on_disk_at_exit()
+    _judged_at_exit(application)
+    said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
+    assert sent == [], "no quit is sent for a file that only may allow web wallpapers"
+    assert any("systemctl --user restart wall-in-one" in one for one in said) is not installed, said

@@ -2459,7 +2459,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                             .map(|failure| failure.key.playlist_id.clone())
                             .collect();
                         for playlist in playlists {
-                            moved |= self.move_cursor_forward(&playlist);
+                            // Nothing left to move to, but a stand-in to give way to: the
+                            // next attempt's apply installs it, as an ordinary apply does
+                            // (review r13m R-L-i).
+                            moved |= self.move_cursor_forward(&playlist)
+                                || self
+                                    .stand_in(&playlist)
+                                    .is_some_and(|stand_in| stand_in.id != playlist);
                         }
                         if moved {
                             let candidate = self.selection_state();

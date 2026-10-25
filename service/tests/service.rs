@@ -16991,3 +16991,123 @@ fn control_an_ordinary_mirrored_boundary_that_fails_restores_its_baseline() {
     assert!(problems.is_empty(), "{problems:#?}");
     assert_eq!(route(&snapshot, "DP-1")["entry_id"], "pages-1");
 }
+
+// -- review r13m R-L-i: a boundary off a refused entry whose rule has nothing left ----------
+//
+// A boundary off a refused entry moves on rather than restore it (R-L-h). When the rule's
+// playlist holds only the refused item and an entry that keeps failing, that entry is taboo
+// after the third failure and the playlist has nothing left that can play: it gives way to its
+// stand-in, the default. The move found nowhere to go and applied nothing, so status named the
+// stand-in's entry, renderer_failed, while the screens kept what the failed apply left.
+
+/// Mirrored, motion on; eve names pages [pages-1, the item 3000000051, pages-2], and pages-3
+/// with `third`. With `assigned`, DP-1 is on the default all-media [two stills] and HDMI-A-1 on
+/// mixed [mixed-1, the item, mixed-2]; without, no display is assigned and all-media-1 is the
+/// item. pages-1 is refused when asked and pages-2 fails on every apply. Started at 15:00 and
+/// ticked from the boundary to +601 s: the status then, and what each output was last given.
+fn a_mirrored_boundary_onto_a_rule_with_nothing_left(
+    assigned: bool,
+    third: bool,
+) -> (
+    serde_json::Value,
+    std::collections::BTreeMap<String, String>,
+) {
+    let pages = "[[playlists.entries]]\nid = \"pages-1\"\nkind = \"still\"\n\
+                 still = \"/stills/pages-1.png\"\npalette = { kind = \"keep\", mode = \"keep\" }\n";
+    let more: String = (2..=if third { 3 } else { 2 })
+        .map(|index| pages.replace("pages-1", &format!("pages-{index}")))
+        .collect();
+    let scene = |entry: &str| {
+        (
+            format!("id = \"{entry}\"\nkind = \"still\"\n"),
+            format!("id = \"{entry}\"\nkind = \"scene\"\nscene_id = \"3000000051\"\n"),
+        )
+    };
+    let mut document = default_rule_document("pages")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(pages, &format!("{pages}{more}"));
+    let item = if assigned {
+        document = document
+            .replace(
+                "connector = \"DP-1\"\nplaylist = \"mixed\"",
+                "connector = \"DP-1\"\nplaylist = \"all-media\"",
+            )
+            .replace(
+                "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+                "connector = \"HDMI-A-1\"\nplaylist = \"mixed\"",
+            );
+        "mixed-1"
+    } else {
+        document.truncate(document.find("[[displays]]").unwrap());
+        "all-media-1"
+    };
+    for entry in ["pages-1", item] {
+        let (still, scene) = scene(entry);
+        document = document.replace(&still, &scene);
+    }
+    assert_eq!(
+        document.matches("scene_id = \"3000000051\"").count(),
+        2,
+        "the premise: pages-1 and {item} are the item"
+    );
+    assert_eq!(document.contains("pages-3"), third, "the premise");
+    assert_eq!(document.contains("[[displays]]"), assigned, "the premise");
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("pages-1".into());
+        recorded.fail_entry_id = Some("pages-2".into());
+        recorded.fail_entry_attempts_remaining = 100;
+    }
+    let at = on_the_third(16, 0);
+    let start = Instant::now();
+    for millis in [1_000, 3_100, 5_200, 7_300, 9_400, 61_000, 301_000, 601_000] {
+        runtime.tick(at, start + Duration::from_millis(millis));
+    }
+    (status(&mut runtime, at), screen_of(&state))
+}
+
+#[test]
+fn a_mirrored_boundary_off_a_refused_entry_whose_rule_has_nothing_left_shows_the_default() {
+    let (snapshot, screen) = a_mirrored_boundary_onto_a_rule_with_nothing_left(true, false);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&snapshot, connector);
+        assert_eq!(row["entry_id"], "all-media-1", "{connector}: {row}");
+        assert_eq!(row["stand_in_for"], "pages", "{connector}: {row}");
+        assert_eq!(
+            screen.get(connector).map(String::as_str),
+            Some("all-media-1"),
+            "{connector}'s screen: {row}"
+        );
+    }
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}
+
+#[test]
+fn without_assignments_a_mirrored_boundary_whose_rule_has_nothing_left_shows_the_default() {
+    let (snapshot, screen) = a_mirrored_boundary_onto_a_rule_with_nothing_left(false, false);
+    // The default's all-media-1 is the refused item too: its all-media-2.
+    assert_eq!(snapshot["entry_id"], "all-media-2", "{snapshot}");
+    assert_eq!(snapshot["stand_in_for"], "pages", "{snapshot}");
+    assert_eq!(screen.get("").map(String::as_str), Some("all-media-2"));
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}
+
+#[test]
+fn control_a_mirrored_boundary_off_a_refused_entry_with_a_third_entry_ends_on_it() {
+    let (snapshot, screen) = a_mirrored_boundary_onto_a_rule_with_nothing_left(true, true);
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&snapshot, connector);
+        assert_eq!(row["entry_id"], "pages-3", "{connector}: {row}");
+        assert_eq!(screen.get(connector).map(String::as_str), Some("pages-3"));
+    }
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}
+
+#[test]
+fn control_without_assignments_a_mirrored_boundary_with_a_third_entry_ends_on_it() {
+    let (snapshot, screen) = a_mirrored_boundary_onto_a_rule_with_nothing_left(false, true);
+    assert_eq!(snapshot["entry_id"], "pages-3", "{snapshot}");
+    assert_eq!(screen.get("").map(String::as_str), Some("pages-3"));
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}

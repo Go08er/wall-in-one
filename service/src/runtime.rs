@@ -6291,9 +6291,12 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// last first, wherever it still fits: so as few go as the room needs,
     /// and a short id stays where a longer error will do (review r13e N6:
     /// 128 one-byte ids went for 128 bytes, beside 110 KB to spare). Both
-    /// flags' bytes are counted until their kind is given back whole. The
-    /// rows' detail chosen, and that reply; with every unit left out when
-    /// even that is ever over.
+    /// flags' bytes are counted until their kind is given back whole, and
+    /// a kind's flag pays for its own last units: what is still out of a
+    /// kind comes back whole where it fits beside the room its flag then
+    /// gives up (review r13f N12: one 565-byte id stayed out beside 548
+    /// bytes and its 34-byte flag). The rows' detail chosen, and that
+    /// reply; with every unit left out when even that is ever over.
     ///
     /// With all of them gone what is left is the budget's: its configured
     /// text, at most four times over on the wire as the budget counts it,
@@ -6344,18 +6347,19 @@ impl<D: WallpaperDriver> Runtime<D> {
             if room + rule_flag + error_flag >= rule_total + error_total {
                 rows = RowDetail::WHOLE;
             } else {
-                // The summary's own first: `last_error`, then
-                // `output_discovery_error`.
-                if let Some(left) = summary[1].and_then(|cost| room.checked_sub(cost)) {
-                    (rows.last_error, room) = (true, left);
+                // Where a unit is: the summary's (0 `output_discovery_error`,
+                // 1 `last_error`), or a row's of a group (0 the connected).
+                #[derive(Clone, Copy)]
+                enum Place {
+                    Summary(usize),
+                    Row(usize),
                 }
-                if let Some(left) = summary[0].and_then(|cost| room.checked_sub(cost)) {
-                    (rows.discovery_error, room) = (true, left);
-                }
-                // Then the rows' ids and errors together, the shortest
-                // first (a connected row's before another's, an id before an
-                // error), each group's kept in its own order. A kind given
-                // back whole gives its flag's bytes back too.
+                // Each unit as its cost, its kind (0 an id, 1 a diagnostic)
+                // and its place, in the order given back: the summary's own
+                // first (`last_error`, then `output_discovery_error`), then
+                // the rows' ids and errors together, the shortest first (a
+                // connected row's before another's, an id before an error
+                // as long), each group's kept in its own order.
                 let mut order: Vec<(usize, usize, usize, usize)> = Vec::new();
                 for group in 0..2 {
                     for (kind, costs) in [&units.rule_ids[group], &units.errors[group]]
@@ -6371,39 +6375,61 @@ impl<D: WallpaperDriver> Runtime<D> {
                     }
                 }
                 order.sort_unstable();
-                let wholes = [
-                    units.rule_ids.iter().map(Vec::len).sum::<usize>(),
-                    units.errors.iter().map(Vec::len).sum::<usize>(),
-                ];
-                let mut kept = [[0_usize; 2]; 2];
+                let given: Vec<(usize, usize, Place)> = [1, 0]
+                    .into_iter()
+                    .filter_map(|unit| summary[unit].map(|cost| (cost, 1, Place::Summary(unit))))
+                    .chain(
+                        order
+                            .into_iter()
+                            .map(|(cost, group, kind, _)| (cost, kind, Place::Row(group))),
+                    )
+                    .collect();
+                let mut back = vec![false; given.len()];
+                // What each kind still has out, and its flag's bytes while
+                // it does.
+                let mut out = [rule_total, error_total];
                 let mut flags = [rule_flag, error_flag];
-                let summary_whole = summary[1].is_none_or(|_| rows.last_error)
-                    && summary[0].is_none_or(|_| rows.discovery_error);
-                let mut next = 0;
                 loop {
-                    while let Some(&(cost, group, kind, _)) = order.get(next) {
-                        let Some(left) = room.checked_sub(cost) else {
-                            break;
-                        };
-                        room = left;
-                        kept[kind][group] += 1;
-                        next += 1;
-                    }
-                    let mut freed = 0;
-                    for kind in 0..2 {
-                        let whole = kept[kind].iter().sum::<usize>() == wholes[kind]
-                            && (kind == 0 || summary_whole);
-                        if whole {
-                            freed += std::mem::take(&mut flags[kind]);
+                    let mut changed = false;
+                    for index in 0..given.len() {
+                        if back[index] {
+                            continue;
+                        }
+                        let (cost, kind, _) = given[index];
+                        if let Some(left) = room.checked_sub(cost) {
+                            (back[index], room, changed) = (true, left, true);
+                            out[kind] -= cost;
+                        } else if let Some(left) = (room + flags[kind]).checked_sub(out[kind]) {
+                            // It doesn't fit on its own, but what is still
+                            // out of its kind does, beside its flag's bytes:
+                            // the kind comes back whole, and its flag goes
+                            // (review r13f N12).
+                            for (other, (_, other_kind, _)) in given.iter().enumerate() {
+                                back[other] |= *other_kind == kind;
+                            }
+                            (room, out[kind], flags[kind], changed) = (left, 0, 0, true);
                         }
                     }
-                    if freed == 0 || next == order.len() {
+                    // A kind given back whole, unit by unit, gives its flag's
+                    // bytes back too.
+                    for kind in 0..2 {
+                        if out[kind] == 0 && flags[kind] > 0 {
+                            room += std::mem::take(&mut flags[kind]);
+                            changed = true;
+                        }
+                    }
+                    if !changed {
                         break;
                     }
-                    room += freed;
                 }
-                rows.rule_ids = kept[0];
-                rows.errors = kept[1];
+                for (&(_, kind, place), _) in given.iter().zip(&back).filter(|(_, back)| **back) {
+                    match place {
+                        Place::Summary(0) => rows.discovery_error = true,
+                        Place::Summary(_) => rows.last_error = true,
+                        Place::Row(group) if kind == 0 => rows.rule_ids[group] += 1,
+                        Place::Row(group) => rows.errors[group] += 1,
+                    }
+                }
             }
             let candidate = self.status_json(at, ReplyShape { rows, ..shape })?;
             if success_fits(&candidate) {

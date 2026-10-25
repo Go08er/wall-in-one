@@ -14011,6 +14011,22 @@ fn floor_status(
     outputs: usize,
     failing_entry: Option<&str>,
 ) -> (serde_json::Value, usize, Result<(), String>) {
+    floor_status_at(
+        document,
+        outputs,
+        failing_entry,
+        Path::new("/tmp/runtime.toml"),
+    )
+}
+
+/// `floor_status` with the document at `config_path`, which status echoes (the budget doesn't
+/// count it).
+fn floor_status_at(
+    document: &str,
+    outputs: usize,
+    failing_entry: Option<&str>,
+    config_path: &Path,
+) -> (serde_json::Value, usize, Result<(), String>) {
     let at = noon();
     let parsed = Config::from_bytes(document.as_bytes().to_vec()).unwrap();
     let state = Arc::new(Mutex::new(RuntimeDriverState {
@@ -14030,13 +14046,8 @@ fn floor_status(
         fail_entry_attempts_remaining: usize::MAX,
         ..RuntimeDriverState::default()
     }));
-    let mut runtime = Runtime::new(
-        PathBuf::from("/tmp/runtime.toml"),
-        parsed,
-        RuntimeDriver(state),
-        at,
-    )
-    .unwrap();
+    let mut runtime =
+        Runtime::new(config_path.to_path_buf(), parsed, RuntimeDriver(state), at).unwrap();
     let applied = runtime.apply_current();
     assert_eq!(applied.is_ok(), failing_entry.is_none(), "{applied:?}");
     runtime.tick(at, Instant::now());
@@ -15243,6 +15254,130 @@ fn past_the_band_only_as_many_errors_go_as_must_and_one_byte_rule_ids_stay() {
         assert!(tip.errors > 0, "{label}: {tip:?}");
         assert_eq!(snapshot["diagnostics_omitted"], true, "{label}");
         assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, "R");
+    }
+}
+
+// -- r13f N12: a kind's flag pays for its own last units ---------------------------------------
+//
+// The rows' rule ids are given back the shortest first while they fit, every row's error being
+// out (each longer than an id). The last one out takes its 565 bytes, but giving it back also
+// takes `schedule_rule_id_omitted` (34 bytes on the wire) out of the reply. At f127a31 a flag
+// was given back only once its kind was whole, so that id stayed out beside 548 bytes of room
+// and its own flag, and the app hedged every rule row for it.
+
+/// A configuration path `pad` bytes longer than `/tmp/runtime.toml`, each a plain byte, one on
+/// the wire: status echoes it, and the budget doesn't count it.
+fn config_path_longer_by(pad: usize) -> PathBuf {
+    let mut path = String::from("/tmp/");
+    let mut left = pad;
+    while left > 0 {
+        if left == 1 {
+            path.push('p');
+            break;
+        }
+        let run = (left - 1).min(199);
+        path.push_str(&"p".repeat(run));
+        path.push('/');
+        left -= run + 1;
+    }
+    path.push_str("runtime.toml");
+    assert_eq!(path.len(), "/tmp/runtime.toml".len() + pad);
+    PathBuf::from(path)
+}
+
+#[test]
+fn the_last_rule_id_out_comes_back_where_its_own_flag_pays_for_it() {
+    let flag = flag_wire_len("schedule_rule_id_omitted");
+    let failing = format!("{}E", "\"".repeat(255));
+    // The corner: every row failing on BIG's entry (its error, about 1.3 KB, goes before any
+    // id), a rule id of `chars` quotes. Measured once, it says where the room it has with every
+    // unit out puts the last id `delta` bytes past what it and its flag take: the summary's
+    // own error first, then 127 ids, then the last, with `unit - flag + delta` bytes left.
+    // The path moves that room byte by byte. Whatever this build's own strings take, some id
+    // length puts it within the path's reach.
+    let mut chars = 142;
+    let (document, rule, base) = loop {
+        let toml = format!("{}R", "\\\"".repeat(chars - 1));
+        let rule = format!("{}R", "\"".repeat(chars - 1));
+        let document = at_the_budgets_edge(|still| floor_corner("mirrored", &toml, still));
+        let (snapshot, wire, written) = floor_status(&document, 64, Some(&failing));
+        assert!(written.is_ok(), "{chars}: {wire} bytes: no reply");
+        let summary = row_unit_len(snapshot["last_error"].as_str().unwrap()) as i64;
+        let unit = row_unit_len(&rule) as i64;
+        // The path's length at which the last id is `delta` bytes past fitting with its flag.
+        let base = room_with_row_units_out(&snapshot, wire) - summary - 128 * unit + flag as i64;
+        println!(
+            "{chars}-quote rule id: {unit} bytes each, the path at {base} puts the last id at its flag's edge"
+        );
+        if base < flag as i64 + 1 {
+            chars -= 1;
+        } else if base > 3_000 {
+            chars += 1;
+        } else {
+            break (document, rule, base);
+        }
+        assert!(
+            (100..=256).contains(&chars),
+            "no rule id puts the window within reach"
+        );
+    };
+    let unit = row_unit_len(&rule);
+    for (delta, back) in [
+        (0, true),
+        (flag as i64 - 1, true),
+        (-1, false),
+        (flag as i64, true),
+    ] {
+        let label = format!(
+            "{} bytes of room before the last id",
+            unit as i64 - flag as i64 + delta
+        );
+        let path = config_path_longer_by(usize::try_from(base - delta).unwrap());
+        let (snapshot, wire, written) = floor_status_at(&document, 64, Some(&failing), &path);
+        assert!(written.is_ok(), "{label}: {wire} bytes: no reply");
+        assert_inventory_whole(&snapshot, 128, &label);
+        let rows = snapshot["displays"].as_array().unwrap();
+        let ids_out = rows
+            .iter()
+            .filter(|row| row["schedule_rule_id"].is_null())
+            .count();
+        let errors_out = rows.iter().filter(|row| row["last_error"] == "").count();
+        println!(
+            "{label}: {ids_out} ids out, {errors_out} errors out, {} bytes to spare",
+            MAX_RESPONSE_BYTES - wire
+        );
+        assert_eq!(errors_out, 128, "{label}: an error came back");
+        assert_eq!(snapshot["diagnostics_omitted"], true, "{label}");
+        assert!(
+            snapshot["last_error"]
+                .as_str()
+                .unwrap()
+                .contains("is borked"),
+            "{label}: the summary's own error is the last to go"
+        );
+        if back {
+            assert_eq!(
+                ids_out, 0,
+                "{label}: a {unit}-byte rule id left out (and schedule_rule_id_omitted set), \
+                 though it fits once its {flag}-byte flag is gone"
+            );
+            assert!(
+                snapshot.get("schedule_rule_id_omitted").is_none(),
+                "{label}"
+            );
+            // Measured, not tried: the reply has exactly the room that was left.
+            assert_eq!(
+                MAX_RESPONSE_BYTES - wire,
+                usize::try_from(delta).unwrap(),
+                "{label}"
+            );
+        } else {
+            // The control: the id and its flag together are a byte over.
+            assert_eq!(ids_out, 1, "{label}");
+            assert_eq!(snapshot["schedule_rule_id_omitted"], true, "{label}");
+            assert_eq!(MAX_RESPONSE_BYTES - wire, unit - flag - 1, "{label}");
+        }
+        assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, &rule);
     }
 }
 

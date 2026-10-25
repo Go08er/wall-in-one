@@ -2519,8 +2519,9 @@ class Application(Adw.Application):
     def _second_interrupt_ends_the_settle(self) -> Callable[[], None]:
         """Let a Ctrl-C during the settle end it; what puts the previous handler back.
 
-        The last step of the shutdown installs it too, while it waits for a
-        settings save (`_settings_save_landed`).
+        The last step of the shutdown installs it too, for all of its work,
+        and its waits look for it: for a settings save (`_settings_save_landed`)
+        and for the compiler lock (`_web_off_on_disk_at_exit`).
 
         PyGObject's SIGINT fallback calls ``quit()`` once and ignores every
         later SIGINT while ``run()`` is on the stack, which it still is in

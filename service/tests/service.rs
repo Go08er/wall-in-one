@@ -721,12 +721,12 @@ fn renderer_applies_still_then_mode_then_palette_then_motion() {
     let scene = parsed.playlists[1].entries[0].clone();
     let mut driver = offline_driver(parsed.renderer.clone());
     without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
+    // Noctalia's three calls, then mpvpaper's launch, before the scene's still.
+    recorded_lines(&log, 4);
     let error =
         without_text_file_busy(|| driver.apply(&scene, "eDP-1", &parsed.settings)).unwrap_err();
     assert!(error.contains("paired still remains applied"));
-    thread::sleep(Duration::from_millis(100));
-    let events = fs::read_to_string(&log).unwrap();
+    let events = recorded_lines(&log, 5);
     let lines: Vec<_> = events.lines().collect();
     assert_eq!(lines[0], "msg wallpaper-set eDP-1 /tmp/two.png");
     assert_eq!(lines[1], "msg theme-mode-set light");
@@ -779,14 +779,13 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
     without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
     driver.end_apply();
-    thread::sleep(Duration::from_millis(100));
 
     assert_eq!(
         asked.load(Ordering::SeqCst),
         1,
         "one question to the compositor for the whole hand-over"
     );
-    let arguments = fs::read_to_string(&launches).unwrap();
+    let arguments = recorded_lines(&launches, 2);
     assert_eq!(arguments.lines().count(), 2);
     for expected in [
         "video-sync=display-resample",
@@ -800,7 +799,28 @@ fn interpolation_uses_live_refresh_once_for_a_multi_output_handover() {
     driver.stop();
     fs::remove_dir_all(root).unwrap();
 }
-/// A stand-in renderer that writes each argument on a line of its own.
+/// How long a test waits for what a renderer stand-in records. The driver starts a stand-in
+/// and doesn't wait for it, so the stand-in writes in its own time, after `apply` returns, and a
+/// loaded machine can hold a fresh shell back for seconds; a record that is there returns at
+/// once. (A fixed sleep of 100 ms read records half-written, or not yet there, under load.)
+const RECORD_DEADLINE: Duration = Duration::from_secs(20);
+
+/// What a stand-in has written to `path` once it holds `count` whole lines, each ended by its
+/// newline (a stand-in writes `printf '%s\n' "$*"`, one line a launch), waited for up to
+/// `RECORD_DEADLINE`; what is there by then otherwise.
+fn recorded_lines(path: &Path, count: usize) -> String {
+    let deadline = Instant::now() + RECORD_DEADLINE;
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if text.matches('\n').count() >= count || Instant::now() >= deadline {
+            return text;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A stand-in renderer that writes each argument on a line of its own, then marks the launch
+/// recorded whole with a line of `launches_marked`.
 fn argument_recorder(root: &Path, name: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let arguments = root.join(format!("{name}-arguments"));
@@ -808,13 +828,28 @@ fn argument_recorder(root: &Path, name: &str) -> (PathBuf, PathBuf) {
     fs::write(
         &program,
         format!(
-            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done >> {:?}\nsleep 30\n",
-            arguments
+            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done >> {:?}\n\
+             printf '\\n' >> {:?}\nsleep 30\n",
+            arguments,
+            launches_marked(&arguments),
         ),
     )
     .unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
     (program, arguments)
+}
+
+/// Where `argument_recorder` marks each launch it has recorded whole: a line each.
+fn launches_marked(arguments: &Path) -> PathBuf {
+    arguments.with_extension("launched")
+}
+
+/// What an `argument_recorder` has recorded once `launches` launches are whole, counted since
+/// it was made (removing `arguments` between launches leaves the count), waited for as
+/// `recorded_lines` waits.
+fn recorded_arguments(arguments: &Path, launches: usize) -> String {
+    recorded_lines(&launches_marked(arguments), launches);
+    fs::read_to_string(arguments).unwrap_or_default()
 }
 
 #[test]
@@ -840,10 +875,8 @@ fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
     let video = parsed.playlists[0].entries[1].clone();
     let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
     without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
 
-    let words: Vec<String> = fs::read_to_string(&arguments)
-        .unwrap()
+    let words: Vec<String> = recorded_arguments(&arguments, 1)
         .lines()
         .map(str::to_string)
         .collect();
@@ -881,9 +914,7 @@ fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
     let video = plain.playlists[0].entries[1].clone();
     let (mut driver, _) = driver_with(plain.renderer.clone(), vec![live("DP-1", None)]);
     without_text_file_busy(|| driver.apply(&video, "DP-1", &plain.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
-    let words: Vec<String> = fs::read_to_string(&arguments)
-        .unwrap()
+    let words: Vec<String> = recorded_arguments(&arguments, 2)
         .lines()
         .map(str::to_string)
         .collect();
@@ -941,10 +972,8 @@ fn a_scenes_dials_reach_linux_wallpaperengine() {
     let scene = parsed.playlists[1].entries[0].clone();
     let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
     without_text_file_busy(|| driver.apply(&scene, "DP-1", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
 
-    let words: Vec<String> = fs::read_to_string(&arguments)
-        .unwrap()
+    let words: Vec<String> = recorded_arguments(&arguments, 1)
         .lines()
         .map(str::to_string)
         .collect();
@@ -1003,9 +1032,8 @@ fn interpolation_off_never_asks_the_compositor() {
         driver_with(parsed.renderer.clone(), vec![live("eDP-1", Some(60_000))]);
 
     without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
     assert_eq!(asked.load(Ordering::SeqCst), 0);
-    let arguments = fs::read_to_string(&launches).unwrap();
+    let arguments = recorded_lines(&launches, 1);
     for absent in [
         "video-sync=",
         "interpolation=",
@@ -1048,8 +1076,7 @@ fn mixed_all_output_refresh_launches_unsmoothed() {
     );
 
     without_text_file_busy(|| driver.apply(&video, "", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
-    let arguments = fs::read_to_string(&launches).unwrap();
+    let arguments = recorded_lines(&launches, 1);
     assert!(arguments.contains(" ALL /tmp/two.mp4"));
     for absent in [
         "video-sync=",
@@ -1097,9 +1124,9 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
     );
 
     without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
 
-    let launched = fs::read_to_string(&events).unwrap();
+    // One engine for every connector: one launch.
+    let launched = recorded_lines(&events, 1);
     assert!(launched.contains("--screen-root DP-1 --scaling fit --clamp repeat --bg 12345"));
     assert!(launched.contains("--screen-root eDP-1 --scaling fit --clamp repeat --bg 12345"));
     assert!(launched.contains("--layer background"));
@@ -1126,22 +1153,11 @@ fn all_output_scene_uses_background_targets_for_every_live_connector() {
 fn a_preset_renders_its_base_with_each_property_as_arguments_of_its_own() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("scene-preset");
-    let arguments = root.join("arguments");
     let noctalia = root.join("noctalia");
-    let engine = root.join("linux-wallpaperengine");
     fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
     // One argument per line, so a value with spaces shows as one argument.
-    fs::write(
-        &engine,
-        format!(
-            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done >> {:?}\nsleep 30\n",
-            arguments
-        ),
-    )
-    .unwrap();
-    for executable in [&noctalia, &engine] {
-        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let (engine, arguments) = argument_recorder(&root, "linux-wallpaperengine");
     let document = config(&noctalia, Path::new("/bin/true"), true)
         .replace("schema_version = 4", "schema_version = 6")
         .replace(
@@ -1159,9 +1175,8 @@ fn a_preset_renders_its_base_with_each_property_as_arguments_of_its_own() {
     let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
 
     without_text_file_busy(|| driver.apply(&preset, "DP-1", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
 
-    let launched = fs::read_to_string(&arguments).unwrap();
+    let launched = recorded_arguments(&arguments, 1);
     let words: Vec<&str> = launched.lines().collect();
     let pairs: Vec<(&str, &str)> = words
         .windows(2)
@@ -1195,8 +1210,7 @@ fn a_preset_renders_its_base_with_each_property_as_arguments_of_its_own() {
     let scene = parsed.playlists[1].entries[0].clone();
     let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
     without_text_file_busy(|| driver.apply(&scene, "DP-1", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
-    let launched = fs::read_to_string(&arguments).unwrap();
+    let launched = recorded_arguments(&arguments, 2);
     assert!(!launched.contains("--set-property"), "{launched}");
     assert!(launched.ends_with("--bg\n12345\n"), "{launched}");
     driver.stop();
@@ -1244,9 +1258,8 @@ fn a_switched_off_head_is_published_but_never_a_scene_target() {
     );
     assert!(driver.published_outputs().contains(&off));
     without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
-    thread::sleep(Duration::from_millis(100));
 
-    let launched = fs::read_to_string(&events).unwrap();
+    let launched = recorded_lines(&events, 1);
     assert_eq!(launched.matches("--screen-root").count(), 2);
     assert!(!launched.contains("HDMI-A-1"), "{launched}");
     driver.stop();
@@ -1802,17 +1815,24 @@ fn crashed_scene_falls_back_once_and_is_suppressed_for_the_session() {
         at,
     );
     assert!(started.ok);
-    thread::sleep(Duration::from_millis(100));
-    runtime.tick(at, Instant::now());
-
-    let response = runtime.handle(
-        wall_in_one_service::protocol::Request {
-            verb: "status".into(),
-            argument: None,
-        },
-        at,
-    );
-    let crash_status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    // The engine exits on its own, in its own time: each tick looks for it (one before it has
+    // exited changes nothing), until a tick has seen it go.
+    let deadline = Instant::now() + RECORD_DEADLINE;
+    let crash_status: serde_json::Value = loop {
+        runtime.tick(at, Instant::now());
+        let response = runtime.handle(
+            wall_in_one_service::protocol::Request {
+                verb: "status".into(),
+                argument: None,
+            },
+            at,
+        );
+        let status: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+        if status["last_error"] != "" || Instant::now() >= deadline {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
     assert_eq!(
         crash_status["config_generation"],
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -1929,8 +1949,15 @@ fn crashed_video_falls_back_but_can_be_attempted_on_a_later_visit() {
 
     for _visit in 0..2 {
         without_text_file_busy(|| driver.apply(&video, "eDP-1", &parsed.settings)).unwrap();
-        thread::sleep(Duration::from_millis(100));
-        let failures = driver.poll_failures();
+        // mpvpaper exits on its own, in its own time.
+        let deadline = Instant::now() + RECORD_DEADLINE;
+        let failures = loop {
+            let failures = driver.poll_failures();
+            if !failures.is_empty() || Instant::now() >= deadline {
+                break failures;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(failures.len(), 1);
         assert!(failures[0].message.contains("video entry \"video-two\""));
         assert!(failures[0].message.contains("video EGL startup failed"));
@@ -7725,23 +7752,14 @@ fn initial_all_output_scene_waits_for_the_compositor_without_retrying_a_crashed_
             (0, 0, 1920, 1080),
         )]),
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if launches.exists() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "scene was not launched once the compositor was there"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+    // The launch line whole, not just the file: it was read half-written under load.
+    let launched = recorded_lines(&launches, 1);
     assert!(
-        fs::read_to_string(&launches)
-            .unwrap()
-            .contains("--screen-root eDP-1")
+        !launched.is_empty(),
+        "scene was not launched once the compositor was there"
     );
-    let failure_deadline = Instant::now() + Duration::from_secs(3);
+    assert!(launched.contains("--screen-root eDP-1"), "{launched}");
+    let failure_deadline = Instant::now() + RECORD_DEADLINE;
     loop {
         let status = request(&socket, "status", None);
         let status: serde_json::Value =
@@ -11573,16 +11591,10 @@ fn p2_runtime(
     (runtime, arguments, config_path)
 }
 
-/// Whether the engine was started: its recorder wrote its arguments.
+/// Whether the engine was started: its recorder recorded a launch whole, waited for up to
+/// `RECORD_DEADLINE`.
 fn engine_started(arguments: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if arguments.exists() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    false
+    recorded_lines(&launches_marked(arguments), 1).contains('\n')
 }
 
 #[test]
@@ -13245,13 +13257,11 @@ fn a_rule_starting_on_an_unasked_refused_playlist(
     let ten = noon() - chrono::TimeDelta::hours(2);
     let (mut runtime, arguments, log) = skip_runtime_at(&root, &document, &home, &["DP-1"], ten);
     runtime.apply_current().unwrap();
-    // Let the engine's recorder write its first start.
-    thread::sleep(Duration::from_millis(300));
+    // The engine's first start, recorded whole: a start read as none here would read as a
+    // start again below.
+    let starts = recorded_arguments(&arguments, 1).matches("--bg").count();
+    assert_eq!(starts, 1, "{mode}: the stand-in's engine never started");
     let calls = stills_handed(&log).len();
-    let starts = fs::read_to_string(&arguments)
-        .unwrap_or_default()
-        .matches("--bg")
-        .count();
     let eleven = ten + chrono::TimeDelta::hours(1);
     runtime.tick(eleven, Instant::now());
     thread::sleep(Duration::from_millis(300));

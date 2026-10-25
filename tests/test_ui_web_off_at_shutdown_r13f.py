@@ -1529,3 +1529,38 @@ def test_the_log_says_replaced_only_when_the_replacement_was_installed(
         assert len(replaced) == 1 and not failed, said
     else:
         assert len(failed) == 1 and "the disk is full" in failed[0] and not replaced, said
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_an_older_service_is_told_to_quit_and_the_log_says_so_whether_or_not_it_was_replaced(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    installed: bool,
+) -> None:
+    """After a failed install the older service is still sent quit; the log has the failure and
+    the quit, and never claims a replacement. The control (installed) claims it."""
+    application = profiles().application
+    _content, scenes = _workshop(2)
+    _on_disk(_naming([*scenes, _web_page(2)]))
+    _heard(monkeypatch, HEARD["an-older-service"])
+    if not installed:
+
+        def refuse(*_a: object, **_k: object) -> None:
+            raise runtime_config.RuntimeConfigError("the disk is full (this test)")
+
+        monkeypatch.setattr(runtime_config, "install_nothing_to_play", refuse)
+    caplog.set_level(logging.INFO, logger=app_module.LOGGER.name)
+    with _service_socket(monkeypatch) as service:
+        application._web_off_on_disk_at_exit()
+        _judged_at_exit(application)
+    assert service.verbs == ["quit"]
+    said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
+    quit_said = [one for one in said if "was sent quit at shutdown" in one]
+    replaced = [one for one in said if "it was replaced at shutdown" in one]
+    failed = [one for one in said if "couldn\u2019t be replaced at shutdown" in one]
+    assert len(quit_said) == 1, said
+    if installed:
+        assert len(replaced) == 1 and not failed, said
+    else:
+        assert len(failed) == 1 and not replaced, said

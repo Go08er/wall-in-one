@@ -660,10 +660,10 @@ def _retained_web_refusal() -> str:
         return ""
     if not titles and not unchecked:
         return (
-            "the last-known-good runtime allows web wallpapers (it was compiled while "
-            "Allow web wallpapers was on), and Allow web wallpapers is off; the service "
-            "was not started on it, since it would play a Workshop wallpaper that has "
-            "become a web page. Fix what stops the compile (the message above), or turn "
+            "the last-known-good runtime allows web wallpapers, and Allow web "
+            "wallpapers is off; the service was not started on it, since it would play a "
+            "Workshop wallpaper that has become a web page. Fix what stops the compile (the "
+            "message above), or turn "
             "Allow web wallpapers on, then start the service again (systemctl --user "
             "start wall-in-one)"
         )

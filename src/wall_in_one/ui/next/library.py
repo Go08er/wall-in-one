@@ -645,8 +645,10 @@ class LibraryPage(Page):
             # The service names 16 refused items at most; the cards past them
             # carry no mark. With none named (a reply held to its size), none
             # is marked, and "more" would have nothing to follow.
-            more = "and " if any(w.refused_here for w in self.state.wallpapers) else ""
-            text += f" · {more}{omitted}{' more' if more else ''} can\u2019t play here"
+            if any(w.refused_here for w in self.state.wallpapers):
+                text += f" · and {omitted} more refused"
+            else:
+                text += f" · {omitted} can\u2019t play here"
         if self.state.library_scanning:
             text += " · scanning…"
         self._count.set_label(text)

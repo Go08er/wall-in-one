@@ -783,7 +783,7 @@ class MainWindow(Adw.ApplicationWindow):
             # Library items with a mark; the service's unlisted rows are its own count.
             summary += f" · {marked} can\u2019t play here"
             if refused_omitted:
-                summary += f", and {refused_omitted} more refused"
+                summary += f" \u00b7 and {refused_omitted} more refused"
         elif refused_omitted:
             summary += f" · {refused_omitted} can\u2019t play here"
         self._summary = summary

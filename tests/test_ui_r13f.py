@@ -855,7 +855,7 @@ def test_n5_classic_count_keeps_library_items_and_the_services_rows_apart() -> N
     from tests.test_ui_next_r13e import _scene
 
     summary = _classic_count((_scene("2910000004"),), omitted=3)
-    assert summary.endswith(" · 1 can\u2019t play here, and 3 more refused"), summary
+    assert summary.endswith(" · 1 can\u2019t play here \u00b7 and 3 more refused"), summary
 
 
 def test_control_n5_classic_count_with_no_item_marked_is_the_services_count() -> None:
@@ -870,3 +870,19 @@ def test_control_n5_classic_count_of_marked_items_alone() -> None:
 
     summary = _classic_count((_scene("2910000004"),), omitted=0)
     assert summary.endswith(" · 1 can\u2019t play here"), summary
+
+
+def test_n5_both_uis_say_the_unlisted_rows_the_same_way() -> None:
+    from tests.test_ui_next_r13e import _count_line, _scene
+
+    said = " \u00b7 and 3 more refused"
+    assert _classic_count((_scene("2910000004"),), omitted=3).endswith(said)
+    assert _count_line(3, marked=True).endswith(said)
+
+
+def test_control_n5_both_uis_say_unlisted_rows_with_no_mark_the_same_way() -> None:
+    from tests.test_ui_next_r13e import _count_line, _scene
+
+    said = " \u00b7 3 can\u2019t play here"
+    assert _classic_count((_scene("12345"),), omitted=3).endswith(said)
+    assert _count_line(3, marked=False).endswith(said)

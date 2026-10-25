@@ -3542,6 +3542,15 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.apply_current_keeping(&[])
     }
 
+    /// What status says of this binary's own path (`runtime_executable`),
+    /// set by a test, never by the service: the feature that compiles it in
+    /// is turned on only by this package's tests. A reply measured against
+    /// one built elsewhere then carries that build's path.
+    #[cfg(feature = "test-support")]
+    pub fn set_runtime_executable_for_tests(&mut self, executable: Option<&str>) {
+        self.runtime_executable = executable.map(str::to_owned);
+    }
+
     /// `apply_current`, where a mirrored display whose target is one of
     /// `resident` (what it shows now, `resident_targets`) keeps its renderer.
     fn apply_current_keeping(&mut self, resident: &[Target]) -> Result<String, String> {

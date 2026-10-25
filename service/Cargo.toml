@@ -23,6 +23,15 @@ wayland-client = { version = "0.31", features = ["log"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
+[features]
+# Only for this package's own tests, which turn it on below: what lets a test
+# make a reply carry the build strings it compares against
+# (`Runtime::set_runtime_executable_for_tests`). The service never has it.
+test-support = []
+
+[dev-dependencies]
+wall-in-one-service = { path = ".", features = ["test-support"] }
+
 [profile.release]
 # The daemon is resident for the whole graphical session. Its event loop is
 # intentionally tiny and measured far below the idle CPU ceiling, while every

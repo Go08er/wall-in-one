@@ -13511,6 +13511,7 @@ fn refusal_ceiling_status(pick: &str, refused: usize, taboo: usize) -> (serde_js
         at,
     )
     .unwrap();
+    with_the_references_executable(&mut runtime);
     runtime.apply_current().unwrap();
     runtime.tick(at, Instant::now());
     let picked = format!("{}{pick}", "\"".repeat(210));
@@ -14874,9 +14875,10 @@ const BAND_AT_0_4_0: [(BandCorner, BandSent); 13] = [
 /// What every reply in `BAND_AT_0_4_0` carried that depends on how its test binary was built
 /// and where: that binary's path (`runtime_executable`), `install_kind` (`source` in a dev
 /// shell, `nix` in the package's build) and `runtime_version`; and the configuration's path,
-/// `config_path`, which a band reply here sets to make up for the others
-/// (`config_path_with_the_references_room`). A reply measured here carries its own, and has as
-/// much less room as they take more (`build_beyond_the_reference`).
+/// `config_path`. A band reply here says the reference's binary path whatever binary runs it
+/// (`with_the_references_executable`), and sets its configuration's path to make up for the
+/// other two (`config_path_with_the_references_room`). A reply that doesn't carries its own,
+/// and has as much less room as they take more (`build_beyond_the_reference`).
 const BAND_REFERENCE_BUILD: [(&str, &str); 4] = [
     (
         "runtime_executable",
@@ -14901,14 +14903,23 @@ fn build_beyond_the_reference(snapshot: &serde_json::Value) -> i64 {
         .sum()
 }
 
-/// How many bytes on the wire this test binary's own build strings take beyond the band
-/// reference's, measured once from a reply at the reference's configuration path. Negative in
-/// the package's build, whose binary lives under a shorter path and says `nix`.
+/// Make `runtime` say the band reference's binary path as its own (`runtime_executable`),
+/// whatever binary runs it and wherever it was built: the room a reply has then doesn't depend
+/// on that path.
+fn with_the_references_executable<D: WallpaperDriver>(runtime: &mut Runtime<D>) {
+    runtime.set_runtime_executable_for_tests(Some(BAND_REFERENCE_BUILD[0].1));
+}
+
+/// How many bytes on the wire this test binary's build strings take beyond the band
+/// reference's, its path said as the reference's (`with_the_references_executable`): its
+/// `install_kind` and `runtime_version`, measured once from a reply at the reference's
+/// configuration path. Negative in the package's build, which says `nix`.
 fn this_builds_strings_beyond_the_reference() -> i64 {
     static BEYOND: OnceLock<i64> = OnceLock::new();
     *BEYOND.get_or_init(|| {
         let (mut runtime, _) =
             default_rule_runtime(default_rule_document("all-media"), &[], noon());
+        with_the_references_executable(&mut runtime);
         let snapshot = status(&mut runtime, noon());
         assert_eq!(snapshot["config_path"], "/tmp/runtime.toml");
         build_beyond_the_reference(&snapshot)
@@ -14916,10 +14927,11 @@ fn this_builds_strings_beyond_the_reference() -> i64 {
 }
 
 /// A configuration path as much shorter than the reference's `/tmp/runtime.toml` as this
-/// build's strings take more on the wire, or longer as they take less (each of its bytes is one
-/// on the wire), so that a reply here has the reference's room to the byte, wherever the test
-/// binary was built. No path is shorter than `/r`: a build whose strings take more than 15
-/// bytes beyond the reference's has the rest less room all the same.
+/// build's other strings take more on the wire, or longer as they take less (each of its bytes
+/// is one on the wire), so that a reply here, saying the reference's binary path, has the
+/// reference's room to the byte. No path is shorter than `/r`: strings more than 15 bytes
+/// beyond the reference's would leave the rest less room all the same, which an install kind
+/// and a version never take.
 fn config_path_with_the_references_room() -> PathBuf {
     let reference = "/tmp/runtime.toml".len() as i64;
     let length = reference - this_builds_strings_beyond_the_reference();
@@ -14994,6 +15006,7 @@ fn band_status(corner: BandCorner) -> (serde_json::Value, usize) {
         at,
     )
     .unwrap();
+    with_the_references_executable(&mut runtime);
     let _ = runtime.apply_current();
     runtime.tick(at, Instant::now());
     let response = runtime_command(&mut runtime, at, "status", None);
@@ -15073,7 +15086,7 @@ fn assert_some_checked(what: &str, checked: usize) {
     assert!(
         checked > 0,
         "{what}: skipped every time: this build's strings take {} bytes beyond the reference's, \
-         which a configuration path can't make up for past 15; build from a shorter path",
+         which a configuration path can't make up for past 15",
         this_builds_strings_beyond_the_reference()
     );
 }

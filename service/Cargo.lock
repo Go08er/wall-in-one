@@ -485,6 +485,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml",
+ "wall-in-one-service",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

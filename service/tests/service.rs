@@ -16581,8 +16581,8 @@ fn control_an_independent_boundary_that_learns_another_refusal_applies_nothing()
 //
 // A refusal is kept by item, but what learned it applied only the routes it was given: a route
 // that showed the same item kept it and its motion, while status listed the item as refused.
-// Every other route whose display shows an item just refused is now applied too, and moves on
-// as any apply does.
+// Every other route whose display shows an item just refused is now applied too, at the tick
+// after the refusal is learned (review r13j R-L-b), and moves on as any apply does.
 
 /// Independent DP-1 and HDMI-A-1, DP-1 assigned to all-media: all-media-1 is the scene
 /// 3000000031 and pages-1 the scene `pages_1`; eve names `rule`.
@@ -16683,7 +16683,8 @@ fn control_a_refusal_of_another_item_at_one_routes_boundary_leaves_the_other_rou
 }
 
 /// The same through a command: DP-1 on mixed, whose mixed-2 is a scene, the item HDMI-A-1's
-/// all-media-1 is when `shared`. `on DP-1 next` asks about mixed-2 and learns it is refused.
+/// all-media-1 is when `shared`. `on DP-1 next` asks about mixed-2 and learns it is refused; the
+/// tick after it (the service's next, once it has replied) moves HDMI-A-1.
 fn another_route_refused_by_a_command(shared: bool) -> (String, bool, Vec<String>, Vec<String>) {
     let mixed_2 = if shared { "3000000031" } else { "3000000033" };
     let document = independent_shared_item_document("pages", "3000000032")
@@ -16705,6 +16706,7 @@ fn another_route_refused_by_a_command(shared: bool) -> (String, bool, Vec<String
         .insert("mixed-2".into());
     let reply = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
     assert!(reply.ok, "{}", reply.message);
+    runtime.tick(at, Instant::now() + Duration::from_secs(1));
     hdmi_after("next", &mut runtime, &state, at)
 }
 
@@ -16897,4 +16899,475 @@ fn control_without_the_pause_failure_an_independent_boundary_skips_and_marks_not
     for connector in ["DP-1", "HDMI-A-1"] {
         assert_eq!(route(&snapshot, connector)["entry_id"], "all-media-2");
     }
+}
+
+// -- review r13j R-L-b, R-L-c, R-L-d, R-N9: the refusal sweep runs at the tick ----------------
+//
+// R-L-a's batch hook moved, inside a command's or a reload's apply, the other routes showing an
+// item just refused. A rollback then put those routes' rows back but not their screens, and a
+// route it moved got no retry. The hook is gone: the tick after a refusal is learned, by a
+// command, a reload, AC resume or the tick itself, moves each route showing the item through
+// `start_route_automatic`, which retries, outside any rollback.
+
+/// A playlist's entries: each (id, Some(scene id) for a scene, None for a still).
+type Entries<'a> = &'a [(&'a str, Option<&'a str>)];
+
+/// An independent document, motion on, theme source DP-1: `playlists` as (id, entries); DP-1
+/// assigned `dp1`, HDMI-A-1 `hdmi`; eve (16:00-17:00) names `rule`. The header is
+/// `default_rule_document`'s.
+fn two_route_document(
+    playlists: &[(&str, Entries<'_>)],
+    dp1: &str,
+    hdmi: &str,
+    rule: &str,
+) -> String {
+    let base = default_rule_document(rule);
+    let mut document = base[..base.find("[[playlists]]").unwrap()]
+        .replace(
+            "display_mode = \"mirrored\"",
+            "display_mode = \"independent\"",
+        )
+        .replace(
+            "theme_source_connector = \"\"",
+            "theme_source_connector = \"DP-1\"",
+        )
+        .replace("dynamics_enabled = false", "dynamics_enabled = true");
+    for (playlist, entries) in playlists {
+        document.push_str(&format!(
+            "[[playlists]]\nid = \"{playlist}\"\nname = \"{playlist}\"\n"
+        ));
+        for (entry, scene) in *entries {
+            let kind = match scene {
+                Some(scene) => format!("kind = \"scene\"\nscene_id = \"{scene}\"\n"),
+                None => "kind = \"still\"\n".to_string(),
+            };
+            document.push_str(&format!(
+                "[[playlists.entries]]\nid = \"{entry}\"\n{kind}still = \"/stills/{entry}.png\"\n\
+                 palette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+            ));
+        }
+    }
+    document.push_str(&format!(
+        "[[schedules]]\nid = \"eve\"\nplaylist = \"{rule}\"\nstart = \"16:00\"\nend = \"17:00\"\n\
+         [[displays]]\nconnector = \"DP-1\"\nplaylist = \"{dp1}\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"{hdmi}\"\n"
+    ));
+    document
+}
+
+/// The rows that name one of `entries`, as "<connector> on <entry>".
+fn rows_on(snapshot: &serde_json::Value, entries: &[&str]) -> Vec<String> {
+    ["DP-1", "HDMI-A-1"]
+        .into_iter()
+        .filter_map(|connector| {
+            let entry = route(snapshot, connector)["entry_id"].as_str()?.to_string();
+            entries
+                .contains(&entry.as_str())
+                .then(|| format!("{connector} on {entry}"))
+        })
+        .collect()
+}
+
+/// The items status lists as refused.
+fn refused_items(snapshot: &serde_json::Value) -> Vec<String> {
+    snapshot["refused"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| row["scene_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// R-L-c. DP-1 on mixed, whose mixed-2 is the scene 3000000051; HDMI-A-1 holds a pick of pages,
+/// whose one entry is the same scene. `next` (untargeted, or `on DP-1 next`) moves DP-1 onto
+/// mixed-2, learns its item is refused, and steps on to mixed-1, whose still fails once on
+/// DP-1: the command rolls back the routes it named. Where a row and its screen disagree, after
+/// the command and after ticks at +3, +5 and +61 s; the rows on an entry of the item then; and
+/// the items refused.
+fn a_commands_rollback_beside_a_route_showing_its_refusal(
+    untargeted: bool,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let x = Some("3000000051");
+    let document = two_route_document(
+        &[
+            ("all-media", &[("all-media-1", None), ("all-media-2", None)]),
+            ("mixed", &[("mixed-1", None), ("mixed-2", x)]),
+            ("pages", &[("pages-1", x)]),
+        ],
+        "mixed",
+        "all-media",
+        "all-media",
+    );
+    let at = on_the_third(12, 0);
+    let (mut runtime, state) = default_rule_runtime(document, &[], at);
+    let reply = runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 playlist-use pages"));
+    assert!(reply.ok, "{}", reply.message);
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("mixed-2".into());
+        recorded.fail_stage_entry_id = Some("mixed-1".into());
+        recorded.fail_stage_output = Some("DP-1".into());
+        recorded.fail_stage_attempts_remaining = 1;
+    }
+    let reply = if untargeted {
+        runtime_command(&mut runtime, at, "next", None)
+    } else {
+        runtime_command(&mut runtime, at, "on", Some("DP-1 next"))
+    };
+    assert!(
+        !reply.ok,
+        "the premise: the command rolls back: {}",
+        reply.message
+    );
+    let mut problems = rows_off_screen("next", &mut runtime, &state, at);
+    let start = Instant::now();
+    for seconds in [3, 5, 61] {
+        runtime.tick(at, start + Duration::from_secs(seconds));
+    }
+    problems.extend(rows_off_screen("+61 s", &mut runtime, &state, at));
+    let later = status(&mut runtime, at);
+    (
+        problems,
+        rows_on(&later, &["mixed-2", "pages-1"]),
+        refused_items(&later),
+    )
+}
+
+#[test]
+fn an_untargeted_commands_rollback_leaves_no_route_on_its_refused_item_or_off_its_screen() {
+    let (problems, on_refused, refused) =
+        a_commands_rollback_beside_a_route_showing_its_refusal(true);
+    assert_eq!(refused, vec!["3000000051".to_string()]);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(on_refused.is_empty(), "{on_refused:?}");
+}
+
+#[test]
+fn control_a_targeted_commands_rollback_leaves_no_route_on_its_refused_item_or_off_its_screen() {
+    let (problems, on_refused, refused) =
+        a_commands_rollback_beside_a_route_showing_its_refusal(false);
+    assert_eq!(refused, vec!["3000000051".to_string()]);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(on_refused.is_empty(), "{on_refused:?}");
+}
+
+/// R-L-b. HDMI-A-1 on all-media, whose all-media-1 is the scene 3000000052 (running). A reload
+/// assigns DP-1 pages, whose one entry is the same scene, refused when asked: DP-1 learns it and
+/// stands in on all-media, at all-media-2. With `fail`, DP-1's all-media-2 still fails once, so
+/// the reload is rejected. With `prior`, the old generation had refused another item, mixed-2's,
+/// and swept it. The reply's ok; where a row and its screen disagree, after the reload and after
+/// a tick; and status after the tick.
+fn a_reload_beside_a_route_showing_its_refusal(
+    fail: bool,
+    prior: bool,
+) -> (bool, Vec<String>, serde_json::Value) {
+    let x = Some("3000000052");
+    let playlists: &[(&str, Entries<'_>)] = &[
+        ("all-media", &[("all-media-1", x), ("all-media-2", None)]),
+        (
+            "mixed",
+            &[("mixed-1", None), ("mixed-2", Some("3000000053"))],
+        ),
+        ("pages", &[("pages-1", x)]),
+    ];
+    let root = directory("refusal-sweep-reload");
+    let path = root.join("runtime.toml");
+    fs::write(
+        &path,
+        two_route_document(playlists, "mixed", "all-media", "all-media"),
+    )
+    .unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let at = on_the_third(12, 0);
+    let mut runtime = Runtime::new(
+        path.clone(),
+        Config::load(&path).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    let start = Instant::now();
+    if prior {
+        state
+            .lock()
+            .unwrap()
+            .refuse_when_asked
+            .insert("mixed-2".into());
+        let reply = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+        assert!(reply.ok, "{}", reply.message);
+        runtime.tick(at, start + Duration::from_secs(1));
+        assert_eq!(
+            refused_items(&status(&mut runtime, at)),
+            vec!["3000000053".to_string()]
+        );
+    }
+    fs::write(
+        &path,
+        two_route_document(playlists, "pages", "all-media", "all-media"),
+    )
+    .unwrap();
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("pages-1".into());
+        if fail {
+            recorded.fail_stage_entry_id = Some("all-media-2".into());
+            recorded.fail_stage_output = Some("DP-1".into());
+            recorded.fail_stage_attempts_remaining = 1;
+        }
+    }
+    let reply = runtime_command(&mut runtime, at, "reload", None);
+    let mut problems = rows_off_screen("reload", &mut runtime, &state, at);
+    runtime.tick(at, start + Duration::from_secs(2));
+    problems.extend(rows_off_screen("tick", &mut runtime, &state, at));
+    let snapshot = status(&mut runtime, at);
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    (reply.ok, problems, snapshot)
+}
+
+#[test]
+fn a_rejected_reload_leaves_no_route_off_its_screen() {
+    let (ok, problems, snapshot) = a_reload_beside_a_route_showing_its_refusal(true, false);
+    assert!(!ok, "the premise: the reload is rejected");
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(route(&snapshot, "HDMI-A-1")["entry_id"], "all-media-1");
+}
+
+#[test]
+fn control_an_accepted_reload_moves_a_route_it_didnt_apply_off_its_refused_item() {
+    let (ok, problems, snapshot) = a_reload_beside_a_route_showing_its_refusal(false, false);
+    assert!(ok);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(refused_items(&snapshot), vec!["3000000052".to_string()]);
+    assert_eq!(route(&snapshot, "HDMI-A-1")["entry_id"], "all-media-2");
+}
+
+#[test]
+fn an_accepted_reload_sweeps_its_refusals_though_the_old_generation_swept_as_many() {
+    let (ok, problems, snapshot) = a_reload_beside_a_route_showing_its_refusal(false, true);
+    assert!(ok);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(refused_items(&snapshot), vec!["3000000052".to_string()]);
+    assert_eq!(
+        route(&snapshot, "HDMI-A-1")["entry_id"],
+        "all-media-2",
+        "HDMI-A-1 keeps all-media-1, an item listed as refused"
+    );
+}
+
+/// R-L-d. HDMI-A-1 on all-media, whose all-media-1 is the scene 3000000054 (running); its
+/// all-media-2 still fails on HDMI-A-1 every time. By command: DP-1 on mixed, and `on DP-1 next`
+/// lands on mixed-2, the same scene, refused when asked. By boundary: HDMI-A-1 holds a pick of
+/// all-media, and DP-1's 16:00 boundary learns that pages-1, the same scene, is refused. Ticks
+/// to +13 s; how often all-media-2's still was tried on HDMI-A-1, and status.
+fn a_moved_route_that_fails(by_command: bool) -> (usize, serde_json::Value) {
+    let x = Some("3000000054");
+    let document = two_route_document(
+        &[
+            ("all-media", &[("all-media-1", x), ("all-media-2", None)]),
+            ("mixed", &[("mixed-1", None), ("mixed-2", x)]),
+            ("pages", &[("pages-1", x)]),
+        ],
+        if by_command { "mixed" } else { "all-media" },
+        "all-media",
+        "pages",
+    );
+    let (at, start_at) = if by_command {
+        (on_the_third(12, 0), on_the_third(12, 0))
+    } else {
+        (on_the_third(16, 0), on_the_third(15, 0))
+    };
+    let (mut runtime, state) = default_rule_runtime(document, &[], start_at);
+    if !by_command {
+        let reply = runtime_command(
+            &mut runtime,
+            on_the_third(15, 5),
+            "on",
+            Some("HDMI-A-1 playlist-use all-media"),
+        );
+        assert!(reply.ok, "{}", reply.message);
+    }
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded
+            .refuse_when_asked
+            .insert(if by_command { "mixed-2" } else { "pages-1" }.into());
+        recorded.fail_stage_entry_id = Some("all-media-2".into());
+        recorded.fail_stage_output = Some("HDMI-A-1".into());
+        recorded.fail_stage_attempts_remaining = 100;
+    }
+    let start = Instant::now();
+    if by_command {
+        let reply = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+        assert!(reply.ok, "{}", reply.message);
+    } else {
+        runtime.tick(at, start + Duration::from_secs(1));
+    }
+    for seconds in [3, 5, 7, 9, 11, 13] {
+        runtime.tick(at, start + Duration::from_secs(seconds));
+    }
+    let snapshot = status(&mut runtime, at);
+    let tries = state
+        .lock()
+        .unwrap()
+        .stage_events
+        .iter()
+        .filter(|event| event.as_str() == "still HDMI-A-1 all-media-2")
+        .count();
+    (tries, snapshot)
+}
+
+#[test]
+fn a_route_moved_off_a_commands_refusal_is_tried_again_when_its_apply_fails() {
+    let (tries, snapshot) = a_moved_route_that_fails(true);
+    assert!(
+        tries >= 3,
+        "tried {tries} time(s); HDMI-A-1: {}",
+        route(&snapshot, "HDMI-A-1")
+    );
+    assert!(
+        snapshot["taboo_entries"]
+            .to_string()
+            .contains("all-media-2"),
+        "{}",
+        snapshot["taboo_entries"]
+    );
+}
+
+#[test]
+fn control_a_route_moved_off_a_boundarys_refusal_is_tried_again_when_its_apply_fails() {
+    let (tries, snapshot) = a_moved_route_that_fails(false);
+    assert!(
+        tries >= 3,
+        "tried {tries} time(s); HDMI-A-1: {}",
+        route(&snapshot, "HDMI-A-1")
+    );
+    assert!(
+        snapshot["taboo_entries"]
+            .to_string()
+            .contains("all-media-2"),
+        "{}",
+        snapshot["taboo_entries"]
+    );
+}
+
+/// R-N9. AC resume asks only the routes that play. DP-1 on dp, whose dp-1 is the scene
+/// 3000000055; HDMI-A-1 paused on all-media, whose all-media-1 is the same scene when `shared`,
+/// another otherwise. On battery dp-1 becomes refused when asked; AC resume learns it, and the
+/// tick after it. Status then.
+fn ac_resume_beside_a_paused_route(shared: bool) -> serde_json::Value {
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let x = Some("3000000055");
+    let hdmi_item = if shared { x } else { Some("3000000056") };
+    let document = two_route_document(
+        &[
+            (
+                "all-media",
+                &[("all-media-1", hdmi_item), ("all-media-2", None)],
+            ),
+            ("dp", &[("dp-1", x)]),
+            ("pages", &[("pages-1", None)]),
+        ],
+        "dp",
+        "all-media",
+        "pages",
+    )
+    .replace("schema_version = 4", "schema_version = 5")
+    .replace(
+        "dynamics_enabled = true",
+        "dynamics_enabled = true\nstop_animations_on_battery = true",
+    );
+    let at = on_the_third(12, 0);
+    let (mut runtime, state) = default_rule_runtime(document, &[], at);
+    let reply = runtime_command(&mut runtime, at, "on", Some("HDMI-A-1 pause"));
+    assert!(reply.ok, "{}", reply.message);
+    runtime.observe_power(power_observation(Battery));
+    state
+        .lock()
+        .unwrap()
+        .refuse_when_asked
+        .insert("dp-1".into());
+    runtime.observe_power(power_observation(Ac));
+    runtime.tick(at, Instant::now() + Duration::from_secs(1));
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(refused_items(&snapshot), vec!["3000000055".to_string()]);
+    snapshot
+}
+
+#[test]
+fn ac_resume_moves_a_paused_route_showing_the_item_it_learned_is_refused() {
+    let snapshot = ac_resume_beside_a_paused_route(true);
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "all-media-2");
+    assert_eq!(
+        route(&snapshot, "HDMI-A-1")["entry_id"],
+        "all-media-2",
+        "HDMI-A-1 keeps all-media-1, an item listed as refused"
+    );
+}
+
+#[test]
+fn control_ac_resume_leaves_a_paused_route_showing_another_item() {
+    let snapshot = ac_resume_beside_a_paused_route(false);
+    assert_eq!(route(&snapshot, "HDMI-A-1")["entry_id"], "all-media-1");
+}
+
+/// The sweep doesn't loop. HDMI-A-1 on all-media, whose one entry is the scene 3000000057, and
+/// nothing can stand in for it; DP-1 on mixed, whose mixed-2 is the same scene, refused when
+/// asked. `on DP-1 next` learns it; the tick after it leaves HDMI-A-1 nothing to play.
+#[test]
+fn a_route_the_sweep_leaves_nothing_to_play_isnt_applied_again() {
+    let x = Some("3000000057");
+    let document = two_route_document(
+        &[
+            ("all-media", &[("all-media-1", x)]),
+            ("mixed", &[("mixed-1", None), ("mixed-2", x)]),
+            ("pages", &[("pages-1", None)]),
+        ],
+        "mixed",
+        "all-media",
+        "pages",
+    );
+    let at = on_the_third(12, 0);
+    let (mut runtime, state) = default_rule_runtime(document, &[], at);
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    state
+        .lock()
+        .unwrap()
+        .refuse_when_asked
+        .insert("mixed-2".into());
+    let reply = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+    assert!(reply.ok, "{}", reply.message);
+    let start = Instant::now();
+    runtime.tick(at, start + Duration::from_secs(1));
+    let swept = status(&mut runtime, at);
+    assert_eq!(refused_items(&swept), vec!["3000000057".to_string()]);
+    let hdmi = route(&swept, "HDMI-A-1");
+    assert_eq!(
+        hdmi["nothing_to_play"], "no wallpaper here can start",
+        "{hdmi}"
+    );
+    assert!(!state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    let driver_calls = |state: &Arc<Mutex<RuntimeDriverState>>| {
+        let recorded = state.lock().unwrap();
+        (
+            recorded.applies.len(),
+            recorded.stage_events.len(),
+            recorded.stops,
+            recorded.retained_outputs.len(),
+            recorded.asked.values().sum::<usize>(),
+        )
+    };
+    let before = driver_calls(&state);
+    for seconds in [3, 5, 7, 61, 301] {
+        runtime.tick(at, start + Duration::from_secs(seconds));
+    }
+    assert_eq!(driver_calls(&state), before, "the driver was called again");
+    assert_eq!(route(&status(&mut runtime, at), "HDMI-A-1"), hdmi);
 }

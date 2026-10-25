@@ -6256,12 +6256,15 @@ impl<D: WallpaperDriver> Runtime<D> {
     ///
     /// With all of them gone what is left is the budget's: its configured
     /// text, at most four times over on the wire as the budget counts it,
-    /// the fixed keys, the structure of at most 578 playlists, 512 rules
-    /// and 128 rows, and what neither budget counts that every reply
-    /// carries (the rows' timing and retry fields, `config_path`,
-    /// `runtime_executable`, `theme_source`'s connectors; see
-    /// docs/runtime-config.md). At those ceilings, with every string of it
-    /// at its longest on the wire, that reply still fits.
+    /// the fixed keys and the structure of at most 578 playlists, 512 rules
+    /// and 128 rows; and what neither budget counts that every reply
+    /// carries (review r13e N7): the rows' timing and retry fields, the top
+    /// level `schedule`'s second copy of a playlist's id and name and of a
+    /// rule's id, `theme_source`'s two connectors, `config_path`, and
+    /// `runtime_executable`, which alone may hold control characters (up
+    /// to about 28.6 KB on the wire). At those ceilings, with every one of
+    /// them at its longest on the wire at once, that reply still has about
+    /// 13 KB to spare (16 KB independent; docs/runtime-config.md).
     fn abridged(
         &self,
         at: NaiveDateTime,

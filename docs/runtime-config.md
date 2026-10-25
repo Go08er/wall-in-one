@@ -490,17 +490,31 @@ they don't fit). Nothing given back is ever kept at the expense of what comes
 before it, so a reply may carry one taboo record more than 0.4.0's where
 0.4.0 had room only for `missing_renderers`' rows instead.
 
-After 7 the reply carries only the text the budget counts, its fixed keys and
-the structure of the playlists, rules and rows. At the ceilings (578
-playlists, 512 rules, 128 rows), with every string the budget counts made of
-quotes and backslashes, so that none is shorter on the wire than the budget
-counts it, the reply after 6 has about 60 KB to spare, more than what is left
-can take: the rows' timing and retry fields (about 14 KB at most) and
-`config_path`, the service's own path. Step 7 is needed only for long
-diagnostics full of quotes, such as an apply that failed on every row on an
-entry whose id is 256 quotes.
+With every one of 6 and 7 left out, the reply carries the text the budget
+counts (at most four times over on the wire, as the budget counts it), its
+fixed keys and the structure of the playlists, rules and rows, and what
+neither budget counts but every reply carries:
 
-Publishing steps down as for 6 and 7. A running service that isn't confirmed
+- the rows' timing fields, about 2.4 KB on 64 live rows, and their retry
+  fields, about 7.7 KB when every row retries;
+- the top level `schedule`'s second copy of a playlist's id and name, and of
+  a rule's id;
+- `theme_source`'s `configured` and `effective` connectors, up to 1 KB each
+  on the wire;
+- `config_path`, the document's path: at most 4,096 bytes, about 16 KB on the
+  wire when it is all quotes;
+- `runtime_executable`, the service's own path, the one string here that can
+  carry control characters: up to about 28.6 KB on the wire.
+
+At the ceilings (578 playlists, 512 rules, 128 rows), with every string the
+budget counts made of quotes and backslashes, so that none is shorter on the
+wire than the budget counts it, that reply has about 68 KB to spare (66 KB in
+independent mode). With every one of the others above at its longest at once
+it still has about 13 KB to spare (16 KB in independent mode). Errors have to
+go only when they are long and full of quotes, such as an apply that failed
+on every row on an entry whose id is 256 quotes.
+
+Publishing steps down as for schemas 6 and 7. A running service that isn't confirmed
 to read 8 gets the document without `allow_web_wallpapers`. One that predates
 8 then plays web pages as 0.4.0 did, while the setting is on. One that lists 8
 but isn't confirmed (its units can't be verified, or it didn't answer) refuses

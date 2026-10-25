@@ -14179,3 +14179,21 @@ fn a_reply_that_leaves_out_a_stand_in_says_so() {
     assert_eq!(route(&snapshot, "DP-1")["stand_in_for"], "pages");
     assert!(snapshot.get("stand_in_for_omitted").is_none(), "{snapshot}");
 }
+
+#[test]
+fn at_the_ceiling_only_as_many_taboo_records_go_as_must() {
+    // Review r13d N8: the taboo records kept are counted by measuring them, not by building
+    // the reply again for each count tried. One more than are kept would not fit.
+    let (snapshot, encoded) = refusal_ceiling_status("BIG", 20, 64);
+    let kept = snapshot["taboo_entries"].as_array().unwrap();
+    assert_eq!(kept.len(), 61);
+    assert_eq!(snapshot["taboo_entries_omitted"], 3);
+    // A record's bytes on the wire: its JSON, each quote and backslash escaped once more.
+    let record = serde_json::to_string(&kept[0]).unwrap();
+    let on_wire = record.len() + record.matches(['"', '\\']).count();
+    assert!(
+        MAX_RESPONSE_BYTES - encoded < on_wire + 1,
+        "{} bytes to spare beside a {on_wire}-byte record",
+        MAX_RESPONSE_BYTES - encoded
+    );
+}

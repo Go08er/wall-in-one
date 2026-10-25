@@ -5,7 +5,7 @@ use crate::config::{
 };
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
-use crate::protocol::{Request, Response, success_fits};
+use crate::protocol::{Request, Response, escaped_len, success_fits, success_room};
 use crate::renderer::{MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver};
 use crate::schedule;
 use crate::workshop::Refusal;
@@ -431,6 +431,13 @@ fn abridge_rows(
         }
     }
     omitted
+}
+
+/// How many characters `count` takes written in decimal.
+fn decimal_digits(count: usize) -> usize {
+    count
+        .checked_ilog10()
+        .map_or(1, |digits| digits as usize + 1)
 }
 
 impl MissingRendererStatus {
@@ -5895,14 +5902,29 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// all of them gone, what is left (the floor) is what the budget bounds,
     /// apart from what it doesn't count on every row: when even the floor
     /// wouldn't fit, `abridged` leaves that out too (6 and 7 there).
+    ///
+    /// Each row count is found by measuring its rows, not by building the
+    /// reply again for each count tried (review r13d N8): a reply at the
+    /// limit is built at most nine times (`everything`, without the
+    /// additions, without `outputs`, the floor, its taboo records,
+    /// `missing_renderers` whole and without paths, with the stand-ins, its
+    /// `refused` rows), six with nothing refused, and six when even the
+    /// floor doesn't fit; beside that each taboo record and `refused` row is
+    /// serialized once on its own. Below the limit, once.
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
         let everything = self.status_json(at, ReplyShape::WHOLE)?;
         if success_fits(&everything) {
             return Ok(everything);
         }
-        let (shape, best) = self.fitting_without_additions(at)?;
+        // Nothing refused, nothing to add: no row stands in (a stand-in
+        // needs a refused entry), and `refused` is empty.
+        let additions = !self.refused_scenes.is_empty();
+        let (shape, best) = self.fitting_without_additions(at, additions)?;
         if !success_fits(&best) {
             return self.abridged(at, shape);
+        }
+        if !additions {
+            return Ok(best);
         }
         // What room is left: every `stand_in_for`, then as many `refused`
         // rows as fit.
@@ -5914,39 +5936,58 @@ impl<D: WallpaperDriver> Runtime<D> {
         if !success_fits(&with_stand_ins) {
             return Ok(best);
         }
-        let listed = self.refused_scenes.len().min(MAX_REFUSED_STATUS_ENTRIES);
-        let (_, best) =
-            self.most_that_fit(at, listed, |refused| ReplyShape { refused, ..shape })?;
+        let rows = self.refused_rows(MAX_REFUSED_STATUS_ENTRIES);
+        let (_, best) = self.most_listed_that_fit(
+            at,
+            with_stand_ins,
+            &rows,
+            self.refused_scenes.len(),
+            |refused| ReplyShape { refused, ..shape },
+        )?;
         Ok(best)
     }
 
     /// The reply 0.4.0 would fit, without `refused` rows or `stand_in_for`:
     /// `outputs` left out first, then as many taboo records kept as fit
     /// without `missing_renderers`, which then gets what room is left:
-    /// whole, without its paths, or not at all. Its shape, and that reply.
-    fn fitting_without_additions(&self, at: NaiveDateTime) -> Result<(ReplyShape, String), String> {
+    /// whole, without its paths, or not at all. Its shape, and that reply;
+    /// the floor, which doesn't fit, when not even that does.
+    /// `with_additions` is false when `everything` was already this reply
+    /// with `outputs`.
+    fn fitting_without_additions(
+        &self,
+        at: NaiveDateTime,
+        with_additions: bool,
+    ) -> Result<(ReplyShape, String), String> {
         let mut shape = ReplyShape {
             refused: 0,
             stand_in_for: false,
             ..ReplyShape::WHOLE
         };
-        let everything = self.status_json(at, shape)?;
-        if success_fits(&everything) {
-            return Ok((shape, everything));
+        if with_additions {
+            let everything = self.status_json(at, shape)?;
+            if success_fits(&everything) {
+                return Ok((shape, everything));
+            }
         }
         shape.outputs = false;
         let full = self.status_json(at, shape)?;
         if success_fits(&full) {
             return Ok((shape, full));
         }
+        shape.taboo = 0;
+        shape.missing = MissingDetail::Left;
+        let floor = self.status_json(at, shape)?;
+        if !success_fits(&floor) {
+            return Ok((shape, floor));
+        }
+        let records = self.taboo_rows(MAX_TABOO_STATUS_ENTRIES);
         let (records, mut best) =
-            self.most_that_fit(at, MAX_TABOO_STATUS_ENTRIES, |taboo| ReplyShape {
+            self.most_listed_that_fit(at, floor, &records, self.taboo.len(), |taboo| ReplyShape {
                 taboo,
-                missing: MissingDetail::Left,
                 ..shape
             })?;
         shape.taboo = records;
-        shape.missing = MissingDetail::Left;
         for detail in [MissingDetail::Full, MissingDetail::WithoutPaths] {
             let candidate = self.status_json(
                 at,
@@ -6003,36 +6044,74 @@ impl<D: WallpaperDriver> Runtime<D> {
         )
     }
 
-    /// The most of `0..=most` a reply shaped `shape(count)` has room for,
-    /// and that reply. 0 and its reply when none has room: for taboo
-    /// records, only when even the floor doesn't fit (`abridged`).
-    fn most_that_fit(
+    /// The most of `rows` (each one element of one of the reply's arrays,
+    /// in the order it lists them) that fit beside `zero`, the reply with
+    /// none of them, which fits; a reply shaped `shape(count)` lists the
+    /// first `count`, and counts the other `total - count` in a number of
+    /// its own. That count, and that reply.
+    ///
+    /// Measured, not tried: the message is compact JSON, so listing a row
+    /// adds its own JSON and, after the first, a comma, and the count of
+    /// those left out gets shorter by however many digits it loses. Every
+    /// one of those is escaped once more on the wire, character by
+    /// character. The reply chosen is built and checked all the same, and
+    /// one fewer is tried if it were ever over.
+    fn most_listed_that_fit<T: Serialize>(
         &self,
         at: NaiveDateTime,
-        most: usize,
+        zero: String,
+        rows: &[T],
+        total: usize,
         shape: impl Fn(usize) -> ReplyShape,
     ) -> Result<(usize, String), String> {
-        let all = self.status_json(at, shape(most))?;
-        if most == 0 || success_fits(&all) {
-            return Ok((most, all));
-        }
-        let mut best = self.status_json(at, shape(0))?;
-        if !success_fits(&best) {
-            return Ok((0, best));
-        }
-        // `fits` fits, `over` does not.
-        let (mut fits, mut over) = (0, most);
-        while over - fits > 1 {
-            let middle = fits + (over - fits) / 2;
-            let candidate = self.status_json(at, shape(middle))?;
-            if success_fits(&candidate) {
-                fits = middle;
-                best = candidate;
-            } else {
-                over = middle;
+        let room = success_room(&zero).unwrap_or(0);
+        let mut added = 0_usize;
+        let mut most = 0;
+        for (index, row) in rows.iter().enumerate() {
+            let row = serde_json::to_string(row).map_err(|error| error.to_string())?;
+            added += escaped_len(&row) + usize::from(index > 0);
+            let listed = index + 1;
+            let saved = decimal_digits(total) - decimal_digits(total.saturating_sub(listed));
+            if added.saturating_sub(saved) <= room {
+                most = listed;
             }
         }
-        Ok((fits, best))
+        while most > 0 {
+            let candidate = self.status_json(at, shape(most))?;
+            if success_fits(&candidate) {
+                return Ok((most, candidate));
+            }
+            most -= 1;
+        }
+        Ok((0, zero))
+    }
+
+    /// The taboo records status lists, newest first: at most `limit`.
+    fn taboo_rows(&self, limit: usize) -> Vec<TabooStatus<'_>> {
+        self.taboo_order
+            .iter()
+            .rev()
+            .filter_map(|key| {
+                let record = self.taboo.get(key)?;
+                let playlist = self.config.playlist(&key.playlist_id)?;
+                let entry = playlist
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == key.entry_id)?;
+                Some(TabooStatus {
+                    playlist_id: &playlist.id,
+                    playlist: &playlist.name,
+                    entry_id: &entry.id,
+                    kind: entry_kind(entry.kind),
+                    scene_id: entry.scene_id.as_deref(),
+                    reason: &record.reason,
+                    source: record.source.as_str(),
+                    durable: record.durable,
+                    observed_config_epoch: record.observed_config_epoch,
+                })
+            })
+            .take(limit.min(MAX_TABOO_STATUS_ENTRIES))
+            .collect()
     }
 
     /// What the service refused this generation, as status lists it: at
@@ -6094,31 +6173,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         let kind = entry.map(|entry| entry_kind(entry.kind));
         let active_ids: HashSet<_> = effective_ids.into_iter().collect();
         let taboo_total = self.taboo.len();
-        let taboo_entries: Vec<TabooStatus<'_>> = self
-            .taboo_order
-            .iter()
-            .rev()
-            .filter_map(|key| {
-                let record = self.taboo.get(key)?;
-                let playlist = self.config.playlist(&key.playlist_id)?;
-                let entry = playlist
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == key.entry_id)?;
-                Some(TabooStatus {
-                    playlist_id: &playlist.id,
-                    playlist: &playlist.name,
-                    entry_id: &entry.id,
-                    kind: entry_kind(entry.kind),
-                    scene_id: entry.scene_id.as_deref(),
-                    reason: &record.reason,
-                    source: record.source.as_str(),
-                    durable: record.durable,
-                    observed_config_epoch: record.observed_config_epoch,
-                })
-            })
-            .take(shape.taboo.min(MAX_TABOO_STATUS_ENTRIES))
-            .collect();
+        let taboo_entries = self.taboo_rows(shape.taboo);
         let playlists = self
             .config
             .playlists
@@ -6520,31 +6575,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             .iter()
             .any(|target| self.is_taboo(&target.playlist_id, &target.entry.id));
         let taboo_total = self.taboo.len();
-        let taboo_entries: Vec<TabooStatus<'_>> = self
-            .taboo_order
-            .iter()
-            .rev()
-            .filter_map(|key| {
-                let record = self.taboo.get(key)?;
-                let playlist = self.config.playlist(&key.playlist_id)?;
-                let entry = playlist
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == key.entry_id)?;
-                Some(TabooStatus {
-                    playlist_id: &playlist.id,
-                    playlist: &playlist.name,
-                    entry_id: &entry.id,
-                    kind: entry_kind(entry.kind),
-                    scene_id: entry.scene_id.as_deref(),
-                    reason: &record.reason,
-                    source: record.source.as_str(),
-                    durable: record.durable,
-                    observed_config_epoch: record.observed_config_epoch,
-                })
-            })
-            .take(shape.taboo.min(MAX_TABOO_STATUS_ENTRIES))
-            .collect();
+        let taboo_entries = self.taboo_rows(shape.taboo);
         let taboo_entries_omitted = taboo_total.saturating_sub(taboo_entries.len());
         let playlists = self
             .config
@@ -7097,7 +7128,7 @@ fn _is_absolute(path: &Path) -> bool {
 mod tests {
     use super::{
         DisplayTiming, EntryKey, MAX_TABOO_STATUS_ENTRIES, PLAYBACK_HISTORY_LIMIT, cycle_remaining,
-        promote_taboo_status_key, push_bounded, wall_clock_after, whole_seconds_up,
+        decimal_digits, promote_taboo_status_key, push_bounded, wall_clock_after, whole_seconds_up,
     };
     use crate::schedule::Change;
     use crate::schedule::test_zones::{Apia2011, Chicago2026, LordHowe2026};
@@ -7289,5 +7320,21 @@ mod tests {
         assert_eq!(total_records - order.len(), 1);
         assert_eq!(order.first().unwrap().entry_id, "entry-2");
         assert_eq!(order.last().unwrap().entry_id, "entry-0");
+    }
+
+    #[test]
+    fn a_count_is_as_many_characters_as_it_has_digits() {
+        for (count, digits) in [
+            (0, 1),
+            (9, 1),
+            (10, 2),
+            (64, 2),
+            (99, 2),
+            (100, 3),
+            (usize::MAX, 20),
+        ] {
+            assert_eq!(decimal_digits(count), digits, "{count}");
+            assert_eq!(decimal_digits(count), count.to_string().len(), "{count}");
+        }
     }
 }

@@ -98,7 +98,7 @@ fn read_request_budgeted(
 /// The bytes `s` takes as a JSON string's contents, escaped as serde_json
 /// escapes it: `"` and `\` take two, the control characters with a short
 /// escape two and the others six (`\u00XX`); everything else is itself.
-fn escaped_len(s: &str) -> usize {
+pub fn escaped_len(s: &str) -> usize {
     s.bytes()
         .map(|byte| match byte {
             b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
@@ -111,9 +111,15 @@ fn escaped_len(s: &str) -> usize {
 /// Whether `Response::success(message)` fits `MAX_RESPONSE_BYTES` on the
 /// wire, measured without encoding it.
 pub fn success_fits(message: &str) -> bool {
+    success_room(message).is_some()
+}
+
+/// How many bytes `Response::success(message)` leaves of `MAX_RESPONSE_BYTES`
+/// on the wire, or None when it doesn't fit.
+pub fn success_room(message: &str) -> Option<usize> {
     // `{"ok":true,"message":""}` and the newline.
     const ENVELOPE: usize = 25;
-    ENVELOPE.saturating_add(escaped_len(message)) <= MAX_RESPONSE_BYTES
+    MAX_RESPONSE_BYTES.checked_sub(ENVELOPE.saturating_add(escaped_len(message)))
 }
 
 fn encode_response(response: &Response) -> Result<Vec<u8>, String> {
@@ -319,6 +325,9 @@ mod tests {
         assert!(success_fits(&"x".repeat(limit)));
         assert!(!success_fits(&"x".repeat(limit + 1)));
         assert!(!success_fits(&"\"".repeat(limit / 2 + 1)));
+        assert_eq!(success_room(&"x".repeat(limit)), Some(0));
+        assert_eq!(success_room(&"\"".repeat(10)), Some(limit - 20));
+        assert_eq!(success_room(&"x".repeat(limit + 1)), None);
     }
 
     #[test]

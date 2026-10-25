@@ -203,7 +203,8 @@ def test_gui_reload_refused(profiles: Any, monkeypatch: pytest.MonkeyPatch) -> N
     assert _acted(sent)[-1] == "reload" and _plays_nothing()
     problem = profile.application.publication_problem
     assert problem.startswith("Runtime rejected the new configuration: refused")
-    assert "still plays Electric Eye" in problem
+    # The held document carries the key, so what it plays is hedged as the allow is (r13k S-N12).
+    assert "still may play Electric Eye" in problem
     assert "nothing to play: web wallpapers are off" in problem
 
 

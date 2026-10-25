@@ -16699,10 +16699,10 @@ fn control_without_the_pause_failure_the_rules_end_skips_and_marks_nothing() {
     assert_eq!(route(&snapshot, "DP-1")["entry_id"], "mixed-2");
 }
 
-/// Independent DP-1 and HDMI-A-1, DP-1 assigned to all-media: all-media-1 is the scene
-/// 3000000031 and pages-1 the scene `pages_1`; eve names `rule`.
-fn independent_shared_item_document(rule: &str, pages_1: &str) -> String {
-    default_rule_document(rule)
+/// Independent DP-1 and HDMI-A-1, DP-1 assigned to all-media: all-media-1 and pages-1 are the
+/// scene 3000000031; eve names pages.
+fn independent_shared_item_document() -> String {
+    default_rule_document("pages")
         .replace(
             "display_mode = \"mirrored\"",
             "display_mode = \"independent\"",
@@ -16718,7 +16718,7 @@ fn independent_shared_item_document(rule: &str, pages_1: &str) -> String {
         )
         .replace(
             "id = \"pages-1\"\nkind = \"still\"\n",
-            &format!("id = \"pages-1\"\nkind = \"scene\"\nscene_id = \"{pages_1}\"\n"),
+            "id = \"pages-1\"\nkind = \"scene\"\nscene_id = \"3000000031\"\n",
         )
         .replace(
             "connector = \"DP-1\"\nplaylist = \"mixed\"",
@@ -16734,7 +16734,7 @@ fn independent_shared_item_document(rule: &str, pages_1: &str) -> String {
 fn paused_at_an_independent_boundary_after_a_skip(
     fail_pause: bool,
 ) -> (Vec<String>, serde_json::Value, Vec<String>) {
-    let document = independent_shared_item_document("pages", "3000000031").replace(
+    let document = independent_shared_item_document().replace(
         "id = \"all-media-2\"\nkind = \"still\"\n",
         "id = \"all-media-2\"\nkind = \"scene\"\nscene_id = \"3000000032\"\n",
     );

@@ -537,6 +537,14 @@ def test_a_quit_or_close_during_the_settle_is_harmless(
 
 
 # -- r13d N11: web wallpapers turned off while the shutdown settles ----------------------------
+#
+# Ordered by events, not by time: under one slow core the lane's compile alone can outlast any
+# settle bound worth waiting for. The settle is ended as a second Ctrl-C ends it (`_settle_cut`,
+# which PyGObject's handler is wrapped to set), once what the test needs has happened; its bound
+# is only a fallback. The lane is held inside the number's reload until the shutdown has begun.
+
+#: How long anything here waits before it gives up: past it the test fails, it doesn't hang.
+GIVE_UP: float = 60.0
 
 
 def _identity() -> tuple[int, int] | None:
@@ -546,6 +554,16 @@ def _identity() -> tuple[int, int] | None:
     except FileNotFoundError:
         return None
     return found.st_ino, found.st_mtime_ns
+
+
+def _until(condition: Callable[[], bool], failures: list[str], what: str) -> None:
+    """Off GTK: wait for ``condition`` (set by GTK's thread), or say that it never came."""
+    deadline = time.monotonic() + GIVE_UP
+    while not condition():
+        if time.monotonic() > deadline:
+            failures.append(f"gave up waiting for {what}")
+            return
+        time.sleep(0.01)
 
 
 @pytest.mark.parametrize(
@@ -562,14 +580,15 @@ def _identity() -> tuple[int, int] | None:
 def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, variant: str
 ) -> None:
-    """Ctrl-C with a number waiting; its publication's reload hangs past the settle's bound.
-    While it hangs, inside the settle, the person turns web wallpapers off in the window: that
-    save lands, and its publication waits on the lane behind the hung reload until the shutdown
-    cuts it, before it installs anything. Before: ``[*-turned-off-during-the-settle]`` left the
-    number's document, which allows web wallpapers, on disk for the service's poll, while
-    settings.toml said they are off. What replaces it is compiled for web wallpapers off, so the
-    library still plays; when that compile fails at the end, it is the document that plays
-    nothing. The controls change nothing during the settle, and nothing more is written."""
+    """Ctrl-C with a number waiting; its publication installs, and its reload hangs. While it
+    hangs, inside the settle, the person turns web wallpapers off in the window: that save lands
+    and is adopted, and its publication waits on the lane behind the hung reload. Then a second
+    Ctrl-C ends the settle, and the shutdown cuts that publication before it installs anything.
+    Before: ``[*-turned-off-*]`` left the number's document, which allows web wallpapers, on disk
+    for the service's poll, while settings.toml said they are off. What replaces it is compiled
+    for web wallpapers off, so the library still plays; when that compile fails at the end, it is
+    the document that plays nothing. The controls change nothing during the settle, and nothing
+    more is written."""
     service = mode == "service"
     turning_off = variant.startswith("turned-off")
     application, clip, slow, spans = _setup(
@@ -577,12 +596,12 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
         tmp_path,
         ui="classic",
         service=service,
-        settle_seconds=2.0,
-        reload_seconds=4.0,
+        settle_seconds=GIVE_UP / 2,  # a fallback: the settle is cut below
         allow_web=variant != "control-off-throughout",
     )
     installed: list[tuple[int, int] | None] = []
     turned: list[bool] = []
+    failures: list[str] = []
     if variant == "turned-off-and-no-compile-at-the-end":
         compile_ = runtime_config._compile
 
@@ -593,15 +612,33 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
 
         monkeypatch.setattr(runtime_config, "_compile", no_compile_once_shut_down)
 
+    def cut() -> bool:
+        application._settle_cut = True  # what a second Ctrl-C sets
+        return GLib.SOURCE_REMOVE
+
+    def saved(settings: config.Settings) -> None:
+        # On GTK, once the save is adopted: its publication is now waiting on the lane.
+        turned.append(settings.allow_web_wallpapers is False)
+        cut()
+
+    def refused(message: str) -> None:
+        failures.append(f"the toggle wasn't saved: {message}")
+        cut()
+
     def turn_off() -> bool:
-        turned.append(application.update_settings_async(allow_web_wallpapers=False))
+        accepted = application.update_settings_async(
+            allow_web_wallpapers=False, on_success=saved, on_error=refused
+        )
+        if not accepted:
+            refused("not accepted")
         return GLib.SOURCE_REMOVE
 
     def hung() -> None:
-        # On the lane, the number's document already installed, before the reload hangs.
+        # On the lane, inside the number's reload: its document is installed by now.
         installed.append(_identity())
-        if turning_off:
-            GLib.idle_add(turn_off)  # the window's gesture, run by the settle's loop
+        GLib.idle_add(turn_off if turning_off else cut)  # run by the settle's loop
+        # Held until the shutdown has begun, so that nothing more is compiled on this lane.
+        _until(lambda: application._runtime_shutdown, failures, "the shutdown to begin")
 
     def scenario() -> Iterator[Step]:
         yield "the first scan", _scanned(application, clip)
@@ -612,6 +649,7 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
         application.quit()  # what SIGINT's fallback calls
 
     _run(application, scenario(), service=service)
+    assert not failures, failures
     own = _own(clip, Kind.VIDEO)
     assert own.dial("video", "speed") == 1.5, own
     assert spans, "no settle ran"
@@ -641,22 +679,30 @@ def test_web_turned_off_as_the_loop_ends_leaves_no_file_that_allows_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``--service``, Ctrl-C just after the toggle, no number waiting, so no settle: the save is
-    still being written when the loop ends, and gets no publication at all. Before: the file on
+    still being written when the loop ends, and gets no publication at all. It lands only once
+    the shutdown has dropped its runtime lane, just before its last step. Before: the file on
     disk still allowed web wallpapers once it had landed. Now the end of the shutdown waits for
     that save, briefly, and then replaces the file."""
     application, clip, _slow, spans = _setup(
         monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
     )
     update = config.update
+    failures: list[str] = []
 
-    def slow_save(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+    def late_save(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
         if "allow_web_wallpapers" in changes and (
             threading.current_thread() is not threading.main_thread()
         ):
-            time.sleep(0.5)  # still being written when the loop ends
+            # Still being written when the loop ends: it lands once the shutdown has begun
+            # and dropped the runtime lane, which it does just before its last step.
+            _until(
+                lambda: application._runtime_shutdown and application._runtime_jobs is None,
+                failures,
+                "the shutdown to drop its runtime lane",
+            )
         return update(changes, *arguments, **keywords)
 
-    monkeypatch.setattr(config, "update", slow_save)
+    monkeypatch.setattr(config, "update", late_save)
     published: list[bool] = []
 
     def scenario() -> Iterator[Step]:
@@ -666,6 +712,7 @@ def test_web_turned_off_as_the_loop_ends_leaves_no_file_that_allows_them(
         application.quit()  # what SIGINT's fallback calls
 
     _run(application, scenario(), service=True)
+    assert not failures, failures
     assert published == [True], "the first publication didn't allow web wallpapers"
     assert not spans, "a settle ran, with no number waiting"
     assert config.load_strict().allow_web_wallpapers is False

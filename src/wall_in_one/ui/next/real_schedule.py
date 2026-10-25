@@ -460,6 +460,7 @@ class RealScheduling:
                     rule_id=_rule_in_force(truth, display),
                     until="" if display.route_source == "manual" else display.until or "",
                     quick=display.pick_stood_in or _is_quick_choice(display.asked_playlist_id),
+                    pick_stood_in=display.pick_stood_in,
                     stand_in_for=display.stand_in_for
                     or (_PICK_STOOD_IN if display.pick_stood_in else ""),
                     stand_in_for_name=display.stand_in_for_name,
@@ -484,6 +485,7 @@ class RealScheduling:
                 playlist=truth.playlist,
                 rule_id=truth.schedule_rule_id,
                 quick=truth.pick_stood_in or _is_quick_choice(truth.asked_playlist_id),
+                pick_stood_in=truth.pick_stood_in,
                 stand_in_for=truth.stand_in_for or (_PICK_STOOD_IN if truth.pick_stood_in else ""),
                 stand_in_for_name=truth.stand_in_for_name,
                 nothing_to_play=truth.nothing_to_play,
@@ -534,6 +536,9 @@ class RealScheduling:
 
     def runtime_blocked(self) -> str:
         return self._runtime_off()
+
+    def manual_pick(self) -> str | None:
+        return self._session.manual_playlist
 
     def playlist_label(self, pid: str) -> str | None:
         """Any authored playlist's name; the hidden "Your pick" ones as the window says it."""

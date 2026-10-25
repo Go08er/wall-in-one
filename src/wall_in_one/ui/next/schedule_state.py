@@ -95,6 +95,9 @@ class RouteView:
     until: str = ""
     #: A pick of one wallpaper ("Your pick"), not of a playlist.
     quick: bool = False
+    #: The pick is stood in for but no field names it (`stand_in_for` is then a
+    #: placeholder): selectors stay on the app's own record of the pick.
+    pick_stood_in: bool = False
     #: The playlist asked for (its id and name), when ``playlist_id`` stands
     #: in for it: the wallpaper service refused every entry of it. Else empty.
     stand_in_for: str = ""
@@ -242,6 +245,11 @@ class Scheduling(Protocol):
 
     def runtime_blocked(self) -> str:
         """Why runtime commands (rotation, play now) are off now, or empty."""
+        ...
+
+    def manual_pick(self) -> str | None:
+        """The playlist id of the pick the app itself made, or None. It can lead or lag
+        the service, so it only places a selector, never decides what is true."""
         ...
 
     def playlist_label(self, pid: str) -> str | None:

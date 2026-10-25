@@ -200,7 +200,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         try:
             row.set_sensitive(True)
             row.set_subtitle(self._playback_description(session, truth))
-            row.set_selected(self._playback_selected(session, self._playback_choices, truth))
+            selected = self._playback_selected(session, self._playback_choices, truth)
+            if selected is not None:
+                row.set_selected(selected)
         finally:
             self._loading = False
 
@@ -242,7 +244,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             subtitle=self._playback_description(session, truth),
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
         )
-        row.set_selected(self._playback_selected(session, choices, truth))
+        selected = self._playback_selected(session, choices, truth)
+        row.set_selected(Gtk.INVALID_LIST_POSITION if selected is None else selected)
         self._playback_row = row
         self._playback_choices = choices
         row.connect("notify::selected", self._make_playback_changed(choices))
@@ -517,8 +520,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
             return 0
         # The person's pick, also while a stand-in plays for it.
         for index, playlist in enumerate(choices, start=1):
-            # A pick the reply can't name is shown as what plays in its place.
-            if playlist.id == (display.asked_playlist_id or display.playlist_id):
+            if playlist.id == display.asked_playlist_id:
                 return index
         return 0
 
@@ -684,10 +686,21 @@ class SchedulesPage(Gtk.ScrolledWindow):
         session: Session,
         choices: tuple[Any, ...],
         truth: runtime_truth.RuntimeTruth | None,
-    ) -> int:
+    ) -> int | None:
+        """The selected row, or None to leave the selector where it is.
+
+        A pick the reply can't name (``pick_stood_in``) is placed by the app's own
+        record of it, which can lead or lag the service; with no match the selector
+        stays, and is never put on the stand-in or on "Follow schedule".
+        """
+        if truth is not None and truth.pick_stood_in:
+            for index, playlist in enumerate(choices, start=1):
+                if playlist.id == session.manual_playlist:
+                    return index
+            return None
         manual_id = (
             # The person's pick, also while a stand-in plays for it.
-            (truth.asked_playlist_id or truth.playlist_id)
+            truth.asked_playlist_id
             if truth is not None and truth.is_manual
             else session.manual_playlist
             if truth is None
@@ -1124,7 +1137,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 self._loading = True
                 try:
                     truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
-                    row.set_selected(self._playback_selected(self._app.session, choices, truth))
+                    selected = self._playback_selected(self._app.session, choices, truth)
+                    if selected is not None:
+                        row.set_selected(selected)
                 finally:
                     self._loading = False
             # The next accepted status reconciles this row.  Do not invalidate

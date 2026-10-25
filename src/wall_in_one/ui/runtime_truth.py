@@ -518,6 +518,9 @@ def _inferred_stand_ins(
             found.append(display)
             continue
         if display.route_source == "manual":
+            # Certain without asking the app's own record of the pick (which can lead
+            # or lag the service): mirrored rows share one decision, and the flag says
+            # a row of it had a stand-in.
             found.append(
                 replace(display, route_unsure=True)
                 if independent

@@ -740,14 +740,57 @@ def test_n3_the_classic_pages_say_it_plainly(monkeypatch: pytest.MonkeyPatch) ->
     assert button == "Plays in place of your pick", button
 
 
-def test_n3_the_classic_combos_still_show_a_pick_not_follow_schedule() -> None:
+def _classic_selected(status: dict[str, Any], recorded: str | None) -> tuple[Any, Any]:
     from wall_in_one.ui.schedules_page import SchedulesPage
 
-    truth = _truth(_mirrored_pick_stood_in())
+    truth = _truth(status)
     choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
-    assert SchedulesPage._display_playback_selected(truth.displays[0], choices) == 2
-    session = SimpleNamespace(manual_playlist=None)
-    assert SchedulesPage._playback_selected(session, choices, truth) == 2  # type: ignore[arg-type]
+    session = SimpleNamespace(manual_playlist=recorded)
+    return (
+        SchedulesPage._playback_selected(session, choices, truth),  # type: ignore[arg-type]
+        SchedulesPage._display_playback_selected(truth.displays[0], choices),
+    )
+
+
+def test_n3_the_classic_combo_follows_the_apps_record_of_the_pick() -> None:
+    # "scenes" plays in place of the pick, and the app's record says the pick is "pages".
+    overall, _display = _classic_selected(_mirrored_pick_stood_in(), "pages")
+    assert overall == 1, overall
+
+
+def test_n3_the_classic_combo_stays_when_the_record_doesnt_match() -> None:
+    for recorded in (None, "gone"):
+        overall, _display = _classic_selected(_mirrored_pick_stood_in(), recorded)
+        # Neither "Follow schedule" (0) nor the stand-in "scenes" (2).
+        assert overall is None, (recorded, overall)
+
+
+def test_control_n3_the_classic_combo_below_the_ceiling_is_the_pick() -> None:
+    overall, _display = _classic_selected(_status("pick-refused"), None)
+    assert overall == 1, overall  # the service names the pick "pages"
+
+
+def _next_selected(status: dict[str, Any], recorded: str | None) -> int | None:
+    from wall_in_one.ui.next.displays import DisplaysPage
+    from wall_in_one.ui.next.real_schedule import RealScheduling
+
+    truth = _truth(status)
+    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    fake = SimpleNamespace(scheduling=SimpleNamespace(manual_pick=lambda: recorded))
+    return DisplaysPage._play_selected(fake, route, ["", "pages", "scenes"])  # type: ignore[arg-type]
+
+
+def test_n3_the_next_combo_follows_the_apps_record_of_the_pick() -> None:
+    assert _next_selected(_mirrored_pick_stood_in(), "pages") == 1
+
+
+def test_n3_the_next_combo_stays_when_the_record_doesnt_match() -> None:
+    for recorded in (None, "gone"):
+        assert _next_selected(_mirrored_pick_stood_in(), recorded) is None, recorded
+
+
+def test_control_n3_the_next_combo_below_the_ceiling_is_the_pick() -> None:
+    assert _next_selected(_status("pick-refused"), None) == 1
 
 
 def test_control_n3_an_independent_pick_at_the_ceiling_is_still_hedged() -> None:

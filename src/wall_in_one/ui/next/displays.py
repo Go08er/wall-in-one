@@ -484,11 +484,19 @@ class DisplaysPage(Page):
             self._loading = False
 
     def _play_selected(self, route: RouteView | None, play_ids: list[str]) -> int | None:
-        """Which "Playing now" row to select: the pick, also while a stand-in plays for it."""
+        """Which "Playing now" row to select, or None to leave the selector where it is.
+
+        The person's pick, also while a stand-in plays for it. A pick no field names
+        (`pick_stood_in`) is placed by the app's own record of it, which can lead or lag
+        the service; with no match the selector stays, and is never put on the stand-in
+        or on "Follow the schedule".
+        """
         if route is None or route.route != "pick":
             return 0
-        # A pick the reply can't name has no id of its own: show what plays.
-        picked = route.stand_in_for if route.stand_in_for in play_ids else route.playlist_id
+        if route.pick_stood_in:
+            recorded = self.scheduling.manual_pick()
+            return play_ids.index(recorded) if recorded in play_ids else None
+        picked = route.stand_in_for or route.playlist_id
         return play_ids.index(picked) if picked in play_ids else 0
 
     def _refresh_details(self, display: DisplayInfo, mirrored: bool) -> None:

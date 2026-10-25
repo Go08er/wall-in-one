@@ -6632,7 +6632,9 @@ fn output_hotplug_reconciles_targets_without_a_second_probe() {
     {
         let recorded = state.lock().unwrap();
         assert_eq!(recorded.output_probes, 2, "one probe per apply batch");
-        assert_eq!(recorded.applied_outputs, vec!["DP-2", "DP-3"]);
+        // DP-2 stays, on the same entry, and keeps its renderer, as an independent display
+        // does; only DP-3 starts (review r13f N13). At f127a31 DP-2 was started again.
+        assert_eq!(recorded.applied_outputs, vec!["DP-3"]);
         assert!(recorded.applies.iter().all(|apply| apply.0 == "still-one"));
         assert_eq!(
             recorded.retained_outputs.last(),
@@ -15741,6 +15743,51 @@ fn a_mirrored_rotation_restarts_only_the_displays_whose_entry_moves() {
     let screen = screen_of(&state);
     assert_eq!(screen.get("DP-1").map(String::as_str), Some("mixed-2"));
     assert_eq!(screen.get("HDMI-A-1").map(String::as_str), Some("pages-1"));
+}
+
+#[test]
+fn a_mirrored_display_plugged_in_or_out_restarts_no_other() {
+    // A hotplug applies the new set of displays: the one plugged in starts (DP-2, unassigned,
+    // on the default), the one unplugged stops; the others keep their renderers. At a5b370d
+    // DP-1 and HDMI-A-1 were applied again each time.
+    let (mut runtime, state) =
+        default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(12, 0));
+    let mut clock = Instant::now();
+    for (label, outputs, started) in [
+        (
+            "plugged in",
+            &["DP-1", "DP-2", "HDMI-A-1"][..],
+            &["DP-2"][..],
+        ),
+        ("unplugged", &["DP-1", "HDMI-A-1"][..], &[][..]),
+    ] {
+        let before = applies_so_far(&state);
+        state.lock().unwrap().connected_outputs =
+            Some(outputs.iter().map(|output| output.to_string()).collect());
+        clock += Duration::from_secs(6);
+        runtime.tick(on_the_third(12, 1), clock);
+        assert_eq!(applied_since(&state, before), started, "{label}");
+        assert_eq!(
+            state.lock().unwrap().retained_outputs.last().unwrap(),
+            outputs,
+            "{label}"
+        );
+        let snapshot = status(&mut runtime, on_the_third(12, 1));
+        let connected: Vec<&str> = snapshot["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["connected"] == true)
+            .map(|row| row["connector"].as_str().unwrap())
+            .collect();
+        assert_eq!(connected, outputs, "{label}");
+    }
+    let problems = rows_off_screen("12:01", &mut runtime, &state, on_the_third(12, 1));
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(
+        screen_of(&state).get("DP-2").map(String::as_str),
+        Some("all-media-1")
+    );
 }
 
 #[test]

@@ -1836,8 +1836,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                 Ok(outputs) if self.live_outputs.as_ref() != Some(&outputs) => {
                     // The discovery call populated the driver's batch snapshot;
                     // reuse it for this hand-over instead of asking the
-                    // compositor twice.
-                    let _ = self.apply_current_in_batch(Ok(outputs), &[]);
+                    // compositor twice. A display that stays keeps its
+                    // renderer: only one plugged in starts.
+                    let resident = self.resident_targets();
+                    let _ = self.apply_current_in_batch(Ok(outputs), &resident);
                 }
                 Ok(outputs) => {
                     self.live_outputs = Some(outputs);

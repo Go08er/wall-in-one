@@ -95,9 +95,9 @@ def _assignment_index(choices: tuple[Any, ...], playlist_id: str) -> int:
 
 
 def _pick_label(truth: runtime_truth.RuntimeTruth | None) -> str:
-    """ "Your pick" for no reply or a reply that names the pick, else the not-named item."""
+    """ "Your pick" for no usable reply or a reply that names the pick, else the not-named item."""
     if truth is None:
-        return unnamed_pick.NAMED_PICK  # no reply to be "not named by": the app's record
+        return unnamed_pick.NAMED_PICK  # no usable reply to be "not named by": the app's record
     named = truth.is_manual and not truth.route_unsure and not truth.pick_stood_in
     return unnamed_pick.NAMED_PICK if named else unnamed_pick.UNNAMED_PICK
 

@@ -483,6 +483,14 @@ class DisplaysPage(Page):
         finally:
             self._loading = False
 
+    def _play_selected(self, route: RouteView | None, play_ids: list[str]) -> int | None:
+        """Which "Playing now" row to select: the pick, also while a stand-in plays for it."""
+        if route is None or route.route != "pick":
+            return 0
+        # A pick the reply can't name has no id of its own: show what plays.
+        picked = route.stand_in_for if route.stand_in_for in play_ids else route.playlist_id
+        return play_ids.index(picked) if picked in play_ids else 0
+
     def _refresh_details(self, display: DisplayInfo, mirrored: bool) -> None:
         scheduling = self.scheduling
         connector = display.connector
@@ -517,13 +525,9 @@ class DisplaysPage(Page):
                 Gtk.StringList.new(["Follow the schedule", *(p.name for p in mine)])
             )
         # The person's pick, also while a stand-in plays for it.
-        picked = (
-            # A pick the reply can't name has no id of its own: show what plays.
-            (route.stand_in_for if route.stand_in_for in play_ids else route.playlist_id)
-            if route is not None and route.route == "pick"
-            else ""
-        )
-        self.play_row.set_selected(play_ids.index(picked) if picked in play_ids else 0)
+        selected = self._play_selected(route, play_ids)
+        if selected is not None:
+            self.play_row.set_selected(selected)
         self.play_row.set_sensitive(not runtime_off)
         self.play_row.set_subtitle(
             runtime_off

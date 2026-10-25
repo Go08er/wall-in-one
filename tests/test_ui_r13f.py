@@ -871,7 +871,7 @@ def test_control_n5_classic_count_of_marked_items_alone() -> None:
 def test_n5_both_uis_say_the_unlisted_rows_the_same_way() -> None:
     from tests.test_ui_next_r13e import _count_line, _scene
 
-    said = " \u00b7 and 3 more refused"
+    said = " \u00b7 1 can\u2019t play here \u00b7 and 3 more refused"
     assert _classic_count((_scene("2910000004"),), omitted=3).endswith(said)
     assert _count_line(3, marked=True).endswith(said)
 

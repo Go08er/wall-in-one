@@ -879,3 +879,26 @@ def test_n8_the_log_still_says_a_new_error_after_a_reply_that_left_them_out() ->
     other["last_error"] = "linux-wallpaperengine exited with status 2"
     said = _log([first, _mirrored_renderer_stopped(left_out=True), other])
     assert len([line for line in said if line.startswith("renderer:")]) == 2, said
+
+
+# ------------------------------------------------------------------ N9 ---------
+
+
+def test_n9_both_uis_say_the_marked_count_before_the_more() -> None:
+    from tests.test_ui_next_r13e import _count_line
+
+    line = _count_line(5, marked=True)
+    assert line.endswith(f" · 1 {CANT} · and 5 more refused"), line
+    assert line == f"3 wallpapers · 1 {CANT} · and 5 more refused"
+
+
+def test_n9_both_uis_say_a_marked_count_with_nothing_more() -> None:
+    from tests.test_ui_next_r13e import _count_line
+
+    assert _count_line(0, marked=True).endswith(f" · 1 {CANT}")
+
+
+def test_control_n9_with_none_marked_both_say_the_same() -> None:
+    from tests.test_ui_next_r13e import _count_line
+
+    assert _count_line(5, marked=False).endswith(f" · 5 {CANT}")

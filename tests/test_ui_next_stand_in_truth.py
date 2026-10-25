@@ -400,8 +400,9 @@ def test_n7_the_library_says_how_many_more_were_refused() -> None:
     assert "and 5 more refused" in _count_text(5)
 
 
-def test_n7_control_no_omitted_says_nothing() -> None:
-    assert _count_text(0) == "3 wallpapers"
+def test_n7_control_no_omitted_says_only_the_marked_count() -> None:
+    # The classic summary says the same (r13f N9): the marked items, no "more".
+    assert _count_text(0) == "3 wallpapers \u00b7 1 can\u2019t play here"
 
 
 def test_n7_the_state_keeps_the_omitted_count_and_tolerates_its_absence() -> None:

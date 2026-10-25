@@ -641,14 +641,16 @@ class LibraryPage(Page):
             # Left out by the scan's limits, or unreadable: said, never dropped quietly.
             text += f" · {len(skipped)} skipped"
         omitted = self.state.library_refused_omitted
-        if omitted:
-            # The service names 16 refused items at most; the cards past them
-            # carry no mark. With none named (a reply held to its size), none
-            # is marked, and "more" would have nothing to follow.
-            if any(w.refused_here for w in self.state.wallpapers):
+        # The same words as the classic window's summary (`window.py`): the items with a
+        # mark, then the service's rows past the 16 it names, which carry none. With
+        # none marked (a reply held to its size), "more" would have nothing to follow.
+        marked = sum(1 for w in self.state.wallpapers if w.refused_here)
+        if marked:
+            text += f" · {marked} can\u2019t play here"
+            if omitted:
                 text += f" · and {omitted} more refused"
-            else:
-                text += f" · {omitted} can\u2019t play here"
+        elif omitted:
+            text += f" · {omitted} can\u2019t play here"
         if self.state.library_scanning:
             text += " · scanning…"
         self._count.set_label(text)

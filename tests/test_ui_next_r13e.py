@@ -666,7 +666,9 @@ def test_n6_with_no_card_marked_the_count_isnt_more() -> None:
 
 
 def test_control_n6_with_cards_marked_the_rest_are_more() -> None:
-    assert _count_line(5, marked=True) == "3 wallpapers \u00b7 and 5 more refused"
+    assert _count_line(5, marked=True) == (
+        "3 wallpapers \u00b7 1 can\u2019t play here \u00b7 and 5 more refused"
+    )
 
 
 def test_n6_the_inspector_doesnt_say_the_mark_waits_for_the_refusal_to_end() -> None:

@@ -550,12 +550,23 @@ class SchedulesPage(Gtk.ScrolledWindow):
             )
         if taboo:
             detail = SchedulesPage._bounded_diagnostic(
-                display.last_error or "this wallpaper is marked as a known renderer crasher"
+                display.last_error
+                or (
+                    runtime_truth.DIAGNOSTICS_LEFT_OUT
+                    if truth.diagnostics_omitted
+                    else "this wallpaper is marked as a known renderer crasher"
+                )
             )
             return f"Playback unavailable; paired still retained · {display.playlist} · {detail}"
         if display.renderer_failed:
             detail = SchedulesPage._bounded_diagnostic(
-                display.last_error or "the motion renderer exited"
+                display.last_error
+                or (
+                    # An empty error is the reply's size, not "no error" or a cause.
+                    runtime_truth.DIAGNOSTICS_LEFT_OUT
+                    if truth.diagnostics_omitted
+                    else "the motion renderer exited"
+                )
             )
             return f"Renderer stopped · Retry available · {display.playlist} · {detail}"
         if display.route_source == "manual":

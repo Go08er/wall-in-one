@@ -578,3 +578,82 @@ def test_n7_both_status_lines_hedge_an_unsure_pick() -> None:
     model = RuntimeStatusModel()
     model.adopt(_independent_pick_at_the_ceiling())
     assert runtime_truth.PICK_OR_STAND_IN in status_line.describe(model.view)
+
+
+# ------------------------------------------------------------------ N8 ---------
+
+
+def _independent_renderer_stopped(*, left_out: bool) -> dict[str, Any]:
+    """Independent row with a stopped renderer; at the ceiling its error was emptied
+    (step 6, per row) and flagged."""
+    from tests.test_ui_next_r13e import _independent
+
+    status = _independent("default", asked="scenes", plays="scenes")
+    error = "linux-wallpaperengine is not installed: the paired still is shown"
+    for record in (status, status["displays"][0]):
+        record["renderer_failed"] = True
+        record["last_error"] = "" if left_out else error
+    if left_out:
+        status["diagnostics_omitted"] = True
+        status = _lean(status)
+    return status
+
+
+def _classic_row_text(status: dict[str, Any]) -> str:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = _truth(status)
+    text = SchedulesPage._display_playback_description(truth.displays[0], truth, taboo=False)
+    print(f"classic row: {text!r}")
+    return text
+
+
+def test_n8_classic_row_doesnt_invent_the_error_the_reply_left_out() -> None:
+    text = _classic_row_text(_independent_renderer_stopped(left_out=True))
+    assert "the motion renderer exited" not in text, (
+        f"the reply emptied the error (diagnostics_omitted); the row says {text!r}"
+    )
+
+
+def test_control_n8_classic_row_says_the_error_it_has() -> None:
+    assert "not installed" in _classic_row_text(_independent_renderer_stopped(left_out=False))
+
+
+def _mirrored_renderer_stopped(*, left_out: bool) -> dict[str, Any]:
+    status = copy.deepcopy(_status("pick-plays"))
+    error = "linux-wallpaperengine exited with status 1"
+    status["renderer_failed"] = True
+    status["last_error"] = "" if left_out else error
+    for row in status["displays"]:
+        row["renderer_failed"] = True
+        row["last_error"] = "" if left_out else error
+    if left_out:
+        status["diagnostics_omitted"] = True
+        status = _lean(status)
+    return status
+
+
+def test_n8_the_log_doesnt_say_an_error_again_after_a_reply_left_it_out() -> None:
+    error = _mirrored_renderer_stopped(left_out=False)
+    said = _log([error, _mirrored_renderer_stopped(left_out=True), error])
+    renderer = [line for line in said if line.startswith("renderer:")]
+    assert len(renderer) == 1, renderer
+
+
+def test_control_n8_the_log_says_the_same_error_once() -> None:
+    error = _mirrored_renderer_stopped(left_out=False)
+    said = _log([error, error])
+    assert len([line for line in said if line.startswith("renderer:")]) == 1
+
+
+def test_n8_the_classic_row_says_the_error_was_left_out_not_a_cause() -> None:
+    text = _classic_row_text(_independent_renderer_stopped(left_out=True))
+    assert runtime_truth.DIAGNOSTICS_LEFT_OUT in text, text
+
+
+def test_n8_the_log_still_says_a_new_error_after_a_reply_that_left_them_out() -> None:
+    first = _mirrored_renderer_stopped(left_out=False)
+    other = copy.deepcopy(first)
+    other["last_error"] = "linux-wallpaperengine exited with status 2"
+    said = _log([first, _mirrored_renderer_stopped(left_out=True), other])
+    assert len([line for line in said if line.startswith("renderer:")]) == 2, said

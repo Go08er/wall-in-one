@@ -357,16 +357,19 @@ class ActivityLog:
                     else f"Playing {playlist} ({source})",
                 )
             self._playing = playing
-        last_error = status.get("last_error")
-        last_error = last_error if isinstance(last_error, str) else ""
-        if last_error and last_error != self._renderer:
-            self.record("renderer", last_error, "error")
-        self._renderer = last_error
-        discovery = status.get("output_discovery_error")
-        discovery = discovery if isinstance(discovery, str) else ""
-        if discovery and discovery != self._displays:
-            self.record("displays", f"Display discovery is degraded: {discovery}", "warning")
-        self._displays = discovery
+        if not runtime_truth.diagnostics_left_out(status):
+            last_error = status.get("last_error")
+            last_error = last_error if isinstance(last_error, str) else ""
+            if last_error and last_error != self._renderer:
+                self.record("renderer", last_error, "error")
+            self._renderer = last_error
+            discovery = status.get("output_discovery_error")
+            discovery = discovery if isinstance(discovery, str) else ""
+            if discovery and discovery != self._displays:
+                self.record("displays", f"Display discovery is degraded: {discovery}", "warning")
+            self._displays = discovery
+        # Else the reply's size emptied both: that is not "no error", so what was said
+        # stays the baseline and the same error back is not said again.
         power = view.power
         message = power.message if power is not None else ""
         if message != self._power:

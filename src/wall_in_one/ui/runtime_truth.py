@@ -264,6 +264,9 @@ class RuntimeTruth:
     route_unsure: bool = False
     #: The same, when every connected display's pick is certainly stood in for.
     pick_stood_in: bool = False
+    #: The reply's size emptied ``last_error`` and ``output_discovery_error`` (also the
+    #: rows'): an empty one is then not "no error".
+    diagnostics_omitted: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
@@ -488,6 +491,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         nothing_to_play=nothing_to_play if isinstance(nothing_to_play, str) else "",
         route_unsure=route_unsure,
         pick_stood_in=pick_stood_in,
+        diagnostics_omitted=diagnostics_left_out(status),
     )
 
 

@@ -635,3 +635,40 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
     assert config.load_strict().allow_web_wallpapers is (variant == "control-left-on")
     assert on_disk is (variant == "control-left-on")
     assert _identity() == installed[0], "something was written after the publication"
+
+
+def test_web_turned_off_as_the_loop_ends_leaves_no_file_that_allows_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--service``, Ctrl-C just after the toggle, no number waiting, so no settle: the save is
+    still being written when the loop ends, and gets no publication at all. Before: the file on
+    disk still allowed web wallpapers once it had landed. Now the end of the shutdown waits for
+    that save, briefly, and then replaces the file."""
+    application, clip, _slow, spans = _setup(
+        monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
+    )
+    update = config.update
+
+    def slow_save(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+        if "allow_web_wallpapers" in changes and (
+            threading.current_thread() is not threading.main_thread()
+        ):
+            time.sleep(0.5)  # still being written when the loop ends
+        return update(changes, *arguments, **keywords)
+
+    monkeypatch.setattr(config, "update", slow_save)
+    published: list[bool] = []
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        published.append(runtime_config.allows_web_wallpapers(paths.runtime_config_path()))
+        assert application.update_settings_async(allow_web_wallpapers=False)
+        application.quit()  # what SIGINT's fallback calls
+
+    _run(application, scenario(), service=True)
+    assert published == [True], "the first publication didn't allow web wallpapers"
+    assert not spans, "a settle ran, with no number waiting"
+    assert config.load_strict().allow_web_wallpapers is False
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+        "settings.toml says web wallpapers are off, and the file on disk still allows them"
+    )

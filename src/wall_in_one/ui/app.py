@@ -735,8 +735,8 @@ class Application(Adw.Application):
         #: until it completes (`_numbers_unsettled`).
         self._authoring_current: _AuthoringTask | None = None
         #: The worker's run of the latest task started, which the last step of
-        #: a shutdown waits for, briefly: a settings save may still be being
-        #: written (`_web_off_on_disk_at_exit`).
+        #: a shutdown waits for, briefly, when it is a settings save
+        #: (`_web_off_on_disk_at_exit`).
         self._authoring_future: Future[Any] | None = None
         #: A renderer number's write asked for the publication now held
         #: (`_runtime_publication_held`): the shutdown settle waits for it too.
@@ -2237,7 +2237,12 @@ class Application(Adw.Application):
 
     def _replace_web_off_on_disk(self, deadline: float) -> None:
         """`_web_off_on_disk_at_exit`'s work, every wait ending by ``deadline``."""
-        saving = self._authoring_future
+        # Only a settings save at the head of the authoring lane, unsettled: the
+        # worker's run is then that save's. A number's write, say, isn't waited
+        # for, so a second Ctrl-C still ends the shutdown at once (r13c, N-2).
+        with self._settings_authoring_lock:
+            saving_settings = self._settings_batch_generation is not None
+        saving = self._authoring_future if saving_settings else None
         if saving is not None:
             with contextlib.suppress(Exception):  # landed, failed or still running: read below
                 saving.result(timeout=max(0.0, deadline - time.monotonic()))

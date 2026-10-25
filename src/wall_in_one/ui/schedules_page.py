@@ -94,6 +94,13 @@ def _assignment_index(choices: tuple[Any, ...], playlist_id: str) -> int:
     )
 
 
+def _pick_label(truth: runtime_truth.RuntimeTruth | None) -> str:
+    """ "Your pick" where the reply names the pick, else the not-named item."""
+    named = truth is not None and truth.is_manual and not truth.route_unsure
+    named = named and not truth.pick_stood_in  # type: ignore[union-attr]
+    return unnamed_pick.NAMED_PICK if named else unnamed_pick.UNNAMED_PICK
+
+
 class SchedulesPage(Gtk.ScrolledWindow):
     """Choose the default, per-screen playlists, and timed overrides."""
 
@@ -201,7 +208,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
             row.set_sensitive(True)
             row.set_subtitle(self._playback_description(session, truth))
             self._place_playback(
-                row, self._playback_selected(session, self._playback_choices, truth)
+                row,
+                self._playback_selected(session, self._playback_choices, truth),
+                _pick_label(truth),
             )
         finally:
             self._loading = False
@@ -246,7 +255,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
         )
         selected = self._playback_selected(session, choices, truth)
         if selected is None:
-            unnamed_pick.show(row)
+            unnamed_pick.show(row, _pick_label(truth))
         else:
             row.set_selected(selected)
         self._playback_row = row
@@ -733,6 +742,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             for index, playlist in enumerate(choices, start=1):
                 if playlist.id == manual_id:
                     return index
+            # Named, but this page lists no row for it (All media): not "Follow schedule".
+            return None
         return 0
 
     def _build_defaults(self, session: Session) -> Gtk.Widget:
@@ -1141,7 +1152,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         return f"{hour.get_selected():02d}:{minute.get_selected():02d}"
 
     @staticmethod
-    def _place_playback(row: Adw.ComboRow, selected: int | None) -> None:
+    def _place_playback(
+        row: Adw.ComboRow, selected: int | None, label: str = unnamed_pick.UNNAMED_PICK
+    ) -> None:
         """Put the overall selector on ``selected``; None is a pick no field names.
 
         The row then stays where it is, except on "Follow schedule", which would say no
@@ -1150,8 +1163,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         if selected is not None:
             unnamed_pick.drop(row)
             row.set_selected(selected)
-        elif row.get_selected() == 0:
-            unnamed_pick.show(row)
+        elif label == unnamed_pick.NAMED_PICK or row.get_selected() == 0:
+            # A named pick this page has no row for is shown wherever the row was.
+            unnamed_pick.show(row, label)
 
     def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
@@ -1180,7 +1194,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
                     # the one the service just refused: the unnamed-pick item, never
                     # the click.
                     if selected is None:
-                        unnamed_pick.show(row)
+                        unnamed_pick.show(row, _pick_label(truth))
                     else:
                         unnamed_pick.drop(row)
                         row.set_selected(selected)

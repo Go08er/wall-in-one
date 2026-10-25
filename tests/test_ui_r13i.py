@@ -685,6 +685,45 @@ def test_u_l_b_pick_holders_a_service_that_says_no_pick_beats_the_record() -> No
         assert _holders(status, "p", "p") == (False, ())
 
 
+# ===================================================== the classic twins of U-L-a, U-N6 =====
+
+
+def _all_media_rows_pick() -> dict[str, Any]:
+    return _renamed(_mirrored_pick_rows(), {"pages": "all-media", "all-media": "gone"})
+
+
+def test_classic_overall_combo_an_all_media_pick_isnt_follow_schedule() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = runtime_truth.from_status(_all_media_rows_pick())
+    choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
+    session = SimpleNamespace(manual_playlist=None)
+    assert truth is not None and truth.is_manual and truth.asked_playlist_id == "all-media"
+    assert SchedulesPage._playback_selected(session, choices, truth) is None  # type: ignore[arg-type]
+
+
+def test_control_classic_overall_combo_a_listed_pick_is_its_row() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = runtime_truth.from_status(_mirrored_pick_rows())
+    choices = (SimpleNamespace(id="scenes"), SimpleNamespace(id="pages"))
+    session = SimpleNamespace(manual_playlist=None)
+    assert SchedulesPage._playback_selected(session, choices, truth) == 2  # type: ignore[arg-type]
+
+
+def test_classic_overall_combo_a_named_unlisted_pick_is_your_pick_after_a_click() -> None:
+    from tests.test_ui_r13g import _classic_changed
+
+    shown = _classic_changed(_all_media_rows_pick(), 1)
+    assert shown == "Your pick", f"the reply names the pick; the row says {shown!r}"
+
+
+def test_control_classic_overall_combo_an_unnamed_pick_keeps_the_not_named_item() -> None:
+    from tests.test_ui_r13g import _classic_changed
+
+    assert _classic_changed(_at_the_ceiling(_mirrored_pick_rows()), 0) == PLACEHOLDER
+
+
 # ============================================================ pick_holders (U-N5) =====
 
 

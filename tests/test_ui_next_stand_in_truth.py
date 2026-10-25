@@ -2,7 +2,7 @@
 
 UI-A: the Playlists detail of the playlist standing in for a refused pick isn't
 presented as the person's pick. UI-B: a refused default isn't "In use now". N-1: the
-classic " · N can't play here" counts the tiles marked. N-6: the inspector doesn't
+classic " · N can't play here" counts the library's marked items. N-6: the inspector doesn't
 promise a recheck. N-7: the new Library says how many refused items it has no card
 marked for (``refused_omitted``). Every status may lack ``stand_in_for``, ``refused``
 and ``refused_omitted`` (a reply held to its budget).
@@ -81,9 +81,13 @@ def test_a_a_summary_only_stand_in_is_said_the_same() -> None:
 
 
 def test_a_a_status_without_stand_in_for_is_read_as_before() -> None:
-    # The reply held to its budget leaves ``stand_in_for`` out: no claim either way.
+    # A service that sends no ``refused`` at all (older): no claim either way, so
+    # the pick is read as the pick. The reply ceiling is a different shape
+    # (``refused == []`` with ``refused_omitted > 0``), tested in
+    # test_ui_next_r13e.py.
     status = _status("pick-refused")
-    status.pop("stand_in_for", None)
+    for key in ("stand_in_for", "refused", "refused_omitted"):
+        status.pop(key, None)
     for row in status["displays"]:
         row.pop("stand_in_for", None)
     assert _on_screen(status, "scenes") == ("On screen now \u00b7 your pick", True)
@@ -369,11 +373,13 @@ def test_n6_the_inspector_doesnt_promise_a_recheck() -> None:
 # ---------------------------------------------------------------- N-7 ----------
 
 
-def _count_text(omitted: int) -> str:
+def _count_text(omitted: int, *, marked: bool = True) -> str:
     from wall_in_one.ui.next.library import LibraryPage
 
     state = SimpleNamespace(
-        wallpapers=(1, 2, 3),
+        wallpapers=tuple(
+            SimpleNamespace(refused_here="not found" if marked and n == 0 else "") for n in range(3)
+        ),
         library_skipped=(),
         library_scanning=False,
         library_refused_omitted=omitted,
@@ -398,7 +404,7 @@ def test_n7_control_no_omitted_says_nothing() -> None:
 def test_n7_the_state_keeps_the_omitted_count_and_tolerates_its_absence() -> None:
     from wall_in_one.ui.next.real_state import RealAppState
 
-    def adopt(status: dict[str, Any], before: int = 0) -> tuple[bool, int]:
+    def adopt(status: dict[str, Any], before: int = 0) -> tuple[str, int]:
         truth = runtime_truth.from_status(status)
         assert truth is not None
         fake = SimpleNamespace(
@@ -416,9 +422,9 @@ def test_n7_the_state_keeps_the_omitted_count_and_tolerates_its_absence() -> Non
     base.pop("refused_omitted", None)
     assert adopt({**base, "refused": [NOT_FOUND], "refused_omitted": 4})[1] == 4
     assert adopt({**base, "refused": [NOT_FOUND]})[1] == 0
-    assert adopt(base) == (False, 0)
-    # Only the count moved: the Library must hear of it.
-    assert adopt({**base, "refused": [], "refused_omitted": 2})[0] is True
+    assert adopt(base) == ("", 0)
+    # Only the count moved: the Library hears of the count, not of every card.
+    assert adopt({**base, "refused": [], "refused_omitted": 2})[0] == "library-count"
 
 
 # ---------------------------------------------- Displays: pick and rule stand-ins ---

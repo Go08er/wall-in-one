@@ -503,6 +503,13 @@
               ''
                 cd ${./.}
                 mypy --strict --no-incremental --cache-dir=/dev/null src tests
+                # The prototype's demo implements the app's Protocols (r13f N11): a
+                # member added to a Protocol and missing from the demo fails here, as
+                # tools/typecheck.sh does by hand. Only protocol_check.py is judged; the
+                # prototype's own modules are followed silently.
+                MYPYPATH="$PWD/src:$PWD/prototypes/ui-redesign" \
+                  mypy --strict --follow-imports=silent --no-incremental --cache-dir=/dev/null \
+                  prototypes/ui-redesign/tools/protocol_check.py
                 touch $out
               '';
 

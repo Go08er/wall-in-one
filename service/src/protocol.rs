@@ -308,15 +308,55 @@ mod tests {
         );
     }
 
+    /// `client`'s socket closed for good: shut down, then dropped. Dropping alone closes only
+    /// this process's descriptor, and another test thread's spawn can hold a copy of it from
+    /// its fork to its exec, the peer then still open to a send (review r13g: beside a thread
+    /// spawning `/bin/true`, 483 of 20,000 such sends succeeded). A shutdown closes the socket
+    /// itself, whoever holds a descriptor of it. The service's own peer is another process.
+    fn closed_for_good(client: UnixStream) {
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(client);
+    }
+
     #[test]
     fn a_closed_peer_fails_at_once() {
         let (server, client) = UnixStream::pair().unwrap();
-        drop(client);
+        closed_for_good(client);
         let started = Instant::now();
         let deadline = started + Duration::from_secs(5);
         let error = write_response_until(&server, &Response::success("w"), deadline).unwrap_err();
         assert!(error.contains("cannot write response"), "{error}");
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_closed_peer_fails_at_once_beside_spawns() {
+        // The case above, many times, beside a thread that keeps spawning processes, as the
+        // renderer tests in this binary do: every send fails, at once.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let spawner = {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("/bin/true").status();
+                }
+            })
+        };
+        let sent: usize = (0..5_000)
+            .map(|_| {
+                let (server, client) = UnixStream::pair().unwrap();
+                closed_for_good(client);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                usize::from(
+                    write_response_until(&server, &Response::success("w"), deadline).is_ok(),
+                )
+            })
+            .sum();
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(sent, 0, "sends to a closed peer that succeeded");
     }
 
     #[test]

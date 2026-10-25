@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ from tests.test_ui_codex030_round1b import profiles  # noqa: E402, F401
 from tests.test_ui_web_off_failed_publish import DOCUMENT, _steam_with_web  # noqa: E402
 from tests.test_web_off_nothing_to_play import _library  # noqa: E402
 from tests.test_web_off_nothing_to_play import _service as _units  # noqa: E402
-from wall_in_one import config, paths  # noqa: E402
+from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.session import Session  # noqa: E402
@@ -710,3 +711,63 @@ def test_with_no_service_running_a_toml_1_1_document_that_allows_web_is_replaced
         return
     assert _plays_nothing(), paths.runtime_config_path().read_text(encoding="utf-8")
     assert "allows web wallpapers. The service isn\u2019t running" in said, said
+
+
+# -- review r13f, N3's class: the setting is read again under the lock -------------------------
+
+
+@pytest.mark.parametrize("variant", ["turned-on-meanwhile", "control-left-off"])
+def test_what_another_writer_installs_while_the_guard_waits_for_the_lock_is_judged_as_it_is(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+) -> None:
+    """The guard reads the setting, off, then waits for the compiler lock, which another writer
+    holds. That writer sees web wallpapers turned on again: it saves that, and installs a
+    document compiled for them on, before it lets go. Before: the setting read before the wait
+    stood, and the service was stopped and given nothing to play while web wallpapers were on.
+    Now it is read again under the lock, and nothing is done. The control: the writer leaves them
+    off, and the document it installs, which allows them, is ended."""
+    application = profiles().application
+    _scene_installed()
+    _held(application, QUIET)
+    allowing = _named(SCENE, allowing=True)
+    sent = _service(monkeypatch, schemas=READS_EIGHT)
+    holding = threading.Event()
+    waiting = threading.Event()
+    failures: list[str] = []
+    lock = runtime_config.compiler_lock
+
+    def watched(*arguments: Any, **keywords: Any) -> Any:
+        if threading.current_thread() is threading.main_thread():
+            waiting.set()
+        return lock(*arguments, **keywords)
+
+    def writer() -> None:
+        with lock():
+            holding.set()
+            if not waiting.wait(60.0):
+                failures.append("the guard never waited for the compiler lock")
+                return
+            if variant == "turned-on-meanwhile":
+                config.update({"allow_web_wallpapers": True})
+            paths.runtime_config_path().write_text(allowing, encoding="utf-8")
+
+    monkeypatch.setattr(runtime_config, "compiler_lock", watched)
+    thread = threading.Thread(target=writer, name="test-writer")
+    thread.start()
+    try:
+        assert holding.wait(60.0), "the writer never took the compiler lock"
+        said = application._web_off_guard()
+    finally:
+        waiting.set()
+        thread.join(60.0)
+    assert not failures, failures
+    if variant == "turned-on-meanwhile":
+        assert config.load_strict().allow_web_wallpapers is True
+        assert _acted(sent) == [], said
+        assert said == ""
+        assert paths.runtime_config_path().read_text(encoding="utf-8") == allowing
+        return
+    assert _acted(sent) == ["stop", "reload"], said
+    assert _plays_nothing()

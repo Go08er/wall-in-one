@@ -5125,6 +5125,11 @@ class Application(Adw.Application):
         above, under the lock (`_web_off_not_running`), so that a start
         already past its own check, or one that doesn't run it, can't load
         it (review r13c, D2).
+
+        The setting is read again once the lock is had (review r13f, N3's
+        class): a writer that held it meanwhile may have seen web wallpapers
+        turned on again and installed a document for them on, which is then
+        what the setting allows, not a page to end.
         """
         try:
             settings = config.load_strict()
@@ -5141,6 +5146,12 @@ class Application(Adw.Application):
                 # Another writer holds it past its timeout: judge what is there,
                 # stop, and write nothing; that writer's own publication follows.
                 locked = False
+            try:
+                settings = config.load_strict()
+            except config.ConfigError:
+                return ""
+            if settings.allow_web_wallpapers:
+                return ""  # turned on again while this waited for the lock
             try:
                 on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
             except OSError, UnicodeDecodeError:

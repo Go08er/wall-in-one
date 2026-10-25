@@ -1102,7 +1102,10 @@ class PlaylistsPage(Gtk.Box):
             if truth is not None
             else playlist.id == session.active_playlist()
         )
-        if active:
+        nothing = truth.nothing_to_play_for(playlist.id) if truth is not None else ""
+        if active and nothing:
+            playing = f" · {runtime_truth.nothing_to_play_sentence(nothing)}"
+        elif active:
             playing = (
                 " · playing manually"
                 if truth is not None and truth.is_manual
@@ -1374,6 +1377,7 @@ class PlaylistsPage(Gtk.Box):
             truth is not None and playlist.id == truth.asked_playlist_id and truth.follows_schedule
         )
         stood_in = truth is not None and truth.stand_in_for == playlist.id
+        nothing = truth.nothing_to_play_for(playlist.id) if truth is not None else ""
         usable, unavailable = _playlist_availability(session, playlist)
         if not usable:
             self._play_button.set_label(
@@ -1387,7 +1391,9 @@ class PlaylistsPage(Gtk.Box):
             self._play_button.set_sensitive(False)
             return
         self._play_button.set_label(
-            "Picked · can\u2019t play here"
+            "Picked · nothing to play"
+            if manual and nothing
+            else "Picked · can\u2019t play here"
             if manual and stood_in
             else "Playing now · pick or stand-in"
             if manual and truth is not None and truth.route_unsure
@@ -1400,7 +1406,9 @@ class PlaylistsPage(Gtk.Box):
         entries = "entry is" if unavailable == 1 else "entries are"
         skipped = f"{unavailable} unavailable {entries} skipped"
         self._play_button.set_tooltip_text(
-            runtime_truth.stand_in_sentence(playlist.name, truth.playlist)
+            runtime_truth.nothing_to_play_sentence(nothing)
+            if manual and nothing
+            else runtime_truth.stand_in_sentence(playlist.name, truth.playlist)
             if stood_in and truth is not None
             else skipped
             if unavailable

@@ -28,6 +28,7 @@ from wall_in_one.ui import runtime_truth  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusModel  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "service/tests/fixtures/stand-in"
+WEB_OFF_FIXTURES = Path(__file__).resolve().parents[1] / "service/tests/fixtures/web-off"
 CANT = "can\u2019t play here"
 WEB_OFF = (
     "this configuration doesn't allow web wallpapers: Workshop item 2777242023 is a web "
@@ -453,6 +454,161 @@ def test_q2_independent_names_no_rule_either() -> None:
     status["display_mode"] = "independent"
     rule_id, _said = _winner_reason(status)
     assert rule_id is None, rule_id
+
+
+# ------------------------------------------------------------------ Q3 ---------
+
+
+def _mirrored_pick_plays_nothing(*, nothing: bool) -> dict[str, Any]:
+    """Mirrored ALL row: the pick ``pages`` (a refused web page) with nothing that can
+    stand in (runtime.rs:6206-6278: row pushed with ``nothing_to_play``, no entry,
+    ``playlist_id`` the pick; top-level ``nothing_to_play``)."""
+    status = copy.deepcopy(_status("pick-refused"))
+    status.pop("stand_in_for", None)
+    [row] = status["displays"]
+    row.pop("stand_in_for", None)
+    status.update(playlist_id="pages", playlist="pages")
+    _playlists(status, {"pages"})
+    row.update(playlist="pages", playlist_id="pages")
+    if nothing:
+        reason = WEB_OFF
+        status.update(nothing_to_play=reason, entry_id=None, kind=None, still=None)
+        status["motion_active"] = False
+        row.update(
+            nothing_to_play=reason,
+            entry_name=f"Nothing to play: {reason}",
+            entry_id="",
+            kind="",
+            still="",
+            motion_active=False,
+        )
+    else:
+        status["refused"] = []
+        row["entry_id"] = status["entry_id"] = "pages-1"
+    return status
+
+
+def test_q3_classic_display_row_of_a_display_that_plays_nothing() -> None:
+    text = _classic_row(_mirrored_pick_plays_nothing(nothing=True), "ALL")
+    assert "Playing" not in text, f"nothing plays, and the classic row says {text!r}"
+
+
+def test_control_q3_classic_display_row_that_plays() -> None:
+    text = _classic_row(_mirrored_pick_plays_nothing(nothing=False), "ALL")
+    assert "Playing" in text, text
+
+
+def _classic_summary(status: dict[str, Any]) -> str:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    text = SchedulesPage._playback_description(None, _truth(status))  # type: ignore[arg-type]
+    print(f"classic schedule summary: {text!r}")
+    return text
+
+
+def test_q3_classic_schedule_summary_of_a_pick_that_plays_nothing() -> None:
+    text = _classic_summary(_mirrored_pick_plays_nothing(nothing=True))
+    assert "is playing" not in text, text
+
+
+def test_control_q3_classic_schedule_summary_of_a_pick_that_plays() -> None:
+    text = _classic_summary(_mirrored_pick_plays_nothing(nothing=False))
+    assert text == "Manual override · pages is playing.", text
+
+
+def _classic_playlists(status: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    import wall_in_one.ui.playlists_page as page
+    from wall_in_one.ui.playlists_page import PlaylistsPage
+
+    monkeypatch.setattr(page, "_playlist_availability", lambda _s, _p: (1, 0))
+    monkeypatch.setattr(page, "_is_default", lambda _s, _p: False)
+    labels: list[str] = []
+    fake = SimpleNamespace(
+        _app=SimpleNamespace(runtime_status=status),
+        _play_button=SimpleNamespace(
+            set_label=labels.append, set_tooltip_text=lambda _t: None, set_sensitive=lambda _s: None
+        ),
+    )
+
+    class P(list[int]):  # len() and .entries
+        id = "pages"
+        name = "pages"
+        entries = (1,)
+
+    one = P([1])
+    detail = PlaylistsPage._playlist_detail(fake, SimpleNamespace(), one)  # type: ignore[arg-type]
+    PlaylistsPage._sync_play_button(fake, SimpleNamespace(manual_playlist=None), one)  # type: ignore[arg-type]
+    print(f"classic detail={detail!r} button={labels!r}")
+    return detail, labels[0]
+
+
+def test_q3_classic_playlists_detail_of_a_pick_that_plays_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail, _button = _classic_playlists(_mirrored_pick_plays_nothing(nothing=True), monkeypatch)
+    assert "playing" not in detail, detail
+
+
+def test_q3_classic_play_button_of_a_pick_that_plays_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _detail, button = _classic_playlists(_mirrored_pick_plays_nothing(nothing=True), monkeypatch)
+    assert not button.startswith("Playing now"), button
+
+
+def test_control_q3_classic_playlists_of_a_pick_that_plays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail, button = _classic_playlists(_mirrored_pick_plays_nothing(nothing=False), monkeypatch)
+    assert "playing manually" in detail and button == "Playing now · manual override"
+
+
+def _classic_window(
+    statuses: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, str, list[str]]:
+    from tests.gtk_helpers import destroy_window
+    from tests.test_ui_missing_renderer_notice import _classic as classic_application
+    from wall_in_one.ui.window import MainWindow
+
+    application = classic_application(tmp_path, monkeypatch)
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type, attr-defined]
+    reports: list[str] = []
+    monkeypatch.setattr(window, "report", reports.append)
+    try:
+        for status in statuses:
+            window.show_runtime_status(status)
+        summary, control = window._runtime_summary, window._runtime_status_text
+        print(f"classic summary={summary!r} control={control!r} reports={reports!r}")
+        return summary, control, reports
+    finally:
+        destroy_window(window)
+        application.session.shutdown()  # type: ignore[attr-defined]
+
+
+def test_q3_classic_window_summary_of_a_pick_that_plays_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary, control, _reports = _classic_window(
+        [_mirrored_pick_plays_nothing(nothing=True)], tmp_path, monkeypatch
+    )
+    assert control.startswith("Nothing to play")  # precondition: the control line knows
+    assert "playing pages" not in summary, summary
+
+
+def test_control_q3_classic_window_summary_of_a_pick_that_plays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary, _control, _reports = _classic_window(
+        [_mirrored_pick_plays_nothing(nothing=False)], tmp_path, monkeypatch
+    )
+    assert summary.startswith("playing pages (manual)"), summary
+
+
+def test_q3_classic_default_row_of_the_captured_web_off_reply() -> None:
+    # The service's own reply for an All media library that web-off leaves empty.
+    status = json.loads((WEB_OFF_FIXTURES / "status-nothing-to-play.json").read_text("utf-8"))
+    text = _classic_row(status, "ALL")
+    assert text == "Default rotation · Nothing to play: web wallpapers are off", text
 
 
 def test_control_gate_version_1_with_the_flag_infers_nothing() -> None:

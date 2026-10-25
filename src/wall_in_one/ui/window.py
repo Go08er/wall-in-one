@@ -766,8 +766,13 @@ class MainWindow(Adw.ApplicationWindow):
         # out: not the service's rows (a preset and its base are one, a web page may
         # say web off), and not the tiles built (a search hides some).
         marked = self._grid.refused_marked_count() + refused_omitted
+        truth = runtime_truth.from_status(self._runtime_media_status)
+        if truth is not None and truth.nothing_to_play:
+            playing = f"nothing ({truth.nothing_to_play})"
+        else:
+            playing = f"playing {playing}"
         summary = (
-            f"{len(library)} media · playing {playing} "
+            f"{len(library)} media · {playing} "
             f"({len(library.videos)} video, {len(library.stills)} still)"
         )
         if library.skipped:
@@ -1038,6 +1043,12 @@ class MainWindow(Adw.ApplicationWindow):
             self._runtime_control_status.set_text(self._runtime_status_text)
         last_error = status.get("last_error")
         output_error = status.get("output_discovery_error")
+        # Every display plays nothing: the summary says so, not "playing <playlist>".
+        shown = (
+            f"nothing to play: {nothing}"
+            if isinstance(nothing, str) and nothing
+            else f"{state} {playlist}"
+        )
         if isinstance(last_error, str) and last_error:
             failure_state = (
                 "playback disabled; paired still retained"
@@ -1060,16 +1071,14 @@ class MainWindow(Adw.ApplicationWindow):
                 self._missing_said = missing
             self._runtime_error = last_error
         elif isinstance(output_error, str) and output_error:
-            self._runtime_summary = (
-                f"{state} {playlist} ({source}){stood_in} · display discovery degraded"
-            )
+            self._runtime_summary = f"{shown} ({source}){stood_in} · display discovery degraded"
             self._subtitle.set_tooltip_text(output_error)
             if output_error != self._runtime_error:
                 self.report(f"Display discovery is degraded: {output_error}")
             self._runtime_error = output_error
         else:
             self._runtime_error = ""
-            self._runtime_summary = f"{state} {playlist} ({source}){stood_in}"
+            self._runtime_summary = f"{shown} ({source}){stood_in}"
             if runtime_truth.diagnostics_left_out(status):
                 # An empty error here is the reply's size, not "no error".
                 self._runtime_summary += f" · {runtime_truth.DIAGNOSTICS_LEFT_OUT}"

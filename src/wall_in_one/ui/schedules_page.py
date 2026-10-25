@@ -565,6 +565,11 @@ class SchedulesPage(Gtk.ScrolledWindow):
             route = "Assigned baseline"
         else:
             route = "Default rotation"
+        if display.nothing_to_play:
+            # Nothing plays: not "Playing still".
+            return " · ".join(
+                (route, runtime_truth.nothing_to_play_sentence(display.nothing_to_play))
+            )
         playback = (
             "Playing motion"
             if display.playback_state == "playing" and display.motion_active
@@ -649,6 +654,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
             else ""
         )
         if truth.is_manual:
+            if truth.nothing_to_play:
+                nothing = runtime_truth.nothing_to_play_sentence(truth.nothing_to_play)
+                return f"Manual override · {nothing}."
             if stand_in:
                 return f"Manual override · {stand_in}."
             return f"Manual override · {truth.playlist} is playing."

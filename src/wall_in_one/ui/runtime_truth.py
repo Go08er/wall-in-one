@@ -282,6 +282,13 @@ class RuntimeTruth:
     def playlist_is_active(self, playlist_id: str) -> bool:
         return playlist_id in self.active_playlist_ids
 
+    def nothing_to_play_for(self, playlist_id: str) -> str:
+        """Why ``playlist_id`` plays nothing, when it does so on every display it is on."""
+        rows = [d for d in self.displays if d.connected and d.playlist_id == playlist_id]
+        if rows:
+            return rows[0].nothing_to_play if all(d.nothing_to_play for d in rows) else ""
+        return self.nothing_to_play if self.playlist_id == playlist_id else ""
+
     def display(self, connector: str) -> DisplayRuntimeTruth | None:
         return next((record for record in self.displays if record.connector == connector), None)
 

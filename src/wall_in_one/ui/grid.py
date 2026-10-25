@@ -551,8 +551,20 @@ class WallpaperGrid(Gtk.ScrolledWindow):
                 tile.set_refused(self._refused.get(path))
 
     def refused_marked_count(self) -> int:
-        """How many tiles show "Can't play here" now."""
-        return sum(tile.shows_refused for tile in self._tiles.values())
+        """How many library items a tile would mark "Can't play here".
+
+        Counted from the library, not from the tiles built (the first page of a
+        search's matches): the count is a fact about the library and doesn't
+        change with what is hidden. The tile's own rule: not beside "not played
+        here" (a web page while web is off) or a playback problem.
+        """
+        return sum(
+            1
+            for item in self._items
+            if item.path in self._refused
+            and item.path not in self._borked
+            and not workshop.why_not_played(item, self._allow_web)
+        )
 
     def set_apply_targeting(self, independent: bool) -> None:
         self._independent = independent

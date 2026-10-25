@@ -762,8 +762,9 @@ class MainWindow(Adw.ApplicationWindow):
         # `refused`): marked, never saved as a playback warning.
         refused, refused_omitted = runtime_truth.refused_from_status(self._runtime_media_status)
         self._grid.set_refused(runtime_truth.refused_paths(refused, library.items))
-        # The tiles that show the mark, and the rows the reply left out: not the
-        # service's rows (a preset and its base are one, a web page may say web off).
+        # The library's items that would show the mark, and the rows the reply left
+        # out: not the service's rows (a preset and its base are one, a web page may
+        # say web off), and not the tiles built (a search hides some).
         marked = self._grid.refused_marked_count() + refused_omitted
         summary = (
             f"{len(library)} media · playing {playing} "

@@ -1398,11 +1398,18 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.refresh_independent_last_error();
         }
         if !refused_outputs.is_empty() {
-            // The apply says what became of them, as any apply does.
+            // The apply says what became of them, as any apply does. A
+            // mirrored display whose motion just started keeps it, as an
+            // independent one does; each refused one is applied.
             let _ = if self.is_independent() {
                 self.apply_independent_selected(&refused_outputs)
             } else {
-                self.apply_current()
+                let resident: Vec<Target> = self
+                    .resident_targets()
+                    .into_iter()
+                    .filter(|target| !refused_outputs.contains(&target.output))
+                    .collect();
+                self.apply_current_keeping(&resident)
             };
         }
     }

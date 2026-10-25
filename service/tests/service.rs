@@ -15891,6 +15891,75 @@ fn a_mirrored_command_restarts_only_the_displays_it_changes() {
 }
 
 #[test]
+fn a_mirrored_display_refused_when_motion_resumes_moves_on_alone() {
+    // Back on AC after the battery stopped motion, each display's motion starts again; DP-1's
+    // entry is refused at its start this time (its item became a web page meanwhile), so DP-1
+    // moves on to its next entry. HDMI-A-1, whose motion just started, keeps it. At 5a9f887
+    // HDMI-A-1 was applied again for DP-1's refusal.
+    use wall_in_one_service::power::PowerSource::{Ac, Battery};
+    let document = default_rule_document("all-media")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"mixed-1\"\nkind = \"still\"\n",
+            "id = \"mixed-1\"\nkind = \"scene\"\nscene_id = \"3000000001\"\n",
+        )
+        .replace(
+            "kind = \"still\"\n",
+            "kind = \"video\"\nmotion = \"/motion.mp4\"\n",
+        );
+    let mut parsed = Config::from_bytes(document.into_bytes()).unwrap();
+    parsed.schema_version = 5;
+    parsed.settings.stop_animations_on_battery = true;
+    let at = on_the_third(12, 0);
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    runtime.observe_power(power_observation(Battery));
+    assert!(state.lock().unwrap().active_outputs.is_empty());
+    state
+        .lock()
+        .unwrap()
+        .refuse_entry_ids
+        .insert("mixed-1".into());
+    let before = applies_so_far(&state);
+    runtime.observe_power(power_observation(Ac));
+    let applied = applied_since(&state, before);
+    // Each display's motion started once (the driver logs that as an apply); then DP-1 again.
+    assert_eq!(
+        applied
+            .iter()
+            .filter(|output| *output == "HDMI-A-1")
+            .count(),
+        1,
+        "HDMI-A-1 started again: {applied:?}"
+    );
+    assert_eq!(
+        applied.last().map(String::as_str),
+        Some("DP-1"),
+        "{applied:?}"
+    );
+    assert_eq!(
+        state.lock().unwrap().active_outputs,
+        HashSet::from(["DP-1".into(), "HDMI-A-1".into()])
+    );
+    assert_eq!(
+        screen_of(&state).get("DP-1").map(String::as_str),
+        Some("mixed-2")
+    );
+    let problems = rows_off_screen("on AC", &mut runtime, &state, at);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
 fn control_a_mirrored_display_whose_renderer_failed_is_started_again_at_a_boundary() {
     // A renderer that exited since the last apply: what the runtime knows to be on screen no
     // longer is, so the hand-over applies every display, HDMI-A-1 too, as Play would.

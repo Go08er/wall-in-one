@@ -1817,7 +1817,9 @@ impl<D: WallpaperDriver> Runtime<D> {
                 if candidate_available {
                     let candidate = self.selection_state();
                     self.restore_selection(&baseline);
-                    self.start_automatic(baseline, candidate, "schedule", now);
+                    // A baseline on a refused entry isn't restored: a failure moves on as
+                    // hotplug and startup do (review r13l R-L-h).
+                    self.start_automatic(baseline, candidate, "schedule", !shown_refused, now);
                 } else {
                     self.restore_selection(&baseline);
                     self.last_error = format!(
@@ -1924,7 +1926,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         let candidate = self.selection_state();
         self.restore_selection(&baseline);
-        self.start_automatic(baseline, candidate, "cycle", now);
+        self.start_automatic(baseline, candidate, "cycle", true, now);
     }
 
     fn tick_independent(&mut self, at: NaiveDateTime, now: Instant) {
@@ -2040,11 +2042,14 @@ impl<D: WallpaperDriver> Runtime<D> {
                         continue;
                     }
                     self.routes.insert(connector.clone(), before.clone());
-                    self.start_route_automatic(
+                    // A baseline on a refused entry isn't restored: a failure moves on as
+                    // hotplug and startup do (review r13l R-L-h).
+                    self.start_route_automatic_with_policy(
                         connector.clone(),
                         before,
                         candidate,
                         "schedule",
+                        !shown_refused,
                         now,
                     );
                 }
@@ -2360,6 +2365,7 @@ impl<D: WallpaperDriver> Runtime<D> {
         baseline: SelectionState,
         candidate: SelectionState,
         reason: &'static str,
+        restore_baseline: bool,
         now: Instant,
     ) {
         self.attempt_automatic(
@@ -2369,7 +2375,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 attempts: 0,
                 next_attempt: now,
                 reason,
-                restore_baseline: true,
+                restore_baseline,
                 failures: Vec::new(),
             },
             now,

@@ -16773,3 +16773,221 @@ fn control_without_the_pause_failure_an_independent_boundary_skips_and_marks_not
         assert_eq!(route(&snapshot, connector)["entry_id"], "all-media-2");
     }
 }
+
+// -- review r13l R-L-h: a boundary off a refused entry doesn't restore it -------------------
+//
+// A boundary applied because the entry a display shows is refused started its move with that
+// entry as the baseline to restore. A failed attempt "restored" it by an apply that stepped over
+// the refused entry onto the failing one again: the row said the previous wallpaper was
+// restored, and after the third failure the display was left on the failing entry, taboo, with
+// the refused entry's still on screen and the entry after never tried. It now moves on as
+// hotplug and startup do. An ordinary boundary still restores its baseline.
+
+/// Independent DP-1 and HDMI-A-1 on the default all-media, with a third entry; eve names pages,
+/// whose pages-1 is all-media-1's item. With `refuse` it is refused when asked, and the boundary
+/// moves DP-1 off all-media-1 onto all-media-2; without, onto pages-1. That entry's still fails
+/// on DP-1 `failures` times. DP-1's row after the boundary's first attempt and its screen then,
+/// the status at +601 s, and where rows and screens disagree then.
+fn a_failing_independent_boundary(
+    refuse: bool,
+    failures: usize,
+) -> (
+    serde_json::Value,
+    Option<String>,
+    serde_json::Value,
+    Vec<String>,
+) {
+    let second = "[[playlists.entries]]\nid = \"all-media-2\"\nkind = \"still\"\n\
+                  still = \"/stills/all-media-2.png\"\npalette = { kind = \"keep\", mode = \"keep\" }\n";
+    let document = independent_shared_item_document().replace(
+        second,
+        &format!("{second}{}", second.replace("all-media-2", "all-media-3")),
+    );
+    assert!(
+        document.contains("all-media-3"),
+        "the premise: a third entry"
+    );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    assert!(state.lock().unwrap().active_outputs.contains("DP-1"));
+    {
+        let mut recorded = state.lock().unwrap();
+        if refuse {
+            recorded.refuse_when_asked.insert("pages-1".into());
+        }
+        let failing = if refuse { "all-media-2" } else { "pages-1" };
+        recorded.fail_stage_entry_id = Some(failing.into());
+        recorded.fail_stage_output = Some("DP-1".into());
+        recorded.fail_stage_attempts_remaining = failures;
+    }
+    let at = on_the_third(16, 0);
+    let start = Instant::now();
+    runtime.tick(at, start + Duration::from_secs(1));
+    let first = route(&status(&mut runtime, at), "DP-1");
+    let screen = screen_of(&state).get("DP-1").cloned();
+    for millis in [3_100, 5_200, 7_300, 9_400, 61_000, 301_000, 601_000] {
+        runtime.tick(at, start + Duration::from_millis(millis));
+    }
+    let problems = rows_off_screen("+601 s", &mut runtime, &state, at);
+    (first, screen, status(&mut runtime, at), problems)
+}
+
+#[test]
+fn an_independent_boundary_off_a_refused_entry_onto_one_that_keeps_failing_moves_on() {
+    let (_, _, snapshot, problems) = a_failing_independent_boundary(true, 100);
+    assert!(problems.is_empty(), "{problems:#?}");
+    let dp1 = route(&snapshot, "DP-1");
+    assert_eq!(
+        dp1["entry_id"], "all-media-3",
+        "all-media-3 never tried: {dp1}"
+    );
+    assert_eq!(dp1["renderer_failed"], false, "{dp1}");
+}
+
+#[test]
+fn an_independent_boundary_off_a_refused_entry_isnt_said_to_restore_it() {
+    let (first, _, snapshot, problems) = a_failing_independent_boundary(true, 1);
+    let error = first["last_error"].as_str().unwrap();
+    assert!(
+        error.starts_with("automatic schedule attempt 1/3 failed: "),
+        "the premise: the boundary's first attempt failed: {first}"
+    );
+    assert!(
+        !error.contains("previous wallpaper restored"),
+        "all-media-1, refused, said restored: {first}"
+    );
+    assert!(
+        error.ends_with("; paired still remains the fallback"),
+        "{first}"
+    );
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "all-media-2");
+}
+
+#[test]
+fn control_an_ordinary_independent_boundary_that_fails_restores_its_baseline() {
+    let (first, screen, snapshot, problems) = a_failing_independent_boundary(false, 1);
+    let error = first["last_error"].as_str().unwrap();
+    assert!(
+        error.starts_with("automatic schedule attempt 1/3 failed: ")
+            && error.ends_with("; previous wallpaper restored"),
+        "{first}"
+    );
+    assert_eq!(first["entry_id"], "all-media-1", "{first}");
+    assert_eq!(screen.as_deref(), Some("all-media-1"));
+    assert_eq!(first["renderer_failed"], false, "{first}");
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "pages-1");
+}
+
+/// The mirrored twin: both displays on the default all-media, whose all-media-1 is a scene,
+/// with a third entry. With `refuse`, eve names the default and all-media-1 is refused when
+/// asked, so the boundary moves the displays off it onto all-media-2; without, eve names pages,
+/// and the boundary moves them onto pages-1. That entry fails `failures` times. The status after
+/// the boundary's first attempt and DP-1's screen then, the status at +601 s, and where rows and
+/// screens disagree then.
+fn a_failing_mirrored_boundary(
+    refuse: bool,
+    failures: usize,
+) -> (
+    serde_json::Value,
+    Option<String>,
+    serde_json::Value,
+    Vec<String>,
+) {
+    let (rule, failing) = if refuse {
+        ("all-media", "all-media-2")
+    } else {
+        ("pages", "pages-1")
+    };
+    let second = "[[playlists.entries]]\nid = \"all-media-2\"\nkind = \"still\"\n\
+                  still = \"/stills/all-media-2.png\"\npalette = { kind = \"keep\", mode = \"keep\" }\n";
+    let document = default_rule_document(rule)
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"all-media-1\"\nkind = \"still\"\n",
+            "id = \"all-media-1\"\nkind = \"scene\"\nscene_id = \"3000000021\"\n",
+        )
+        .replace(
+            second,
+            &format!("{second}{}", second.replace("all-media-2", "all-media-3")),
+        )
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+        );
+    assert!(
+        document.contains("all-media-3"),
+        "the premise: a third entry"
+    );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    assert!(state.lock().unwrap().active_outputs.contains("DP-1"));
+    {
+        let mut recorded = state.lock().unwrap();
+        if refuse {
+            recorded.refuse_when_asked.insert("all-media-1".into());
+        }
+        // Mirrored applies don't stage per output: fail the entry itself.
+        recorded.fail_entry_id = Some(failing.into());
+        recorded.fail_entry_attempts_remaining = failures;
+    }
+    let at = on_the_third(16, 0);
+    let start = Instant::now();
+    runtime.tick(at, start + Duration::from_secs(1));
+    let first = status(&mut runtime, at);
+    let screen = screen_of(&state).get("DP-1").cloned();
+    for millis in [3_100, 5_200, 7_300, 9_400, 61_000, 301_000, 601_000] {
+        runtime.tick(at, start + Duration::from_millis(millis));
+    }
+    let problems = rows_off_screen("+601 s", &mut runtime, &state, at);
+    (first, screen, status(&mut runtime, at), problems)
+}
+
+#[test]
+fn a_mirrored_boundary_off_a_refused_entry_onto_one_that_keeps_failing_moves_on() {
+    let (_, _, snapshot, problems) = a_failing_mirrored_boundary(true, 100);
+    assert!(problems.is_empty(), "{problems:#?}");
+    for connector in ["DP-1", "HDMI-A-1"] {
+        let row = route(&snapshot, connector);
+        assert_eq!(
+            row["entry_id"], "all-media-3",
+            "all-media-3 never tried: {row}"
+        );
+    }
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}
+
+#[test]
+fn a_mirrored_boundary_off_a_refused_entry_isnt_said_to_restore_it() {
+    let (first, _, snapshot, problems) = a_failing_mirrored_boundary(true, 1);
+    let error = first["last_error"].as_str().unwrap();
+    assert!(
+        error.starts_with("automatic schedule attempt 1/3 failed: "),
+        "the premise: the boundary's first attempt failed: {error}"
+    );
+    assert!(
+        !error.contains("previous wallpaper restored"),
+        "all-media-1, refused, said restored: {error}"
+    );
+    assert!(
+        error.ends_with("; paired still remains the fallback"),
+        "{error}"
+    );
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "all-media-2");
+}
+
+#[test]
+fn control_an_ordinary_mirrored_boundary_that_fails_restores_its_baseline() {
+    let (first, screen, snapshot, problems) = a_failing_mirrored_boundary(false, 1);
+    let error = first["last_error"].as_str().unwrap();
+    assert!(
+        error.starts_with("automatic schedule attempt 1/3 failed: ")
+            && error.ends_with("; previous wallpaper restored"),
+        "{error}"
+    );
+    assert_eq!(route(&first, "DP-1")["entry_id"], "all-media-1", "{first}");
+    assert_eq!(screen.as_deref(), Some("all-media-1"));
+    assert_eq!(first["renderer_failed"], false, "{first}");
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "pages-1");
+}

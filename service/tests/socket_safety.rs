@@ -277,15 +277,28 @@ fn a_failing_assertion_never_leaves_the_service_running() {
         wait_for_socket(&socket);
         panic!("an assertion fails while the service runs");
     }));
-    assert!(outcome.is_err());
-    let process = process.expect("the service was started");
-    // The guard killed and reaped it. Whatever happened, end this one process: through its
-    // handle, never its pid, which once reaped may be another's (review r13c N-4).
+    // The closure's own panic, not one on the way to it (a spawn or a socket that never
+    // came), which would say nothing about the guard.
+    let payload = outcome.expect_err("the closure panics");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"an assertion fails while the service runs"),
+        "{:?}",
+        payload.downcast_ref::<String>()
+    );
+    let process = process
+        .expect("the service was started")
+        .unwrap_or_else(|error| panic!("pidfd_open: {error}"));
+    // The guard killed and reaped it. Whatever happened, end and collect this one process:
+    // through its handle, never its pid, which once reaped may be another's (review r13c N-4).
     let alive = process.is_running();
-    if alive {
-        process.kill();
-    }
     let reaped = process.is_reaped();
+    if !reaped {
+        if alive {
+            process.kill();
+        }
+        process.reap();
+    }
     fs::remove_dir_all(root).unwrap();
     assert!(!alive, "the service outlived the failed test");
     assert!(reaped, "the guard left the service unreaped");
@@ -296,21 +309,55 @@ fn a_failing_assertion_never_leaves_the_service_running() {
 struct ProcessHandle(OwnedFd);
 
 impl ProcessHandle {
-    fn of(child: &Child) -> Self {
+    fn of(child: &Child) -> std::io::Result<Self> {
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
-        Self(unsafe { OwnedFd::from_raw_fd(RawFd::try_from(fd).unwrap()) })
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(unsafe {
+            OwnedFd::from_raw_fd(RawFd::try_from(fd).unwrap())
+        }))
     }
 
-    /// Whether the process still runs: its pidfd turns readable once it has exited.
+    /// Whether the process still runs: its pidfd turns readable once it has exited. A poll
+    /// that fails says nothing either way, so it is never read as "not running".
     fn is_running(&self) -> bool {
-        let mut poll = libc::pollfd {
-            fd: self.0.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        unsafe { libc::poll(&mut poll, 1, 0) == 0 }
+        loop {
+            let mut poll = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            match unsafe { libc::poll(&mut poll, 1, 0) } {
+                0 => return true,
+                -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {
+                }
+                -1 => panic!("poll on a pidfd: {}", std::io::Error::last_os_error()),
+                _ => return false,
+            }
+        }
+    }
+
+    /// Wait for it to exit and collect it. Only for a child of ours not yet reaped.
+    fn reap(&self) {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        while unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                libc::id_t::try_from(self.0.as_raw_fd()).unwrap(),
+                &mut info,
+                libc::WEXITED,
+            )
+        } == -1
+        {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted,
+                "waitid: {error}"
+            );
+        }
     }
 
     /// Whether whoever started it has collected it: a pidfd of a process

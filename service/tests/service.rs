@@ -17371,3 +17371,17 @@ fn a_route_the_sweep_leaves_nothing_to_play_isnt_applied_again() {
     assert_eq!(driver_calls(&state), before, "the driver was called again");
     assert_eq!(route(&status(&mut runtime, at), "HDMI-A-1"), hdmi);
 }
+
+// -- review r13j R-N10: the sweep's moves are skips, not a schedule's ---------------------------
+
+#[test]
+fn a_pick_the_sweep_moves_isnt_said_to_be_a_schedule_attempt() {
+    let (_, snapshot) = a_moved_route_that_fails(false);
+    let hdmi = route(&snapshot, "HDMI-A-1");
+    assert_eq!(hdmi["route_source"], "manual", "the premise: a pick");
+    let error = hdmi["last_error"].as_str().unwrap();
+    assert!(
+        error.starts_with("automatic skip attempt 3/3 failed: "),
+        "{error}"
+    );
+}

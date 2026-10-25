@@ -2087,7 +2087,8 @@ impl<D: WallpaperDriver> Runtime<D> {
         // nothing applied shows: that one moves on too, with the retries of
         // any automatic move (reviews r13i R-L-a, r13j R-L-b to R-L-d, R-N9).
         // Here, outside any rollback, so none undoes the move on the row
-        // only. What the sweep learns itself is swept at the next tick.
+        // only. What the sweep learns itself is swept at the next tick. Its
+        // moves are skips, a pick's too, not a schedule's (r13j R-N10).
         if self.refused_scenes.len() > self.swept_refusals {
             self.swept_refusals = self.refused_scenes.len();
             let mut others: Vec<String> = self.routes_showing_refused().into_iter().collect();
@@ -2096,7 +2097,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                 if self.routes_showing_refused().contains(&connector)
                     && let Some(route) = self.routes.get(&connector).cloned()
                 {
-                    self.start_route_automatic(connector, route.clone(), route, "schedule", now);
+                    self.start_route_automatic(connector, route.clone(), route, "skip", now);
                 }
             }
         }

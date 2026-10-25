@@ -2004,6 +2004,13 @@ impl WallpaperDriver for RecordingDriver {
             .push((output.into(), entry.id.clone()));
         Ok(())
     }
+    fn apply_keeping_renderer(
+        &mut self,
+        _entry: &wall_in_one_service::config::Entry,
+        _output: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     fn set_paused(&mut self, _paused: bool) -> Result<(), String> {
         Ok(())
     }
@@ -2135,6 +2142,23 @@ impl WallpaperDriver for RuntimeDriver {
             state.active_outputs.remove(output);
         }
         Ok(())
+    }
+
+    fn apply_keeping_renderer(
+        &mut self,
+        entry: &wall_in_one_service::config::Entry,
+        output: &str,
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        state
+            .stage_events
+            .push(format!("keep {output} {}", entry.id));
+        if state.fail_palette_attempts_remaining > 0 {
+            state.fail_palette_attempts_remaining -= 1;
+            Err("palette application failed".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn stop_output_renderer(&mut self, output: &str) {
@@ -15818,8 +15842,8 @@ fn a_mirrored_rule_naming_the_default_restarts_only_the_display_it_moves() {
         );
         assert_eq!(
             state.lock().unwrap().stage_events,
-            ["palette all-media-1"],
-            "{label}: HDMI-A-1's palette, in its turn"
+            ["keep HDMI-A-1 all-media-1"],
+            "{label}: HDMI-A-1's still and palette, in its turn"
         );
     }
     assert!(problems.is_empty(), "{problems:#?}");
@@ -16082,6 +16106,157 @@ fn a_mirrored_display_refused_when_motion_resumes_moves_on_alone() {
     );
     let problems = rows_off_screen("on AC", &mut runtime, &state, at);
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// A real driver over `default_rule_document` with videos and motion on, HDMI-A-1 assigned
+/// pages (one entry): a Noctalia stand-in that keeps what each output shows in
+/// `root/shell/<output>`, as `msg wallpaper-set <output> <path>` sets it, and an mpvpaper
+/// stand-in that logs each launch on a line of `root/launches` and keeps running. The runtime,
+/// the document's path, and those two places.
+fn shell_runtime(label: &str) -> (Runtime<SystemDriver>, PathBuf, PathBuf, PathBuf) {
+    let root = directory(label);
+    let shell = root.join("shell");
+    fs::create_dir_all(&shell).unwrap();
+    let noctalia = root.join("noctalia");
+    script(
+        &noctalia,
+        &format!(
+            "if [ \"$1\" = msg ] && [ \"$2\" = wallpaper-set ] && [ $# -eq 4 ]; then \
+             printf '%s' \"$4\" > {:?}/\"$3\"; fi",
+            shell
+        ),
+    );
+    let launches = root.join("launches");
+    let mpvpaper = root.join("mpvpaper");
+    script(
+        &mpvpaper,
+        &format!("printf '%s\\n' \"$*\" >> {launches:?}\nexec sleep 30"),
+    );
+    let document = default_rule_document("all-media")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "kind = \"still\"\n",
+            "kind = \"video\"\nmotion = \"/motion.mp4\"\n",
+        )
+        .replace(
+            "noctalia_program = \"/bin/true\"",
+            &format!("noctalia_program = {:?}", noctalia.display().to_string()),
+        )
+        .replace(
+            "mpvpaper_program = \"/bin/true\"",
+            &format!("mpvpaper_program = {:?}", mpvpaper.display().to_string()),
+        )
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+            "connector = \"HDMI-A-1\"\nplaylist = \"pages\"",
+        );
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, &document).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let source = SwitchableOutputs::default();
+    source.set(vec![live("DP-1", None), live("HDMI-A-1", None)]);
+    let driver = SystemDriver::with_output_source(
+        parsed.renderer.clone(),
+        Path::new("/wall-in-one-runtime.sock"),
+        Box::new(source),
+    );
+    let mut runtime = Runtime::new(config_path.clone(), parsed, driver, noon()).unwrap();
+    let applied = without_text_file_busy(|| runtime.apply_current());
+    assert!(applied.is_ok(), "{applied:?}");
+    (runtime, config_path, shell, launches)
+}
+
+/// What the Noctalia stand-in shows on `output`, if anything.
+fn shown_by_the_shell(shell: &Path, output: &str) -> Option<String> {
+    fs::read_to_string(shell.join(output)).ok()
+}
+
+/// The outputs mpvpaper was launched on, in order, once `count` launches are logged.
+fn launched_on(launches: &Path, count: usize) -> Vec<String> {
+    recorded_lines(launches, count)
+        .lines()
+        .map(|line| {
+            ["DP-1", "HDMI-A-1"]
+                .into_iter()
+                .find(|output| line.split(' ').any(|word| word == *output))
+                .unwrap_or("?")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The shell loses what every output shows: restarted with its state gone, or another
+/// program's wallpaper set meanwhile.
+fn the_shell_forgets(shell: &Path) {
+    for output in ["DP-1", "HDMI-A-1"] {
+        let _ = fs::remove_file(shell.join(output));
+    }
+}
+
+#[test]
+fn a_kept_mirrored_display_is_handed_its_still_again() {
+    // Review r13g: a display a hand-over doesn't change keeps its renderer (N13), but a full
+    // apply also handed the shell its still again, which put back a still the shell had lost.
+    // A kept display still gets it: after `next`, and after a reload, HDMI-A-1 (pages' one
+    // entry throughout) shows pages-1's still again, though its mpvpaper isn't started again.
+    // At 56a0196 it was handed only its palette, and the shell kept showing nothing.
+    let (mut runtime, config_path, shell, launches) = shell_runtime("r13g-kept-still");
+    let mut first = launched_on(&launches, 2);
+    first.sort();
+    assert_eq!(first, ["DP-1", "HDMI-A-1"]);
+    let pages = Some("/stills/pages-1.png".to_string());
+    assert_eq!(shown_by_the_shell(&shell, "HDMI-A-1"), pages);
+    // A command that moves only DP-1.
+    the_shell_forgets(&shell);
+    let reply = runtime_command(&mut runtime, noon(), "next", None);
+    assert!(reply.ok, "{}", reply.message);
+    assert_eq!(
+        shown_by_the_shell(&shell, "HDMI-A-1"),
+        pages,
+        "after next: the kept display's still isn't back"
+    );
+    // A reload that moves only DP-1 (onto all-media).
+    the_shell_forgets(&shell);
+    let document = fs::read_to_string(&config_path).unwrap().replace(
+        "connector = \"DP-1\"\nplaylist = \"mixed\"",
+        "connector = \"DP-1\"\nplaylist = \"all-media\"",
+    );
+    fs::write(&config_path, document).unwrap();
+    let reply = runtime_command(&mut runtime, noon(), "reload", None);
+    assert!(reply.ok, "{}", reply.message);
+    assert_eq!(
+        shown_by_the_shell(&shell, "HDMI-A-1"),
+        pages,
+        "after the reload: the kept display's still isn't back"
+    );
+    // HDMI-A-1's renderer was kept both times: the two launches after the first two are DP-1's.
+    assert_eq!(&launched_on(&launches, 4)[2..], ["DP-1", "DP-1"]);
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(route(&snapshot, "HDMI-A-1")["entry_id"], "pages-1");
+    runtime.shutdown();
+    fs::remove_dir_all(config_path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn control_a_mirrored_display_a_command_moves_is_handed_its_new_still() {
+    // The other side, on both trees: DP-1, which `next` moves, is applied whole, so the shell
+    // shows its new still however much it lost, and its mpvpaper starts again.
+    let (mut runtime, config_path, shell, launches) = shell_runtime("r13g-moved-still");
+    launched_on(&launches, 2);
+    assert_eq!(
+        shown_by_the_shell(&shell, "DP-1"),
+        Some("/stills/mixed-1.png".to_string())
+    );
+    the_shell_forgets(&shell);
+    let reply = runtime_command(&mut runtime, noon(), "next", None);
+    assert!(reply.ok, "{}", reply.message);
+    assert_eq!(
+        shown_by_the_shell(&shell, "DP-1"),
+        Some("/stills/mixed-2.png".to_string())
+    );
+    assert_eq!(launched_on(&launches, 3)[2], "DP-1");
+    runtime.shutdown();
+    fs::remove_dir_all(config_path.parent().unwrap()).unwrap();
 }
 
 #[test]

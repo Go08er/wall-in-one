@@ -3737,9 +3737,11 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     /// Apply every mirrored display's target, break before make. One whose
     /// target is in `resident`, which it already shows, keeps its renderer
-    /// (review r13f N13): only its palette is applied, in its turn, so the
-    /// shell's one palette ends as an apply of every display leaves it. A
-    /// taboo entry's still is applied all the same.
+    /// (review r13f N13): the shell is handed its still and palette again
+    /// (`apply_keeping_renderer`), in its turn, so the shell shows what an
+    /// apply of every display would leave, its one palette included, even
+    /// where it lost a still meanwhile. A taboo entry's still is applied all
+    /// the same.
     fn apply_mirrored_targets(&mut self, resident: &[Target]) -> Result<String, String> {
         let targets = self.current_targets(&self.target_outputs);
         let outputs: Vec<String> = targets.iter().map(|target| target.output.clone()).collect();
@@ -3777,7 +3779,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                 });
             }
             let applied = if kept {
-                self.driver.apply_palette_only(&target.entry)
+                self.driver
+                    .apply_keeping_renderer(&target.entry, &target.output)
             } else {
                 self.driver.apply(&target.entry, &target.output, &settings)
             };

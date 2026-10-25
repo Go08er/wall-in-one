@@ -16410,3 +16410,80 @@ fn control_without_the_refusal_next_moves_dp1_to_mixed_2() {
     assert!(motion);
     assert!(problems.is_empty(), "{problems:#?}");
 }
+
+// -- review r13g R-L3: a boundary that learns the shown entry is refused applies --------------
+//
+// The ask-ahead at a mirrored rule's boundary can learn that an entry a display shows is
+// refused. Before, what every display showed was then judged with that knowledge on both
+// sides, before and after, so the boundary could find nothing changed and commit provenance
+// only: the display kept the refused entry's renderer. It is applied now, and moves on as any
+// apply does: to its playlist's next entry, or, with none, to the default.
+
+#[test]
+fn a_boundary_that_learns_the_shown_entry_is_refused_moves_the_display_to_the_default() {
+    // DP-1 on pages (one entry, pages-1, refused), HDMI-A-1 on the default; eve names pages.
+    // `control_without_the_refusal_the_boundary_and_the_pick_move_dp1` is the control.
+    let (at_boundary, _, _) = refused_at_a_boundary_then_a_pick(true);
+    assert!(at_boundary.is_empty(), "{at_boundary:#?}");
+}
+
+/// Both displays on the default, all-media, whose first entry is a scene that the driver
+/// refuses when asked if `refuse`; eve names the default. Each display's row and screen at
+/// 16:00, what the boundary applied, and whether DP-1 runs motion.
+fn refused_shown_entry_at_the_defaults_rule(
+    refuse: bool,
+) -> (Vec<String>, serde_json::Value, Vec<String>, bool) {
+    let document = default_rule_document("all-media")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"all-media-1\"\nkind = \"still\"\n",
+            "id = \"all-media-1\"\nkind = \"scene\"\nscene_id = \"3000000021\"\n",
+        )
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+        );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    assert!(state.lock().unwrap().active_outputs.contains("DP-1"));
+    if refuse {
+        state
+            .lock()
+            .unwrap()
+            .refuse_when_asked
+            .insert("all-media-1".into());
+    }
+    let before = applies_so_far(&state);
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let problems = rows_off_screen("16:00", &mut runtime, &state, on_the_third(16, 0));
+    let motion = state.lock().unwrap().active_outputs.contains("DP-1");
+    (
+        problems,
+        status(&mut runtime, on_the_third(16, 0)),
+        applied_since(&state, before),
+        motion,
+    )
+}
+
+#[test]
+fn a_boundary_that_learns_the_shown_entry_is_refused_skips_to_the_next_entry() {
+    let (problems, snapshot, applied, motion) = refused_shown_entry_at_the_defaults_rule(true);
+    assert!(problems.is_empty(), "{problems:#?}");
+    for connector in ["DP-1", "HDMI-A-1"] {
+        assert_eq!(
+            route(&snapshot, connector)["entry_id"],
+            "all-media-2",
+            "{connector} still shows the refused all-media-1; applied {applied:?}"
+        );
+    }
+    assert!(!motion, "all-media-1's motion still runs on DP-1");
+}
+
+#[test]
+fn control_without_the_refusal_the_defaults_rule_applies_nothing() {
+    let (problems, snapshot, applied, motion) = refused_shown_entry_at_the_defaults_rule(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "all-media-1");
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "eve");
+    assert_eq!(applied, Vec::<String>::new());
+    assert!(motion);
+}

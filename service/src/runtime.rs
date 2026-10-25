@@ -1774,20 +1774,27 @@ impl<D: WallpaperDriver> Runtime<D> {
             let assignments_move = routing_changed
                 && !self.config.displays.is_empty()
                 && overrode != self.schedule_rule.is_some();
+            let mut shown_refused = false;
             if (playlist_changed || assignments_move && overrode)
                 && (overrode || self.config.displays.is_empty())
             {
                 // Known before the change is decided, not learned by
                 // applying it: a stand-in that already plays isn't started
                 // again.
+                let shown = self.current_targets(&self.target_outputs);
                 self.ask_ahead_of_mirrored_change(&wanted);
+                // What it learns can be that an entry a display shows is
+                // refused: the change is then applied, which moves that
+                // display on as any apply does (review r13g R-L3).
+                shown_refused = shown.iter().any(|target| self.is_refused(&target.entry));
             }
             // A playlist the service refused throughout plays its stand-in
             // (`stand_in`): a change to one whose stand-in is what already
             // plays changes nothing on screen.
-            let shown_changed = (playlist_changed
-                && self.shown_playlist_id(&wanted)
-                    != self.shown_playlist_id(&self.active_playlist))
+            let shown_changed = shown_refused
+                || (playlist_changed
+                    && self.shown_playlist_id(&wanted)
+                        != self.shown_playlist_id(&self.active_playlist))
                 || (assignments_move
                     && self.mirrored_shown(overrode, &wanted)
                         != self.mirrored_shown(!overrode, &self.active_playlist));

@@ -1283,3 +1283,127 @@ def test_a_look_that_fails_once_its_wait_was_cut_is_logged(
         return
     assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()
     assert len(said) == 1, f"a look that failed once its wait was cut was logged {len(said)} times"
+
+
+def _held_parse(
+    monkeypatch: pytest.MonkeyPatch, name: str, text: str, order: list[str]
+) -> tuple[threading.Event, threading.Event]:
+    """`runtime_config`'s ``name`` (a parse) held for ``text``, standing in for a large one, until
+    the test lets it go or `SLOW_CALL_SECONDS`; it says so in ``order``. The Events: let it go,
+    it returned."""
+    parse = getattr(runtime_config, name)
+    release, ended = threading.Event(), threading.Event()
+
+    def held(*arguments: Any, **keywords: Any) -> Any:
+        if text in (*arguments, keywords.get("text")):
+            release.wait(SLOW_CALL_SECONDS)
+            order.append("the parse returned")
+            ended.set()
+        return parse(*arguments, **keywords)
+
+    monkeypatch.setattr(runtime_config, name, held)
+    return release, ended
+
+
+@pytest.mark.parametrize(
+    "parse",
+    ["whether-it-allows", "what-it-names", "control-whether-it-allows", "control-what-it-names"],
+)
+def test_the_looks_bound_ends_the_wait_for_a_parse(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    parse: str,
+) -> None:
+    """A hand edit only a parse can judge, whose parse is held (`_held_parse`), and no Ctrl-C.
+    The look's bound (0.5 s here, well short of the hold) ends the wait for it, as it ends the
+    look at the Workshop items, and fails closed as that does: ``[whether-it-allows]``
+    (`runtime_config.allows_web_wallpapers`, a service that reads 8 heard) counts as allowing
+    web wallpapers, and ``[what-it-names]`` (`runtime_config.named_scenes`, an older service
+    heard) as naming what can't be checked. Either file is replaced. Before: only a second
+    Ctrl-C ended either wait, and the step returned once the parse did, leaving the file. The
+    controls: nothing held; the parse ends within the bound, and the file, which allows none
+    and names only scenes, is left."""
+    application = profiles().application
+    _content, scenes = _workshop(2)
+    if parse.endswith("what-it-names"):
+        text = _naming([]) + "".join(f'[[playlists.entries]]\nscene_id="{one}"\n' for one in scenes)
+        name, heard = "named_scenes", "an-older-service"
+    else:
+        text, name = document("control-off")[0], "allows_web_wallpapers"
+        heard = "control-reads-eight"
+    _on_disk(text)
+    _heard(monkeypatch, HEARD[heard])
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", 0.5)
+    control = parse.startswith("control")
+    order: list[str] = []
+    release, ended = _held_parse(monkeypatch, name, text, order)
+    if control:
+        release.set()
+    start = time.monotonic()
+    try:
+        application._web_off_on_disk_at_exit()
+        took = time.monotonic() - start
+        order.append("the step returned")
+    finally:
+        release.set()
+        ended.wait(GIVE_UP)
+    _judged_at_exit(application)
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if control:
+        assert order == ["the parse returned", "the step returned"], order
+        assert now == text, "a file that allows no web wallpaper and names only scenes was replaced"
+        return
+    assert order == ["the step returned", "the parse returned"], (
+        f"the step waited for the parse: it took {took:.2f} s, past its 0.5 s bound ({order})"
+    )
+    assert now == _nothing_to_play(), "a file whose parse the step couldn't finish was left"
+
+
+@pytest.mark.parametrize("variant", ["held", "control-not-held"])
+def test_the_looks_bound_ends_the_wait_for_a_parse_in_the_later_judgement(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+) -> None:
+    """The same, in the judgement made once a turn-off still being written has landed
+    (`_web_off_judged_once_landed`), which nothing else ends: no Ctrl-C does there. A second
+    Ctrl-C ended the step's wait for the save, which then lands off, with a hand edit on disk
+    that only a parse can judge, held. The look's bound ends that wait too, and the file counts
+    as allowing web wallpapers: replaced. Before: the judgement waited for the parse, however
+    long, and the file was left. The control: nothing held; the parse ends, and the file, which
+    allows none, is left."""
+    application = profiles().application
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    text = document("control-off")[0]
+    _on_disk(text)
+    config.update({"allow_web_wallpapers": True})
+    _heard(monkeypatch, HEARD["control-reads-eight"])
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", 0.5)
+    order: list[str] = []
+    release, ended = _held_parse(monkeypatch, "allows_web_wallpapers", text, order)
+    if variant == "control-not-held":
+        release.set()
+    saving = _turn_off_being_written(application)
+    application._settle_cut = True  # a second Ctrl-C: the save isn't waited for
+    try:
+        application._web_off_on_disk_at_exit()
+        assert not order, "the step itself parsed the file, with web wallpapers still on"
+        config.update({"allow_web_wallpapers": False})
+        saving.set_result(None)
+        _judged_at_exit(application)
+        order.append("judged")
+    finally:
+        release.set()
+        if not saving.done():
+            saving.set_result(None)
+        ended.wait(GIVE_UP)
+        _judged_at_exit(application)
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if variant == "control-not-held":
+        assert order == ["the parse returned", "judged"], order
+        assert now == text, "a file that allows no web wallpaper was replaced"
+        return
+    assert order == ["judged", "the parse returned"], (
+        f"the judgement waited for the parse ({order})"
+    )
+    assert now == _nothing_to_play(), "a file whose parse the judgement couldn't finish was left"

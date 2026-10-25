@@ -321,9 +321,11 @@ SHUTDOWN_LOOK_THREAD: Final = "wio-shutdown-look"
 #: The longest that step gives a wallpaper service older than schema 8 to answer
 #: ``quit`` (`Application._quit_older_service`): its own timeout, and the wait for it.
 SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS: Final = 1.0
-#: How long that step looks at the Workshop items a file names, at most, for a
-#: service with no check of an item's type of its own (`_web_named`):
-#: past it, those it hasn't looked at count as web pages.
+#: How long that step looks at a file, at most (`_may_play_web_while_off`): a
+#: hand edit's parses, and, for a service with no check of an item's type of
+#: its own, the Workshop items it names (`_web_named`). Past it, a parse not
+#: finished counts as allowing web wallpapers, or as naming what can't be
+#: checked, and the items it hasn't looked at count as web pages.
 SHUTDOWN_WORKSHOP_LOOK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
@@ -383,7 +385,9 @@ def _unless_given_up[Judged](
     return done.result()
 
 
-def _may_allow_web_wallpapers(text: str, give_up: Callable[[], bool] = lambda: False) -> bool:
+def _may_allow_web_wallpapers(
+    text: str, give_up: Callable[[], bool] = lambda: False, until: float | None = None
+) -> bool:
     """Whether ``text`` (a ``runtime.toml``) may allow web wallpapers, unparsed where it can be.
 
     One the compiler wrote has the key on a line of its own exactly when it
@@ -396,47 +400,49 @@ def _may_allow_web_wallpapers(text: str, give_up: Callable[[], bool] = lambda: F
     else, a hand edit, is parsed (`runtime_config.allows_web_wallpapers`,
     which counts one that isn't TOML 1.0 as allowing them), on a thread of its
     own (`_unless_given_up`): once ``give_up`` says so (a second Ctrl-C at the
-    end of a shutdown), the wait for it ends, and the document counts as
-    allowing them (fail closed).
+    end of a shutdown), or ``until`` (the look's deadline) has passed, the
+    wait for it ends, and the document counts as allowing them (fail closed).
     """
     if _COMPILED_WEB_ALLOWED.search(text) is not None:
         return True
     if not runtime_config.may_spell_key(text, "allow_web_wallpapers"):
         return False
     return _unless_given_up(
-        lambda: runtime_config.allows_web_wallpapers(text=text), give_up, cut=True
+        lambda: runtime_config.allows_web_wallpapers(text=text), give_up, cut=True, until=until
     )
 
 
-def _web_named(text: str, give_up: Callable[[], bool]) -> tuple[bool, bool]:
+def _web_named(text: str, give_up: Callable[[], bool], until: float) -> tuple[bool, bool]:
     """Whether ``text`` names a Workshop web wallpaper, and whether it names what can't be checked.
 
     The ids it names are read off the compiler's own lines
     (`runtime_config.compiled_scenes`), or, from a hand edit, from a parse
     (`runtime_config.named_scenes`) on a thread of its own
-    (`_unless_given_up`). Then each id's own ``project.json`` is read
-    (`workshop.web_among`), and nothing else: no scan of the Workshop
-    (review r13e, L1), so it takes as long as the file's ids make it. That
-    look runs on a thread of its own too, Steam's list of libraries
-    included, and the wait for it ends once ``give_up`` says so or
-    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` has passed, though one call of it is
+    (`_unless_given_up`), whose wait ends as the look's does. Then each id's
+    own ``project.json`` is read (`workshop.web_among`), and nothing else: no
+    scan of the Workshop (review r13e, L1), so it takes as long as the file's
+    ids make it. That look runs on a thread of its own too, Steam's list of
+    libraries included, and the wait for it ends once ``give_up`` says so or
+    ``until`` (the look's deadline) has passed, though one call of it is
     still slow (review r13g, S-L1: a library on a disk spinning up, or a hung
     mount). The first answer is what the files confirm. The second is every
-    doubt: one that isn't TOML 1.0, an id that can't be checked, and every id
-    left once ``give_up`` says so or that bound has passed.
+    doubt: one that isn't TOML 1.0, or whose parse was cut, an id that can't
+    be checked, and every id left once ``give_up`` says so or ``until`` has
+    passed.
     """
     named = runtime_config.compiled_scenes(text)
     if named is None:
-        named = _unless_given_up(lambda: runtime_config.named_scenes(text), give_up, cut=None)
+        named = _unless_given_up(
+            lambda: runtime_config.named_scenes(text), give_up, cut=None, until=until
+        )
         if named is None:
             return False, True
     if not named:
         return False, False
     ids = sorted(named)
-    deadline = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
-    over = lambda: give_up() or time.monotonic() > deadline  # noqa: E731
+    over = lambda: give_up() or time.monotonic() > until  # noqa: E731
     return _unless_given_up(
-        lambda: workshop.web_among(ids, over), give_up, cut=(False, True), until=deadline
+        lambda: workshop.web_among(ids, over), give_up, cut=(False, True), until=until
     )
 
 
@@ -461,12 +467,16 @@ def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], boo
     with exit 78 a kept file that plays one), or it is current, and refuses a
     page at launch itself; so an item that can't be checked (unsubscribed, or
     on a library that isn't mounted) leaves the file as it is.
+
+    Its parses and its look at the Workshop items share one deadline,
+    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` from its start.
     """
-    if _may_allow_web_wallpapers(text, give_up):
+    until = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
+    if _may_allow_web_wallpapers(text, give_up, until):
         return _ALLOWS
     if runtime_config.nothing_to_play_supported(status):
         return ""
-    confirmed, unchecked = _web_named(text, give_up)
+    confirmed, unchecked = _web_named(text, give_up, until)
     if confirmed:
         return _NAMES_WEB
     if unchecked and status is not None:
@@ -2482,12 +2492,12 @@ class Application(Adw.Application):
         of its text for the compiler's own line for the key, and for any
         spelling of the key (`_may_allow_web_wallpapers`), which a compiled
         document never has; only a hand edit that has one is parsed, on a
-        thread a second Ctrl-C stops waiting for (review r13f, N2). So a quit
-        takes at most the settle's bound, that save's bound while one is being
-        written, the lock's, and, unless the service last heard reads schema
-        8, the look's at the Workshop items (for each text judged) and the
-        ``quit``'s; on top of those, only a hand edit's parses, each about a
-        second at most.
+        thread whose wait a second Ctrl-C or the look's bound ends (review
+        r13f, N2). So a quit takes at most the settle's bound, that save's
+        bound while one is being written, the lock's, the look's for each text
+        judged (`SHUTDOWN_WORKSHOP_LOOK_SECONDS`: a hand edit's parses, and,
+        unless the service last heard reads schema 8, the look at the Workshop
+        items), and, unless it reads 8, the ``quit``'s.
 
         What those waits leave is judged once it has settled, before the
         process exits (`_web_off_judged_once_landed`; review r13f, L1): a
@@ -2693,10 +2703,10 @@ class Application(Adw.Application):
         process's exit waits for it, as it waits for the save's worker and the
         lane's (`_runtime_lane_at_exit`), so it takes no longer than they do
         but for its own wait for the compiler lock
-        (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`) and its look at the file: a
-        hand edit's parses, each about a second at most, the look at the
-        Workshop items it names (`SHUTDOWN_WORKSHOP_LOOK_SECONDS`), and the
-        ``quit`` (`SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS`).
+        (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`), its look at the file
+        (`SHUTDOWN_WORKSHOP_LOOK_SECONDS`: a hand edit's parses, and the look
+        at the Workshop items it names), and the ``quit``
+        (`SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS`).
         ``target`` and ``source`` are the files as the step found them, and
         ``status`` what it had last heard. Only files and that lock are
         touched, nothing of GTK; the one socket call is `_quit_older_service`'s,

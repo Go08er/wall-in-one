@@ -3,7 +3,9 @@
 For a service with no check of an item's type of its own, the shutdown's last step judges the
 file by the ids it names: read off the compiler's own lines when that is all it names
 (`runtime_config.compiled_scenes`), otherwise parsed (`runtime_config.named_scenes`), then each
-id's own ``project.json`` (`workshop.web_among`), never a scan. Every doubt counts as a web page.
+id's own ``project.json`` (`workshop.web_among`), never a scan. For a service older than schema 8
+that was heard, every doubt counts as a web page; with no status heard, only a web page the files
+confirm does.
 """
 
 from __future__ import annotations

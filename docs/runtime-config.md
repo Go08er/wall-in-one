@@ -421,8 +421,8 @@ entries; a reload, the file poll's included, forgets.
 | `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none. Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
 | `refused_omitted` | top level | How many more items were refused than `refused` lists. Added in 0.4.1. |
 | `stand_in_for_omitted` | top level | `true` when the reply left out at least one `stand_in_for`, a row's or the top level's, to fit its size limit (2 below). Absent otherwise, never `false`. A row without `stand_in_for` may then still play a stand-in. Added in 0.4.1. |
-| `schedule_rule_id_omitted` | top level | `true` when the reply left every row's `schedule_rule_id` `null` to fit at all (4 below). Absent otherwise. A row whose `route_source` is `schedule` then names no rule; `schedules[].in_force` still says which is in force. Added in 0.4.1. |
-| `diagnostics_omitted` | top level | `true` when the reply also left every `last_error`, the rows' and the top level's, and `output_discovery_error` empty (5 below). Absent otherwise; `renderer_failed` still says what failed. Added in 0.4.1. |
+| `schedule_rule_id_omitted` | top level | `true` when the reply left every row's `schedule_rule_id` `null` to fit at all (6 below). Absent otherwise. A row whose `route_source` is `schedule` then names no rule; `schedules[].in_force` still says which is in force. Added in 0.4.1. |
+| `diagnostics_omitted` | top level | `true` when the reply also left every `last_error`, the rows' and the top level's, and `output_discovery_error` empty (7 below). Absent otherwise; `renderer_failed` still says what failed. Added in 0.4.1. |
 
 Neither status budget counts these, so the budget is 0.4.0's, and any
 document 0.4.0 published still loads. (Counting them refused a document near
@@ -440,8 +440,9 @@ out, in order:
    default) and from `schedules[].playlist_id` of the row's `schedule_rule_id`
    (a rule); for a pick (`route_source` `manual`) nothing says it, so the app
    hedges;
-3. as at 0.4.0, `outputs`, then `missing_renderers`' paths, then its rows, then
-   the oldest taboo records.
+3. as at 0.4.0, `outputs`;
+4. `missing_renderers`' paths, then its rows;
+5. the oldest taboo records.
 
 Only a document at the schema's ceilings comes near it. With all of these
 gone, what is left is what the budget bounds, apart from what it doesn't count
@@ -451,18 +452,18 @@ budget's edge with such a rule in force had no reply small enough to send, at
 0.4.0 as well, and every status query got none. So, last, and with nothing
 left out above given back:
 
-4. every row's `schedule_rule_id`, left `null`, which
+6. every row's `schedule_rule_id`, left `null`, which
    `schedule_rule_id_omitted` says;
-5. every `last_error`, the rows' and the top level's, and
+7. every `last_error`, the rows' and the top level's, and
    `output_discovery_error`, left empty, which `diagnostics_omitted` says.
 
-After 5 the reply carries only the text the budget counts, its fixed keys and
+After 7 the reply carries only the text the budget counts, its fixed keys and
 the structure of the playlists, rules and rows. At the ceilings (578
 playlists, 512 rules, 128 rows), with every string the budget counts made of
 quotes and backslashes, so that none is shorter on the wire than the budget
-counts it, the reply after 4 has about 60 KB to spare, more than what is left
+counts it, the reply after 6 has about 60 KB to spare, more than what is left
 can take: the rows' timing and retry fields (about 14 KB at most) and
-`config_path`, the service's own path. Step 5 is needed only for long
+`config_path`, the service's own path. Step 7 is needed only for long
 diagnostics full of quotes, such as an apply that failed on every row on an
 entry whose id is 256 quotes.
 

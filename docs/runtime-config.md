@@ -482,13 +482,26 @@ needs of:
 These are measured, not tried: with every one of them left out, the service
 gives each back, the last first, wherever it still fits, so a short rule id
 stays while a longer error will do, and no more goes than the room needs. A
-document that 0.4.0 answered keeps every one of them. Whatever room the reply
-then has goes back to what was left out before, in the reverse order: taboo
-records, `missing_renderers` whole or without its paths, `outputs`, the
-stand-ins, then `refused` rows (beside the stand-ins, or without them when
-they don't fit). Nothing given back is ever kept at the expense of what comes
-before it, so a reply may carry one taboo record more than 0.4.0's where
-0.4.0 had room only for `missing_renderers`' rows instead.
+flag goes with the last of its kind, and its bytes count toward that: what is
+still out of a kind comes back whole where it fits beside the bytes its flag
+then gives up (`schedule_rule_id_omitted` takes 34 bytes on the wire,
+`diagnostics_omitted` 29). Whatever room the reply then has goes back to
+what was left out before, in the reverse order: taboo records,
+`missing_renderers` whole or without its paths, `outputs`, the stand-ins,
+then `refused` rows (beside the stand-ins, or without them when they don't
+fit). Nothing given back is ever kept at the expense of what comes before it,
+so a reply may carry one taboo record more than 0.4.0's where 0.4.0 had room
+only for `missing_renderers`' rows instead.
+
+A document that 0.4.0 answered, and none of whose items the service refuses,
+keeps every one of 6 and 7: the reply that carries what 0.4.0's carried is at
+least 21 bytes smaller (0 above). One whose items it refuses is not a reply
+0.4.0 sent, since 0.4.0 refused none: its rows play other entries, and it can
+carry `refused_omitted` (21 bytes on the wire and its digits),
+`stand_in_for_omitted` (30) and, for a display that plays nothing, why. That
+can take more than the lean saving, which is 21 bytes with an overrides file
+applied (54 without one), so where 0.4.0 had less to spare than the
+difference, some of 6 and 7 go.
 
 With every one of 6 and 7 left out, the reply carries the text the budget
 counts (at most four times over on the wire, as the budget counts it), its

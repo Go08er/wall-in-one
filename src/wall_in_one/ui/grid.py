@@ -266,10 +266,6 @@ class WallpaperTile(Gtk.Box):
             f"The wallpaper service skips it: {reason}" if shown else None
         )
 
-    @property
-    def shows_refused(self) -> bool:
-        return self._refused_badge.get_visible()
-
     def set_favourite(self, favourite: bool) -> None:
         """Show whether this one is starred. Never reads as a click."""
         self._reflecting = True

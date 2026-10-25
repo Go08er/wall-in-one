@@ -303,7 +303,9 @@ own sound past the engine.
 
 Every dial is applied when its wallpaper's renderer starts, so changing one
 restarts that renderer (video mute and volume stay live, as before). A
-change to one wallpaper's own restarts only the display showing it.
+change to one wallpaper's own restarts only the display showing it when the
+displays are independent; mirrored displays all restart, as for any change
+to what they show. One that no display shows restarts nothing.
 
 The dials need the wallpaper service from this release (runtime schema 7).
 An older one that is still running (or one whose installed units can't be

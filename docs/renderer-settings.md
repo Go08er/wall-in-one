@@ -105,7 +105,8 @@ details), shown as "Default (…)" or overridden, each with its own reset.
 | Mute while other apps play | `--noautomute` when off | on/off | yes | — |
 
 Every dial is a launch option, so changing one restarts the renderers it
-reaches (a wallpaper's own: only the display showing it). Only the existing
+reaches (a wallpaper's own: only the display showing it when the displays
+are independent, every display when they are mirrored). Only the existing
 video mute and volume stay live over mpv's IPC.
 
 A dial that would do nothing as things are set is greyed out, never shown as

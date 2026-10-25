@@ -321,9 +321,10 @@ is one `name=value` token. A scene's own Wallpaper Engine values travel in
 `properties` (a preset's, with the person's over them), schema 6's, on any
 scene but a web page.
 
-A change to one wallpaper's own changes only its entries, so only the display
-showing it is handed over; a `[renderer]` change reconfigures every renderer,
-as before.
+A change to one wallpaper's own changes only its entries. With independent
+displays only the display showing it is handed over; mirrored displays are
+all applied again, as for any change to what they show. A `[renderer]` change
+reconfigures every renderer, as before.
 
 Publishing works as for presets: a running service that isn't confirmed to
 read 7 (it doesn't list it, or its installed units can't be verified) gets the

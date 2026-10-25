@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.status_model import RuntimeStatusView
 
 #: The runtime's playback states, as words. ``mixed`` means the displays
@@ -75,6 +76,9 @@ def _playing(view: RuntimeStatusView, status: dict[str, object]) -> str:
         if truth is not None and truth.stand_in_for:
             # The service refused every entry of what was asked for.
             parts.append(f"\u201c{truth.stand_in_for_name}\u201d can\u2019t play here")
+    if runtime_truth.diagnostics_left_out(status):
+        # The reply's size emptied the error fields: not "no error".
+        parts.append(runtime_truth.DIAGNOSTICS_LEFT_OUT)
     power = view.power
     if power is not None and power.message:
         parts.append(power.message)

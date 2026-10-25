@@ -51,6 +51,19 @@ def stand_ins_sentence(asked: Iterable[str], playing: str) -> str:
 #: What a pick may be when the reply left out every ``stand_in_for``: it can't be
 #: told from the playlist that stands in for it.
 PICK_OR_STAND_IN = "your pick, or what stands in for it"
+#: The same for a rule whose id the reply left out (`schedule_rule_id_omitted`).
+SCHEDULE_OR_STAND_IN = "from schedule, or what stands in for it"
+
+#: What is said in place of "no error" when the reply left its diagnostics out.
+DIAGNOSTICS_LEFT_OUT = "details left out: status too large"
+
+
+def diagnostics_left_out(status: Mapping[str, object] | None) -> bool:
+    """Whether the reply's size dropped ``last_error`` and ``output_discovery_error``.
+
+    They then read as empty strings, which is not "no error".
+    """
+    return status is not None and status.get("diagnostics_omitted") is True
 
 
 def nothing_to_play_sentence(reason: str) -> str:
@@ -115,9 +128,10 @@ class DisplayRuntimeTruth:
     #: Why this display plays nothing (``nothing_to_play``): the playlist asked
     #: for has nothing that can play and nothing can stand in. Else empty.
     nothing_to_play: str = ""
-    #: A pick on a reply that left out every ``stand_in_for``: what plays may be
-    #: the pick, or what stands in for it. The app can't tell.
-    pick_unsure: bool = False
+    #: A pick (or a rule whose id was left out) on a reply that dropped its
+    #: ``stand_in_for``: what plays may be what the route asked for, or what stands
+    #: in for it. The app can't tell.
+    route_unsure: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
@@ -232,8 +246,8 @@ class RuntimeTruth:
     refused_omitted: int = 0
     #: Why every display plays nothing (``nothing_to_play``), or empty.
     nothing_to_play: str = ""
-    #: The summary's pick, on a reply that left out every ``stand_in_for``.
-    pick_unsure: bool = False
+    #: The summary's pick, on a reply that dropped its ``stand_in_for``.
+    route_unsure: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
@@ -392,7 +406,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     stand_in_for = _stand_in_for(status.get("stand_in_for"), playlist_id)
     refused, refused_omitted = refused_from_status(status)
     nothing_to_play = status.get("nothing_to_play")
-    pick_unsure = False
+    route_unsure = False
     if status_version == 2 and status.get("stand_in_for_omitted") is True:
         # The service says the reply's size dropped some `stand_in_for`. A row
         # that kept its own is left; the others still say what they asked for,
@@ -401,6 +415,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
             parsed_displays,
             parsed_schedules,
             independent=display_mode == "independent",
+            rule_ids_left_out=status.get("schedule_rule_id_omitted") is True,
             scheduled_playlist_id=scheduled_playlist_id,
             names=names,
         )
@@ -413,7 +428,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
             [(asked, playing)] = heard
             if asked and playing == playlist_id:
                 stand_in_for = asked
-        pick_unsure = source == "manual" and stand_in_for is None
+        route_unsure = source == "manual" and stand_in_for is None
     return RuntimeTruth(
         playlist_id=playlist_id,
         playlist=playlist,
@@ -433,7 +448,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         refused=refused,
         refused_omitted=refused_omitted,
         nothing_to_play=nothing_to_play if isinstance(nothing_to_play, str) else "",
-        pick_unsure=pick_unsure,
+        route_unsure=route_unsure,
     )
 
 
@@ -442,6 +457,7 @@ def _inferred_stand_ins(
     schedules: tuple[RuntimeScheduleTruth, ...],
     *,
     independent: bool,
+    rule_ids_left_out: bool,
     scheduled_playlist_id: str,
     names: Mapping[str, str],
 ) -> tuple[DisplayRuntimeTruth, ...]:
@@ -451,6 +467,11 @@ def _inferred_stand_ins(
     service refused it, so a row that plays another playlist stands in for it.
     A pick is on no field: the row is marked unsure instead. A mirrored row
     follows the schedule's playlist, not the connector's own assignment.
+
+    With the rule ids left out, a rule's playlist can't be looked up. Mirrored,
+    the whole screen follows one answer, the schedule's own playlist, so that
+    stands. Independent, the top-level playlist is no one display's rule, so the
+    row is marked unsure like a pick.
     """
     found: list[DisplayRuntimeTruth] = []
     for display in displays:
@@ -461,7 +482,10 @@ def _inferred_stand_ins(
             found.append(display)
             continue
         if display.route_source == "manual":
-            found.append(replace(display, pick_unsure=True))
+            found.append(replace(display, route_unsure=True))
+            continue
+        if display.route_source == "schedule" and rule_ids_left_out and independent:
+            found.append(replace(display, route_unsure=True))
             continue
         rule = next((one for one in schedules if one.id == display.schedule_rule_id), None)
         if display.route_source == "schedule" and rule is not None:

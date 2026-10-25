@@ -358,6 +358,7 @@ def _displays_rows(status: dict[str, Any]) -> tuple[str, str]:
         plays_row=row,
         _route=lambda _connector: route,
     )
+    fake.why = lambda connector: DisplaysPage.why(fake, connector)  # type: ignore[arg-type]
     DisplaysPage._refresh_plays(fake, "DP-1", "", route)  # type: ignore[arg-type]
     why = DisplaysPage.why(fake, "DP-1")  # type: ignore[arg-type]
     plays = row.get_subtitle() or ""
@@ -525,7 +526,7 @@ def test_l3_the_row_still_says_what_it_asked_for_at_the_ceiling() -> None:
         [row] = truth.displays
         assert (row.stand_in_for, row.stand_in_for_name) == ("pages", "pages"), source
         assert truth.stand_in_for == "pages", source
-        assert not row.pick_unsure and not truth.pick_unsure
+        assert not row.route_unsure and not truth.route_unsure
 
 
 def test_l3_a_mirrored_default_at_the_ceiling_is_known_too() -> None:
@@ -545,7 +546,7 @@ def test_l3_a_mirrored_default_at_the_ceiling_is_known_too() -> None:
 def test_l3_a_pick_at_the_ceiling_is_unsure_not_claimed() -> None:
     truth = runtime_truth.from_status(_at_the_ceiling(_status("pick-refused")))
     assert truth is not None
-    assert truth.pick_unsure and truth.displays[0].pick_unsure
+    assert truth.route_unsure and truth.displays[0].route_unsure
     assert truth.stand_in_for is None
 
 
@@ -554,9 +555,9 @@ def test_l3_the_pick_hedge_names_what_plays_and_doesnt_claim_the_pick() -> None:
 
     text, playing, _showing = _on_screen(_at_the_ceiling(_status("pick-refused")), "scenes")
     assert text == f"On screen now \u00b7 {runtime_truth.PICK_OR_STAND_IN}" and not playing
-    said = reason_text(Reason("pick", "scenes", pick_unsure=True))
+    said = reason_text(Reason("pick", "scenes", route_unsure=True))
     assert said == "\u201cscenes\u201d is playing", said
-    assert "pick" not in reason_text(Reason("pick", "scenes", pick_unsure=True)).casefold()
+    assert "pick" not in reason_text(Reason("pick", "scenes", route_unsure=True)).casefold()
 
 
 def test_l3_nothing_is_inferred_below_the_ceiling() -> None:
@@ -567,7 +568,7 @@ def test_l3_nothing_is_inferred_below_the_ceiling() -> None:
     status["refused"] = [NOT_FOUND]
     truth = runtime_truth.from_status(status)
     assert truth is not None and truth.displays[0].stand_in_for is None
-    assert not truth.displays[0].pick_unsure
+    assert not truth.displays[0].route_unsure
 
 
 def test_control_l3_a_row_that_plays_what_it_asked_for_is_not_a_stand_in() -> None:
@@ -748,8 +749,8 @@ def test_l3_no_flag_no_inference_even_in_the_old_heuristics_shape() -> None:
         del status["stand_in_for_omitted"]
         truth = runtime_truth.from_status(status)
         assert truth is not None
-        assert truth.stand_in_for is None and not truth.pick_unsure, source
-        assert all(not d.stand_in_for and not d.pick_unsure for d in truth.displays), source
+        assert truth.stand_in_for is None and not truth.route_unsure, source
+        assert all(not d.stand_in_for and not d.route_unsure for d in truth.displays), source
 
 
 def test_l3_a_false_flag_infers_nothing() -> None:
@@ -766,4 +767,103 @@ def test_l3_the_flag_keeps_a_row_that_kept_its_own_stand_in() -> None:
     assert truth is not None
     first, second = truth.displays
     assert first.stand_in_for == "pages" and second.stand_in_for is None
-    assert second.route_source == "manual" and second.pick_unsure
+    assert second.route_source == "manual" and second.route_unsure
+
+
+# --------------------------------------------- ceiling flags (service b23081c) --
+
+
+def _rule_ids_left_out(status: dict[str, Any]) -> dict[str, Any]:
+    status = copy.deepcopy(status)
+    status["schedule_rule_id_omitted"] = True
+    status["schedule"]["rule_id"] = None
+    for row in status["displays"]:
+        row["schedule_rule_id"] = None
+    return status
+
+
+def test_rule_ids_left_out_an_independent_rule_route_hedges() -> None:
+    status = _rule_ids_left_out(_at_the_ceiling(_independent("schedule")))
+    truth = runtime_truth.from_status(status)
+    assert truth is not None
+    [row] = truth.displays
+    # No rule id, so no rule to look up: not guessed from the top-level playlist.
+    assert row.route_unsure and row.stand_in_for is None
+    plays, why = _displays_rows(status)
+    assert plays == "Not in use now · “all-media” is playing", plays
+    assert "scheduled" not in plays and "pages" not in plays
+    assert why == "“all-media” is playing", why
+    text, playing, _showing = _on_screen(status, "all-media")
+    assert text == f"On screen now · {runtime_truth.SCHEDULE_OR_STAND_IN}", text
+    assert not playing
+
+
+def test_control_rule_ids_present_the_rule_route_is_still_inferred() -> None:
+    truth = runtime_truth.from_status(_at_the_ceiling(_independent("schedule")))
+    assert truth is not None
+    assert truth.displays[0].stand_in_for == "pages" and not truth.displays[0].route_unsure
+
+
+def test_rule_ids_left_out_a_mirrored_rule_route_follows_the_schedule() -> None:
+    # One answer for the whole screen: the schedule's own playlist.
+    status = _at_the_ceiling(copy.deepcopy(_status("pick-refused")))
+    status["source"] = "schedule"
+    status["schedule"] = {"following": True, "playlist": "pages", "playlist_id": "pages"}
+    status["displays"][0].update(route_source="schedule", manual_override=False)
+    status = _rule_ids_left_out(status)
+    truth = runtime_truth.from_status(status)
+    assert truth is not None
+    assert truth.displays[0].stand_in_for == "pages" and not truth.displays[0].route_unsure
+
+
+def test_a_mirrored_pick_without_a_rule_id_is_still_a_pick() -> None:
+    from wall_in_one.ui.next.real_schedule import RealScheduling
+
+    status = _rule_ids_left_out(_at_the_ceiling(_status("pick-refused")))
+    truth = runtime_truth.from_status(status)
+    assert truth is not None
+    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    assert route.route == "pick" and route.rule_id is None and route.route_unsure
+
+
+def _left_out(status: dict[str, Any]) -> dict[str, Any]:
+    status = copy.deepcopy(status)
+    status["diagnostics_omitted"] = True
+    return status
+
+
+def test_diagnostics_left_out_the_next_status_line_doesnt_say_no_error() -> None:
+    from wall_in_one.ui.next import status_line
+
+    model = RuntimeStatusModel()
+    model.adopt(_left_out(_status("pick-plays")))
+    assert status_line.describe(model.view).endswith(runtime_truth.DIAGNOSTICS_LEFT_OUT)
+
+
+def test_control_diagnostics_present_the_next_status_line_is_unchanged() -> None:
+    from wall_in_one.ui.next import status_line
+
+    model = RuntimeStatusModel()
+    model.adopt(_status("pick-plays"))
+    assert runtime_truth.DIAGNOSTICS_LEFT_OUT not in status_line.describe(model.view)
+
+
+@pytest.mark.parametrize("omitted", [True, False])
+def test_diagnostics_left_out_the_classic_summary(
+    omitted: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gtk_helpers import destroy_window
+    from tests.test_ui_missing_renderer_notice import _classic as classic_application
+    from wall_in_one.ui.window import MainWindow
+
+    application = classic_application(tmp_path, monkeypatch)
+    window = MainWindow(application, application.settings)  # type: ignore[arg-type, attr-defined]
+    monkeypatch.setattr(window, "report", lambda _text: None)
+    try:
+        status = _status("pick-plays")
+        window.show_runtime_status(_left_out(status) if omitted else status)
+        said = runtime_truth.DIAGNOSTICS_LEFT_OUT in window._runtime_summary
+        assert said is omitted, window._runtime_summary
+    finally:
+        destroy_window(window)
+        application.session.shutdown()  # type: ignore[attr-defined]

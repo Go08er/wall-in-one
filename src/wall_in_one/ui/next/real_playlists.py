@@ -454,7 +454,7 @@ class RealPlaylists:
                     False,
                     (),
                 )
-            if truth.pick_unsure:
+            if truth.route_unsure:
                 return f"On screen now \u00b7 {runtime_truth.PICK_OR_STAND_IN}", False, ()
             why = "your pick" if truth.is_manual else "from schedule"
             return f"On screen now \u00b7 {why}", truth.is_manual, ()
@@ -497,10 +497,14 @@ class RealPlaylists:
         )
         routes = {display.route_source for display in showing}
         why = _ROUTE_WORDS.get(next(iter(routes)), "") if len(routes) == 1 else ""
-        unsure = routes == {"manual"} and any(display.pick_unsure for display in showing)
+        unsure = len(routes) == 1 and any(display.route_unsure for display in showing)
         if unsure:
-            # The reply can't tell the pick from what stands in for it.
-            why = runtime_truth.PICK_OR_STAND_IN
+            # The reply can't tell the pick (or the rule) from what stands in for it.
+            why = (
+                runtime_truth.PICK_OR_STAND_IN
+                if routes == {"manual"}
+                else runtime_truth.SCHEDULE_OR_STAND_IN
+            )
         playing = everywhere and routes == {"manual"} and not unsure
         text = f"{where} \u00b7 {why}" if why else where
         if stood:

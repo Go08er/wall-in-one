@@ -251,7 +251,7 @@ class DisplaysPage(Page):
                 route.until,
                 stand_in_for="" if route.quick else route.stand_in_for_name,
                 pick_stood_in=route.quick and stood_in,
-                pick_unsure=route.pick_unsure,
+                route_unsure=route.route_unsure,
                 nothing_to_play=route.nothing_to_play,
             )
         )
@@ -530,7 +530,7 @@ class DisplaysPage(Page):
                 self.why(connector)
                 if route is not None
                 and route.route == "pick"
-                and (route.stand_in_for or route.pick_unsure)
+                and (route.stand_in_for or route.route_unsure)
                 else "Your pick"
                 if route and route.quick
                 else ""
@@ -615,6 +615,9 @@ class DisplaysPage(Page):
                 "In use now"
                 + (f" · nothing is scheduled until {route.until}" if route.until else "")
             )
+        elif route.route == "schedule" and route.route_unsure:
+            # The rule's id was left out, so its playlist is unknown: say only what plays.
+            self.plays_row.set_subtitle(f"Not in use now · {self.why(connector)}")
         elif route.route == "schedule":
             if route.stand_in_for:
                 # The rule's playlist can't play here: another plays instead.
@@ -638,7 +641,7 @@ class DisplaysPage(Page):
                     )
                 )
             )
-        elif route.route == "pick" and route.pick_unsure:
+        elif route.route == "pick" and route.route_unsure:
             # The reply left out what stands in for what; say only what plays.
             self.plays_row.set_subtitle(f"Not in use now · {self.why(connector)}")
         elif route.route == "pick":

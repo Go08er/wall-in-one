@@ -716,7 +716,7 @@ class RealAppState(GObject.Object):
                 until,
                 stand_in_for="" if picked_one else display.stand_in_for_name,
                 pick_stood_in=picked_one and stood_in,
-                pick_unsure=display.pick_unsure,
+                route_unsure=display.route_unsure,
                 nothing_to_play=display.nothing_to_play,
             )
             name = self._index[wid].name if wid in self._index else ""
@@ -737,7 +737,7 @@ class RealAppState(GObject.Object):
                 truth.playlist if stood_in or not picked_one else "",
                 stand_in_for="" if picked_one else truth.stand_in_for_name,
                 pick_stood_in=picked_one and stood_in,
-                pick_unsure=truth.pick_unsure,
+                route_unsure=truth.route_unsure,
                 nothing_to_play=truth.nothing_to_play,
             )
             screens.append(OnScreen("Display", wid, name, reason))

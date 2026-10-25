@@ -440,7 +440,7 @@ class RealScheduling:
                     stand_in_for=display.stand_in_for or "",
                     stand_in_for_name=display.stand_in_for_name,
                     nothing_to_play=display.nothing_to_play,
-                    pick_unsure=display.pick_unsure,
+                    route_unsure=display.route_unsure,
                     playback=display.playback_state,
                     cycle=display.cycle_enabled,
                     cycle_default=display.cycle_default,
@@ -463,7 +463,7 @@ class RealScheduling:
                 stand_in_for=truth.stand_in_for or "",
                 stand_in_for_name=truth.stand_in_for_name,
                 nothing_to_play=truth.nothing_to_play,
-                pick_unsure=truth.pick_unsure,
+                route_unsure=truth.route_unsure,
             ),
         )
 

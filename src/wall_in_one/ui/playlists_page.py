@@ -1390,7 +1390,7 @@ class PlaylistsPage(Gtk.Box):
             "Picked · can\u2019t play here"
             if manual and stood_in
             else "Playing now · pick or stand-in"
-            if manual and truth is not None and truth.pick_unsure
+            if manual and truth is not None and truth.route_unsure
             else "Playing now · manual override"
             if manual
             else "Use as manual override"

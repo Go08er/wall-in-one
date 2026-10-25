@@ -103,7 +103,7 @@ class RouteView:
     nothing_to_play: str = ""
     #: A pick that may be standing in for another (the reply left out every
     #: ``stand_in_for``), so "your pick" would be a guess.
-    pick_unsure: bool = False
+    route_unsure: bool = False
     #: ``playing``, ``paused`` or ``stopped``.
     playback: str = "playing"
     cycle: bool = False

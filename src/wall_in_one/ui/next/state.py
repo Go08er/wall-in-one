@@ -268,7 +268,7 @@ class Reason:
     pick_stood_in: bool = False
     #: A pick that the reply can't tell from its stand-in (it left out every
     #: ``stand_in_for``): not said to be the pick.
-    pick_unsure: bool = False
+    route_unsure: bool = False
     #: Why nothing plays (the runtime's ``nothing_to_play``), or empty.
     nothing_to_play: str = ""
 
@@ -322,7 +322,7 @@ def reason_text(reason: Reason) -> str:
     """
     if reason.nothing_to_play:
         return f"Nothing to play: {reason.nothing_to_play}"
-    if reason.pick_unsure:
+    if reason.route_unsure:
         # Playing is true; that it is the pick is not known.
         return (
             f"\u201c{reason.playlist}\u201d is playing"

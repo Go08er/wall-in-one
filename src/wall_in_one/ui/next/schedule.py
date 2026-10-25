@@ -617,7 +617,7 @@ class SchedulePage(Page):
                 route.rule_id,
                 route.until,
                 route.nothing_to_play,
-                route.pick_unsure,
+                route.route_unsure,
             )
             for index, group in enumerate(groups):
                 other = group.route
@@ -627,7 +627,7 @@ class SchedulePage(Page):
                     other.rule_id,
                     other.until,
                     other.nothing_to_play,
-                    other.pick_unsure,
+                    other.route_unsure,
                 ) == key:
                     groups[index] = Outcome((*group.connectors, route.connector), other)
                     break
@@ -683,7 +683,7 @@ class SchedulePage(Page):
                     label="in place of your pick"
                     if stood_in
                     else runtime_truth.PICK_OR_STAND_IN
-                    if route.pick_unsure
+                    if route.route_unsure
                     else "your pick",
                     xalign=0,
                 )

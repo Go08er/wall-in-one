@@ -1070,6 +1070,9 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self._runtime_error = ""
             self._runtime_summary = f"{state} {playlist} ({source}){stood_in}"
+            if runtime_truth.diagnostics_left_out(status):
+                # An empty error here is the reply's size, not "no error".
+                self._runtime_summary += f" · {runtime_truth.DIAGNOSTICS_LEFT_OUT}"
             self._subtitle.set_tooltip_text(None)
         if power is not None and power.message:
             self._runtime_summary += f" · {power.message}"

@@ -216,6 +216,24 @@ def _is_quick_choice(playlist_id: str) -> bool:
     return playlist_id == QUICK_CHOICE_ID or playlist_id.startswith(DISPLAY_QUICK_CHOICE_ID_PREFIX)
 
 
+def _rule_in_force(
+    truth: runtime_truth.RuntimeTruth, display: runtime_truth.DisplayRuntimeTruth
+) -> str | None:
+    """The rule a row follows: its own id, or with the id left out, the rule in force.
+
+    The reply leaves every row's id null only at its size ceiling
+    (``schedule_rule_id_omitted``). Mirrored, one rule is in force for the whole
+    screen, and ``schedules[].in_force`` still says which. A transition being
+    retried leaves the row on its earlier rule, so then nothing is named.
+    """
+    if display.schedule_rule_id or display.route_source != "schedule":
+        return display.schedule_rule_id
+    if truth.display_mode != "mirrored" or display.automatic_retry is not None:
+        return None
+    in_force = [rule.id for rule in truth.schedules if rule.in_force]
+    return in_force[0] if len(in_force) == 1 else None
+
+
 def rule_view(rule: schedules.Rule) -> RuleView:
     """A stored rule in the pages' convention (the store's own numbers)."""
     return RuleView(
@@ -434,7 +452,7 @@ class RealScheduling:
                     route=_ROUTES.get(display.route_source, "default"),
                     playlist_id=display.playlist_id,
                     playlist=display.playlist,
-                    rule_id=display.schedule_rule_id,
+                    rule_id=_rule_in_force(truth, display),
                     until="" if display.route_source == "manual" else display.until or "",
                     quick=_is_quick_choice(display.asked_playlist_id),
                     stand_in_for=display.stand_in_for or "",

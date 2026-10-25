@@ -808,6 +808,9 @@ class SchedulePage(Page):
                 text, kind = model.reason(
                     rule, at, connector, winner, scheduling.rule_applies, mirrored=mirrored
                 )
+                if kind == "overridden" and route.route == "schedule" and winner is None:
+                    # The reply left the rule's id out: whether this one wins isn't known.
+                    continue
                 if kind in ("playing", "overridden"):
                     active.append(self._why_row(rule, text, kind))
                     self.why_entries.append((rule.id, text, kind))
@@ -815,6 +818,7 @@ class SchedulePage(Page):
             if winner is None or winner not in {rule.id for rule in rules}:
                 active.append(self._why_unscheduled(route, group.connectors[0]))
             content.append(active)
+        unsure = any(g.route.route == "schedule" and g.route.rule_id is None for g in groups)
         idle = [rule for rule in rules if rule.id not in in_play]
         if idle:
             label = Gtk.Label(label="NOT NOW", xalign=0, margin_top=2)
@@ -834,8 +838,9 @@ class SchedulePage(Page):
                     mirrored=mirrored,
                 )
                 if kind == "overridden":
-                    # It applies but is not the runtime's answer for this display.
-                    text = "Not chosen now"
+                    # It applies but is not the runtime's answer for this display,
+                    # or the reply left the answer's id out.
+                    text = "Not chosen now" if not unsure else "Not sure which applies"
                 quiet.append(self._why_row(rule, text, kind, compact=True))
                 self.why_entries.append((rule.id, text, kind))
             content.append(quiet)

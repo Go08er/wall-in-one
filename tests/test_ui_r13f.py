@@ -8,6 +8,7 @@ A ``control_`` test is the matching case that was already right.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -376,6 +377,82 @@ def test_control_q1c_with_rule_ids_the_window_reads_right() -> None:
     status = _at_the_ceiling(_mirrored_rule_window(ceiling=False))
     truth = _truth(status)
     assert truth.displays[0].stand_in_for == "pages"
+
+
+# ------------------------------------------------------------------ Q2 ---------
+
+
+def _mirrored_rule_in_force(*, ids_left_out: bool) -> dict[str, Any]:
+    """Mirrored ALL row on rule r1 (-> pages), playing; ``schedules`` says r1 in force."""
+    status = copy.deepcopy(_status("pick-plays"))
+    status["source"] = "schedule"
+    status.pop("stand_in_for", None)
+    [row] = status["displays"]
+    row.pop("stand_in_for", None)
+    row.update(manual_override=False, route_source="schedule", schedule_rule_id="r1")
+    status["schedule"] = {
+        "following": True,
+        "playlist": row["playlist"],
+        "playlist_id": row["playlist_id"],
+        "rule_id": "r1",
+    }
+    status["schedules"] = [_rule("r1", row["playlist_id"], in_force=True)]
+    return _rule_ids_left_out(status) if ids_left_out else status
+
+
+def _winner_reason(status: dict[str, Any]) -> tuple[str | None, tuple[str, str]]:
+    from wall_in_one.ui.next import schedule_model as model
+    from wall_in_one.ui.next.real_schedule import RealScheduling
+    from wall_in_one.ui.next.schedule_state import RuleView
+
+    truth = _truth(status)
+    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    rule = RuleView(id="r1", playlist=route.playlist_id)
+    # schedule.py:806-810, mirrored: the winner is the route's rule id.
+    winner = route.rule_id if route.route == "schedule" else None
+    said = model.reason(
+        rule, dt.datetime(2026, 10, 25, 12, 0), "", winner, lambda *_a: True, mirrored=True
+    )
+    print(f"route.rule_id={route.rule_id!r} reason={said!r}")
+    return route.rule_id, said
+
+
+def test_q2_with_rule_ids_left_out_the_rule_in_force_isnt_overridden() -> None:
+    _rule_id, said = _winner_reason(_mirrored_rule_in_force(ids_left_out=True))
+    assert said != ("Overridden", "overridden"), (
+        "schedules[].in_force says r1 is in force, and the Why popover calls it overridden"
+    )
+
+
+def test_q2_with_rule_ids_left_out_the_route_still_names_the_rule_in_force() -> None:
+    rule_id, _said = _winner_reason(_mirrored_rule_in_force(ids_left_out=True))
+    assert rule_id == "r1", "no now pill: schedule.py:729 keys on the route's rule id"
+
+
+def test_control_q2_with_rule_ids_the_rule_is_playing() -> None:
+    rule_id, said = _winner_reason(_mirrored_rule_in_force(ids_left_out=False))
+    assert (rule_id, said) == ("r1", ("Playing", "playing"))
+
+
+def test_q2_a_retried_transition_names_no_rule_it_cant_be_sure_of() -> None:
+    # The row stays on its earlier rule while a transition is retried, so with the id
+    # left out the rule now in force is not necessarily the row's.
+    status = _mirrored_rule_in_force(ids_left_out=True)
+    status["displays"][0]["automatic_retry"] = {
+        "attempt": 1,
+        "maximum_attempts": 3,
+        "reason": "schedule",
+    }
+    rule_id, _said = _winner_reason(status)
+    assert rule_id is None, rule_id
+
+
+def test_q2_independent_names_no_rule_either() -> None:
+    # `in_force` is the global answer, not one display's.
+    status = _mirrored_rule_in_force(ids_left_out=True)
+    status["display_mode"] = "independent"
+    rule_id, _said = _winner_reason(status)
+    assert rule_id is None, rule_id
 
 
 def test_control_gate_version_1_with_the_flag_infers_nothing() -> None:

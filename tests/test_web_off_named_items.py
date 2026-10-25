@@ -3,7 +3,7 @@
 For a service with no check of an item's type of its own, the shutdown's last step judges the
 file by the ids it names: read off the compiler's own lines when that is all it names
 (`runtime_config.compiled_scenes`), otherwise parsed (`runtime_config.named_scenes`), then each
-id's own ``project.json`` (`workshop.may_be_web`), never a scan. Every doubt counts as a web page.
+id's own ``project.json`` (`workshop.web_among`), never a scan. Every doubt counts as a web page.
 """
 
 from __future__ import annotations
@@ -79,15 +79,15 @@ def test_a_web_page_and_a_preset_of_one_are_found() -> None:
     _item("101", SCENE)
     _item("104", WEB)
     _item("105", {"title": "Preset", "preset": {"a": 1}, "dependency": "104"})
-    assert workshop.may_be_web(["101", "104"])
-    assert workshop.may_be_web(["101", "105"])
+    assert workshop.web_among(["101", "104"]) == (True, False)
+    assert workshop.web_among(["101", "105"]) == (True, False)
 
 
 def test_control_scenes_and_a_preset_of_one_are_not() -> None:
     _item("101", SCENE)
     _item("105", {"title": "Preset", "preset": {"a": 1}, "dependency": "101"})
-    assert not workshop.may_be_web(["101", "105"])
-    assert not workshop.may_be_web([])
+    assert workshop.web_among(["101", "105"]) == (False, False)
+    assert workshop.web_among([]) == (False, False)
 
 
 @pytest.mark.parametrize(
@@ -133,7 +133,7 @@ def test_every_doubt_counts_as_a_web_page(doubt: str) -> None:
         named = ["105"]
     else:
         give_up = True
-    assert workshop.may_be_web(named, lambda: give_up), doubt
+    assert workshop.web_among(named, lambda: give_up) == (False, True), doubt
 
 
 # -- what the files confirm, apart from what they can't (none heard: only the first counts) ----
@@ -178,4 +178,3 @@ def test_what_the_files_confirm_and_what_they_cant(case: str, expected: tuple[bo
     if case == "a-web-page-after-one-not-installed":
         named = ["109", "104"]
     assert workshop.web_among(named) == expected
-    assert workshop.may_be_web(named) is any(expected)

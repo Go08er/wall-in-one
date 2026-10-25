@@ -959,15 +959,6 @@ def holds_web(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> bool
     return "web" in {base.kind, base.declared_type, base.lenient_type}
 
 
-def may_be_web(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> bool:
-    """Whether any Workshop item of ``ids`` is, or may be, a web wallpaper's (`web_among`).
-
-    Fails closed: what can't be checked counts as one.
-    """
-    confirmed, unchecked = web_among(ids, give_up)
-    return confirmed or unchecked
-
-
 def web_among(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> tuple[bool, bool]:
     """Whether a Workshop item of ``ids`` is a web wallpaper's, and whether one can't be checked.
 

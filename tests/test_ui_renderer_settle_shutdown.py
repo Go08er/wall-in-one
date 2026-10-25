@@ -876,14 +876,19 @@ def _in_the_last_steps_wait() -> bool:
 SLOW_SAVE: float = 4.0
 
 
+@pytest.mark.parametrize("slow_in", ["its-check", "its-write"])
 def test_a_save_turning_web_off_slower_than_two_seconds_is_still_waited_for(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, slow_in: str
 ) -> None:
-    """``--service``, "Stop animations on battery" on, Ctrl-C just after the web toggle, no
-    number waiting: the toggle's save is still checking the service when the loop ends, and its
-    status call answers only 4 s after the shutdown has dropped its runtime lane, within what
-    such a save can take. Before: the end of the shutdown waited 2 s, read the setting still on,
-    and left the file that allows web wallpapers."""
+    """``--service``, Ctrl-C just after the web toggle, no number waiting: the toggle's save is
+    still being written when the loop ends, and lands only 4 s after the shutdown has dropped its
+    runtime lane, within what such a save can take. ``its-check``: "Stop animations on battery"
+    is on, and the save's status call answers late. ``its-write``: the write itself is slow, as
+    a batch that also changes the library's sources is while its dry run scans them (review
+    r13e's p4: 1.5 s for 2,500 Workshop items). Before (d4a369d): the end of the shutdown waited
+    2 s, read the setting still on, and left the file that allows web wallpapers. Both pass at
+    040b3aa, which waits for the save as long as it can take: the file is replaced, and only
+    after the save has landed."""
     application, clip, _slow, spans = _setup(
         monkeypatch,
         tmp_path,
@@ -891,25 +896,51 @@ def test_a_save_turning_web_off_slower_than_two_seconds_is_still_waited_for(
         service=True,
         settle_seconds=2.0,
         allow_web=True,
-        battery=True,
+        battery=slow_in == "its-check",
     )
     failures: list[str] = []
     answered = threading.Event()
     timers: list[threading.Timer] = []
+    order: list[str] = []
 
-    def status_call() -> None:
+    def late() -> None:
         _until(
             lambda: application._runtime_shutdown and application._runtime_jobs is None,
             failures,
             "the shutdown to drop its runtime lane",
         )
-        timer = threading.Timer(SLOW_SAVE, answered.set)  # the service answers, late
+        timer = threading.Timer(SLOW_SAVE, answered.set)  # the service answers, or the scan ends
         timers.append(timer)
         timer.start()
         if not answered.wait(GIVE_UP):
-            failures.append("the status call was never answered")
+            failures.append("the save was never let go")
 
-    _held_save_check(monkeypatch, status_call)
+    if slow_in == "its-check":
+        _held_save_check(monkeypatch, late)
+    update = config.update
+
+    def recorded_save(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+        turning = "allow_web_wallpapers" in changes and (
+            threading.current_thread() is not threading.main_thread()
+        )
+        if turning and slow_in == "its-write":
+            late()
+        saved = update(changes, *arguments, **keywords)
+        if turning:
+            order.append("saved")
+        return saved
+
+    monkeypatch.setattr(config, "update", recorded_save)
+    install = runtime_config._install
+
+    def recorded_install(*arguments: Any, **keywords: Any) -> None:
+        if application._runtime_shutdown and (
+            threading.current_thread() is threading.main_thread()
+        ):
+            order.append("replaced")
+        install(*arguments, **keywords)
+
+    monkeypatch.setattr(runtime_config, "_install", recorded_install)
     published: list[bool] = []
 
     def scenario() -> Iterator[Step]:
@@ -927,12 +958,13 @@ def test_a_save_turning_web_off_slower_than_two_seconds_is_still_waited_for(
             timer.join()
     assert not failures, failures
     assert published == [True], "the first publication didn't allow web wallpapers"
-    assert timers, "the save never checked the service"
+    assert timers, "the save was never held"
     assert not spans, "a settle ran, with no number waiting"
     assert config.load_strict().allow_web_wallpapers is False
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
         "settings.toml says web wallpapers are off, and the file on disk still allows them"
     )
+    assert order == ["saved", "replaced"], f"not waited for: {order}"
 
 
 def test_a_quit_with_no_save_being_written_waits_for_nothing(

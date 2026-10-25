@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from collections.abc import Callable
@@ -753,6 +754,58 @@ def test_compiler_lock_timeout_preserves_the_last_known_good(
     finally:
         _finish_lock_holder(process, release)
         session.shutdown()
+
+
+@pytest.mark.parametrize("held_by", ["another-process", "another-thread", "control-free"])
+def test_compiler_lock_stops_waiting_once_given_up(tmp_path: Path, held_by: str) -> None:
+    """``give_up``: asked at each poll while the lock is busy, and once it says so, the wait ends
+    there, long before its timeout, whichever half of the lock is busy: the file's (another
+    process) or this process's gate (another thread). Counted in polls, not timed. A free lock
+    is still taken, however ``give_up`` answers."""
+    target = tmp_path / "runtime.toml"
+    asked: list[bool] = []
+
+    def give_up() -> bool:
+        asked.append(True)
+        return len(asked) >= 3
+
+    let_go = threading.Event()
+    holding = threading.Event()
+    process: subprocess.Popen[str] | None = None
+    thread: threading.Thread | None = None
+    release = tmp_path / "held.release"
+    if held_by == "another-process":
+        process = _start_lock_holder(target, tmp_path / "held.ready", release)
+    elif held_by == "another-thread":
+
+        def hold() -> None:
+            with runtime_config.compiler_lock(target):
+                holding.set()
+                let_go.wait(60)
+
+        thread = threading.Thread(target=hold)
+        thread.start()
+        assert holding.wait(60)
+    entered = False
+    try:
+        if held_by == "control-free":
+            with runtime_config.compiler_lock(target, timeout=60, give_up=lambda: True):
+                entered = True
+            assert entered
+            return
+        with (
+            pytest.raises(runtime_config.RuntimeConfigError, match="stopped waiting"),
+            runtime_config.compiler_lock(target, timeout=60, give_up=give_up),
+        ):
+            entered = True
+        assert not entered
+        assert len(asked) == 3, asked
+    finally:
+        let_go.set()
+        if thread is not None:
+            thread.join()
+        if process is not None:
+            _finish_lock_holder(process, release)
 
 
 def test_compiler_lock_refuses_a_symlink_without_touching_its_target(tmp_path: Path) -> None:

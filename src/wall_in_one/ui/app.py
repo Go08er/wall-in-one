@@ -2248,10 +2248,14 @@ class Application(Adw.Application):
 
         A second Ctrl-C, during the settle or here, ends these waits at once
         (review r13c, N-2): the save still being written is then not waited
-        for, and the lock is only tried. Losing that save is accepted: the
-        person cut it off. What has already landed is still acted on, which
-        waits for nothing. Never raises.
+        for, and the lock is only tried. Its handler is installed for the
+        whole step (`_second_interrupt_ends_the_settle`), and each wait looks
+        for it every `SHUTDOWN_INTERRUPT_POLL_SECONDS`, the lock's included
+        (`runtime_config.compiler_lock`'s ``give_up``; review r13e, L1).
+        Losing that save is accepted: the person cut it off. What has already
+        landed is still acted on, which waits for nothing. Never raises.
         """
+        restore = self._second_interrupt_ends_the_settle()
         try:
             self._replace_web_off_on_disk()
         except Exception:
@@ -2259,6 +2263,8 @@ class Application(Adw.Application):
                 "the runtime configuration on disk could not be checked against "
                 "Allow web wallpapers at shutdown"
             )
+        finally:
+            restore()
 
     def _replace_web_off_on_disk(self) -> None:
         """`_web_off_on_disk_at_exit`'s work."""
@@ -2274,7 +2280,8 @@ class Application(Adw.Application):
             try:
                 held.enter_context(
                     runtime_config.compiler_lock(
-                        timeout=0.0 if self._settle_cut else SHUTDOWN_WEB_OFF_LOCK_SECONDS
+                        timeout=0.0 if self._settle_cut else SHUTDOWN_WEB_OFF_LOCK_SECONDS,
+                        give_up=lambda: self._settle_cut,
                     )
                 )
             except runtime_config.RuntimeConfigError:
@@ -2310,7 +2317,8 @@ class Application(Adw.Application):
         Only a save at the head of the authoring lane, unsettled: the
         worker's run is then that save's. A number's write, say, isn't waited
         for. A second Ctrl-C ends the wait (`_second_interrupt_ends_the_settle`,
-        installed for it); one during the settle means it isn't begun.
+        installed by the step for all of it); one during the settle means it
+        isn't begun.
         """
         with self._settings_authoring_lock:
             saving_settings = self._settings_batch_generation is not None
@@ -2318,16 +2326,12 @@ class Application(Adw.Application):
         if saving is None or saving.done() or self._settle_cut:
             return
         deadline = time.monotonic() + SETTINGS_SAVE_SECONDS
-        restore = self._second_interrupt_ends_the_settle()
-        try:
-            while not saving.done() and not self._settle_cut:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return
-                # In slices: Python runs the Ctrl-C handler between them.
-                futures.wait((saving,), timeout=min(remaining, SHUTDOWN_INTERRUPT_POLL_SECONDS))
-        finally:
-            restore()
+        while not saving.done() and not self._settle_cut:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            # In slices: Python runs the Ctrl-C handler between them.
+            futures.wait((saving,), timeout=min(remaining, SHUTDOWN_INTERRUPT_POLL_SECONDS))
 
     def _web_off_document_now(self, settings: config.Settings, status: object) -> str:
         """What `_web_off_on_disk_at_exit` installs: a web-off compile, else nothing to play."""

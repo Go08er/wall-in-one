@@ -455,6 +455,39 @@ def _lock_timeout(path: Path, seconds: float) -> RuntimeConfigError:
     )
 
 
+def _lock_given_up(path: Path) -> RuntimeConfigError:
+    return RuntimeConfigError(
+        _lock_trouble(
+            "stopped waiting for the runtime compiler lock; "
+            "the last-known-good runtime configuration was left untouched",
+            path,
+        )
+    )
+
+
+def _acquire_gate(
+    deadline: float, give_up: Callable[[], bool] | None, lock_path: Path, wait: float
+) -> None:
+    """Take this process's half of the lock (`_LOCAL_COMPILER_GATE`) by ``deadline``, or raise.
+
+    With ``give_up``, waited for in `COMPILER_LOCK_POLL_SECONDS` slices, and
+    not after ``give_up()`` says so: one wait for the whole timeout runs no
+    Python code, and so can't be ended early.
+    """
+    if give_up is None:
+        if not _LOCAL_COMPILER_GATE.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise _lock_timeout(lock_path, wait)
+        return
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if _LOCAL_COMPILER_GATE.acquire(timeout=min(COMPILER_LOCK_POLL_SECONDS, remaining)):
+            return
+        if give_up():
+            raise _lock_given_up(lock_path)
+        if remaining <= 0:
+            raise _lock_timeout(lock_path, wait)
+
+
 def _open_compiler_lock(path: Path) -> int:
     try:
         paths.ensure_directory(path.parent)
@@ -515,12 +548,18 @@ def compiler_lock(
     target: Path | None = None,
     *,
     timeout: float | None = None,
+    give_up: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     """Serialise every complete authoring-snapshot compilation.
 
     The headless compiler holds this before it reads settings or authoring
     stores. ``write`` and ``update`` enter it too, making direct and GUI callers
     safe while remaining re-entrant on the same thread and target.
+
+    ``give_up``: asked at every poll while the lock is busy; once it says
+    so, the wait ends there, as at the timeout (`RuntimeConfigError`). The
+    lock is still tried once. For a wait a second Ctrl-C ends
+    (`Application._web_off_on_disk_at_exit`).
     """
 
     document = target if target is not None else paths.runtime_config_path()
@@ -530,9 +569,7 @@ def compiler_lock(
         raise RuntimeConfigError("runtime compiler lock timeout cannot be negative")
     deadline = time.monotonic() + wait
 
-    remaining = max(0.0, deadline - time.monotonic())
-    if not _LOCAL_COMPILER_GATE.acquire(timeout=remaining):
-        raise _lock_timeout(lock_path, wait)
+    _acquire_gate(deadline, give_up, lock_path, wait)
     try:
         held = _COMPILER_LOCK_STATE.held
         if held is not None:
@@ -560,6 +597,8 @@ def compiler_lock(
                     break
                 except BlockingIOError:
                     remaining = deadline - time.monotonic()
+                    if give_up is not None and give_up():
+                        raise _lock_given_up(lock_path) from None
                     if remaining <= 0:
                         raise _lock_timeout(lock_path, wait) from None
                     time.sleep(min(COMPILER_LOCK_POLL_SECONDS, remaining))

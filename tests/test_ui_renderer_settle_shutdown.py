@@ -35,6 +35,8 @@ that isn't the number's.
 
 from __future__ import annotations
 
+import fcntl
+import os
 import signal
 import threading
 import time
@@ -915,6 +917,159 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
             _join_lanes()
     assert not failures, failures
     assert "second" in marks, "the second Ctrl-C was never sent"
+    assert ended - marks["second"] < 1.0, (
+        f"run() returned {ended - marks['second']:.2f}s after the second Ctrl-C"
+    )
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, "handler not restored"
+
+
+# -- r13e L1: the wait for the compiler lock ends at a second Ctrl-C too -----------------------
+
+
+def _held_compiler_lock(
+    by: str, holding: threading.Event, let_go: threading.Event, marks: dict[str, float]
+) -> None:
+    """Off GTK: hold the compiler lock as ``by`` does until ``let_go`` (or `GIVE_UP`).
+
+    ``this-process``: the lock as this process's own lane takes it (`runtime_config.compiler_lock`,
+    its in-process gate and the file's flock); ``another-process``: the file's flock alone, on an
+    open file of its own, as another process holds it.
+    """
+    if by == "this-process":
+        with runtime_config.compiler_lock():
+            holding.set()
+            let_go.wait(GIVE_UP)
+            marks["let go"] = time.monotonic()
+        return
+    lock_path = runtime_config._compiler_lock_path(paths.runtime_config_path())
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        holding.set()
+        let_go.wait(GIVE_UP)
+        marks["let go"] = time.monotonic()
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("holder", "variant"),
+    [
+        ("this-process", "second-ctrl-c"),
+        ("another-process", "second-ctrl-c"),
+        ("this-process", "control-let-go"),
+    ],
+)
+def test_a_second_ctrl_c_ends_the_wait_for_the_compiler_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, holder: str, variant: str
+) -> None:
+    """``--service``, web wallpapers on and then turned off just before Ctrl-C: the save lands once
+    the shutdown has dropped its runtime lane, so it gets no publication, and the end of the
+    shutdown finds the file that allows them. Another writer holds the compiler lock meanwhile:
+    this process's own lane, or another process. A second Ctrl-C while the end of the shutdown
+    waits for that lock ends the wait at once, and ``run()`` returns with the lock still held.
+    The wait's own bound is put out of reach, so only the holder or the Ctrl-C can end it.
+    Before (r13e, L1): the step's Ctrl-C handler was installed only while it waited for a save,
+    so PyGObject's swallowed this one, and the lock was waited for until the holder let go. The
+    control: the holder lets go while the step waits, and the file is replaced."""
+    application, clip, _slow, spans = _setup(
+        monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
+    )
+    monkeypatch.setattr(app_module, "SHUTDOWN_WEB_OFF_LOCK_SECONDS", 2 * GIVE_UP)
+    failures: list[str] = []
+    marks: dict[str, float] = {}
+    holding = threading.Event()
+    waiting = threading.Event()
+    let_go = threading.Event()
+    held: list[threading.Thread] = []
+    second = variant == "second-ctrl-c"
+
+    def hold() -> None:
+        _held_compiler_lock(holder, holding, let_go, marks)
+
+    def watch() -> None:
+        # Once the end of the shutdown waits for the lock: the second Ctrl-C, or the control's
+        # letting go.
+        if not waiting.wait(GIVE_UP):
+            failures.append("the end of the shutdown never waited for the compiler lock")
+        elif second:
+            marks["second"] = time.monotonic()
+            _interrupt(failures)
+        else:
+            let_go.set()
+
+    update = config.update
+
+    def late_save(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+        if "allow_web_wallpapers" in changes and (
+            threading.current_thread() is not threading.main_thread()
+        ):
+            _until(
+                lambda: application._runtime_shutdown and application._runtime_jobs is None,
+                failures,
+                "the shutdown to drop its runtime lane",
+            )
+            for work in (hold, watch):
+                thread = threading.Thread(target=work, name=f"test-{work.__name__}")
+                held.append(thread)
+                thread.start()
+            if not holding.wait(GIVE_UP):
+                failures.append("the compiler lock was never taken")
+        return update(changes, *arguments, **keywords)
+
+    monkeypatch.setattr(config, "update", late_save)
+    lock = runtime_config.compiler_lock
+
+    def watched(*arguments: Any, **keywords: Any) -> Any:
+        if threading.current_thread() is threading.main_thread() and application._runtime_shutdown:
+            waiting.set()
+        return lock(*arguments, **keywords)
+
+    monkeypatch.setattr(runtime_config, "compiler_lock", watched)
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        assert runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+        assert application.update_settings_async(allow_web_wallpapers=False)
+        _LANES.extend(application_lanes(application))  # its worker, joined after the run
+        application.quit()  # the first Ctrl-C (SIGINT's fallback calls this)
+
+    ended = 0.0
+    try:
+        if second:
+
+            def launch() -> bool:
+                application.activate()
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(launch)
+            _LANES.clear()
+            with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+                try:
+                    run_application(application, scenario())
+                finally:
+                    ended = time.monotonic()
+                    let_go.set()
+                    _join_lanes()
+        else:
+            _run(application, scenario(), service=True)
+    finally:
+        let_go.set()
+        for thread in held:
+            thread.join()
+    assert not failures, failures
+    assert not spans, "a settle ran, with no number waiting"
+    assert config.load_strict().allow_web_wallpapers is False
+    if not second:
+        assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+            "settings.toml says web wallpapers are off, and the file on disk still allows them"
+        )
+        return
+    assert "second" in marks, "the second Ctrl-C was never sent"
+    assert ended < marks["let go"], (
+        f"the end of the shutdown waited for the compiler lock past a second Ctrl-C, until it "
+        f"was let go ({marks['let go'] - marks['second']:.2f}s after it)"
+    )
     assert ended - marks["second"] < 1.0, (
         f"run() returned {ended - marks['second']:.2f}s after the second Ctrl-C"
     )

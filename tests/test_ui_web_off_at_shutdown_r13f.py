@@ -1407,3 +1407,66 @@ def test_the_looks_bound_ends_the_wait_for_a_parse_in_the_later_judgement(
         f"the judgement waited for the parse ({order})"
     )
     assert now == _nothing_to_play(), "a file whose parse the judgement couldn't finish was left"
+
+
+@pytest.mark.parametrize("first", ["spends-the-bound", "control-quick"])
+def test_a_file_judged_again_under_the_lock_has_only_what_is_left_of_the_bound(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+) -> None:
+    """An older service heard. The step's look before the lock is held past the look's bound
+    (0.5 s here), so the ids it didn't reach count as web pages, and the file is to be replaced;
+    then, just before the step takes the lock, another writer puts a file naming only other
+    scenes there. Judged again under the lock, that file has what is left of the same bound:
+    nothing, so its ids count as web pages too, unread, and it is replaced (fail closed: the
+    look's time was spent). Before: that look had a bound of its own, read every id, and left
+    the file, so the step took up to twice the look's bound, holding the lock for the second.
+    The control: the first look is quick and finds a web page; the file judged again under the
+    lock, with most of the bound left, is read, and left."""
+    application = profiles().application
+    _content, scenes = _workshop(4)
+    spends = first == "spends-the-bound"
+    text = _naming(scenes[:2] if spends else [*scenes[:2], _web_page(4)])
+    meanwhile = _naming(scenes[2:])
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["an-older-service"])
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", 0.5)
+    release, ended = threading.Event(), threading.Event()
+    among = workshop.web_among
+    looks: list[list[str]] = []
+
+    def looked(ids: Any, give_up: Any) -> tuple[bool, bool]:
+        looks.append(list(ids))
+        if spends and len(looks) == 1:
+            release.wait(SLOW_CALL_SECONDS)
+            ended.set()
+        return among(ids, give_up)
+
+    lock = runtime_config.compiler_lock
+    written: list[bool] = []
+
+    def another_writer_first(*arguments: Any, **keywords: Any) -> Any:
+        if not written:
+            written.append(True)
+            paths.runtime_config_path().write_text(meanwhile, encoding="utf-8")
+        return lock(*arguments, **keywords)
+
+    monkeypatch.setattr(workshop, "web_among", looked)
+    monkeypatch.setattr(runtime_config, "compiler_lock", another_writer_first)
+    try:
+        application._web_off_on_disk_at_exit()
+    finally:
+        release.set()
+        if spends:
+            ended.wait(GIVE_UP)
+    _judged_at_exit(application)
+    assert written, "the step never took the lock"
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if not spends:
+        assert now == meanwhile, "a file naming only scenes, read within the bound, was replaced"
+        return
+    assert now == _nothing_to_play(), (
+        "the file judged again under the lock had a bound of its own: its look read every id "
+        "after the step's look had spent the bound, and left it"
+    )

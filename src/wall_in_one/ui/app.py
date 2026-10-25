@@ -321,11 +321,12 @@ SHUTDOWN_LOOK_THREAD: Final = "wio-shutdown-look"
 #: The longest that step gives a wallpaper service older than schema 8 to answer
 #: ``quit`` (`Application._quit_older_service`): its own timeout, and the wait for it.
 SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS: Final = 1.0
-#: How long that step looks at a file, at most (`_may_play_web_while_off`): a
-#: hand edit's parses, and, for a service with no check of an item's type of
-#: its own, the Workshop items it names (`_web_named`). Past it, a parse not
-#: finished counts as allowing web wallpapers, or as naming what can't be
-#: checked, and the items it hasn't looked at count as web pages.
+#: How long that step looks at the files it judges, at most, before the lock
+#: and under it together (`_ExitLook`): a hand edit's parses, and, for a service
+#: with no check of an item's type of its own, the Workshop items a file names
+#: (`_web_named`). Past it, a parse not finished counts as allowing web
+#: wallpapers, or as naming what can't be checked, and the items it hasn't
+#: looked at count as web pages.
 SHUTDOWN_WORKSHOP_LOOK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
@@ -452,7 +453,9 @@ _NAMES: Final = "names"
 _NAMES_WEB: Final = "names-web"
 
 
-def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], bool]) -> str:
+def _may_play_web_while_off(
+    text: str, status: object, give_up: Callable[[], bool], until: float
+) -> str:
     """Why a service that loads ``text`` may play a web page while web wallpapers are off; or "".
 
     `_ALLOWS`: it may allow them, which any service obeys (`_may_allow_web_wallpapers`).
@@ -469,9 +472,8 @@ def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], boo
     on a library that isn't mounted) leaves the file as it is.
 
     Its parses and its look at the Workshop items share one deadline,
-    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` from its start.
+    ``until`` (`_ExitLook.until`).
     """
-    until = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
     if _may_allow_web_wallpapers(text, give_up, until):
         return _ALLOWS
     if runtime_config.nothing_to_play_supported(status):
@@ -490,15 +492,21 @@ class _ExitLook:
 
     One look for the step's own judgements, before the lock and under it,
     which each text is judged once for (`reasons`); another for the later one.
+    Each look has one deadline (`until`), `SHUTDOWN_WORKSHOP_LOOK_SECONDS`
+    from its first judgement: a text judged again under the lock has only
+    what is left of it.
     """
 
     status: object
     reasons: dict[str, str] = field(default_factory=dict)
+    until: float | None = None
 
     def why(self, text: str, give_up: Callable[[], bool]) -> str:
         """`_may_play_web_while_off`, once for each text."""
         if text not in self.reasons:
-            self.reasons[text] = _may_play_web_while_off(text, self.status, give_up)
+            if self.until is None:
+                self.until = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
+            self.reasons[text] = _may_play_web_while_off(text, self.status, give_up, self.until)
         return self.reasons[text]
 
 
@@ -2494,10 +2502,11 @@ class Application(Adw.Application):
         document never has; only a hand edit that has one is parsed, on a
         thread whose wait a second Ctrl-C or the look's bound ends (review
         r13f, N2). So a quit takes at most the settle's bound, that save's
-        bound while one is being written, the lock's, the look's for each text
-        judged (`SHUTDOWN_WORKSHOP_LOOK_SECONDS`: a hand edit's parses, and,
-        unless the service last heard reads schema 8, the look at the Workshop
-        items), and, unless it reads 8, the ``quit``'s.
+        bound while one is being written, the lock's, the look's
+        (`SHUTDOWN_WORKSHOP_LOOK_SECONDS`, for the texts judged before the lock
+        and under it together: a hand edit's parses, and, unless the service
+        last heard reads schema 8, the look at the Workshop items), and, unless
+        it reads 8, the ``quit``'s.
 
         What those waits leave is judged once it has settled, before the
         process exits (`_web_off_judged_once_landed`; review r13f, L1): a

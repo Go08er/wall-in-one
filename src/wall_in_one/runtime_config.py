@@ -847,6 +847,11 @@ def _named_scenes(path: Path | None, text: str | None = None) -> set[str]:
 
     ``text``: that document's text, already read (`Published.replaced`); then
     ``path`` is not read.
+
+    One that isn't TOML 1.0 names none here, though the service, which reads
+    TOML 1.1, may read ids in it (`not_toml_1_0`). Every caller that must not
+    keep a web page asks `allows_web_wallpapers` of the same document too,
+    which counts such a one as allowing them: anything may play from it.
     """
     target = path if path is not None else paths.runtime_config_path()
     try:
@@ -881,8 +886,10 @@ def retained_web_wallpapers(
     leave that document in force asks here (service start with a compile that
     failed, the app after a publication that failed). The Workshop scan
     doesn't depend on the library folders, so it usually works when the
-    compile didn't. An unreadable or malformed document says nothing: the
-    service's own validation judges that. What the scan can't classify is
+    compile didn't. An unreadable or malformed document says nothing here:
+    the service's own validation judges that, and one that isn't TOML 1.0,
+    which the service may read all the same, `allows_web_wallpapers` counts
+    as allowing web wallpapers (`not_toml_1_0`). What the scan can't classify is
     `unchecked_scene_wallpapers`'s to say. ``text``: judge that document's
     text instead of reading ``path`` (the one a publication replaced, which a
     service that refused its successor still holds).
@@ -937,18 +944,60 @@ def allows_web_wallpapers(path: Path | None = None, *, text: str | None = None) 
     starts the engine only while the document doesn't allow web wallpapers),
     so a Workshop item whose type became ``web`` after the compile would play
     as one. A caller that must not keep a web page while the setting is off
-    counts it as one. An unreadable or malformed document says nothing, as for
-    `retained_web_wallpapers`; ``text`` as there.
+    counts it as one. ``text`` as for `retained_web_wallpapers`.
+
+    One the service can't read either says nothing: missing, unreadable, not
+    a regular file (a symbolic link included), over `MAX_RUNTIME_CONFIG_BYTES`
+    or not UTF-8, each of which the service refuses the same way
+    (``Config::read_bytes``: ``O_NOFOLLOW``, the same cap, strict UTF-8). One
+    that isn't TOML 1.0 (`not_toml_1_0`) counts as allowing them (review
+    r13f, N1): the service's parser reads TOML 1.1, so a hand edit such as
+    ``"allow_web_wallpap\\x65rs" = true``, which ``tomllib`` refuses, is
+    loaded as allowing them, and so is the key in an inline table that spans
+    lines. A document that is plainly malformed is counted so too, though the
+    service refuses it: fail closed, since this can't tell the two apart.
     """
     target = path if path is not None else paths.runtime_config_path()
     try:
         if text is None:
             text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
-        document = tomllib.loads(text) if text is not None else {}
-    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
+    except OSError, UnicodeDecodeError:
         return False
+    if text is None:
+        return False
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError, RecursionError:
+        return True
     settings = document.get("settings")
     return isinstance(settings, dict) and settings.get("allow_web_wallpapers") is True
+
+
+def not_toml_1_0(path: Path | None = None, *, text: str | None = None) -> bool:
+    """Whether the published ``runtime.toml`` is there and readable, but isn't TOML 1.0.
+
+    Python's ``tomllib`` reads TOML 1.0; the service's ``toml`` crate reads
+    1.1, which adds ``\\xHH`` and ``\\e`` escapes, newlines and trailing
+    commas in inline tables, and times without seconds. So what such a
+    document allows or names can't be judged here the way the service reads
+    it: `allows_web_wallpapers` counts it as allowing web wallpapers, and
+    `_named_scenes` as naming nothing. A document the service can't read
+    either (as `allows_web_wallpapers` lists) is not one. ``text`` as for
+    `retained_web_wallpapers`.
+    """
+    target = path if path is not None else paths.runtime_config_path()
+    try:
+        if text is None:
+            text = file_io.read_regular_text(target, MAX_RUNTIME_CONFIG_BYTES)
+    except OSError, UnicodeDecodeError:
+        return False
+    if text is None:
+        return False
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError, RecursionError:
+        return True
+    return False
 
 
 def web_wallpapers_in(texts: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:

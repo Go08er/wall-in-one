@@ -655,3 +655,58 @@ def test_control_with_no_service_running_a_document_without_the_key_is_left(
     assert application._web_off_guard() == ""
     assert sent == ["status"]
     assert paths.runtime_config_path().read_text(encoding="utf-8") == text
+
+
+# -- review r13f, N1: a document the service reads as TOML 1.1 ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["x-escape-key", "inline-table-over-lines", "control-off", "control-no-key"]
+)
+def test_a_document_the_service_reads_as_allowing_web_wallpapers_is_ended(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """The guard's judgement of a text, when the service's status doesn't say (a service from
+    before the field). Before: ``[x-escape-key]`` and ``[inline-table-over-lines]``, which the
+    service loads as allowing web wallpapers (`tests.test_web_off_toml_1_1`), were judged not
+    to, and it went on holding them. The controls are TOML 1.0 and allow none: left alone."""
+    from tests.test_web_off_toml_1_1 import document
+
+    application = profiles().application
+    text, _service_allows, _toml_1_0 = document(name)
+    _held(application, text)
+    sent = _service(monkeypatch, schemas=READS_EIGHT)
+    said = application._web_off_guard()
+    if name.startswith("control"):
+        assert _acted(sent) == [], said
+        assert said == ""
+        assert paths.runtime_config_path().read_text(encoding="utf-8") == text
+        return
+    assert _acted(sent) == ["stop", "reload"], said
+    assert _plays_nothing()
+    assert "still holds a configuration that allows web wallpapers" in said
+
+
+@pytest.mark.parametrize("name", ["x-escape-key", "control-no-key"])
+def test_with_no_service_running_a_toml_1_1_document_that_allows_web_is_replaced(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """`_web_off_not_running`: the file is what the next service loads. Before: kept."""
+    from tests.test_web_off_toml_1_1 import document
+
+    application = profiles().application
+    text, _service_allows, _toml_1_0 = document(name)
+    _held(application, text)
+    sent = _not_running(monkeypatch)
+    said = application._web_off_guard()
+    assert sent == ["status"], said
+    if name.startswith("control"):
+        assert said == ""
+        assert paths.runtime_config_path().read_text(encoding="utf-8") == text
+        return
+    assert _plays_nothing(), paths.runtime_config_path().read_text(encoding="utf-8")
+    assert "allows web wallpapers. The service isn\u2019t running" in said, said

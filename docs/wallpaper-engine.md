@@ -237,9 +237,21 @@ that save then fail, nothing plays while the setting stays on, until a
 publication gets through.
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
-a web page, names a Workshop item whose type can't be checked, or allows web
-wallpapers. The unit isn't restarted on 78; the companion tries it again
-every 300 s, which runs the compile again.
+a web page, names a Workshop item whose type can't be checked, allows web
+wallpapers, or isn't TOML the app can read (below). The unit isn't restarted
+on 78; the companion tries it again every 300 s, which runs the compile again.
+
+**A file the app reads differently from the service.** The service reads
+`runtime.toml` as TOML 1.1; the app's checks read TOML 1.0, which refuses what
+1.1 added: `\xHH` and `\e` escapes, an inline table spread over lines or with
+a trailing comma, a time without seconds. Only a hand edit has any of them, and
+one such as `"allow_web_wallpap\x65rs" = true` in `[settings]` is loaded by the
+service as allowing web wallpapers. So every check above (the guard's, the end
+of a quit's, the start's) counts a file the app can't read as TOML 1.0 as one
+that allows web wallpapers. A plainly malformed file is counted so too, since
+the two can't be told apart; the service refuses it anyway. A file the service
+can't read either (a symbolic link, not UTF-8, over 8 MiB) counts as nothing,
+as before.
 
 **When it is on and can't reach the service either.** A service that lists
 schema 8 but isn't confirmed to read it (its installed units can't be

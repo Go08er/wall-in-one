@@ -2395,19 +2395,6 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn attempt_automatic(&mut self, mut pending: PendingAutomatic, now: Instant) {
         self.restore_selection(&pending.candidate);
-        let attempted: Vec<(EntryKey, String)> = self
-            .current_targets(&self.target_outputs)
-            .into_iter()
-            .map(|target| {
-                (
-                    EntryKey {
-                        playlist_id: target.playlist_id,
-                        entry_id: target.entry.id,
-                    },
-                    target.output,
-                )
-            })
-            .collect();
         pending.attempts += 1;
         match self.apply_current() {
             Ok(_) => {
@@ -2419,11 +2406,18 @@ impl<D: WallpaperDriver> Runtime<D> {
             Err(error) => {
                 let mut failures = self.last_apply_failures.clone();
                 if failures.is_empty() {
-                    failures = attempted
+                    // What the apply put up, past the refused entries it
+                    // stepped over: not what the candidate showed before it
+                    // (review r13i R-N6).
+                    failures = self
+                        .current_targets(&self.target_outputs)
                         .into_iter()
-                        .map(|(key, output)| ApplyFailure {
-                            key,
-                            output,
+                        .map(|target| ApplyFailure {
+                            key: EntryKey {
+                                playlist_id: target.playlist_id,
+                                entry_id: target.entry.id,
+                            },
+                            output: target.output,
                             reason: error.clone(),
                         })
                         .collect();

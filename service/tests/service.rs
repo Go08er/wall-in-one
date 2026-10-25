@@ -16728,3 +16728,125 @@ fn control_a_refusal_of_another_item_by_one_routes_command_leaves_the_other_rout
     assert_eq!(entry, "all-media-1");
     assert!(motion);
 }
+
+// -- review r13i R-N6: a failure after a skip is blamed on the entry the apply put up -------
+//
+// A mirrored automatic attempt took what it would blame before its apply. When the apply
+// stepped over a refused entry and then failed without a failure of its own (the pause), the
+// refused entry it never started was blamed, and after three attempts marked taboo; the entry
+// the apply put up wasn't named.
+
+/// The taboo entries' ids, and where a row and its screen disagree.
+fn taboo_and_rows(
+    label: &str,
+    runtime: &mut Runtime<RuntimeDriver>,
+    state: &Arc<Mutex<RuntimeDriverState>>,
+    at: chrono::NaiveDateTime,
+) -> (Vec<String>, serde_json::Value, Vec<String>) {
+    let problems = rows_off_screen(label, runtime, state, at);
+    let snapshot = status(runtime, at);
+    let taboo = snapshot["taboo_entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["entry_id"].as_str().unwrap().to_string())
+        .collect();
+    (taboo, snapshot, problems)
+}
+
+/// Mirrored, both displays on the default all-media (all-media-1 a scene), paused; eve names
+/// the default. At 16:00 the ask-ahead learns all-media-1 is refused and the apply steps over
+/// it to all-media-2. With `fail_pause` the pause can't be set, through three attempts.
+fn paused_at_a_mirrored_boundary_after_a_skip(
+    fail_pause: bool,
+) -> (Vec<String>, serde_json::Value, Vec<String>) {
+    let document = default_rule_document("all-media")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"all-media-1\"\nkind = \"still\"\n",
+            "id = \"all-media-1\"\nkind = \"scene\"\nscene_id = \"3000000021\"\n",
+        )
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+        );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    let reply = runtime_command(&mut runtime, on_the_third(15, 5), "pause", None);
+    assert!(reply.ok, "{}", reply.message);
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("all-media-1".into());
+        recorded.fail_pause = fail_pause;
+    }
+    let start = Instant::now();
+    for seconds in [1, 3, 5, 7, 9] {
+        runtime.tick(on_the_third(16, 0), start + Duration::from_secs(seconds));
+    }
+    taboo_and_rows("16:00", &mut runtime, &state, on_the_third(16, 0))
+}
+
+#[test]
+fn a_pause_failure_after_a_skip_is_blamed_on_the_entry_put_up_not_the_one_skipped() {
+    let (taboo, snapshot, _) = paused_at_a_mirrored_boundary_after_a_skip(true);
+    assert_eq!(
+        taboo,
+        vec!["all-media-2".to_string()],
+        "all-media-1, refused and never started, blamed for the pause: {}",
+        snapshot["taboo_entries"]
+    );
+}
+
+#[test]
+fn control_without_the_pause_failure_the_boundary_skips_and_marks_nothing() {
+    let (taboo, snapshot, problems) = paused_at_a_mirrored_boundary_after_a_skip(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(taboo.is_empty(), "{taboo:?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "all-media-2");
+}
+
+/// The path from before the range: a rule ending with assignments asks nothing ahead, so DP-1
+/// goes back to mixed with its cursor on mixed-1 (a scene), which the apply finds refused and
+/// steps over to mixed-2. With `fail_pause` the pause can't be set, through three attempts.
+fn paused_at_a_mirrored_rules_end_after_a_skip(
+    fail_pause: bool,
+) -> (Vec<String>, serde_json::Value, Vec<String>) {
+    let document = default_rule_document("pages")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"mixed-1\"\nkind = \"still\"\n",
+            "id = \"mixed-1\"\nkind = \"scene\"\nscene_id = \"3000000041\"\n",
+        );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let reply = runtime_command(&mut runtime, on_the_third(16, 5), "pause", None);
+    assert!(reply.ok, "{}", reply.message);
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("mixed-1".into());
+        recorded.fail_pause = fail_pause;
+    }
+    let start = Instant::now() + Duration::from_secs(2);
+    for seconds in [1, 3, 5, 7, 9] {
+        runtime.tick(on_the_third(17, 0), start + Duration::from_secs(seconds));
+    }
+    taboo_and_rows("17:00", &mut runtime, &state, on_the_third(17, 0))
+}
+
+#[test]
+fn a_pause_failure_after_a_skip_at_a_rules_end_is_blamed_on_the_entries_put_up() {
+    let (taboo, snapshot, _) = paused_at_a_mirrored_rules_end_after_a_skip(true);
+    assert!(
+        !taboo.contains(&"mixed-1".to_string()),
+        "mixed-1, refused and never started, blamed for the pause: {}",
+        snapshot["taboo_entries"]
+    );
+    assert!(taboo.contains(&"mixed-2".to_string()), "{taboo:?}");
+}
+
+#[test]
+fn control_without_the_pause_failure_the_rules_end_skips_and_marks_nothing() {
+    let (taboo, snapshot, problems) = paused_at_a_mirrored_rules_end_after_a_skip(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(taboo.is_empty(), "{taboo:?}");
+    assert_eq!(route(&snapshot, "DP-1")["entry_id"], "mixed-2");
+}

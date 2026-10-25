@@ -230,7 +230,11 @@ service that "Stop animations on battery" makes: about 70 seconds at most);
 with none, nothing is waited for. The lock is waited for two seconds at most,
 and only when there is a file to replace; another writer holding it past that
 installs only what the setting allows. A second Ctrl-C ends both waits at
-once, and the save it cuts off is then not acted on.
+once. A save the app stops waiting for (that Ctrl-C, or its bound) still lands
+before the process exits, so one that turns the setting off is judged as if it
+had landed: a file that allows web wallpapers is replaced all the same. Should
+that save then fail, nothing plays while the setting stays on, until a
+publication gets through.
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
 a web page, names a Workshop item whose type can't be checked, or allows web

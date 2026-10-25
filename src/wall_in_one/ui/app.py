@@ -825,6 +825,10 @@ class Application(Adw.Application):
         #: (`_prepare_settings_batch`): what that batch owns and settles, and
         #: nothing accepted after it. None between batches.
         self._settings_batch_generation: int | None = None
+        #: Whether that batch turns web wallpapers off: what the end of a
+        #: shutdown judges by while it is still being written
+        #: (`_settings_save_landed`). Set with the generation.
+        self._settings_batch_turns_web_off = False
         self._settings_requested = self._settings
         self._runtime_status_pending = False
         self._runtime_status_generation = -1
@@ -2244,8 +2248,9 @@ class Application(Adw.Application):
         page while the setting is off, until it next starts (review r13d,
         N11).
 
-        So, once a save still being written has landed: when ``settings.toml``
-        says web wallpapers are off and the file on disk allows them
+        So, once a save still being written has landed, or the wait for it has
+        ended (below): when ``settings.toml`` says web wallpapers are off, or
+        that save turns them off, and the file on disk allows them
         (``allow_web_wallpapers = true``, compiled while they were on, which
         turns the service's own check off), the file is replaced with the
         document that plays nothing (`runtime_config.nothing_to_play_document`),
@@ -2305,8 +2310,13 @@ class Application(Adw.Application):
         whole step (`_second_interrupt_ends_the_settle`), and each wait looks
         for it every `SHUTDOWN_INTERRUPT_POLL_SECONDS`, the lock's included
         (`runtime_config.compiler_lock`'s ``give_up``; review r13e, L1).
-        Losing that save is accepted: the person cut it off. What has already
-        landed is still acted on, which waits for nothing. Never raises.
+        That save isn't lost, though: the process waits for it before it
+        exits (`_shutdown_authoring_jobs`), and so for one still being
+        written past its own bound. So one that turns web wallpapers off is
+        judged as if it had landed (review r13e, L3): a file that allows them
+        is replaced all the same. Should it then fail, nothing plays while
+        they stay on, until a publication gets through. What has already
+        landed is acted on as ever, which waits for nothing. Never raises.
         """
         restore = self._second_interrupt_ends_the_settle()
         try:
@@ -2321,9 +2331,9 @@ class Application(Adw.Application):
 
     def _replace_web_off_on_disk(self) -> None:
         """`_web_off_on_disk_at_exit`'s work."""
-        self._settings_save_landed()
+        turning_off = self._settings_save_landed()
         target = paths.runtime_config_path()
-        if self._web_off_but_allowed_on_disk(target) is None:
+        if self._web_off_but_allowed_on_disk(target, turning_off=turning_off) is None:
             return  # nothing to replace: the lock isn't waited for
         with contextlib.ExitStack() as held:
             try:
@@ -2336,7 +2346,7 @@ class Application(Adw.Application):
             except runtime_config.RuntimeConfigError:
                 return  # a publication holds it, and installs only what the setting allows
             # Judged again, on what is on disk now, and installed in this same hold.
-            settings = self._web_off_but_allowed_on_disk(target)
+            settings = self._web_off_but_allowed_on_disk(target, turning_off=turning_off)
             if settings is None:
                 return
             document = runtime_config.nothing_to_play_document(
@@ -2352,14 +2362,15 @@ class Application(Adw.Application):
             )
 
     @staticmethod
-    def _web_off_but_allowed_on_disk(target: Path) -> config.Settings | None:
-        """``settings.toml`` as read now, when it says web wallpapers are off and ``target``
-        allows them (`_may_allow_web_wallpapers`); otherwise None."""
+    def _web_off_but_allowed_on_disk(target: Path, *, turning_off: bool) -> config.Settings | None:
+        """``settings.toml`` as read now, when it says web wallpapers are off, or a save still
+        being written turns them off (``turning_off``), and ``target`` allows them
+        (`_may_allow_web_wallpapers`); otherwise None."""
         try:
             settings = config.load_strict()
         except config.ConfigError:
             return None  # as for `_web_off_guard`: the next compile says what is wrong with it
-        if settings.allow_web_wallpapers:
+        if settings.allow_web_wallpapers and not turning_off:
             return None
         try:
             on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
@@ -2367,29 +2378,34 @@ class Application(Adw.Application):
             return None
         if on_disk is None or not _may_allow_web_wallpapers(on_disk):
             return None
-        return settings
+        return replace(settings, allow_web_wallpapers=False)
 
-    def _settings_save_landed(self) -> None:
+    def _settings_save_landed(self) -> bool:
         """Wait for a settings save still being written: until it ends, its bound, or a Ctrl-C.
 
         Only a save at the head of the authoring lane, unsettled: the
         worker's run is then that save's. A number's write, say, isn't waited
         for. A second Ctrl-C ends the wait (`_second_interrupt_ends_the_settle`,
         installed by the step for all of it); one during the settle means it
-        isn't begun.
+        isn't begun. Whether such a save, still not done when the wait ends,
+        turns web wallpapers off (`_settings_batch_turns_web_off`): it lands
+        before the process exits all the same. One that is done has said
+        what it saved in ``settings.toml``, or failed.
         """
         with self._settings_authoring_lock:
             saving_settings = self._settings_batch_generation is not None
+            turns_web_off = self._settings_batch_turns_web_off
         saving = self._authoring_future if saving_settings else None
-        if saving is None or saving.done() or self._settle_cut:
-            return
+        if saving is None:
+            return False
         deadline = time.monotonic() + SETTINGS_SAVE_SECONDS
         while not saving.done() and not self._settle_cut:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return
+                break
             # In slices: Python runs the Ctrl-C handler between them.
             futures.wait((saving,), timeout=min(remaining, SHUTDOWN_INTERRUPT_POLL_SECONDS))
+        return turns_web_off and not saving.done()
 
     def _on_close_request(self, window: Gtk.Window) -> bool:
         # Every settings edit is persisted by ``update_settings``.  Saving the
@@ -7857,6 +7873,9 @@ class Application(Adw.Application):
             changes = tuple(
                 (key, field_generation, value)
                 for key, (field_generation, value) in self._settings_authoring_pending.items()
+            )
+            self._settings_batch_turns_web_off = any(
+                key == "allow_web_wallpapers" and not value for key, _gen, value in changes
             )
             roots_edits = tuple(edit for _gen, edit in self._settings_roots_edits)
         change_map = {key: value for key, _gen, value in changes}

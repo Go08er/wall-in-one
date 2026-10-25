@@ -980,7 +980,10 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
 ) -> None:
     """The same slow save, whose status call doesn't answer while the app runs. A second Ctrl-C
     while the end of the shutdown waits for it ends that wait: ``run()`` returns at once, and the
-    save it cut off isn't waited for (the person cut it off)."""
+    save it cut off isn't waited for (the person cut it off). It still lands, as the process's
+    exit waits for it, with web wallpapers off: so the file that allows them is replaced all the
+    same. Before (r13e, L3's last case): it was left, and the page played on while they were
+    off."""
     application, clip, _slow, _spans = _setup(
         monkeypatch,
         tmp_path,
@@ -1036,6 +1039,79 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
         f"run() returned {ended - marks['second']:.2f}s after the second Ctrl-C"
     )
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, "handler not restored"
+    assert config.load_strict().allow_web_wallpapers is False, "the save never landed"
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+        "settings.toml says web wallpapers are off, and the file on disk still allows them"
+    )
+
+
+@pytest.mark.parametrize("variant", ["turns-web-off", "control-another-setting"])
+def test_a_save_still_written_past_its_bound_that_turns_web_off_is_judged_as_landed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
+) -> None:
+    """``--service``, web wallpapers on, Ctrl-C just after a toggle, no number waiting: the save
+    is still being written when the end of the shutdown stops waiting for it at its bound (made
+    short here), and lands only once ``run()`` has returned, as the process's exit waits for it.
+    Before (r13e, L3's last case): the step read the setting still on and left the file that
+    allows web wallpapers, and the save then turned them off. Now a save that turns them off is
+    judged as landed, and the file is replaced. The control: a save of another setting; the file
+    is left as it is."""
+    application, clip, _slow, spans = _setup(
+        monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
+    )
+    monkeypatch.setattr(app_module, "SETTINGS_SAVE_SECONDS", 0.2)
+    turning_off = variant == "turns-web-off"
+    key = "allow_web_wallpapers" if turning_off else "shuffle"
+    failures: list[str] = []
+    returned = threading.Event()
+    update = config.update
+
+    def held_save(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+        if (
+            key in changes
+            and threading.current_thread() is not threading.main_thread()
+            and not returned.wait(GIVE_UP)
+        ):
+            failures.append("run() never returned")
+        return update(changes, *arguments, **keywords)
+
+    monkeypatch.setattr(config, "update", held_save)
+    published: list[tuple[int, int] | None] = []
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        assert runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+        published.append(_identity())
+        assert (
+            application.update_settings_async(allow_web_wallpapers=False)
+            if turning_off
+            else application.update_settings_async(shuffle=True)
+        )
+        _LANES.extend(application_lanes(application))  # its worker, joined after the run
+        application.quit()  # what SIGINT's fallback calls
+
+    def launch() -> bool:
+        application.activate()
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(launch)
+    _LANES.clear()
+    try:
+        assert run_application(application, scenario()) == 0
+    finally:
+        returned.set()
+        _join_lanes()
+    assert not failures, failures
+    assert not spans, "a settle ran, with no number waiting"
+    saved = config.load_strict()
+    if not turning_off:
+        assert saved.shuffle is True and saved.allow_web_wallpapers is True
+        assert _identity() == published[0], "the file was replaced with web wallpapers on"
+        return
+    assert saved.allow_web_wallpapers is False, "the save never landed"
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+        "settings.toml says web wallpapers are off, and the file on disk still allows them"
+    )
 
 
 # -- r13e L1: the wait for the compiler lock ends at a second Ctrl-C too -----------------------

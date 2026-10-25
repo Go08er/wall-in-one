@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use support::compositor::{FakeCompositor, FakeHead, FakeOutput, Layout, WedgedCompositor};
 use wall_in_one_service::config::{Config, Overrides, RendererSettings};
 use wall_in_one_service::outputs::{Output, OutputSource};
-use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, write_response};
+use wall_in_one_service::protocol::{MAX_RESPONSE_BYTES, Response, escaped_len, write_response};
 use wall_in_one_service::renderer::{
     MissingReason, MissingRenderer, PathIdentity, RendererFailure, SystemDriver, WallpaperDriver,
 };
@@ -13492,8 +13492,10 @@ const CUT_AT_THE_CEILING: [&str; 4] = [
 fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
     // 20 of ASK's scenes are refused, so BIG stands in on all 128 rows and the summary. With 64
     // taboo records, a 0.4.0 reply already leaves out `outputs`, `missing_renderers`' paths and
-    // three records; with 32 it is whole. Either way the 0.4.1 fields get no room: what was
-    // cut, and what wasn't, is exactly what the same status without them cuts (a pick of BIG).
+    // two records (lean); with 32 it is whole. Either way the 0.4.1 fields get no room before
+    // 0.4.0's: what was cut, and what wasn't, is exactly what the same status without them cuts
+    // (a pick of BIG). The stand-ins, about 112 KB, don't fit; what room is left goes back to
+    // `refused` rows (review r13e L6: at 040b3aa none, beside 109 KB to spare at 32 records).
     for taboo in [64, 32] {
         let (plain, _) = refusal_ceiling_status("BIG", 20, taboo);
         let (shown, encoded) = refusal_ceiling_status("ASK", 20, taboo);
@@ -13510,15 +13512,27 @@ fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
             );
         }
         assert_eq!(stand_ins(&shown), 0, "{taboo}");
-        assert_eq!(shown["refused"], serde_json::json!([]), "{taboo}");
+        assert_eq!(shown["stand_in_for_omitted"], true, "{taboo}");
+        let listed = shown
+            .get("refused")
+            .map_or(0, |rows| rows.as_array().unwrap().len());
         assert_eq!(
-            shown["refused_omitted"], 20,
-            "{taboo}: every refused item is counted"
+            listed as u64 + shown["refused_omitted"].as_u64().unwrap(),
+            20,
+            "{taboo}: every refused item is listed or counted"
         );
+        // As many rows as fit: one more (about 1.1 KB on the wire) would not.
+        assert!(listed >= 1, "{taboo}: no refused row given back");
+        if listed < 16 {
+            assert!(
+                MAX_RESPONSE_BYTES - encoded < 1_200,
+                "{taboo}: {encoded} bytes, {listed} rows"
+            );
+        }
     }
     let (at_64, _) = refusal_ceiling_status("BIG", 20, 64);
     assert_eq!(
-        at_64["taboo_entries_omitted"], 3,
+        at_64["taboo_entries_omitted"], 2,
         "the ceiling cuts 0.4.0's fields"
     );
     assert_eq!(at_64["outputs"], serde_json::json!([]));
@@ -13529,11 +13543,12 @@ fn refused_rows_and_stand_ins_never_displace_what_a_0_4_0_reply_carries() {
 
 #[test]
 fn at_the_limit_refused_rows_go_before_the_stand_ins_and_each_is_counted() {
-    // With 28 taboo records, everything 0.4.0 carries fits, and every `stand_in_for`, but not
-    // 16 `refused` rows: the last listed go, and `refused_omitted` counts them.
-    let (shown, encoded) = refusal_ceiling_status("ASK", 20, 28);
+    // With 29 taboo records, everything 0.4.0 carries fits, and every `stand_in_for`, but not
+    // 16 `refused` rows: the last listed go, and `refused_omitted` counts them. (With 28, since
+    // a lean reply leaves out what says nothing, all 16 fit.)
+    let (shown, encoded) = refusal_ceiling_status("ASK", 20, 29);
     assert!(encoded <= MAX_RESPONSE_BYTES, "{encoded} bytes");
-    assert_eq!(shown["taboo_entries"].as_array().unwrap().len(), 28);
+    assert_eq!(shown["taboo_entries"].as_array().unwrap().len(), 29);
     assert_eq!(shown["taboo_entries_omitted"], 0);
     assert_eq!(shown["outputs"].as_array().unwrap().len(), 64);
     assert!(
@@ -14023,23 +14038,155 @@ fn assert_inventory_whole(snapshot: &serde_json::Value, rows: usize, label: &str
     );
 }
 
-#[test]
-fn a_status_whose_rows_rule_ids_dont_fit_leaves_them_out_and_says_so() {
-    // The review's corner, at the budget's edge, with a 256-byte rule id of quotes in force
-    // (about 21 KB over the limit at 2adc5b4), in both modes; and with a 220-byte id, which
-    // 0.4.0 still answered and 0.4.1's fixed keys pushed over.
-    let long = format!("{}R", "\\\"".repeat(255));
-    let band = format!("{}R", "\\\"".repeat(219));
-    for (mode, rule_id) in [
-        ("mirrored", &long),
-        ("independent", &long),
-        ("mirrored", &band),
-    ] {
-        let label = format!(
-            "{mode}, {}-byte rule id",
-            rule_id.matches("\\\"").count() + 1
+/// What `value` takes on the wire as compact JSON inside a reply's message (each of its
+/// characters escaped once more).
+fn json_wire_len(value: &serde_json::Value) -> usize {
+    escaped_len(&serde_json::to_string(value).unwrap())
+}
+
+/// What one of `Runtime::abridged`'s units, a rule id or an error, adds beside the `null` or
+/// `""` left in its place (4 bytes on the wire either).
+fn row_unit_len(text: &str) -> usize {
+    json_wire_len(&serde_json::Value::from(text)) - 4
+}
+
+/// What a flag `"key":true` takes on the wire.
+fn flag_wire_len(key: &str) -> usize {
+    escaped_len(&format!(",\"{key}\":true"))
+}
+
+/// The room a reply would have with every row's `schedule_rule_id` and `last_error`, and the
+/// summary's own diagnostics, left out (so both flags set), worked out from one that kept some:
+/// its room, plus what each it kept takes, less the flags it didn't carry. The status budget's
+/// residue, whatever was given back.
+fn room_with_row_units_out(snapshot: &serde_json::Value, wire: usize) -> i64 {
+    let mut room = MAX_RESPONSE_BYTES as i64 - wire as i64;
+    let (mut ids, mut errors) = (false, false);
+    for row in snapshot["displays"].as_array().unwrap() {
+        if let Some(id) = row["schedule_rule_id"].as_str() {
+            room += row_unit_len(id) as i64;
+            ids = true;
+        }
+        let error = row["last_error"].as_str().unwrap();
+        if !error.is_empty() {
+            room += row_unit_len(error) as i64;
+            errors = true;
+        }
+    }
+    for key in ["last_error", "output_discovery_error"] {
+        let error = snapshot[key].as_str().unwrap();
+        if !error.is_empty() {
+            room += row_unit_len(error) as i64;
+            errors = true;
+        }
+    }
+    if ids && snapshot.get("schedule_rule_id_omitted").is_none() {
+        room -= flag_wire_len("schedule_rule_id_omitted") as i64;
+    }
+    if errors && snapshot.get("diagnostics_omitted").is_none() {
+        room -= flag_wire_len("diagnostics_omitted") as i64;
+    }
+    room
+}
+
+/// That a reply left out of its rows only as much as it had to (`Runtime::abridged`, review
+/// r13e L6), and says so: each rule id or error it left out would take more than the room it
+/// has (less that unit's flag, when it is the only one of its kind out), and a connected row
+/// lost one only once every other row had. Every row is the in-force rule's (`rule_id`); the
+/// errors left out are at least as long as each one kept.
+fn assert_row_units_left_out_wouldnt_fit(
+    label: &str,
+    snapshot: &serde_json::Value,
+    wire: usize,
+    rule_id: &str,
+) {
+    let room = MAX_RESPONSE_BYTES - wire;
+    let rows = snapshot["displays"].as_array().unwrap();
+    let ids_out: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["schedule_rule_id"].is_null())
+        .collect();
+    let errors_out: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["renderer_failed"] == true && row["last_error"] == "")
+        .collect();
+    let summary_out = snapshot["renderer_failed"] == true && snapshot["last_error"] == "";
+    assert_eq!(
+        snapshot.get("schedule_rule_id_omitted").is_some(),
+        !ids_out.is_empty(),
+        "{label}: the rule ids' flag"
+    );
+    assert_eq!(
+        snapshot.get("diagnostics_omitted").is_some(),
+        !errors_out.is_empty() || summary_out,
+        "{label}: the diagnostics' flag"
+    );
+    for row in rows {
+        assert_eq!(row["route_source"], "schedule", "{label}");
+        if !row["schedule_rule_id"].is_null() {
+            assert_eq!(row["schedule_rule_id"], rule_id, "{label}");
+        }
+    }
+    let flag_back = |out: usize, key: &str| if out == 1 { flag_wire_len(key) } else { 0 };
+    if !ids_out.is_empty() {
+        let cost = row_unit_len(rule_id)
+            .saturating_sub(flag_back(ids_out.len(), "schedule_rule_id_omitted"));
+        assert!(
+            room < cost,
+            "{label}: {room} bytes to spare beside {} rule ids left out of {cost} each",
+            ids_out.len()
         );
-        let document = at_the_budgets_edge(|still| floor_corner(mode, rule_id, still));
+    }
+    let kept_error = rows
+        .iter()
+        .filter_map(|row| row["last_error"].as_str())
+        .map(row_unit_len)
+        .max()
+        .unwrap_or(0);
+    if !errors_out.is_empty() && kept_error > 0 {
+        let flag = if summary_out {
+            0
+        } else {
+            flag_back(errors_out.len(), "diagnostics_omitted")
+        };
+        assert!(
+            room < kept_error.saturating_sub(flag),
+            "{label}: {room} bytes to spare beside {} errors left out of {kept_error} or more",
+            errors_out.len()
+        );
+    }
+    // Every row has the rule's id; a row has an error when its renderer failed.
+    for (out, what, had) in [
+        (
+            &ids_out,
+            "rule id",
+            (|_| true) as fn(&serde_json::Value) -> bool,
+        ),
+        (&errors_out, "error", |row| row["renderer_failed"] == true),
+    ] {
+        if out.iter().any(|row| row["connected"] == true) {
+            assert!(
+                rows.iter()
+                    .filter(|row| row["connected"] == false && had(row))
+                    .all(|row| out.iter().any(|left| left["connector"] == row["connector"])),
+                "{label}: a connected row's {what} went before another's"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_status_whose_rows_rule_ids_dont_fit_leaves_out_only_as_many_as_it_must() {
+    // The review's corner, at the budget's edge, with a 256-byte rule id of quotes in force
+    // (about 21 KB over the limit at 2adc5b4, and 15 KB at 0.4.0, which sent nothing), in both
+    // modes. The rows' ids go one at a time, the detached rows' first, only until the reply
+    // fits (review r13e L6; at 040b3aa every one went, with about 109 KB to spare). Every
+    // playlist, rule and row is still there, and the rule is still said to be in force.
+    let long = format!("{}R", "\\\"".repeat(255));
+    let rule = format!("{}R", "\"".repeat(255));
+    for mode in ["mirrored", "independent"] {
+        let label = format!("{mode}, 256-byte rule id");
+        let document = at_the_budgets_edge(|still| floor_corner(mode, &long, still));
         let (snapshot, wire, written) = floor_status(&document, 64, None);
         println!("{label}: {wire} bytes on the wire");
         assert!(
@@ -14047,13 +14194,17 @@ fn a_status_whose_rows_rule_ids_dont_fit_leaves_them_out_and_says_so() {
             "{label}: the reply is {wire} bytes: {written:?}"
         );
         assert_inventory_whole(&snapshot, 128, &label);
-        assert_eq!(snapshot["schedule_rule_id_omitted"], true, "{label}");
-        assert!(snapshot.get("diagnostics_omitted").is_none(), "{label}");
-        for row in snapshot["displays"].as_array().unwrap() {
-            assert_eq!(row["route_source"], "schedule", "{label}");
-            assert!(row["schedule_rule_id"].is_null(), "{label}");
-        }
-        // The rule itself is still listed, and still said to be in force.
+        let kept = snapshot["displays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["schedule_rule_id"] == rule.as_str())
+            .count();
+        assert!(
+            (64..128).contains(&kept),
+            "{label}: {kept} rows kept the id"
+        );
+        assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, &rule);
         let rule = snapshot["schedules"]
             .as_array()
             .unwrap()
@@ -14081,18 +14232,19 @@ fn a_status_whose_rows_rule_ids_fit_keeps_them() {
 }
 
 #[test]
-fn the_rows_rule_ids_are_all_a_status_at_the_ceilings_needs_to_leave_out() {
+fn with_its_rows_units_left_out_the_worst_structure_has_room_to_spare() {
     // The worst structure the budget passes: every ceiling, and no string shorter on the wire
-    // than the budget counts it. Without the rows' rule ids its floor fits, with room to spare
-    // for the summary's own diagnostics (`last_error` is at most 12 KiB, four times that
-    // escaped); with a one-byte rule id it fits as it is.
+    // than the budget counts it. With every row's rule id and error left out its reply has room
+    // to spare for the summary's own diagnostics (`last_error` is at most 12 KiB, four times
+    // that escaped), whatever was then given back; with a one-byte rule id it fits as it is.
     for mode in ["mirrored", "independent"] {
         for rule_chars in [256, 1] {
             let label = format!("{mode}, {rule_chars}-byte rule id");
             let document =
                 at_the_budgets_edge(|still| quoted_structure_corner(mode, rule_chars, still));
             let (snapshot, wire, written) = floor_status(&document, 64, None);
-            println!("{label}: {wire} bytes on the wire");
+            let room = room_with_row_units_out(&snapshot, wire);
+            println!("{label}: {wire} bytes on the wire, {room} with the rows' units out");
             assert!(written.is_ok(), "{label}: {wire} bytes");
             assert_inventory_whole(&snapshot, 128, &label);
             assert_eq!(
@@ -14101,19 +14253,21 @@ fn the_rows_rule_ids_are_all_a_status_at_the_ceilings_needs_to_leave_out() {
                 "{label}"
             );
             assert!(
-                MAX_RESPONSE_BYTES - wire > 4 * 12 * 1024 + 4 * 1024,
-                "{label}: {} bytes to spare",
-                MAX_RESPONSE_BYTES - wire
+                room > 4 * 12 * 1024 + 4 * 1024,
+                "{label}: {room} bytes to spare"
             );
         }
     }
 }
 
 #[test]
-fn a_status_whose_diagnostics_dont_fit_leaves_them_out_and_says_so() {
+fn a_status_whose_diagnostics_dont_fit_leaves_out_as_few_as_it_must() {
     // The other text the budget doesn't count on every row: a row's `last_error` (up to 384
     // bytes each, which the budget's diagnostic reserve counts once, not four times). Every
     // apply of BIG's entry, whose id is 256 quotes, fails, so all 128 rows carry the error.
+    // Only as many rows' errors go as must, the detached rows' first, and the one-byte rule ids
+    // stay: they are the shortest units (review r13e N6: at 040b3aa all 128 went first, for
+    // 128 bytes, and then every error too, with 150 KB to spare).
     let document = at_the_budgets_edge(|still| floor_corner("mirrored", "R", still));
     let entry = format!("{}E", "\"".repeat(255));
     let (snapshot, wire, written) = floor_status(&document, 64, Some(&entry));
@@ -14121,17 +14275,31 @@ fn a_status_whose_diagnostics_dont_fit_leaves_them_out_and_says_so() {
     assert!(written.is_ok(), "{wire} bytes");
     assert_inventory_whole(&snapshot, 128, "errors");
     assert_eq!(snapshot["diagnostics_omitted"], true);
-    // A rule id of one byte isn't what was in the way, but it went first.
-    assert_eq!(snapshot["schedule_rule_id_omitted"], true);
-    assert_eq!(snapshot["last_error"], "");
+    assert!(
+        snapshot.get("schedule_rule_id_omitted").is_none(),
+        "no rule id was in the way"
+    );
     assert_eq!(
         snapshot["renderer_failed"], true,
         "what failed is still said"
     );
-    for row in snapshot["displays"].as_array().unwrap() {
-        assert_eq!(row["last_error"], "");
+    assert!(
+        snapshot["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("is borked"),
+        "the summary's own error is the last to go"
+    );
+    let rows = snapshot["displays"].as_array().unwrap();
+    let kept = rows
+        .iter()
+        .filter(|row| !row["last_error"].as_str().unwrap().is_empty())
+        .count();
+    assert!((1..128).contains(&kept), "{kept} rows kept their error");
+    for row in rows {
         assert_eq!(row["renderer_failed"], true);
     }
+    assert_row_units_left_out_wouldnt_fit("errors", &snapshot, wire, "R");
 
     // The control: the same failure on 8 live displays, which leaves room for every error.
     let (snapshot, _, written) = floor_status(&document, 8, Some(&entry));
@@ -14184,10 +14352,11 @@ fn a_reply_that_leaves_out_a_stand_in_says_so() {
 fn at_the_ceiling_only_as_many_taboo_records_go_as_must() {
     // Review r13d N8: the taboo records kept are counted by measuring them, not by building
     // the reply again for each count tried. One more than are kept would not fit.
+    // (61 kept at 040b3aa: a lean reply leaves out what says nothing, room for one more.)
     let (snapshot, encoded) = refusal_ceiling_status("BIG", 20, 64);
     let kept = snapshot["taboo_entries"].as_array().unwrap();
-    assert_eq!(kept.len(), 61);
-    assert_eq!(snapshot["taboo_entries_omitted"], 3);
+    assert_eq!(kept.len(), 62);
+    assert_eq!(snapshot["taboo_entries_omitted"], 2);
     // A record's bytes on the wire: its JSON, each quote and backslash escaped once more.
     let record = serde_json::to_string(&kept[0]).unwrap();
     let on_wire = record.len() + record.matches(['"', '\\']).count();
@@ -14196,4 +14365,741 @@ fn at_the_ceiling_only_as_many_taboo_records_go_as_must() {
         "{} bytes to spare beside a {on_wire}-byte record",
         MAX_RESPONSE_BYTES - encoded
     );
+}
+
+// -- r13e N7: what is left with the rows' units out still fits, whatever else is at its longest -
+//
+// The review's T2: the worst structure (`quoted_structure_corner`, a 256-byte rule id, both
+// modes, at the budget's edge) beside every string the budget doesn't count at its longest at
+// once: a `config_path` of 4,096 quotes, a mirrored `theme_source_connector` of 256 quotes and
+// backslashes, timing on every live row, every row failing or retrying, 64 live outputs of 256
+// quotes. What has to fit beside that is `runtime_executable` at its worst.
+
+/// `quoted_structure_corner` with knobs: BIG's entry id `entry_quotes` quotes (64 there), the
+/// in-force rule with a time window (`window`: 00:00-23:59, so every live row has a schedule
+/// change to report), rotation on (`cycle`), in mirrored mode a theme source of 256 quotes and
+/// backslashes (`mirrored_theme`; the budget doesn't count it), and a second entry of 256
+/// quotes for the rotation to fail on (`second_entry`).
+fn unbudgeted_corner(mode: &str, still: usize, extras: Unbudgeted) -> String {
+    let quotes = |count: usize| "\\\"".repeat(count);
+    let big = quotes(64);
+    let entry_quotes = if extras.failing && !extras.retrying {
+        256
+    } else {
+        64
+    };
+    let theme = if mode == "independent" || extras.mirrored_theme {
+        format!("{}{}", quotes(250), quoted_text("", 0, 6))
+    } else {
+        String::new()
+    };
+    let months =
+        "months = [10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]\nweekdays = [0, 1, 2, 3, 4, 5, 6]\n";
+    let mut document = floor_corner_head(mode, &big, &theme)
+        + &format!(
+            "[[playlists]]\nid = \"{big}\"\nname = \"{}\"\n[[playlists.entries]]\nid = \"{}\"\n\
+             kind = \"still\"\nstill = \"/{}\"\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            "\\\\".repeat(32),
+            quotes(entry_quotes),
+            quotes(still),
+        );
+    if extras.retrying {
+        document.push_str(&format!(
+            "[[playlists.entries]]\nid = \"{}\"\nkind = \"still\"\nstill = \"/s.png\"\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            quotes(256)
+        ));
+    }
+    for index in 0..577 {
+        document.push_str(&format!(
+            "[[playlists]]\nid = \"{}\"\nname = \"{}\"\n\
+             [[playlists.entries]]\nid = \"e\"\nkind = \"still\"\nstill = \"/s.png\"\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n",
+            quoted_text("\"", index, 10),
+            quoted_text("\\", index, 10),
+        ));
+    }
+    for index in 0..511 {
+        document.push_str(&format!(
+            "[[schedules]]\nid = \"{}\"\nplaylist = \"{}\"\nenabled = false\n{months}",
+            quoted_text("\"", index, 10),
+            quoted_text("\"", index % 577, 10),
+        ));
+    }
+    document.push_str(&format!(
+        "[[schedules]]\nid = \"{}\"\nplaylist = \"{big}\"\n{months}{}",
+        "\\\\".repeat(256),
+        if extras.window {
+            "start = \"00:00\"\nend = \"23:59\"\n"
+        } else {
+            ""
+        }
+    ));
+    for index in 0..64 {
+        document.push_str(&format!(
+            "[[displays]]\nconnector = \"{}{}\"\nplaylist = \"{big}\"\n",
+            quotes(250),
+            quoted_text("", index, 6)
+        ));
+    }
+    if extras.cycle || extras.retrying {
+        document = document.replacen("cycle_enabled = false", "cycle_enabled = true", 1);
+    }
+    document
+}
+
+/// Which of the strings the budget doesn't count `unbudgeted_corner` and
+/// `unbudgeted_residue` put at their longest.
+#[derive(Clone, Copy, Debug)]
+struct Unbudgeted {
+    long_path: bool,
+    window: bool,
+    cycle: bool,
+    mirrored_theme: bool,
+    failing: bool,
+    /// Rotation on, onto a second entry that fails: every live row retrying.
+    retrying: bool,
+}
+
+const UNBUDGETED_NONE: Unbudgeted = Unbudgeted {
+    long_path: false,
+    window: false,
+    cycle: false,
+    mirrored_theme: false,
+    failing: false,
+    retrying: false,
+};
+
+const UNBUDGETED_ALL: Unbudgeted = Unbudgeted {
+    long_path: true,
+    window: true,
+    cycle: true,
+    mirrored_theme: true,
+    failing: true,
+    retrying: false,
+};
+
+/// The longest config path `Runtime::new` takes: 4,096 bytes, components of 255 quotes
+/// between slashes. Status echoes it; the budget doesn't count it.
+fn longest_config_path() -> PathBuf {
+    let mut path = String::new();
+    while path.len() < 4096 {
+        path.push('/');
+        let left = 4096 - path.len();
+        path.push_str(&"\"".repeat(left.min(255)));
+    }
+    assert_eq!(path.len(), 4096);
+    PathBuf::from(path)
+}
+
+/// `runtime_executable` at its worst on the wire: `current_exe()` reads /proc/self/exe, at most
+/// 4,095 bytes, components of at most 255; a control character is `\u00XX` in the JSON, 7
+/// bytes on the wire. 16 slashes and 4,079 control characters.
+const WORST_EXECUTABLE_WIRE: usize = 16 + 4079 * 7;
+
+/// The status of `unbudgeted_corner(mode, ..)` at the budget's edge with 64 live outputs of
+/// 256 quotes, every row failing or retrying as `extras` says: the snapshot, its size on the
+/// wire, whether it is sent, and the room it would have with the rows' units out
+/// (`room_with_row_units_out`).
+fn unbudgeted_residue(
+    mode: &str,
+    extras: Unbudgeted,
+) -> (serde_json::Value, usize, Result<(), String>, i64) {
+    let document = at_the_budgets_edge(|still| unbudgeted_corner(mode, still, extras));
+    let failing = extras.failing || extras.retrying;
+    let entry = "\"".repeat(if extras.retrying || extras.failing {
+        256
+    } else {
+        64
+    });
+    let at = noon();
+    let parsed = Config::from_bytes(document.into_bytes()).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(
+            (0..64)
+                .map(|index| {
+                    let mut name = "\"".repeat(249);
+                    name.push('\\');
+                    for bit in (0..6).rev() {
+                        name.push(if index >> bit & 1 == 1 { '\\' } else { '"' });
+                    }
+                    name
+                })
+                .collect(),
+        ),
+        fail_entry_id: failing.then(|| entry.clone()),
+        fail_entry_attempts_remaining: usize::MAX,
+        ..RuntimeDriverState::default()
+    }));
+    let path = if extras.long_path {
+        longest_config_path()
+    } else {
+        PathBuf::from("/tmp/runtime.toml")
+    };
+    let mut runtime = Runtime::new(path, parsed, RuntimeDriver(state), at).unwrap();
+    let applied = runtime.apply_current();
+    assert_eq!(applied.is_ok(), !failing || extras.retrying, "{applied:?}");
+    runtime.tick(at, Instant::now());
+    if extras.retrying {
+        // The rotation is due: it moves to the failing entry, which fails, and retries.
+        runtime.tick(at, Instant::now() + Duration::from_secs(301));
+    }
+    let response = runtime_command(&mut runtime, at, "status", None);
+    assert!(response.ok, "{}", response.message);
+    let mut encoded = Vec::new();
+    let written = write_response(&mut encoded, &response);
+    let wire = serde_json::to_vec(&response).unwrap().len() + 1;
+    let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    let room = room_with_row_units_out(&snapshot, wire);
+    let rows = snapshot["displays"].as_array().unwrap();
+    println!(
+        "[{mode}] {extras:?}: rows {}, timed {}, retrying {}, wire {wire}, room with the rows' \
+         units out {room}, written {written:?}",
+        rows.len(),
+        rows.iter()
+            .filter(|row| !row["route_change_at"].is_null() || !row["next_cycle_at"].is_null())
+            .count(),
+        rows.iter()
+            .filter(|row| !row["automatic_retry"].is_null())
+            .count(),
+    );
+    (snapshot, wire, written, room)
+}
+
+/// What the worst `runtime_executable` takes on the wire beyond this test binary's own, which
+/// every reply measured here carries.
+fn worst_executable_extra() -> i64 {
+    let now = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.to_str().map(escaped_len))
+        .unwrap_or(0);
+    WORST_EXECUTABLE_WIRE as i64 - now as i64
+}
+
+#[test]
+fn with_every_unbudgeted_string_at_its_longest_the_rows_units_out_leave_room_for_the_executable() {
+    // Review r13e T2 and N7. What is left with every row's rule id and error out is the
+    // budget's residue: it must hold the worst `runtime_executable` beside everything else the
+    // budget doesn't count at its longest, or a document the budget passes could get no reply.
+    let extra = worst_executable_extra();
+    for mode in ["mirrored", "independent"] {
+        for extras in [
+            UNBUDGETED_ALL,
+            Unbudgeted {
+                failing: false,
+                retrying: true,
+                ..UNBUDGETED_ALL
+            },
+        ] {
+            let (snapshot, wire, written, room) = unbudgeted_residue(mode, extras);
+            assert!(
+                written.is_ok(),
+                "[{mode}] {extras:?}: {wire} bytes: no reply"
+            );
+            assert_inventory_whole(&snapshot, 128, mode);
+            assert!(
+                room >= extra,
+                "[{mode}] {extras:?}: {room} bytes with the rows' units out, but the worst \
+                 runtime_executable needs {extra} more"
+            );
+            println!(
+                "[{mode}] {extras:?}: {} bytes to spare beside the worst runtime_executable",
+                room - extra
+            );
+        }
+    }
+}
+
+#[test]
+fn control_without_the_unbudgeted_strings_the_residue_is_larger() {
+    // Each extra on its own (said, not judged), then none: the room the residue has is what
+    // they take less.
+    for mode in ["mirrored", "independent"] {
+        let (_, _, _, all) = unbudgeted_residue(mode, UNBUDGETED_ALL);
+        for extras in [
+            Unbudgeted {
+                long_path: true,
+                ..UNBUDGETED_NONE
+            },
+            Unbudgeted {
+                window: true,
+                cycle: true,
+                ..UNBUDGETED_NONE
+            },
+            Unbudgeted {
+                mirrored_theme: mode == "mirrored",
+                ..UNBUDGETED_NONE
+            },
+            Unbudgeted {
+                failing: true,
+                ..UNBUDGETED_NONE
+            },
+            Unbudgeted {
+                retrying: true,
+                ..UNBUDGETED_NONE
+            },
+        ] {
+            let _ = unbudgeted_residue(mode, extras);
+        }
+        let (_, _, written, none) = unbudgeted_residue(mode, UNBUDGETED_NONE);
+        assert!(written.is_ok(), "{mode}");
+        assert!(
+            none > all,
+            "[{mode}] {none} bytes without the extras, {all} with them"
+        );
+    }
+}
+
+// -- r13e L6: a document 0.4.0 answered gets at least what 0.4.0 sent -------------------------
+//
+// The review's band: its corner (`floor_corner`) at the budget's edge, a rule in force whose id
+// is quotes, 64 short taboo records ("band 000" and on), 64 live outputs of 256 bytes. At
+// 040b3aa steps 6 and 7 left out every rule id and error at once, and gave nothing back, where
+// 0.4.0 had sent every one of them and 27 to 41 records; and 0.4.1's null fields took the room
+// of about 30 records 0.4.0 had sent. `BAND_AT_0_4_0` is what d159a20 (0.4.0) sent for the same
+// documents, from the same text run in a d159a20 tree (r13f's probe, 2026-10-25).
+
+/// `floor_corner` with `records` short taboo records on its small playlists.
+fn band_corner(mode: &str, rule_id: &str, still: usize, records: usize) -> String {
+    let mut document = floor_corner(mode, rule_id, still);
+    for index in 0..records {
+        let block = format!(
+            "[[playlists]]\nid = \"{index:03}\"\nname = \"n{index:03}\"\n\
+             [[playlists.entries]]\nid = \"e\"\nkind = \"still\"\nstill = \"/s.png\"\n"
+        );
+        let at = document.find(&block).unwrap() + block.len();
+        document.insert_str(
+            at,
+            &format!("taboo = {{ reason = \"band {index:03}\", source = \"review\" }}\n"),
+        );
+    }
+    document
+}
+
+/// One of the band's documents: its mode, the length of the in-force rule's id (a `R` after
+/// quotes), its records, and the status asked: every row failing on BIG's entry, with that many
+/// quotes in the live outputs' names (otherwise 254); `published` monitors; and both renderers
+/// missing at the longest path.
+#[derive(Clone, Copy, Debug)]
+struct BandCorner {
+    mode: &'static str,
+    rule_chars: usize,
+    records: usize,
+    failing_quoted: Option<usize>,
+    published: usize,
+    missing: bool,
+}
+
+/// What a band reply carried: rows' rule ids and errors, the summary's error, taboo records,
+/// `missing_renderers` rows and those with a path, `outputs`, and how many bytes it had to
+/// spare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BandSent {
+    rule_ids: usize,
+    errors: usize,
+    summary_error: bool,
+    taboo: usize,
+    missing: usize,
+    missing_paths: usize,
+    outputs: usize,
+    spare: usize,
+}
+
+const fn band(mode: &'static str, rule_chars: usize, records: usize) -> BandCorner {
+    BandCorner {
+        mode,
+        rule_chars,
+        records,
+        failing_quoted: None,
+        published: 0,
+        missing: false,
+    }
+}
+
+const fn failing_band(mode: &'static str, quoted: usize) -> BandCorner {
+    BandCorner {
+        failing_quoted: Some(quoted),
+        ..band(mode, 1, 0)
+    }
+}
+
+const fn sent(rule_ids: usize, errors: usize, taboo: usize, spare: usize) -> BandSent {
+    BandSent {
+        rule_ids,
+        errors,
+        summary_error: errors > 0,
+        taboo,
+        missing: 0,
+        missing_paths: 0,
+        outputs: 0,
+        spare,
+    }
+}
+
+/// What d159a20 sent for each corner (every row: 128 rows, and every playlist and rule).
+const BAND_AT_0_4_0: [(BandCorner, BandSent); 13] = [
+    (band("mirrored", 1, 64), sent(128, 0, 64, 103_690)),
+    (band("mirrored", 210, 64), sent(128, 0, 41, 10)),
+    (band("mirrored", 214, 64), sent(128, 0, 30, 75)),
+    (band("mirrored", 220, 64), sent(128, 0, 17, 6)),
+    (band("mirrored", 226, 64), sent(128, 0, 1, 6)),
+    (band("mirrored", 226, 0), sent(128, 0, 0, 201)),
+    (band("independent", 210, 64), sent(128, 0, 30, 120)),
+    (band("independent", 216, 64), sent(128, 0, 17, 51)),
+    (band("independent", 222, 64), sent(128, 0, 1, 51)),
+    (failing_band("mirrored", 48), sent(128, 128, 0, 908)),
+    (failing_band("independent", 180), sent(128, 64, 0, 951)),
+    (
+        BandCorner {
+            missing: true,
+            ..band("mirrored", 212, 64)
+        },
+        sent(128, 0, 35, 140),
+    ),
+    (
+        BandCorner {
+            published: 1,
+            missing: true,
+            ..band("independent", 214, 64)
+        },
+        BandSent {
+            missing: 2,
+            ..sent(128, 0, 19, 41)
+        },
+    ),
+];
+
+/// d159a20's test binary's path on the wire (its `runtime_executable`, in every reply above).
+const BAND_REFERENCE_EXECUTABLE: usize = 114;
+
+/// How much smaller a lean reply is than 0.4.0's for the same content, for a document with no
+/// overrides file: `loaded_overrides_sha256` and `overrides_ignored` (60 bytes) less the three
+/// schemas 0.4.1 lists beside 0.4.0's two (6).
+const LEAN_UNDER_0_4_0: usize = 54;
+
+/// The status of `corner` at the budget's edge, its snapshot and size on the wire.
+fn band_status(corner: BandCorner) -> (serde_json::Value, usize) {
+    let rule = format!("{}R", "\\\"".repeat(corner.rule_chars - 1));
+    let document =
+        at_the_budgets_edge(|still| band_corner(corner.mode, &rule, still, corner.records));
+    let monitors: Vec<Output> = (0..corner.published)
+        .map(|index| Output {
+            name: format!("DP-{index}"),
+            enabled: true,
+            make: "Dell Inc.".into(),
+            model: "U2720Q".into(),
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+            mode_width: 3840,
+            mode_height: 2160,
+            refresh_millihz: Some(59_997),
+            physical_width_mm: 597,
+            physical_height_mm: 336,
+            ..Output::default()
+        })
+        .collect();
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(Box::leak(monitors.into_boxed_slice())));
+    let at = noon();
+    let quoted = corner.failing_quoted.unwrap_or(254);
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(
+            (0..64)
+                .map(|index| {
+                    format!(
+                        "{}{}{index:02}",
+                        "\"".repeat(quoted),
+                        "x".repeat(254 - quoted)
+                    )
+                })
+                .collect(),
+        ),
+        fail_entry_id: corner
+            .failing_quoted
+            .map(|_| format!("{}E", "\"".repeat(255))),
+        fail_entry_attempts_remaining: usize::MAX,
+        missing_renderers: if corner.missing {
+            longest_missing_renderers()
+        } else {
+            Vec::new()
+        },
+        ..RuntimeDriverState::default()
+    }));
+    let parsed = Config::from_bytes(document.into_bytes()).unwrap();
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state),
+        at,
+    )
+    .unwrap();
+    let _ = runtime.apply_current();
+    runtime.tick(at, Instant::now());
+    let response = runtime_command(&mut runtime, at, "status", None);
+    RUNTIME_DRIVER_PUBLISHED.with(|cell| cell.set(&[]));
+    assert!(response.ok, "{}", response.message);
+    let mut encoded = Vec::new();
+    let written = write_response(&mut encoded, &response);
+    let wire = serde_json::to_vec(&response).unwrap().len() + 1;
+    assert!(written.is_ok(), "{corner:?}: {wire} bytes: no reply");
+    let snapshot: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+    assert_inventory_whole(&snapshot, 128, &format!("{corner:?}"));
+    (snapshot, wire)
+}
+
+/// What `snapshot` (`wire` bytes on the wire) carried, as `BandSent` counts it.
+fn band_sent(snapshot: &serde_json::Value, wire: usize) -> BandSent {
+    let rows = snapshot["displays"].as_array().unwrap();
+    let missing = snapshot["missing_renderers"].as_array().unwrap();
+    BandSent {
+        rule_ids: rows
+            .iter()
+            .filter(|row| !row["schedule_rule_id"].is_null())
+            .count(),
+        errors: rows.iter().filter(|row| row["last_error"] != "").count(),
+        summary_error: snapshot["last_error"] != "",
+        taboo: snapshot["taboo_entries"].as_array().unwrap().len(),
+        missing: missing.len(),
+        missing_paths: missing.iter().filter(|row| row["path"] != "").count(),
+        outputs: snapshot["outputs"].as_array().unwrap().len(),
+        spare: MAX_RESPONSE_BYTES - wire,
+    }
+}
+
+/// This test binary's path on the wire beyond d159a20's: the room every reply here has less.
+fn executable_beyond_the_reference() -> i64 {
+    let now = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.to_str().map(escaped_len))
+        .unwrap_or(0);
+    now as i64 - BAND_REFERENCE_EXECUTABLE as i64
+}
+
+/// That `tip` sent at least what `reference` (0.4.0) did, in the documented order of what is
+/// kept longest: every row's rule id and error 0.4.0 sent, and the summary's error, then the
+/// taboo records; `missing_renderers` and `outputs` only where 0.4.0 kept no more records
+/// (none of them is ever kept at a record's expense, at 0.4.0 or now).
+fn assert_at_least_what_0_4_0_sent(label: &str, tip: BandSent, reference: BandSent) {
+    assert!(
+        tip.rule_ids >= reference.rule_ids,
+        "{label}: {tip:?} beside 0.4.0's {reference:?}"
+    );
+    assert!(
+        tip.errors >= reference.errors,
+        "{label}: {tip:?} beside 0.4.0's {reference:?}"
+    );
+    assert!(
+        tip.summary_error >= reference.summary_error,
+        "{label}: {tip:?} beside 0.4.0's {reference:?}"
+    );
+    let order = |sent: BandSent| (sent.taboo, sent.missing, sent.missing_paths, sent.outputs);
+    assert!(
+        order(tip) >= order(reference),
+        "{label}: {tip:?} beside 0.4.0's {reference:?}"
+    );
+}
+
+fn assert_band_at_least_0_4_0(corners: std::ops::Range<usize>) {
+    let beyond = executable_beyond_the_reference();
+    for (corner, reference) in &BAND_AT_0_4_0[corners] {
+        let label = format!("{corner:?}");
+        if ((reference.spare + LEAN_UNDER_0_4_0) as i64) < beyond {
+            // A test binary whose path is this much longer than d159a20's has less room than
+            // 0.4.0 had at this corner, through no change of the reply's.
+            println!("{label}: not compared: this binary's path is {beyond} bytes longer");
+            continue;
+        }
+        let (snapshot, wire) = band_status(*corner);
+        let tip = band_sent(&snapshot, wire);
+        println!("{label}: 0.4.0 {reference:?}; now {tip:?}");
+        assert_at_least_what_0_4_0_sent(&label, tip, *reference);
+        // 0.4.0 sent every row's id and error here, so nothing of them is left out now.
+        assert!(
+            snapshot.get("schedule_rule_id_omitted").is_none(),
+            "{label}"
+        );
+        assert!(snapshot.get("diagnostics_omitted").is_none(), "{label}");
+    }
+}
+
+#[test]
+fn a_band_document_0_4_0_answered_gets_at_least_what_0_4_0_sent_mirrored() {
+    // Review r13e L6. 0.4.0's tightest corners had 6 bytes to spare; a lean reply carrying what
+    // it carried is 54 bytes smaller. At 040b3aa the 210-byte id kept 11 records of 0.4.0's 41,
+    // the 220- and 226-byte ids none of the rule ids.
+    assert_band_at_least_0_4_0(1..6);
+}
+
+#[test]
+fn a_band_document_0_4_0_answered_gets_at_least_what_0_4_0_sent_independent() {
+    assert_band_at_least_0_4_0(6..9);
+}
+
+#[test]
+fn a_failing_band_document_0_4_0_answered_gets_every_error_0_4_0_sent() {
+    // Every row failing, a one-byte rule id: 0.4.0 sent all 128 rows' errors and ids with 908
+    // and 951 bytes to spare; at 040b3aa the mirrored corner sent none of either.
+    assert_band_at_least_0_4_0(9..11);
+}
+
+#[test]
+fn what_is_left_beside_the_records_goes_back_to_missing_renderers_and_outputs() {
+    // The give-back after the records: two missing renderers (their 16 KB paths never fit, the
+    // rows without them do) beside the band's records. Where 0.4.0 had no room left for them
+    // (212-byte id), a lean reply gives them back; where it had, and the extra room now takes
+    // one more record instead (214-byte id, independent), the record goes first, as at 0.4.0.
+    assert_band_at_least_0_4_0(11..13);
+    if executable_beyond_the_reference() > 40 {
+        println!("not counted: this binary's path is longer than the reference's");
+        return;
+    }
+    let (given, wire) = band_status(BAND_AT_0_4_0[11].0);
+    let given = band_sent(&given, wire);
+    assert_eq!(
+        (given.taboo, given.missing, given.missing_paths),
+        (35, 2, 0),
+        "{given:?}"
+    );
+    let (record_first, wire) = band_status(BAND_AT_0_4_0[12].0);
+    let record_first = band_sent(&record_first, wire);
+    assert_eq!(record_first.taboo, 20, "{record_first:?}");
+    // One more record: the 16 KB paths, and the rows without them, have no room beside it.
+    assert!(record_first.spare < 150, "{record_first:?}");
+}
+
+#[test]
+fn control_a_band_document_far_from_the_limit_is_whole_and_says_its_nulls() {
+    // A one-byte rule id with 64 records: whole at 0.4.0 and now, with 0.4.1's fields as they
+    // are below the limit (null, false, [] and 0), and no flag.
+    assert_band_at_least_0_4_0(0..1);
+    let (snapshot, wire) = band_status(BAND_AT_0_4_0[0].0);
+    assert_eq!(band_sent(&snapshot, wire).taboo, 64);
+    for (key, value) in [
+        ("nothing_to_play", serde_json::Value::Null),
+        ("allow_web_wallpapers", false.into()),
+        ("refused", serde_json::json!([])),
+        ("refused_omitted", 0.into()),
+        ("loaded_overrides_sha256", serde_json::Value::Null),
+        ("overrides_ignored", serde_json::Value::Null),
+    ] {
+        assert_eq!(snapshot.get(key), Some(&value), "{key}");
+    }
+    for row in snapshot["displays"].as_array().unwrap() {
+        assert_eq!(row.get("nothing_to_play"), Some(&serde_json::Value::Null));
+        assert_eq!(row.get("entry_name"), Some(&serde_json::Value::Null));
+    }
+}
+
+#[test]
+fn a_reply_at_its_limit_leaves_out_first_what_says_nothing() {
+    // Review r13e L6: the fields 0.4.1 added took, while they said nothing, the room of about
+    // 30 of the records 0.4.0 sent. At the limit they are left out first (absent reads as null,
+    // false, [] or 0, and no flag says so), with 0.4.0's two null overrides fields, so a reply
+    // carrying what 0.4.0's carried is smaller than 0.4.0's though it lists three more schemas.
+    // Every row failing, with no records: what it carries is 0.4.0's whatever this binary's
+    // path takes.
+    let corner = BAND_AT_0_4_0[9];
+    let (snapshot, wire) = band_status(corner.0);
+    let tip = band_sent(&snapshot, wire);
+    assert_eq!(
+        BandSent { spare: 0, ..tip },
+        BandSent {
+            spare: 0,
+            ..corner.1
+        }
+    );
+    for key in [
+        "nothing_to_play",
+        "allow_web_wallpapers",
+        "refused",
+        "refused_omitted",
+        "loaded_overrides_sha256",
+        "overrides_ignored",
+        "stand_in_for_omitted",
+        "schedule_rule_id_omitted",
+        "diagnostics_omitted",
+    ] {
+        assert!(snapshot.get(key).is_none(), "{key}: {}", snapshot[key]);
+    }
+    assert_eq!(
+        snapshot["supported_config_schemas"],
+        serde_json::json!([4, 5, 6, 7, 8])
+    );
+    for row in snapshot["displays"].as_array().unwrap() {
+        assert!(row.get("nothing_to_play").is_none(), "{row}");
+        assert!(row.get("entry_name").is_none(), "{row}");
+    }
+    // The same content as 0.4.0's, LEAN_UNDER_0_4_0 bytes smaller, this binary's path aside.
+    let beyond = executable_beyond_the_reference();
+    assert_eq!(
+        tip.spare as i64 + beyond,
+        (corner.1.spare + LEAN_UNDER_0_4_0) as i64,
+        "{tip:?}"
+    );
+}
+
+// -- r13e L6 and N6: past what 0.4.0 answered, only as much goes as must ----------------------
+
+/// That no taboo record left out would fit in the room `snapshot` has: listing one more adds
+/// it (`record`, a listed one's wire size), a comma, and makes `taboo_entries_omitted` no
+/// longer.
+fn assert_next_record_wouldnt_fit(label: &str, snapshot: &serde_json::Value, wire: usize) {
+    let listed = snapshot["taboo_entries"].as_array().unwrap();
+    let omitted = snapshot["taboo_entries_omitted"].as_u64().unwrap();
+    if omitted == 0 || listed.is_empty() {
+        return;
+    }
+    let digits = |count: u64| count.to_string().len();
+    let cost = json_wire_len(&listed[0]) + 1 - (digits(omitted) - digits(omitted - 1));
+    assert!(
+        MAX_RESPONSE_BYTES - wire < cost,
+        "{label}: {} bytes to spare beside a {cost}-byte record left out",
+        MAX_RESPONSE_BYTES - wire
+    );
+}
+
+#[test]
+fn past_the_band_only_as_many_rule_ids_go_as_must_and_records_come_back() {
+    // 0.4.0 sent nothing for these (EOF): the floor itself is over. At 040b3aa every rule id
+    // went, with about 109 KB to spare. Now as few go as must, the detached rows' first; what
+    // room is left goes back to the records.
+    for corner in [
+        band("mirrored", 228, 64),
+        band("mirrored", 256, 64),
+        band("independent", 224, 64),
+        band("independent", 256, 0),
+    ] {
+        let label = format!("{corner:?}");
+        let (snapshot, wire) = band_status(corner);
+        let tip = band_sent(&snapshot, wire);
+        println!("{label}: {tip:?}");
+        let rule = format!("{}R", "\"".repeat(corner.rule_chars - 1));
+        assert!(tip.rule_ids >= 64, "{label}: {tip:?}");
+        assert!(tip.rule_ids < 128, "{label}: {tip:?}");
+        assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, &rule);
+        assert_next_record_wouldnt_fit(&label, &snapshot, wire);
+    }
+}
+
+#[test]
+fn past_the_band_only_as_many_errors_go_as_must_and_one_byte_rule_ids_stay() {
+    // Every row failing, 0.4.0 again sent nothing. At 040b3aa every rule id and every error
+    // went, with 110 to 150 KB to spare. Now the longest go first, which are the errors: the
+    // one-byte rule ids stay (review r13e N6), and so does the summary's error.
+    for corner in [
+        failing_band("mirrored", 54),
+        failing_band("mirrored", 252),
+        failing_band("independent", 186),
+        failing_band("independent", 252),
+    ] {
+        let label = format!("{corner:?}");
+        let (snapshot, wire) = band_status(corner);
+        let tip = band_sent(&snapshot, wire);
+        println!("{label}: {tip:?}");
+        assert_eq!(tip.rule_ids, 128, "{label}: {tip:?}");
+        assert!(tip.summary_error, "{label}: {tip:?}");
+        assert!(tip.errors > 0, "{label}: {tip:?}");
+        assert_eq!(snapshot["diagnostics_omitted"], true, "{label}");
+        assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, "R");
+    }
 }

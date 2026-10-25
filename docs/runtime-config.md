@@ -367,8 +367,8 @@ every connected display plays nothing, at the top:
 
 | Field | Where | Meaning |
 |---|---|---|
-| `nothing_to_play` | top level, each display row | The reason; `null` while something plays. |
-| `entry_name` | each display row | `"Nothing to play: <reason>"` on such a row, `null` otherwise. The companion shows it as the display's title. |
+| `nothing_to_play` | top level, each display row | The reason; `null` while something plays (absent instead from a reply at its size limit, 0 below). |
+| `entry_name` | each display row | `"Nothing to play: <reason>"` on such a row, `null` otherwise (absent instead at the limit, as `nothing_to_play`). The companion shows it as the display's title. |
 
 On such a row `entry_id`, `kind` and `still` are empty and there is no
 rotation countdown.
@@ -383,7 +383,7 @@ loaded document allows:
 
 | Field | Where | Meaning |
 |---|---|---|
-| `allow_web_wallpapers` | top level | `true` when the document the service holds has `allow_web_wallpapers = true`, `false` otherwise (no key, or a document below 8). Status is only answered with a document loaded; after a refused reload it is the one kept. Added in 0.4.1. |
+| `allow_web_wallpapers` | top level | `true` when the document the service holds has `allow_web_wallpapers = true`, `false` otherwise (no key, or a document below 8). Status is only answered with a document loaded; after a refused reload it is the one kept. Absent instead of `false` from a reply at its size limit (0 below), never while `true`; the app then judges the document the service holds itself, as for a service that doesn't say. Added in 0.4.1. |
 
 **An entry the service refuses is skipped.** Such an entry is never started.
 While motion can start, the service asks before its still goes up, so it isn't
@@ -423,11 +423,11 @@ entries; a reload, the file poll's included, forgets.
 | Field | Where | Meaning |
 |---|---|---|
 | `stand_in_for` | each display row; top level | The playlist the display asked for (its pick, rule, assignment or the default) while `playlist_id` stands in for it. Absent otherwise, never `null`. At the top level, only when every connected display plays the same stand-in for the same playlist. Added in 0.4.1. |
-| `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none. Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
-| `refused_omitted` | top level | How many more items were refused than `refused` lists. Added in 0.4.1. |
+| `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none (absent instead at the limit, 0 below). Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
+| `refused_omitted` | top level | How many more items were refused than `refused` lists; absent instead of `0` at the limit. Added in 0.4.1. |
 | `stand_in_for_omitted` | top level | `true` when the reply left out at least one `stand_in_for`, a row's or the top level's, to fit its size limit (2 below). Absent otherwise, never `false`. A row without `stand_in_for` may then still play a stand-in. Added in 0.4.1. |
-| `schedule_rule_id_omitted` | top level | `true` when the reply left every row's `schedule_rule_id` `null` to fit at all (6 below). Absent otherwise. A row whose `route_source` is `schedule` then names no rule; `schedules[].in_force` still says which is in force. Added in 0.4.1. |
-| `diagnostics_omitted` | top level | `true` when the reply also left every `last_error`, the rows' and the top level's, and `output_discovery_error` empty (7 below). Absent otherwise; `renderer_failed` still says what failed. Added in 0.4.1. |
+| `schedule_rule_id_omitted` | top level | `true` when the reply left at least one row's `schedule_rule_id` `null` to fit at all (6 below). Absent otherwise. A row whose `route_source` is `schedule` and whose `schedule_rule_id` is `null` may then have had one; a row that names one names its own, and `schedules[].in_force` still says which rules are in force. Added in 0.4.1. |
+| `diagnostics_omitted` | top level | `true` when the reply left at least one `last_error`, a row's or the top level's, or `output_discovery_error` empty that wasn't (6 and 7 below). Absent otherwise. An empty one may then not mean "no error"; one that isn't empty is whole, and `renderer_failed` still says what failed. Added in 0.4.1. |
 
 Neither status budget counts these, so the budget is 0.4.0's, and any
 document 0.4.0 published still loads. (Counting them refused a document near
@@ -436,6 +436,16 @@ check.) They are fitted when the reply is built instead, and give way before
 anything a 0.4.0 reply carries. When a reply would not fit, the service leaves
 out, in order:
 
+0. what says nothing: a row's `nothing_to_play` and `entry_name` while `null`,
+   the top level's `nothing_to_play` while `null`, `allow_web_wallpapers` while
+   `false`, `refused` while `[]` and `refused_omitted` while `0`, all added in
+   0.4.1; and 0.4.0's own `loaded_overrides_sha256` and `overrides_ignored`
+   while `null` (one of them always is). An absent one reads as that value,
+   and no flag says so. On 128 rows the 0.4.1 ones took about 5.8 KB, the room
+   of about 30 small taboo records that 0.4.0 sent. Without them a reply that
+   carries what 0.4.0's carried is at least 21 bytes smaller than 0.4.0's on
+   the wire (54 with no overrides file), though `supported_config_schemas`
+   lists three more (0.4.0 loads no document that allows web wallpapers);
 1. `refused` rows, the last listed first, each counted in `refused_omitted`;
 2. every `stand_in_for`, on the rows and at the top level, and says so with
    `stand_in_for_omitted`, whose own bytes are counted in every reply measured
@@ -451,18 +461,34 @@ out, in order:
 4. `missing_renderers`' paths, then its rows;
 5. the oldest taboo records.
 
-Only a document at the schema's ceilings comes near it. With all of these
-gone, what is left is what the budget bounds, apart from what it doesn't count
-on every row. That isn't always within the limit: a rule's id of 256 quotes is
-about 1 KB on the wire, on each of up to 128 rows, so a document at the
-budget's edge with such a rule in force had no reply small enough to send, at
-0.4.0 as well, and every status query got none. So, last, and with nothing
-left out above given back:
+Only a document at the schema's ceilings comes near it, and only one with
+about as many display rows as there can be (64 connected and 64 more
+assigned): a mirrored document as the app compiles it, with one row, at the
+budget's edge, leaves more than 600 KB to spare. With all of these gone, what
+is left is what the budget bounds, apart from what it doesn't count on the
+rows. That isn't always within the limit: a rule's id of 256 quotes is about
+1 KB on the wire, on each of up to 128 rows, so a document at the budget's
+edge with such a rule in force had no reply small enough to send, at 0.4.0 as
+well, and every status query got none. So, last, as little as the reply then
+needs of:
 
-6. every row's `schedule_rule_id`, left `null`, which
-   `schedule_rule_id_omitted` says;
-7. every `last_error`, the rows' and the top level's, and
-   `output_discovery_error`, left empty, which `diagnostics_omitted` says.
+6. the rows' `schedule_rule_id`s, left `null` (`schedule_rule_id_omitted`
+   says so), and the rows' `last_error`s, left empty (`diagnostics_omitted`),
+   together: the longest first, an error before a rule id as long, and a
+   detached row's before a connected row's;
+7. then the top level's `output_discovery_error`, then its `last_error`,
+   left empty (`diagnostics_omitted`).
+
+These are measured, not tried: with every one of them left out, the service
+gives each back, the last first, wherever it still fits, so a short rule id
+stays while a longer error will do, and no more goes than the room needs. A
+document that 0.4.0 answered keeps every one of them. Whatever room the reply
+then has goes back to what was left out before, in the reverse order: taboo
+records, `missing_renderers` whole or without its paths, `outputs`, the
+stand-ins, then `refused` rows (beside the stand-ins, or without them when
+they don't fit). Nothing given back is ever kept at the expense of what comes
+before it, so a reply may carry one taboo record more than 0.4.0's where
+0.4.0 had room only for `missing_renderers`' rows instead.
 
 After 7 the reply carries only the text the budget counts, its fixed keys and
 the structure of the playlists, rules and rows. At the ceilings (578

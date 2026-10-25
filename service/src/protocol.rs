@@ -117,9 +117,21 @@ pub fn success_fits(message: &str) -> bool {
 /// How many bytes `Response::success(message)` leaves of `MAX_RESPONSE_BYTES`
 /// on the wire, or None when it doesn't fit.
 pub fn success_room(message: &str) -> Option<usize> {
+    MAX_RESPONSE_BYTES.checked_sub(success_len(message))
+}
+
+/// How many bytes `Response::success(message)` takes past
+/// `MAX_RESPONSE_BYTES` on the wire: 0 when it fits.
+pub fn success_excess(message: &str) -> usize {
+    success_len(message).saturating_sub(MAX_RESPONSE_BYTES)
+}
+
+/// `Response::success(message)`'s bytes on the wire, measured without
+/// encoding it.
+fn success_len(message: &str) -> usize {
     // `{"ok":true,"message":""}` and the newline.
     const ENVELOPE: usize = 25;
-    MAX_RESPONSE_BYTES.checked_sub(ENVELOPE.saturating_add(escaped_len(message)))
+    ENVELOPE.saturating_add(escaped_len(message))
 }
 
 fn encode_response(response: &Response) -> Result<Vec<u8>, String> {
@@ -328,6 +340,12 @@ mod tests {
         assert_eq!(success_room(&"x".repeat(limit)), Some(0));
         assert_eq!(success_room(&"\"".repeat(10)), Some(limit - 20));
         assert_eq!(success_room(&"x".repeat(limit + 1)), None);
+        assert_eq!(success_excess(&"x".repeat(limit)), 0);
+        assert_eq!(success_excess(&"x".repeat(limit + 7)), 7);
+        assert_eq!(
+            success_excess(&"\"".repeat(limit / 2 + 1)),
+            2 * (limit / 2 + 1) - limit
+        );
     }
 
     #[test]

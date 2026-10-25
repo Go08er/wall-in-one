@@ -5,7 +5,7 @@ use crate::config::{
 };
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
-use crate::protocol::{Request, Response, escaped_len, success_fits, success_room};
+use crate::protocol::{Request, Response, escaped_len, success_excess, success_fits, success_room};
 use crate::renderer::{MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver};
 use crate::schedule;
 use crate::workshop::Refusal;
@@ -205,10 +205,16 @@ pub struct Status<'a> {
     /// omits this field never reads that file.
     pub supported_override_schemas: &'static [u32],
     /// Identity of the applied `runtime-overrides.toml`, `None` without one.
-    pub loaded_overrides_sha256: Option<&'a str>,
+    /// Absent, rather than null, from a reply at its size limit
+    /// (`ReplyShape::lean`), as `overrides_ignored` is: at least one of the
+    /// two is null, which pays for the three schemas 0.4.1 lists beside
+    /// 0.4.0's two.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_overrides_sha256: Option<Option<&'a str>>,
     /// Why a present `runtime-overrides.toml` is not applied, e.g.
     /// `unsupported schema_version 2`; `None` when there is nothing to say.
-    pub overrides_ignored: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overrides_ignored: Option<Option<&'a str>>,
     pub runtime_version: &'static str,
     pub runtime_executable: Option<&'a str>,
     /// What kind of install this service is: `nix`, `system` or `source`
@@ -287,35 +293,46 @@ pub struct Status<'a> {
     /// Why nothing plays, when every connected display plays nothing (the
     /// document's `nothing_to_play`, schema 8, or the service refused every
     /// entry they could play); null otherwise. Each display row says it for
-    /// itself too. Added in 0.4.1.
-    pub nothing_to_play: Option<&'a str>,
+    /// itself too. Added in 0.4.1. Absent, rather than null, from a reply
+    /// at its size limit (`ReplyShape::lean`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nothing_to_play: Option<Option<&'a str>>,
     /// Whether the loaded document allows web wallpapers (`[settings]
     /// allow_web_wallpapers`, schema 8), the one thing that decides whether
     /// the service starts a Wallpaper Engine web page. False for a document
     /// without the key. Status is only ever answered with a document loaded;
-    /// after a refused reload it is the one kept. Added in 0.4.1.
-    pub allow_web_wallpapers: bool,
+    /// after a refused reload it is the one kept. Added in 0.4.1. Absent,
+    /// rather than false, from a reply at its size limit
+    /// (`ReplyShape::lean`); never while true. The app reads its absence as
+    /// a service that doesn't say, and judges the document it holds itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_web_wallpapers: Option<bool>,
     /// The Wallpaper Engine items the service would not start in this
     /// document generation, and why, in the order it found them: each entry
     /// of one is skipped (never a taboo, never saved). At most
     /// `MAX_REFUSED_STATUS_ENTRIES`; `refused_omitted` counts the rest. A
-    /// reload forgets them and asks again. Added in 0.4.1.
-    pub refused: Vec<RefusedStatus<'a>>,
-    pub refused_omitted: usize,
+    /// reload forgets them and asks again. Added in 0.4.1. Absent, rather
+    /// than empty, and the count rather than 0, from a reply at its size
+    /// limit (`ReplyShape::lean`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Vec<RefusedStatus<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_omitted: Option<usize>,
     /// True when this reply left out at least one `stand_in_for` (a row's or
     /// the summary's) to fit its size limit; absent otherwise, never false.
     /// A row without one may then still play a stand-in. Added in 0.4.1.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stand_in_for_omitted: bool,
-    /// True when, to fit at all, this reply left every display row's
+    /// True when, to fit at all, this reply left at least one display row's
     /// `schedule_rule_id` null, which the document's status budget doesn't
-    /// count; absent otherwise. A row whose `route_source` is `schedule` then
-    /// names no rule. Added in 0.4.1.
+    /// count; absent otherwise. A row whose `route_source` is `schedule` and
+    /// whose `schedule_rule_id` is null may then have had one. Added in 0.4.1.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub schedule_rule_id_omitted: bool,
-    /// True when, to fit at all, this reply also left every `last_error`
-    /// (the rows' and the summary's) and `output_discovery_error` empty;
-    /// absent otherwise. Added in 0.4.1.
+    /// True when, to fit at all, this reply left at least one `last_error`
+    /// (a row's or the summary's) or `output_discovery_error` empty that
+    /// wasn't; absent otherwise. An empty one may then not be "no error".
+    /// Added in 0.4.1.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub diagnostics_omitted: bool,
 }
@@ -354,6 +371,20 @@ enum MissingDetail {
 /// doesn't bound (`Runtime::status_reply`).
 #[derive(Clone, Copy, Debug)]
 struct ReplyShape {
+    /// Whether the reply leaves out the fields 0.4.1 added while they say
+    /// nothing: a row's and the summary's `nothing_to_play` and a row's
+    /// `entry_name` while null, `refused` while empty, `refused_omitted`
+    /// while 0 and `allow_web_wallpapers` while false; and, of 0.4.0's own,
+    /// `loaded_overrides_sha256` and `overrides_ignored` while null, at least
+    /// one of which is. Absent, each reads as that value (the app judges the
+    /// document itself where `allow_web_wallpapers` isn't said). Every
+    /// reply but the whole one is lean (review r13e L6: on 128 rows the
+    /// 0.4.1 fields took about 5.8 KB, 30 small taboo records' worth, that
+    /// 0.4.0 had room for). A lean reply that carries what 0.4.0's carried
+    /// is then at least 21 bytes smaller than 0.4.0's, though its
+    /// `supported_config_schemas` lists three more: 0.4.0 loads no document
+    /// that allows web wallpapers.
+    lean: bool,
     /// The most taboo records listed; `taboo_entries_omitted` counts the
     /// rest.
     taboo: usize,
@@ -366,31 +397,49 @@ struct ReplyShape {
     /// stand-in plays for (`stand_in_for`).
     stand_in_for: bool,
     /// What a reply that wouldn't fit even without all of the above leaves
-    /// out of every row.
+    /// out of the rows and the summary.
     rows: RowDetail,
 }
 
-/// How much of what the status budget doesn't count on every display row a
-/// reply carries (`Runtime::abridged`). Each leaves out what the one before
-/// it does, too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum RowDetail {
-    Whole,
-    /// `schedule_rule_id` null (`schedule_rule_id_omitted`).
-    WithoutRuleIds,
-    /// Every `last_error` and `output_discovery_error` empty as well
-    /// (`diagnostics_omitted`).
-    WithoutDiagnostics,
+/// Which of what the status budget doesn't count on the display rows a
+/// reply carries (`Runtime::abridged`): how many rows keep their
+/// `schedule_rule_id` and how many their `last_error`, each of the
+/// connected rows and of the others (`[connected, others]`), the shortest
+/// first; and whether the summary keeps its `output_discovery_error` and
+/// its `last_error`. A row id left out is null (`schedule_rule_id_omitted`),
+/// an error left out empty (`diagnostics_omitted`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowDetail {
+    rule_ids: [usize; 2],
+    errors: [usize; 2],
+    discovery_error: bool,
+    last_error: bool,
+}
+
+impl RowDetail {
+    const WHOLE: Self = Self {
+        rule_ids: [usize::MAX; 2],
+        errors: [usize::MAX; 2],
+        discovery_error: true,
+        last_error: true,
+    };
+    const NONE: Self = Self {
+        rule_ids: [0; 2],
+        errors: [0; 2],
+        discovery_error: false,
+        last_error: false,
+    };
 }
 
 impl ReplyShape {
     const WHOLE: Self = Self {
+        lean: false,
         taboo: MAX_TABOO_STATUS_ENTRIES,
         outputs: true,
         missing: MissingDetail::Full,
         refused: MAX_REFUSED_STATUS_ENTRIES,
         stand_in_for: true,
-        rows: RowDetail::Whole,
+        rows: RowDetail::WHOLE,
     };
 }
 
@@ -403,34 +452,168 @@ struct Omitted {
     diagnostics: bool,
 }
 
-/// Leave out of `displays` what `shape` doesn't carry; `top_level_errors`
-/// says whether the summary has a diagnostic of its own to leave out.
+/// What a reply measured as it was built (`Runtime::status_json_measured`):
+/// its rows' units, and how many bytes on the wire the lean reply of the
+/// same shape takes less.
+#[derive(Debug, Default)]
+struct Measured {
+    units: RowUnits,
+    lean_saving: usize,
+}
+
+/// The bytes on the wire each of `RowDetail`'s row units adds to a reply
+/// that leaves it out (an id beside `null`, an error beside `""`), in the
+/// order a reply keeps them: of the connected rows and of the others, the
+/// shortest first.
+#[derive(Debug, Default)]
+struct RowUnits {
+    rule_ids: [Vec<usize>; 2],
+    errors: [Vec<usize>; 2],
+}
+
+/// What `value`'s compact JSON takes on the wire, each of its characters
+/// escaped once more inside the reply's message (`escaped_len`).
+fn wire_len<T: Serialize + ?Sized>(value: &T) -> usize {
+    serde_json::to_string(value).map_or(0, |json| escaped_len(&json))
+}
+
+/// What a unit of `RowDetail` adds on the wire beside what is left in its
+/// place, `null` or `""`, which take 4 bytes each (`"` is escaped).
+fn unit_len<T: Serialize + ?Sized>(value: &T) -> usize {
+    wire_len(value).saturating_sub(4)
+}
+
+/// What a lean reply saves on the wire by leaving out `"key":value` (and
+/// its comma: no such field is the first of its object).
+fn absent_len(key: &str, value: &str) -> usize {
+    escaped_len(&format!(",\"{key}\":{value}"))
+}
+
+/// What a flag `"key":true` takes on the wire.
+fn flag_len(key: &str) -> usize {
+    absent_len(key, "true")
+}
+
+/// `value` as a reply of `shape` carries a field 0.4.1 added: left out
+/// (None) from a lean one while it `says_nothing`.
+fn lean_field<T>(shape: ReplyShape, value: T, says_nothing: bool) -> Option<T> {
+    (!(shape.lean && says_nothing)).then_some(value)
+}
+
+/// The summary's fields a lean reply leaves out while they say nothing
+/// (`ReplyShape::lean`), as a reply of `shape` carries them, and what
+/// leaving those out saves on the wire.
+struct LeanSummary<'a> {
+    nothing_to_play: Option<Option<&'a str>>,
+    allow_web_wallpapers: Option<bool>,
+    refused: Option<Vec<RefusedStatus<'a>>>,
+    refused_omitted: Option<usize>,
+    loaded_overrides_sha256: Option<Option<&'a str>>,
+    overrides_ignored: Option<Option<&'a str>>,
+    lean_saving: usize,
+}
+
+impl<'a> LeanSummary<'a> {
+    fn of(
+        shape: ReplyShape,
+        config: &'a Config,
+        nothing: Option<&'a str>,
+        refused: Vec<RefusedStatus<'a>>,
+        refused_omitted: usize,
+    ) -> Self {
+        let allow_web = config.settings.allow_web_wallpapers;
+        let overrides = config.overrides_sha256.as_deref();
+        let ignored = config.overrides_ignored.as_deref();
+        let says_nothing = [
+            (nothing.is_none(), "nothing_to_play", "null"),
+            (!allow_web, "allow_web_wallpapers", "false"),
+            (refused.is_empty(), "refused", "[]"),
+            (refused_omitted == 0, "refused_omitted", "0"),
+            (overrides.is_none(), "loaded_overrides_sha256", "null"),
+            (ignored.is_none(), "overrides_ignored", "null"),
+        ];
+        let lean_saving = says_nothing
+            .iter()
+            .filter(|(quiet, _, _)| *quiet)
+            .map(|(_, key, value)| absent_len(key, value))
+            .sum();
+        let [
+            nothing_quiet,
+            web_quiet,
+            refused_quiet,
+            omitted_quiet,
+            loaded_quiet,
+            ignored_quiet,
+        ] = says_nothing.map(|(quiet, _, _)| quiet);
+        Self {
+            nothing_to_play: lean_field(shape, nothing, nothing_quiet),
+            allow_web_wallpapers: lean_field(shape, allow_web, web_quiet),
+            refused: lean_field(shape, refused, refused_quiet),
+            refused_omitted: lean_field(shape, refused_omitted, omitted_quiet),
+            loaded_overrides_sha256: lean_field(shape, overrides, loaded_quiet),
+            overrides_ignored: lean_field(shape, ignored, ignored_quiet),
+            lean_saving,
+        }
+    }
+}
+
+/// Leave out of `displays` what `shape` doesn't carry, and say what was
+/// left out: of the rows, and of the summary's `output_discovery_error` and
+/// `last_error` (`summary`), which its caller leaves out as `shape.rows`
+/// says. What the rows' units take is measured before any is left out.
 fn abridge_rows(
     displays: &mut [DisplayStatus<'_>],
     shape: ReplyShape,
-    top_level_errors: bool,
-) -> Omitted {
+    summary: [&str; 2],
+) -> (Omitted, Measured) {
     let mut omitted = Omitted::default();
+    let mut measured = Measured::default();
     if !shape.stand_in_for {
         omitted.stand_in_for = displays.iter().any(|row| row.stand_in_for.is_some());
         for row in displays.iter_mut() {
             row.stand_in_for = None;
         }
     }
-    if shape.rows >= RowDetail::WithoutRuleIds {
-        omitted.schedule_rule_id = displays.iter().any(|row| row.schedule_rule_id.is_some());
-        for row in displays.iter_mut() {
-            row.schedule_rule_id = None;
+    // Each group's units, the shortest first, ties in row order.
+    let mut rule_ids: [Vec<(usize, usize)>; 2] = Default::default();
+    let mut errors: [Vec<(usize, usize)>; 2] = Default::default();
+    for (index, row) in displays.iter().enumerate() {
+        let group = usize::from(!row.connected);
+        if let Some(rule) = row.schedule_rule_id {
+            rule_ids[group].push((unit_len(rule), index));
+        }
+        if !row.last_error.is_empty() {
+            errors[group].push((unit_len(&row.last_error), index));
         }
     }
-    if shape.rows >= RowDetail::WithoutDiagnostics {
-        omitted.diagnostics =
-            top_level_errors || displays.iter().any(|row| !row.last_error.is_empty());
-        for row in displays.iter_mut() {
-            row.last_error.clear();
+    for group in 0..2 {
+        rule_ids[group].sort_unstable();
+        errors[group].sort_unstable();
+        for &(_, index) in rule_ids[group].iter().skip(shape.rows.rule_ids[group]) {
+            displays[index].schedule_rule_id = None;
+            omitted.schedule_rule_id = true;
+        }
+        for &(_, index) in errors[group].iter().skip(shape.rows.errors[group]) {
+            displays[index].last_error.clear();
+            omitted.diagnostics = true;
+        }
+        measured.units.rule_ids[group] = rule_ids[group].iter().map(|unit| unit.0).collect();
+        measured.units.errors[group] = errors[group].iter().map(|unit| unit.0).collect();
+    }
+    let [discovery_error, last_error] = summary;
+    omitted.diagnostics |= (!shape.rows.discovery_error && !discovery_error.is_empty())
+        || (!shape.rows.last_error && !last_error.is_empty());
+    for row in displays.iter_mut() {
+        if row.nothing_to_play == Some(None) {
+            measured.lean_saving += absent_len("nothing_to_play", "null");
+            row.nothing_to_play = lean_field(shape, None, true);
+        }
+        if row.entry_name == Some(None) {
+            measured.lean_saving += absent_len("entry_name", "null");
+            row.entry_name = lean_field(shape, None, true);
         }
     }
-    omitted
+    (omitted, measured)
 }
 
 /// How many characters `count` takes written in decimal.
@@ -567,13 +750,17 @@ pub struct DisplayStatus<'a> {
     /// Why this display plays nothing: its playlist has no entries (schema
     /// 8). `entry_id`, `kind` and `still` are then empty, nothing of the
     /// service's is on it, and it has no rotation countdown. Null while
-    /// something plays. Added in 0.4.1.
-    pub nothing_to_play: Option<&'a str>,
+    /// something plays; absent instead from a reply at its size limit
+    /// (`ReplyShape::lean`). Added in 0.4.1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nothing_to_play: Option<Option<&'a str>>,
     /// The name of what is on screen, for a display that plays nothing:
     /// "Nothing to play: <reason>", which the companion shows as the
     /// display's title. Null otherwise (the companion then names a wallpaper
-    /// after its still). Added in 0.4.1.
-    pub entry_name: Option<String>,
+    /// after its still); absent instead from a reply at its size limit, like
+    /// `nothing_to_play`. Added in 0.4.1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_name: Option<Option<String>>,
     /// When and why this display's wallpaper next changes on its own.
     #[serde(flatten)]
     pub timing: DisplayTiming,
@@ -5880,14 +6067,17 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// from it except the taboo records' own text, which a document at the
     /// schema's ceilings can push over the limit. Then the oldest records are
     /// left out -- as many as needed, and counted in `taboo_entries_omitted`,
-    /// as the 64-record cap already does -- instead of the reply failing. The
-    /// shape of the status never changes, and `entry_taboo` stays exact.
+    /// as the 64-record cap already does -- instead of the reply failing.
+    /// `entry_taboo` stays exact.
     ///
     /// What the budget doesn't bound at all is fitted here, and goes first.
-    /// The fields added in 0.4.1, `refused` and `stand_in_for`, give way
-    /// before anything a 0.4.0 reply carries, so the budget stays 0.4.0's
-    /// and a document that loaded then still loads (docs/runtime-config.md):
+    /// The fields added in 0.4.1 give way before anything a 0.4.0 reply
+    /// carries, so the budget stays 0.4.0's and a document that loaded then
+    /// still loads (docs/runtime-config.md). In order:
     ///
+    /// 0. those of them that say nothing (`ReplyShape::lean`): with them
+    ///    gone, a reply carrying what 0.4.0's carried is no larger than
+    ///    0.4.0's, given a display row (review r13e L6);
     /// 1. `refused` rows, the last listed first, each counted in
     ///    `refused_omitted`;
     /// 2. every `stand_in_for`, on the rows and in the summary, which
@@ -5900,66 +6090,91 @@ impl<D: WallpaperDriver> Runtime<D> {
     ///
     /// None of the first four is ever kept at a taboo record's expense. With
     /// all of them gone, what is left (the floor) is what the budget bounds,
-    /// apart from what it doesn't count on every row: when even the floor
-    /// wouldn't fit, `abridged` leaves that out too (6 and 7 there).
+    /// apart from what it doesn't count on the rows: when even the floor
+    /// wouldn't fit, `abridged` leaves out as little of that as it then
+    /// needs (6 and 7 there). Whatever room the reply then has is given back
+    /// in the reverse order, as 0.4.0 gave its room back to
+    /// `missing_renderers`: taboo records, `missing_renderers` whole or
+    /// without its paths, `outputs`, the stand-ins, `refused` rows.
     ///
-    /// Each row count is found by measuring its rows, not by building the
-    /// reply again for each count tried (review r13d N8): a reply at the
-    /// limit is built at most nine times (`everything`, without the
-    /// additions, without `outputs`, the floor, its taboo records,
-    /// `missing_renderers` whole and without paths, with the stand-ins, its
-    /// `refused` rows), six with nothing refused, and six when even the
-    /// floor doesn't fit; beside that each taboo record and `refused` row is
-    /// serialized once on its own. Below the limit, once.
+    /// Each count and each piece given back is found by measuring it, not
+    /// by building the reply again for each one tried (review r13d N8): a
+    /// reply at the limit is built at most nine times (`everything`, without
+    /// the additions, without `outputs`, the floor, the floor abridged, its
+    /// taboo records, with what is given back to 4 and 3, with the
+    /// stand-ins, its `refused` rows), six with nothing refused; beside that
+    /// each taboo record, `refused` row, `missing_renderers` and `outputs` is
+    /// serialized once on its own. A lean reply that fits whole is built
+    /// once more, and returned. Below the limit, once. The reply chosen is
+    /// always built and checked: a measure that were ever short would cost
+    /// a build, never the limit.
     fn status_reply(&self, at: NaiveDateTime) -> Result<String, String> {
-        let everything = self.status_json(at, ReplyShape::WHOLE)?;
+        let (everything, measured) = self.status_json_measured(at, ReplyShape::WHOLE)?;
         if success_fits(&everything) {
             return Ok(everything);
+        }
+        // 0: the lean reply is built only when it fits.
+        if success_excess(&everything) <= measured.lean_saving {
+            let lean = self.status_json(
+                at,
+                ReplyShape {
+                    lean: true,
+                    ..ReplyShape::WHOLE
+                },
+            )?;
+            if success_fits(&lean) {
+                return Ok(lean);
+            }
         }
         // Nothing refused, nothing to add: no row stands in (a stand-in
         // needs a refused entry), and `refused` is empty.
         let additions = !self.refused_scenes.is_empty();
         let (shape, best) = self.fitting_without_additions(at, additions)?;
-        if !success_fits(&best) {
-            return self.abridged(at, shape);
-        }
-        if !additions {
+        if !success_fits(&best) || !additions {
             return Ok(best);
         }
         // What room is left: every `stand_in_for`, then as many `refused`
-        // rows as fit.
-        let shape = ReplyShape {
+        // rows as fit, beside the stand-ins or, when they don't fit, without
+        // them (review r13e L6: the rows were left out with 109 KB to spare).
+        let with_stand_ins = ReplyShape {
             stand_in_for: true,
             ..shape
         };
-        let with_stand_ins = self.status_json(at, shape)?;
-        if !success_fits(&with_stand_ins) {
-            return Ok(best);
-        }
+        let candidate = self.status_json(at, with_stand_ins)?;
+        let (shape, best) = if success_fits(&candidate) {
+            (with_stand_ins, candidate)
+        } else {
+            (shape, best)
+        };
         let rows = self.refused_rows(MAX_REFUSED_STATUS_ENTRIES);
         let (_, best) = self.most_listed_that_fit(
             at,
-            with_stand_ins,
+            best,
             &rows,
             self.refused_scenes.len(),
+            shape.lean.then_some(["refused", "refused_omitted"]),
             |refused| ReplyShape { refused, ..shape },
         )?;
         Ok(best)
     }
 
-    /// The reply 0.4.0 would fit, without `refused` rows or `stand_in_for`:
-    /// `outputs` left out first, then as many taboo records kept as fit
-    /// without `missing_renderers`, which then gets what room is left:
-    /// whole, without its paths, or not at all. Its shape, and that reply;
-    /// the floor, which doesn't fit, when not even that does.
-    /// `with_additions` is false when `everything` was already this reply
-    /// with `outputs`.
+    /// The reply 0.4.0 would fit, lean and without `refused` rows or
+    /// `stand_in_for`: `outputs` left out first, then as many taboo records
+    /// kept as fit without `missing_renderers`, which then gets what room
+    /// is left (whole, without its paths, or not at all), and `outputs`
+    /// what room is left after that. When not even the floor fits, the
+    /// floor abridged (`abridged`) takes the place of the floor. Its shape,
+    /// and that reply; one that doesn't fit only when not even the
+    /// abridged floor does. `with_additions` is false when the lean
+    /// `everything`, which didn't fit, was already this reply with
+    /// `outputs`.
     fn fitting_without_additions(
         &self,
         at: NaiveDateTime,
         with_additions: bool,
     ) -> Result<(ReplyShape, String), String> {
         let mut shape = ReplyShape {
+            lean: true,
             refused: 0,
             stand_in_for: false,
             ..ReplyShape::WHOLE
@@ -5977,71 +6192,188 @@ impl<D: WallpaperDriver> Runtime<D> {
         }
         shape.taboo = 0;
         shape.missing = MissingDetail::Left;
-        let floor = self.status_json(at, shape)?;
+        let (mut floor, measured) = self.status_json_measured(at, shape)?;
         if !success_fits(&floor) {
-            return Ok((shape, floor));
+            (shape.rows, floor) = self.abridged(at, shape, &floor, &measured.units)?;
+            if !success_fits(&floor) {
+                return Ok((shape, floor));
+            }
         }
         let records = self.taboo_rows(MAX_TABOO_STATUS_ENTRIES);
-        let (records, mut best) =
-            self.most_listed_that_fit(at, floor, &records, self.taboo.len(), |taboo| ReplyShape {
-                taboo,
-                ..shape
+        let (records, best) =
+            self.most_listed_that_fit(at, floor, &records, self.taboo.len(), None, |taboo| {
+                ReplyShape { taboo, ..shape }
             })?;
         shape.taboo = records;
+        // 4, then 3, given back, measured: each is one array of the reply,
+        // `[]` in it until then, so it adds its own JSON less those 2 bytes.
+        let mut room = success_room(&best).unwrap_or(0);
+        let mut given = shape;
+        let mut added = 0;
         for detail in [MissingDetail::Full, MissingDetail::WithoutPaths] {
-            let candidate = self.status_json(
-                at,
-                ReplyShape {
-                    missing: detail,
-                    ..shape
-                },
-            )?;
-            if success_fits(&candidate) {
-                shape.missing = detail;
-                best = candidate;
+            let cost = wire_len(&self.missing_rows(detail)).saturating_sub(2);
+            if let Some(left) = room.checked_sub(cost) {
+                (given.missing, room, added) = (detail, left, cost);
                 break;
             }
         }
-        Ok((shape, best))
+        let cost = wire_len(self.driver.published_outputs()).saturating_sub(2);
+        if cost <= room {
+            (given.outputs, added) = (true, added + cost);
+        }
+        if added == 0 {
+            // Nothing given back takes a byte: the same reply.
+            return Ok((given, best));
+        }
+        let candidate = self.status_json(at, given)?;
+        if success_fits(&candidate) {
+            Ok((given, candidate))
+        } else {
+            Ok((shape, best))
+        }
     }
 
-    /// The floor (`shape`), which doesn't fit, without what the status
-    /// budget doesn't count on every row (review r13d L5), in order:
+    /// The floor (`shape`, `floor`, which doesn't fit) with as little left
+    /// out as it then needs of what the status budget doesn't count on the
+    /// rows (reviews r13d L5 and r13e L6), measured from the floor's own
+    /// rows (`units`):
     ///
-    /// 6. every row's `schedule_rule_id`, left null (a rule's id is up to
-    ///    256 bytes, on as many as 128 rows), which `schedule_rule_id_omitted`
-    ///    says;
-    /// 7. every `last_error`, the rows' and the summary's, and
-    ///    `output_discovery_error`, left empty (`diagnostics_omitted`).
+    /// 6. rows' `schedule_rule_id`s, left null (a rule's id is up to 256
+    ///    bytes, on as many as 128 rows; `schedule_rule_id_omitted`), and
+    ///    rows' `last_error`s, left empty (`diagnostics_omitted`), together:
+    ///    the longest first, an error before an id as long, another row's
+    ///    before a connected row's;
+    /// 7. then the summary's own: `output_discovery_error`, then its
+    ///    `last_error`, also left empty.
     ///
-    /// What is left after 7 is the budget's: its configured text, at most
-    /// four times over on the wire as the budget counts it, the fixed keys,
-    /// and the structure of at most 578 playlists, 512 rules and 128 rows.
-    /// At those ceilings, with every counted string made of quotes and
-    /// backslashes, that reply has about 60 KB to spare, more than the rows'
-    /// timing and retry fields and `config_path` can take
-    /// (docs/runtime-config.md). 6 alone is enough unless the diagnostics
-    /// are long and full of quotes. Nothing cut before is given back: this
-    /// is a reply for a document at the schema's ceilings that otherwise
-    /// gets none.
-    fn abridged(&self, at: NaiveDateTime, shape: ReplyShape) -> Result<String, String> {
-        let without_rule_ids = self.status_json(
+    /// Measured with every one of them out, each is then given back, the
+    /// last first, wherever it still fits: so as few go as the room needs,
+    /// and a short id stays where a longer error will do (review r13e N6:
+    /// 128 one-byte ids went for 128 bytes, beside 110 KB to spare). Both
+    /// flags' bytes are counted until their kind is given back whole. The
+    /// rows' detail chosen, and that reply; with every unit left out when
+    /// even that is ever over.
+    ///
+    /// With all of them gone what is left is the budget's: its configured
+    /// text, at most four times over on the wire as the budget counts it,
+    /// the fixed keys, the structure of at most 578 playlists, 512 rules
+    /// and 128 rows, and what neither budget counts that every reply
+    /// carries (the rows' timing and retry fields, `config_path`,
+    /// `runtime_executable`, `theme_source`'s connectors; see
+    /// docs/runtime-config.md). At those ceilings, with every string of it
+    /// at its longest on the wire, that reply still fits.
+    fn abridged(
+        &self,
+        at: NaiveDateTime,
+        shape: ReplyShape,
+        floor: &str,
+        units: &RowUnits,
+    ) -> Result<(RowDetail, String), String> {
+        // The summary's units: `output_discovery_error`, then `last_error`.
+        let summary = [
+            self.output_discovery_error.as_str(),
+            self.last_error.as_str(),
+        ]
+        .map(|text| (!text.is_empty()).then(|| unit_len(text)));
+        let rule_total: usize = units.rule_ids.iter().flatten().sum();
+        let error_total: usize = units
+            .errors
+            .iter()
+            .flatten()
+            .chain(summary.iter().flatten())
+            .sum();
+        let rule_flag = if rule_total > 0 {
+            flag_len("schedule_rule_id_omitted")
+        } else {
+            0
+        };
+        let error_flag = if error_total > 0 {
+            flag_len("diagnostics_omitted")
+        } else {
+            0
+        };
+        // The room left with every unit out, which sets both flags.
+        let room =
+            (rule_total + error_total).checked_sub(success_excess(floor) + rule_flag + error_flag);
+        if let Some(mut room) = room {
+            let mut rows = RowDetail::NONE;
+            if room + rule_flag + error_flag >= rule_total + error_total {
+                rows = RowDetail::WHOLE;
+            } else {
+                // The summary's own first: `last_error`, then
+                // `output_discovery_error`.
+                if let Some(left) = summary[1].and_then(|cost| room.checked_sub(cost)) {
+                    (rows.last_error, room) = (true, left);
+                }
+                if let Some(left) = summary[0].and_then(|cost| room.checked_sub(cost)) {
+                    (rows.discovery_error, room) = (true, left);
+                }
+                // Then the rows' ids and errors together, the shortest
+                // first (a connected row's before another's, an id before an
+                // error), each group's kept in its own order. A kind given
+                // back whole gives its flag's bytes back too.
+                let mut order: Vec<(usize, usize, usize, usize)> = Vec::new();
+                for group in 0..2 {
+                    for (kind, costs) in [&units.rule_ids[group], &units.errors[group]]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        order.extend(
+                            costs
+                                .iter()
+                                .enumerate()
+                                .map(|(place, cost)| (*cost, group, kind, place)),
+                        );
+                    }
+                }
+                order.sort_unstable();
+                let wholes = [
+                    units.rule_ids.iter().map(Vec::len).sum::<usize>(),
+                    units.errors.iter().map(Vec::len).sum::<usize>(),
+                ];
+                let mut kept = [[0_usize; 2]; 2];
+                let mut flags = [rule_flag, error_flag];
+                let summary_whole = summary[1].is_none_or(|_| rows.last_error)
+                    && summary[0].is_none_or(|_| rows.discovery_error);
+                let mut next = 0;
+                loop {
+                    while let Some(&(cost, group, kind, _)) = order.get(next) {
+                        let Some(left) = room.checked_sub(cost) else {
+                            break;
+                        };
+                        room = left;
+                        kept[kind][group] += 1;
+                        next += 1;
+                    }
+                    let mut freed = 0;
+                    for kind in 0..2 {
+                        let whole = kept[kind].iter().sum::<usize>() == wholes[kind]
+                            && (kind == 0 || summary_whole);
+                        if whole {
+                            freed += std::mem::take(&mut flags[kind]);
+                        }
+                    }
+                    if freed == 0 || next == order.len() {
+                        break;
+                    }
+                    room += freed;
+                }
+                rows.rule_ids = kept[0];
+                rows.errors = kept[1];
+            }
+            let candidate = self.status_json(at, ReplyShape { rows, ..shape })?;
+            if success_fits(&candidate) {
+                return Ok((rows, candidate));
+            }
+        }
+        let least = self.status_json(
             at,
             ReplyShape {
-                rows: RowDetail::WithoutRuleIds,
+                rows: RowDetail::NONE,
                 ..shape
             },
         )?;
-        if success_fits(&without_rule_ids) {
-            return Ok(without_rule_ids);
-        }
-        self.status_json(
-            at,
-            ReplyShape {
-                rows: RowDetail::WithoutDiagnostics,
-                ..shape
-            },
-        )
+        Ok((RowDetail::NONE, least))
     }
 
     /// The most of `rows` (each one element of one of the reply's arrays,
@@ -6054,24 +6386,34 @@ impl<D: WallpaperDriver> Runtime<D> {
     /// adds its own JSON and, after the first, a comma, and the count of
     /// those left out gets shorter by however many digits it loses. Every
     /// one of those is escaped once more on the wire, character by
-    /// character. The reply chosen is built and checked all the same, and
-    /// one fewer is tried if it were ever over.
+    /// character. `lean_keys` names the array and the count when the reply
+    /// is lean, which leaves the array out while it is empty and the count
+    /// while it is 0 (`ReplyShape::lean`): then the first row brings its
+    /// array's key, and listing the last takes its count's away. The reply
+    /// chosen is built and checked all the same, and one fewer is tried if
+    /// it were ever over.
     fn most_listed_that_fit<T: Serialize>(
         &self,
         at: NaiveDateTime,
         zero: String,
         rows: &[T],
         total: usize,
+        lean_keys: Option<[&str; 2]>,
         shape: impl Fn(usize) -> ReplyShape,
     ) -> Result<(usize, String), String> {
         let room = success_room(&zero).unwrap_or(0);
+        let opening = lean_keys.map_or(0, |[array, _]| absent_len(array, "[]"));
         let mut added = 0_usize;
         let mut most = 0;
         for (index, row) in rows.iter().enumerate() {
             let row = serde_json::to_string(row).map_err(|error| error.to_string())?;
-            added += escaped_len(&row) + usize::from(index > 0);
+            added += escaped_len(&row) + if index > 0 { 1 } else { opening };
             let listed = index + 1;
-            let saved = decimal_digits(total) - decimal_digits(total.saturating_sub(listed));
+            let left = total.saturating_sub(listed);
+            let saved = match lean_keys {
+                Some([_, count]) if left == 0 => absent_len(count, &total.to_string()),
+                _ => decimal_digits(total) - decimal_digits(left),
+            };
             if added.saturating_sub(saved) <= room {
                 most = listed;
             }
@@ -6148,6 +6490,16 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn status_json(&self, at: NaiveDateTime, shape: ReplyShape) -> Result<String, String> {
+        self.status_json_measured(at, shape).map(|(json, _)| json)
+    }
+
+    /// The status of `shape`, and what was measured building it
+    /// (`Measured`): its rows' units and the lean saving.
+    fn status_json_measured(
+        &self,
+        at: NaiveDateTime,
+        shape: ReplyShape,
+    ) -> Result<(String, Measured), String> {
         if self.is_independent() {
             return self.status_json_independent(at, shape);
         }
@@ -6269,8 +6621,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                             reason: pending.reason,
                         }
                     }),
-                    nothing_to_play: nothing,
-                    entry_name: nothing_name(nothing),
+                    nothing_to_play: Some(nothing),
+                    entry_name: Some(nothing_name(nothing)),
                     timing: {
                         let timing = self.mirrored_timing(None, true, &moment, &mut budget);
                         if nothing.is_some() {
@@ -6386,8 +6738,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                                 reason: pending.reason,
                             }
                         }),
-                        nothing_to_play: nothing,
-                        entry_name: nothing_name(nothing),
+                        nothing_to_play: Some(nothing),
+                        entry_name: Some(nothing_name(nothing)),
                         timing: {
                             let timing = self.mirrored_timing(
                                 explicit,
@@ -6405,17 +6757,25 @@ impl<D: WallpaperDriver> Runtime<D> {
                 }
             }
         }
-        let omitted = abridge_rows(
+        let (omitted, mut measured) = abridge_rows(
             &mut displays,
             shape,
-            !self.last_error.is_empty() || !self.output_discovery_error.is_empty(),
+            [&self.output_discovery_error, &self.last_error],
         );
-        serde_json::to_string(&Status {
+        let quiet = LeanSummary::of(
+            shape,
+            &self.config,
+            self.mirrored_nothing_reason(),
+            self.refused_rows(shape.refused),
+            self.refused_omitted(shape.refused),
+        );
+        measured.lean_saving += quiet.lean_saving;
+        let json = serde_json::to_string(&Status {
             loaded_config_sha256: self.config.source_sha256.as_deref(),
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
             supported_override_schemas: SUPPORTED_OVERRIDE_SCHEMAS,
-            loaded_overrides_sha256: self.config.overrides_sha256.as_deref(),
-            overrides_ignored: self.config.overrides_ignored.as_deref(),
+            loaded_overrides_sha256: quiet.loaded_overrides_sha256,
+            overrides_ignored: quiet.overrides_ignored,
             runtime_version: env!("CARGO_PKG_VERSION"),
             runtime_executable: self.runtime_executable.as_deref(),
             install_kind: crate::INSTALL_KIND,
@@ -6479,15 +6839,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "config"
             },
             cycle_interval_seconds: Some(self.mirrored_cycle_interval_seconds()),
-            last_error: if omitted.diagnostics {
-                ""
-            } else {
+            last_error: if shape.rows.last_error {
                 &self.last_error
-            },
-            output_discovery_error: if omitted.diagnostics {
-                ""
             } else {
+                ""
+            },
+            output_discovery_error: if shape.rows.discovery_error {
                 &self.output_discovery_error
+            } else {
+                ""
             },
             automatic_retry: self
                 .pending_automatic
@@ -6514,22 +6874,23 @@ impl<D: WallpaperDriver> Runtime<D> {
                 &[]
             },
             missing_renderers: self.missing_rows(shape.missing),
-            nothing_to_play: self.mirrored_nothing_reason(),
-            allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
-            refused: self.refused_rows(shape.refused),
-            refused_omitted: self.refused_omitted(shape.refused),
+            nothing_to_play: quiet.nothing_to_play,
+            allow_web_wallpapers: quiet.allow_web_wallpapers,
+            refused: quiet.refused,
+            refused_omitted: quiet.refused_omitted,
             stand_in_for_omitted: omitted.stand_in_for,
             schedule_rule_id_omitted: omitted.schedule_rule_id,
             diagnostics_omitted: omitted.diagnostics,
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        Ok((json, measured))
     }
 
     fn status_json_independent(
         &self,
         at: NaiveDateTime,
         shape: ReplyShape,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Measured), String> {
         let moment = self.status_moment(at);
         let mut budget = ROUTE_CHANGE_RULE_CHECKS;
         let live_targets = self.current_targets(&self.target_outputs);
@@ -6735,8 +7096,8 @@ impl<D: WallpaperDriver> Runtime<D> {
                         reason: pending.reason,
                     }
                 }),
-                nothing_to_play: nothing,
-                entry_name: nothing_name(nothing),
+                nothing_to_play: Some(nothing),
+                entry_name: Some(nothing_name(nothing)),
                 timing: {
                     let timing = self.route_timing(
                         output,
@@ -6803,17 +7164,25 @@ impl<D: WallpaperDriver> Runtime<D> {
             .target_outputs
             .iter()
             .find_map(|connector| self.pending_routes.get(connector));
-        let omitted = abridge_rows(
+        let (omitted, mut measured) = abridge_rows(
             &mut displays,
             shape,
-            !self.last_error.is_empty() || !self.output_discovery_error.is_empty(),
+            [&self.output_discovery_error, &self.last_error],
         );
-        serde_json::to_string(&Status {
+        let quiet = LeanSummary::of(
+            shape,
+            &self.config,
+            self.routes_nothing_reason(&self.target_outputs),
+            self.refused_rows(shape.refused),
+            self.refused_omitted(shape.refused),
+        );
+        measured.lean_saving += quiet.lean_saving;
+        let json = serde_json::to_string(&Status {
             loaded_config_sha256: self.config.source_sha256.as_deref(),
             supported_config_schemas: SUPPORTED_SCHEMA_VERSIONS,
             supported_override_schemas: SUPPORTED_OVERRIDE_SCHEMAS,
-            loaded_overrides_sha256: self.config.overrides_sha256.as_deref(),
-            overrides_ignored: self.config.overrides_ignored.as_deref(),
+            loaded_overrides_sha256: quiet.loaded_overrides_sha256,
+            overrides_ignored: quiet.overrides_ignored,
             runtime_version: env!("CARGO_PKG_VERSION"),
             runtime_executable: self.runtime_executable.as_deref(),
             install_kind: crate::INSTALL_KIND,
@@ -6891,15 +7260,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                 "mixed"
             },
             cycle_interval_seconds: common_interval,
-            last_error: if omitted.diagnostics {
-                ""
-            } else {
+            last_error: if shape.rows.last_error {
                 &self.last_error
-            },
-            output_discovery_error: if omitted.diagnostics {
-                ""
             } else {
+                ""
+            },
+            output_discovery_error: if shape.rows.discovery_error {
                 &self.output_discovery_error
+            } else {
+                ""
             },
             automatic_retry: pending_summary.map(|pending| AutomaticRetryStatus {
                 attempt: pending.attempts,
@@ -6926,15 +7295,16 @@ impl<D: WallpaperDriver> Runtime<D> {
                 &[]
             },
             missing_renderers: self.missing_rows(shape.missing),
-            nothing_to_play: self.routes_nothing_reason(&self.target_outputs),
-            allow_web_wallpapers: self.config.settings.allow_web_wallpapers,
-            refused: self.refused_rows(shape.refused),
-            refused_omitted: self.refused_omitted(shape.refused),
+            nothing_to_play: quiet.nothing_to_play,
+            allow_web_wallpapers: quiet.allow_web_wallpapers,
+            refused: quiet.refused,
+            refused_omitted: quiet.refused_omitted,
             stand_in_for_omitted: omitted.stand_in_for,
             schedule_rule_id_omitted: omitted.schedule_rule_id,
             diagnostics_omitted: omitted.diagnostics,
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        Ok((json, measured))
     }
 
     fn schedule_rule_status<'a>(

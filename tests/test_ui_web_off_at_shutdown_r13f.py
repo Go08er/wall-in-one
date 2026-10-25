@@ -282,9 +282,17 @@ def _turn_off_being_written(application: Any) -> Future[Any]:
 
 def _on_the_runtime_lane(application: Any, lane: Callable[[], None]) -> Future[Any]:
     """``lane`` running on this process's runtime lane, as `do_shutdown` leaves it: let go
-    of, with its running job still running, before the step."""
+    of, with its running job still running, before the step. Let go of only once the job is
+    running: `do_shutdown` cancels what is still queued."""
+    started = threading.Event()
+
+    def job() -> None:
+        started.set()
+        lane()
+
     pool = application._runtime_pool()
-    running: Future[Any] = pool.submit(lane)
+    running: Future[Any] = pool.submit(job)
+    assert started.wait(GIVE_UP), "the lane's job never began"
     pool.shutdown(wait=False, cancel_futures=True)
     application._runtime_lane_at_exit = pool
     application._runtime_jobs = None

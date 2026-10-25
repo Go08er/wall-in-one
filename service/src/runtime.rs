@@ -6373,7 +6373,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 // Where a unit is: the summary's (0 `output_discovery_error`,
                 // 1 `last_error`), or a row's of a group (0 the connected).
-                #[derive(Clone, Copy)]
+                #[derive(Clone, Copy, PartialEq)]
                 enum Place {
                     Summary(usize),
                     Row(usize),
@@ -6419,8 +6419,17 @@ impl<D: WallpaperDriver> Runtime<D> {
                         if back[index] {
                             continue;
                         }
-                        let (cost, kind, _) = given[index];
-                        if let Some(left) = room.checked_sub(cost) {
+                        let (cost, kind, place) = given[index];
+                        // `abridge_rows` keeps the shortest of each group's
+                        // kind, so one comes back on its own only after every
+                        // one before it of its group and kind (review r13g
+                        // R-N4).
+                        let before_out = given[..index].iter().zip(&back).any(
+                            |(&(_, other_kind, other_place), &other_back)| {
+                                !other_back && other_kind == kind && other_place == place
+                            },
+                        );
+                        if !before_out && let Some(left) = room.checked_sub(cost) {
                             (back[index], room, changed) = (true, left, true);
                             out[kind] -= cost;
                         } else if let Some(left) = (room + flags[kind]).checked_sub(out[kind]) {

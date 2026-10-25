@@ -329,6 +329,7 @@ class AppState(GObject.Object):
         self.thumbnail_size = "large"  # the Library's cards: "large" or "small"
         self.library_scanning = False
         self.library_skipped: list[str] = []  # the demo's scans never hit a limit
+        self.library_refused_omitted = 0  # the demo's service names every item it refuses
         #: Wallpaper Engine is scanned, and every demo scene plays.
         self.workshop: Workshop | None = Workshop()
         self._rng = random.Random(4)
@@ -2031,6 +2032,10 @@ class AppState(GObject.Object):
 
     def runtime_blocked(self) -> str:
         return "" if self.service_running else "The wallpaper service isn\u2019t running"
+
+    def manual_pick(self) -> str | None:
+        picks = set(self.manual.values())
+        return next(iter(picks)) if len(picks) == 1 else None
 
     def playlist_label(self, pid: str) -> str | None:
         return self.playlist_name(pid) if self.has_playlist(pid) else None

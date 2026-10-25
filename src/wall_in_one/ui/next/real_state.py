@@ -496,11 +496,16 @@ class RealAppState(GObject.Object):
         # By the item its entries render: a preset's base (`refused_paths`).
         return self._refused.get(item.scene_base or item.scene, "")
 
-    def _adopt_refused(self, truth: runtime_truth.RuntimeTruth | None) -> bool:
-        """Mark what the service refused on the views it changes; True if any changed."""
+    def _adopt_refused(self, truth: runtime_truth.RuntimeTruth | None) -> str:
+        """Mark what the service refused on the views it changes.
+
+        Says what changed: "library" when a view did (every card is rebuilt),
+        "library-count" when only the count of rows the reply left out did (the
+        count line alone follows it), else "".
+        """
         refused = {one.scene_id: one.reason for one in truth.refused} if truth is not None else {}
         omitted = truth.refused_omitted if truth is not None else 0
-        counted = omitted != self._refused_omitted
+        counted = "library-count" if omitted != self._refused_omitted else ""
         self._refused_omitted = omitted
         if refused == self._refused:
             return counted
@@ -515,7 +520,7 @@ class RealAppState(GObject.Object):
             return counted
         self._wallpapers = views
         self._index = {view.id: view for view in views}
-        return True
+        return "library"
 
     def _indexed_stills(self) -> Callable[[], frozenset[Path]]:
         """Every still image the latest scan found, worked out once and only if asked."""
@@ -623,8 +628,8 @@ class RealAppState(GObject.Object):
         if self._scope != "all" and self._scope not in {d.connector for d in displays}:
             self._scope = "all"
         topics: list[str] = []
-        if self._adopt_refused(truth):
-            topics.append("library")
+        if refreshed := self._adopt_refused(truth):
+            topics.append(refreshed)
         mode = self.display_mode
         if displays != self._displays or mode != self._mode:
             # A mode change alone changes which displays stand on their own.
@@ -711,6 +716,8 @@ class RealAppState(GObject.Object):
                 until,
                 stand_in_for="" if picked_one else display.stand_in_for_name,
                 pick_stood_in=picked_one and stood_in,
+                pick_unsure=display.pick_unsure,
+                nothing_to_play=display.nothing_to_play,
             )
             name = self._index[wid].name if wid in self._index else ""
             screens.append(OnScreen(display.connector, wid, name, reason))
@@ -730,6 +737,8 @@ class RealAppState(GObject.Object):
                 truth.playlist if stood_in or not picked_one else "",
                 stand_in_for="" if picked_one else truth.stand_in_for_name,
                 pick_stood_in=picked_one and stood_in,
+                pick_unsure=truth.pick_unsure,
+                nothing_to_play=truth.nothing_to_play,
             )
             screens.append(OnScreen("Display", wid, name, reason))
             following = not truth.is_manual

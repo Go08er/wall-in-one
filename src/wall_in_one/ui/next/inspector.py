@@ -457,7 +457,7 @@ class Inspector(Gtk.Box):
         card.append(
             widgets.dim(
                 "Playback skips it to the next wallpaper. This notice goes once the "
-                "service stops refusing it."
+                "service stops refusing it, or stops naming it."
             )
         )
         return card

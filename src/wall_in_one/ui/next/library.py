@@ -643,8 +643,10 @@ class LibraryPage(Page):
         omitted = self.state.library_refused_omitted
         if omitted:
             # The service names 16 refused items at most; the cards past them
-            # carry no mark.
-            text += f" · and {omitted} more can\u2019t play here"
+            # carry no mark. With none named (a reply held to its size), none
+            # is marked, and "more" would have nothing to follow.
+            more = "and " if any(w.refused_here for w in self.state.wallpapers) else ""
+            text += f" · {more}{omitted}{' more' if more else ''} can\u2019t play here"
         if self.state.library_scanning:
             text += " · scanning…"
         self._count.set_label(text)
@@ -727,7 +729,7 @@ class LibraryPage(Page):
         if topic in ("library", "now", "playlists"):
             self._rebuild()
             self._update_selection_bar()
-        elif topic in ("system", "settings"):
+        elif topic in ("system", "settings", "library-count"):
             self._update_count()
             self._refresh_action_states()
         elif topic == "displays":

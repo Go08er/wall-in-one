@@ -28,14 +28,19 @@ Each case has a control that passes before and after.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
+import socket
+import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -51,11 +56,16 @@ from tests.test_ui_renderer_settle_shutdown import HEARD, _naming  # noqa: E402
 from tests.test_ui_web_off_at_shutdown import _heard, _scans, _workshop  # noqa: E402
 from tests.test_web_off_toml_1_1 import DOCUMENTS, document  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
+from wall_in_one.control import client  # noqa: E402
+from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import workshop  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 
 #: How long anything here waits before it gives up: past it the test fails, it doesn't hang.
 GIVE_UP: float = 60.0
+#: The real runtime client, which `profiles` stands in for: the quit tests talk to a fake
+#: service's socket through it.
+REAL_SEND_RUNTIME = client.send_runtime
 
 
 def _on_disk(text: str) -> None:
@@ -852,3 +862,215 @@ def test_with_nothing_heard_only_a_web_page_the_files_confirm_counts(
         assert now == _nothing_to_play(), f"{case}: left"
         return
     assert now == text, f"{case}: replaced, with no status heard and no web page confirmed"
+
+
+# -- L2's residual: an older service still playing a web page is told to quit --------------------
+
+
+class _FakeService:
+    """A wallpaper service's socket, in a thread: what it is sent, and what it saw of each.
+
+    ``hangs``: it reads the request and never answers; it then waits for the app to close the
+    connection (``closed``), or for ``release``. ``on_request`` runs as each request arrives.
+    """
+
+    def __init__(self, address: Any, *, hangs: bool, on_request: Callable[[], None]) -> None:
+        self.verbs: list[str] = []
+        self.order: list[str] = []
+        self.closed = threading.Event()
+        self.release = threading.Event()
+        self._stop = threading.Event()
+        self._hangs = hangs
+        self._on_request = on_request
+        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._listener.bind(str(address))
+        self._listener.listen(4)
+        self._listener.settimeout(0.05)
+        self._thread = threading.Thread(target=self._serve, name="test-fake-service")
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            with connection:
+                connection.settimeout(GIVE_UP)
+                line = b""
+                while not line.endswith(b"\n"):
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    line += chunk
+                self.verbs.append(Request.decode(line).verb)
+                self.order.append("request")
+                self._on_request()
+                if not self._hangs:
+                    connection.sendall(Response.success("quitting").encode())
+                    continue
+                try:
+                    if connection.recv(4096) == b"":
+                        self.order.append("closed by the app")
+                        self.closed.set()
+                except OSError:
+                    self.order.append("closed by the app")
+                    self.closed.set()
+                self.release.wait(GIVE_UP)
+
+    def stop(self) -> None:
+        self.release.set()
+        self._stop.set()
+        self._thread.join(GIVE_UP)
+        self._listener.close()
+
+
+@contextmanager
+def _service_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hangs: bool = False,
+    on_request: Callable[[], None] = lambda: None,
+) -> Iterator[_FakeService]:
+    """A fake wallpaper service listening where the app looks for it (a short path in /tmp)."""
+    with tempfile.TemporaryDirectory(prefix="wio-quit-") as directory:
+        address = os.path.join(directory, "runtime.sock")
+        monkeypatch.setattr(client, "send_runtime", REAL_SEND_RUNTIME)
+        monkeypatch.setattr(paths, "runtime_socket_path", lambda: Path(address))
+        service = _FakeService(address, hangs=hangs, on_request=on_request)
+        try:
+            yield service
+        finally:
+            service.stop()
+
+
+@pytest.mark.parametrize(
+    ("heard", "names"),
+    [
+        ("an-older-service", "a-web-page"),
+        ("an-older-service", "a-preset-of-a-web-page"),
+        ("control-reads-eight", "a-web-page"),
+        ("nothing", "a-web-page"),
+        ("an-older-service", "control-only-scenes"),
+        ("an-older-service", "control-only-an-unsubscribed-item"),
+    ],
+)
+def test_an_older_service_heard_while_the_file_names_a_web_page_is_told_to_quit(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    heard: str,
+    names: str,
+) -> None:
+    """A service older than schema 8 was heard, web wallpapers are off, and the file names a web
+    page its project.json confirms: the service can't load the document that plays nothing, and
+    plays the page it holds. So it is sent ``quit`` (its next start runs the updated start
+    check). Before (a848d28): nothing was sent. Never in any other case (the controls): a
+    service that reads 8, none heard, a file naming only scenes, or only an item that can't be
+    checked (replaced, but not confirmed a page)."""
+    application = profiles().application
+    content, scenes = _workshop(2)
+    if names == "control-only-scenes":
+        named = scenes
+    elif names == "control-only-an-unsubscribed-item":
+        named = [*scenes, "2099999999"]
+    elif names == "a-preset-of-a-web-page":
+        _preset(content, "2100000000", _web_page(2))
+        named = [*scenes, "2100000000"]
+    else:
+        named = [*scenes, _web_page(2)]
+    text = _naming(named)
+    _on_disk(text)
+    _heard(monkeypatch, HEARD[heard])
+    caplog.set_level(logging.WARNING, logger=app_module.LOGGER.name)
+    with _service_socket(monkeypatch) as service:
+        application._web_off_on_disk_at_exit()
+        _judged_at_exit(application)
+    sent = heard == "an-older-service" and names not in (
+        "control-only-scenes",
+        "control-only-an-unsubscribed-item",
+    )
+    if not sent:
+        assert service.verbs == [], f"{heard}, {names}: the service was sent {service.verbs}"
+        return
+    assert service.verbs == ["quit"], "the older service playing a web page wasn't told to quit"
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()
+    assert "was sent quit at shutdown" in caplog.text and "it is quitting" in caplog.text
+
+
+def _older_service_playing_a_web_page(application: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    _content, scenes = _workshop(1)
+    _on_disk(_naming([*scenes, _web_page(1)]))
+    _heard(monkeypatch, HEARD["an-older-service"])
+
+
+def test_a_hung_service_cant_hold_the_quit_past_its_bound(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The older service reads ``quit`` and never answers. The step stops waiting at its bound
+    (1 s), closes the connection, and returns, while the service is still holding it; the
+    thread that sent it is a daemon, so the process's exit doesn't wait for it either. Before
+    (a848d28): nothing was sent."""
+    application = profiles().application
+    _older_service_playing_a_web_page(application, monkeypatch)
+    caplog.set_level(logging.WARNING, logger=app_module.LOGGER.name)
+    with _service_socket(monkeypatch, hangs=True) as service:
+        application._web_off_on_disk_at_exit()
+        service.order.append("step returned")
+        assert service.verbs == ["quit"], "the older service playing a web page wasn't told to quit"
+        senders = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == getattr(app_module, "SHUTDOWN_LOOK_THREAD", "wio-shutdown-look")
+        ]
+        assert service.closed.wait(GIVE_UP), "the app left the connection open"
+        order = list(service.order)
+    assert service.verbs == ["quit"], "the older service playing a web page wasn't told to quit"
+    assert order[0] == "request" and "step returned" in order, order
+    assert all(thread.daemon for thread in senders), "a thread that could hold the exit"
+    # The wait's bound and the request's own timeout are both 1 s: whichever ends it first.
+    assert "didn\u2019t answer within 1 s" in caplog.text or "timed out after 1s" in caplog.text, (
+        caplog.text
+    )
+
+
+def test_a_second_ctrl_c_cuts_the_quit(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same hung service, with the bound put out of reach: only a second Ctrl-C (a real
+    SIGINT, sent once the service has the request) can end the wait. The step returns, the
+    connection is closed, and the service is still holding it. Before (a848d28): nothing was
+    sent."""
+    application = profiles().application
+    _older_service_playing_a_web_page(application, monkeypatch)
+    # Not there at a848d28, which this test is also run against.
+    monkeypatch.setattr(app_module, "SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS", GIVE_UP, raising=False)
+    caplog.set_level(logging.WARNING, logger=app_module.LOGGER.name)
+    with _service_socket(
+        monkeypatch, hangs=True, on_request=lambda: os.kill(os.getpid(), signal.SIGINT)
+    ) as service:
+        application._web_off_on_disk_at_exit()
+        service.order.append("step returned")
+        assert service.verbs == ["quit"], "the older service playing a web page wasn't told to quit"
+        assert service.closed.wait(GIVE_UP), "the app left the connection open"
+    assert "a second Ctrl-C ended the wait for its answer" in caplog.text, caplog.text
+
+
+def test_control_no_quit_once_a_second_ctrl_c_has_come(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second Ctrl-C before the step: the file is still replaced (the lock is tried), but no
+    socket call is begun."""
+    application = profiles().application
+    _older_service_playing_a_web_page(application, monkeypatch)
+    application._settle_cut = True
+    with _service_socket(monkeypatch) as service:
+        application._web_off_on_disk_at_exit()
+        _judged_at_exit(application)
+    assert service.verbs == []
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()

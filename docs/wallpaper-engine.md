@@ -233,13 +233,17 @@ isn't mounted, leaves the file as it is. A service not heard from is either not
 running, and its start compiles again (or refuses with exit 78 a kept file that
 plays a web page), or current, and it refuses a page at launch itself. An older service
 that is still running after an update can't load the document that plays
-nothing, though: it keeps playing what it holds until it is restarted, as it
-should be after an update ([installing.md](installing.md)), and the app's log
-says so. Only a compile for that service's schema, or telling it to quit,
-would stop it, and neither is done at the end of a quit. What the replacement
-does is make sure nothing started next plays the page: an older service can't
-load it, and the updated one plays nothing until a publication gets through;
-its start runs the check below. A save of the setting still being written then is
+nothing, though: it would keep playing what it holds. So when one was heard and
+the file names a web page its `project.json` confirms, the app tells it to quit,
+the one request the end of a quit sends: it waits a second for the answer at
+most, a second Ctrl-C ends that wait, and none is sent once a second Ctrl-C has
+come. The service then stays stopped, and its next start runs the updated start
+check below. For an item that can't be checked it isn't told to quit; it plays
+what it holds until it is restarted, as it should be after an update
+([installing.md](installing.md)), and the app's log says so. The log also says
+what was sent and what came of it. What the replacement does is make sure
+nothing started next plays the page: an older service can't load it, and the
+updated one plays nothing until a publication gets through. A save of the setting still being written then is
 waited for, as long as such a save can take (its locks, and the check of the
 service that "Stop animations on battery" makes: about 70 seconds at most);
 with none, nothing is waited for. The lock is waited for two seconds at most,

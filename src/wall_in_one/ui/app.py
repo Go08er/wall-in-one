@@ -315,6 +315,12 @@ SHUTDOWN_WEB_OFF_LOCK_SECONDS: Final = 2.0
 SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS: Final = runtime_config.COMPILER_LOCK_TIMEOUT_SECONDS
 #: That judgement's thread's name.
 WEB_OFF_AT_EXIT_THREAD: Final = "wio-web-off-at-exit"
+#: The name of the daemon threads that step waits for only as long as it may
+#: (`_unless_given_up`): a parse, a look at Workshop items, a ``quit``.
+SHUTDOWN_LOOK_THREAD: Final = "wio-shutdown-look"
+#: The longest that step gives a wallpaper service older than schema 8 to answer
+#: ``quit`` (`Application._quit_older_service`): its own timeout, and the wait for it.
+SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS: Final = 1.0
 #: How long that step looks at the Workshop items a file names, at most, for a
 #: service with no check of an item's type of its own (`_web_named`):
 #: past it, those it hasn't looked at count as web pages.
@@ -328,15 +334,20 @@ _COMPILED_WEB_ALLOWED: Final = re.compile(r"^allow_web_wallpapers = true$", re.M
 
 
 def _unless_given_up[Judged](
-    work: Callable[[], Judged], give_up: Callable[[], bool], cut: Judged
+    work: Callable[[], Judged],
+    give_up: Callable[[], bool],
+    cut: Judged,
+    *,
+    until: float | None = None,
 ) -> Judged:
     """``work()``, run on a thread of its own and waited for in slices; ``cut`` once ``give_up``.
 
     For what the end of a shutdown can't bound, such as a parse of a large
     document: a second Ctrl-C (``give_up``) ends the wait, and Python runs its
-    handler between the slices (`SHUTDOWN_INTERRUPT_POLL_SECONDS`). The thread
-    is a daemon, so the process doesn't wait for work it stopped waiting for.
-    What ``work`` raises is raised here.
+    handler between the slices (`SHUTDOWN_INTERRUPT_POLL_SECONDS`). ``until``
+    (a `time.monotonic` deadline) ends it too, never later: the last slice is
+    cut to it. The thread is a daemon, so the process doesn't wait for work it
+    stopped waiting for. What ``work`` raises is raised here.
     """
     done: Future[Judged] = Future()
 
@@ -346,11 +357,17 @@ def _unless_given_up[Judged](
         except BaseException as error:  # handed to the waiter
             done.set_exception(error)
 
-    threading.Thread(target=run, name="wio-shutdown-look", daemon=True).start()
+    threading.Thread(target=run, name=SHUTDOWN_LOOK_THREAD, daemon=True).start()
     while not done.done():
         if give_up():
             return cut
-        futures.wait((done,), timeout=SHUTDOWN_INTERRUPT_POLL_SECONDS)
+        slice_ = SHUTDOWN_INTERRUPT_POLL_SECONDS
+        if until is not None:
+            left = until - time.monotonic()
+            if left <= 0:
+                return cut
+            slice_ = min(slice_, left)
+        futures.wait((done,), timeout=slice_)
     return done.result()
 
 
@@ -407,6 +424,7 @@ def _web_named(text: str, give_up: Callable[[], bool]) -> tuple[bool, bool]:
 #: Why the end of a shutdown replaces a file (`_may_play_web_while_off`).
 _ALLOWS: Final = "allows"
 _NAMES: Final = "names"
+_NAMES_WEB: Final = "names-web"
 
 
 def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], bool]) -> str:
@@ -416,9 +434,10 @@ def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], boo
     Otherwise a service that reads schema 8 plays no page: it reads each
     item's type before it starts the engine. One older than that (``status``,
     the last one heard, lists no 8) has no such check: `_NAMES`, when the file
-    names a web page, or an item that can't be checked, which may be one
-    (`_web_named`; review r13f, L2). With no status heard at all, only a web
-    page the files confirm counts (a preset whose base is one included): the
+    names an item that can't be checked, which may be a web page
+    (`_web_named`; review r13f, L2), and `_NAMES_WEB` when it names one the
+    files confirm. With no status heard at all, only that counts (a preset
+    whose base is one included): the
     service is then not running, and its start compiles again (or refuses
     with exit 78 a kept file that plays one), or it is current, and refuses a
     page at launch itself; so an item that can't be checked (unsubscribed, or
@@ -429,7 +448,9 @@ def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], boo
     if runtime_config.nothing_to_play_supported(status):
         return ""
     confirmed, unchecked = _web_named(text, give_up)
-    if confirmed or (unchecked and status is not None):
+    if confirmed:
+        return _NAMES_WEB
+    if unchecked and status is not None:
         return _NAMES
     return ""
 
@@ -2407,11 +2428,15 @@ class Application(Adw.Application):
         the file as it is. That replacement can't stop a service
         older than schema 8 that is still running after an update, though:
         it can't load the document that plays nothing, and keeps playing what
-        it holds until it is restarted, as it should be after an update (its
-        start check then compiles again, or refuses with exit 78 a kept file
-        that plays a web page while they are off). Only a compile for its
-        schema, or a socket call, could; neither is made here (r13e, L1 and
-        L2), and the log says to restart it. What the replacement does is see
+        it holds. So when such a service was heard and the file named a web
+        page the files confirm, it is told to quit (`_quit_older_service`):
+        the one socket call made here, bounded by
+        `SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS`, ended by a second Ctrl-C, and
+        never begun after one. Its next start then runs the updated start
+        check, which compiles again, or refuses with exit 78 a kept file that
+        plays a web page while they are off. For an item that can't be
+        checked it isn't told: the log says to restart it. No compile for its
+        schema is made here (r13e, L1 and L2). What the replacement does is see
         that nothing started next plays the page: an older service can't load
         it, and the updated one plays nothing until a publication gets
         through.
@@ -2423,8 +2448,8 @@ class Application(Adw.Application):
         again, is left), and nothing installed after it is touched (L2). The
         migration guard isn't taken: no authoring store is read, and the
         legacy import never writes this file. Nothing else is written, and
-        nothing is asked of the service: the shutdown has cut the socket calls
-        off, and one would hold the exit.
+        nothing is asked of the service, but for the bounded ``quit`` above:
+        the shutdown has cut the socket calls off, and one would hold the exit.
 
         Bounded, and waiting only for what can matter. A settings save that
         turns web wallpapers off and is still being written is waited for, for
@@ -2518,7 +2543,10 @@ class Application(Adw.Application):
 
         Whether the lock was had (in ``timeout``, unless ``give_up`` first):
         `_web_off_but_allowed_on_disk` on what is on disk now, and the document
-        that plays nothing installed in this same hold when it says so.
+        that plays nothing installed in this same hold when it says so. When
+        the file named a web page the files confirm, for a service older than
+        schema 8 that was heard, that service is then told to quit, with the
+        lock let go (`_quit_older_service`).
         """
         with contextlib.ExitStack() as held:
             try:
@@ -2531,6 +2559,8 @@ class Application(Adw.Application):
             if judged is None:
                 return True
             settings, why = judged
+            older = look.status is not None
+            quit_older = why == _NAMES_WEB and older
             document = runtime_config.nothing_to_play_document(
                 settings, runtime_config.WEB_OFF_REASON
             )
@@ -2538,23 +2568,98 @@ class Application(Adw.Application):
                 runtime_config.install_nothing_to_play(document, target)
             except runtime_config.RuntimeConfigNotDurableError as uncertain:
                 LOGGER.warning("%s", uncertain)  # installed: only its folder sync failed
+            except runtime_config.RuntimeConfigError as error:
+                LOGGER.warning(
+                    "Allow web wallpapers is off, and the configuration on disk could let a web "
+                    "wallpaper play, but it couldn\u2019t be replaced at shutdown: %s",
+                    error,
+                )
             if why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk allowed web "
                     "wallpapers; it was replaced at shutdown with one that plays nothing"
                 )
+            elif not older:
+                LOGGER.warning(
+                    "Allow web wallpapers is off, and the configuration on disk named a web "
+                    "wallpaper, with no wallpaper service heard from; it was replaced at "
+                    "shutdown with one that plays nothing"
+                )
             else:
                 LOGGER.warning(
-                    "Allow web wallpapers is off, and the configuration on disk named %s; it "
-                    "was replaced at shutdown with one that plays nothing. A wallpaper service "
-                    "older than this app can\u2019t load that, and keeps playing what it holds "
-                    "until it is restarted: systemctl --user restart wall-in-one",
-                    "a web wallpaper, and no wallpaper service was heard from"
-                    if look.status is None
-                    else "a web wallpaper, or a Workshop item whose type couldn\u2019t be "
-                    "checked, for a wallpaper service older than this app",
+                    "Allow web wallpapers is off, and the configuration on disk named %s, for a "
+                    "wallpaper service older than this app; it was replaced at shutdown with "
+                    "one that plays nothing, which that service can\u2019t load%s",
+                    "a web wallpaper"
+                    if quit_older
+                    else "a Workshop item whose type couldn\u2019t be checked",
+                    ": it is told to quit"
+                    if quit_older
+                    else ", so it keeps playing what it holds until it is restarted: "
+                    "systemctl --user restart wall-in-one",
                 )
+        if quit_older:
+            self._quit_older_service()
         return True
+
+    def _quit_older_service(self) -> None:
+        """Tell the wallpaper service to quit: at most `SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS`.
+
+        Only from `_replaced_under_the_lock`, and only when a status from a
+        service older than schema 8 was heard, web wallpapers are off, and the
+        file on disk named a web page the files confirm (review r13f, L2's
+        residual; the owner's call). Such a service can't load the document
+        that plays nothing, and plays the page it holds until it stops.
+        ``quit`` ends it cleanly, so systemd leaves it stopped, and whatever
+        starts it next runs the updated start check
+        (``--service-startup-prepare``: a compile, or exit 78 for a kept file
+        that plays a web page while they are off).
+
+        The one socket call the end of a shutdown makes, and bounded: its own
+        timeout is that bound, it runs on a daemon thread (`_unless_given_up`)
+        whose wait ends at the bound or at a second Ctrl-C, never later, and
+        its socket is then closed (a `client.Cancellation` of its own). So it
+        holds neither ``run()`` nor the process's exit past the bound. Not sent
+        at all once a second Ctrl-C has come. What was sent, and what came of
+        it, is logged. Never raises.
+        """
+        if self._settle_cut:
+            LOGGER.warning(
+                "the wallpaper service, older than this app, wasn\u2019t told to quit at "
+                "shutdown: a second Ctrl-C had come; restart it: systemctl --user restart "
+                "wall-in-one"
+            )
+            return
+        cancellation = client.Cancellation()
+        bound = SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS
+
+        def send() -> str:
+            try:
+                reply = client.send_runtime("quit", timeout=bound, cancellation=cancellation)
+            except client.NotRunningError:
+                return "it wasn\u2019t running"
+            except (client.ControlError, OSError) as error:
+                return f"it couldn\u2019t be told ({error})"
+            if reply.ok:
+                return "it is quitting"
+            return f"it refused ({reply.message or 'no reason given'})"
+
+        outcome = _unless_given_up(
+            send, lambda: self._settle_cut, cut=None, until=time.monotonic() + bound
+        )
+        if outcome is None:
+            cancellation.cancel()  # its socket closed: nothing is left waiting on it
+            outcome = (
+                "a second Ctrl-C ended the wait for its answer"
+                if self._settle_cut
+                else f"it didn\u2019t answer within {bound:g} s"
+            )
+        LOGGER.warning(
+            "the wallpaper service, older than this app, was sent quit at shutdown, since it "
+            "may be playing a web wallpaper while they are off: %s. Its next start runs the "
+            "updated start check",
+            outcome,
+        )
 
     def _web_off_judged_once_landed(
         self, saving: Future[Any] | None, target: Path, source: Path, status: object
@@ -2568,7 +2673,8 @@ class Application(Adw.Application):
         (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`) and its look at the file.
         ``target`` and ``source`` are the files as the step found them, and
         ``status`` what it had last heard. Only files and that lock are
-        touched; nothing of GTK, and no socket.
+        touched, nothing of GTK; the one socket call is `_quit_older_service`'s,
+        when it is warranted.
         """
         lane = self._runtime_lane_at_exit
         never = lambda: False  # noqa: E731

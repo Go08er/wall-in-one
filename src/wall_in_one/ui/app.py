@@ -2692,6 +2692,7 @@ class Application(Adw.Application):
             return
         cancellation = client.Cancellation()
         bound = SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS
+        restart = "restart it: systemctl --user restart wall-in-one"
 
         def send() -> str:
             try:
@@ -2699,10 +2700,10 @@ class Application(Adw.Application):
             except client.NotRunningError:
                 return "it wasn\u2019t running"
             except (client.ControlError, OSError) as error:
-                return f"it couldn\u2019t be told ({error})"
+                return f"it couldn\u2019t be told ({error}); {restart}"
             if reply.ok:
                 return "it is quitting"
-            return f"it refused ({reply.message or 'no reason given'})"
+            return f"it refused ({reply.message or 'no reason given'}); {restart}"
 
         outcome = _unless_given_up(
             send, lambda: self._settle_cut, cut=None, until=time.monotonic() + bound
@@ -2710,9 +2711,9 @@ class Application(Adw.Application):
         if outcome is None:
             cancellation.cancel()  # its socket closed: nothing is left waiting on it
             outcome = (
-                "a second Ctrl-C ended the wait for its answer"
+                f"a second Ctrl-C ended the wait for its answer; {restart}"
                 if self._settle_cut
-                else f"it didn\u2019t answer within {bound:g} s"
+                else f"it didn\u2019t answer within {bound:g} s; {restart}"
             )
         LOGGER.warning(
             "the wallpaper service, older than this app, was sent quit at shutdown, since it "

@@ -160,3 +160,56 @@ def test_control_s_n14_an_installed_file_naming_an_unchecked_item_says_it(
     )
     assert sent == []
     assert any("it was replaced at shutdown" in one and RESTART in one for one in said), said
+
+
+# -- p3 (S-N15) ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("installed", [True, False], ids=["installed", "failed"])
+@pytest.mark.parametrize(
+    "answer",
+    ["refused", "couldnt-be-told"],
+)
+def test_s_n15_a_quit_that_failed_says_to_restart_the_older_service(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    installed: bool,
+    answer: str,
+) -> None:
+    quit_answer: Any = (
+        Response.failure("busy (r13m)")
+        if answer == "refused"
+        else client.ControlError("timed out (r13m)")
+    )
+    sent, said = _step(
+        profiles,
+        monkeypatch,
+        caplog,
+        heard="an-older-service",
+        text=None,
+        web=1,
+        installed=installed,
+        quit_answer=quit_answer,
+    )
+    assert sent == ["quit"], "the premise: `_NAMES_WEB`, the quit is sent"
+    assert any("was sent quit at shutdown" in one for one in said), said
+    assert any(RESTART in one for one in said), said
+
+
+def test_control_s_n15_a_quit_answered_ok_says_it_is_quitting(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sent, said = _step(
+        profiles,
+        monkeypatch,
+        caplog,
+        heard="an-older-service",
+        text=None,
+        web=1,
+        installed=True,
+    )
+    assert sent == ["quit"]
+    assert any("it is quitting" in one for one in said), said

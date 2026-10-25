@@ -2608,17 +2608,21 @@ class Application(Adw.Application):
             document = runtime_config.nothing_to_play_document(
                 settings, runtime_config.WEB_OFF_REASON
             )
+            replaced = True
             try:
                 runtime_config.install_nothing_to_play(document, target)
             except runtime_config.RuntimeConfigNotDurableError as uncertain:
                 LOGGER.warning("%s", uncertain)  # installed: only its folder sync failed
             except runtime_config.RuntimeConfigError as error:
+                replaced = False
                 LOGGER.warning(
                     "Allow web wallpapers is off, and the configuration on disk could let a web "
                     "wallpaper play, but it couldn\u2019t be replaced at shutdown: %s",
                     error,
                 )
-            if why == _ALLOWS:
+            if not replaced:
+                pass  # the warning above is what happened
+            elif why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk may have "
                     "allowed web wallpapers; it was replaced at shutdown with one that plays "

@@ -1498,3 +1498,34 @@ def test_a_wait_already_cut_starts_no_work(state: str) -> None:
         if thread.name == app_module.SHUTDOWN_LOOK_THREAD:
             thread.join(GIVE_UP)
     assert not started.is_set(), f"{state}: the wait was already cut, and the work was started"
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_the_log_says_replaced_only_when_the_replacement_was_installed(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    installed: bool,
+) -> None:
+    """Before: after a failed install the log said "couldn't be replaced" and then "it was
+    replaced". The control (installed) says only the latter."""
+    application = profiles().application
+    _on_disk(document("control-compiler-line")[0])
+    _heard(monkeypatch, HEARD["control-reads-eight"])
+    monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
+    if not installed:
+
+        def refuse(*_a: object, **_k: object) -> None:
+            raise runtime_config.RuntimeConfigError("the disk is full (this test)")
+
+        monkeypatch.setattr(runtime_config, "install_nothing_to_play", refuse)
+    caplog.set_level(logging.INFO, logger=app_module.LOGGER.name)
+    application._web_off_on_disk_at_exit()
+    _judged_at_exit(application)
+    said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
+    replaced = [one for one in said if "replaced at shutdown with one that plays nothing" in one]
+    failed = [one for one in said if "couldn\u2019t be replaced at shutdown" in one]
+    if installed:
+        assert len(replaced) == 1 and not failed, said
+    else:
+        assert len(failed) == 1 and "the disk is full" in failed[0] and not replaced, said

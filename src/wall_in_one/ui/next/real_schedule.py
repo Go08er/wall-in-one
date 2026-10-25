@@ -545,9 +545,6 @@ class RealScheduling:
     def runtime_blocked(self) -> str:
         return self._runtime_off()
 
-    def manual_pick(self) -> str | None:
-        return self._session.manual_playlist
-
     def playlist_label(self, pid: str) -> str | None:
         """Any authored playlist's name; the hidden "Your pick" ones as the window says it."""
         playlist = self._session.playlists.get(pid)

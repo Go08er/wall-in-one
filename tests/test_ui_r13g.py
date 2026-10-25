@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,7 +30,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from wall_in_one.ui import runtime_truth  # noqa: E402
+from wall_in_one.ui import runtime_truth, unnamed_pick  # noqa: E402
 from wall_in_one.ui.status_model import RuntimeStatusModel, StatusChange  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "service/tests/fixtures/stand-in"
@@ -578,6 +579,227 @@ def test_n7_both_status_lines_hedge_an_unsure_pick() -> None:
     model = RuntimeStatusModel()
     model.adopt(_independent_pick_at_the_ceiling())
     assert runtime_truth.PICK_OR_STAND_IN in status_line.describe(model.view)
+
+
+# ------------------------------------------------------------------ N4 ---------
+
+
+def _app_with_playlists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
+    from tests.test_ui_runtime import FakeWindow, _application, _attach
+    from wall_in_one.library.model import Kind, Library, MediaItem
+
+    application = _application(tmp_path, monkeypatch)
+    window = FakeWindow()
+    _attach(application, window)
+    items = []
+    for name in ("pages", "scenes"):
+        path = tmp_path / f"{name}.png"
+        items.append(MediaItem(path, Kind.STILL, size=1, mtime=1))
+    application.session.adopt_library(Library((tmp_path,), tuple(items)))
+    for item, name in zip(items, ("pages", "scenes"), strict=True):
+        made = application.session.playlists.create(name, entry_id=name)
+        application.session.playlists.add(made.id, item.path)
+    return application, window, items
+
+
+def _send_ok(monkeypatch: pytest.MonkeyPatch, sent: list[str]) -> None:
+    from tests.test_ui_runtime import _status as runtime_status
+    from wall_in_one.control import client
+    from wall_in_one.control.protocol import Response
+
+    def answered(request: str, argument: str | None = None, **_kwargs: object) -> Response:
+        if request == "status":
+            return runtime_status("Scheduled")
+        sent.append(f"{request} {argument}")
+        return Response.success("ok")
+
+    monkeypatch.setattr(client, "send_runtime", answered)
+
+
+def _classic_overall(session: Any, status: dict[str, Any]) -> int | None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    choices = session.playlists.all()
+    selected = SchedulesPage._playback_selected(session, choices, _truth(status))
+    names = ["Follow schedule", *(one.name for one in choices)]
+    print(f"choices={names} selected={selected!r} record={session.manual_playlist!r}")
+    return selected
+
+
+def _shown_item(row: Adw.ComboRow) -> str:
+    item = row.get_selected_item()
+    assert isinstance(item, Gtk.StringObject)
+    return item.get_string()
+
+
+def _classic_changed(status: dict[str, Any], picked: int) -> str:
+    """The classic Active playlist row after the person picks row ``picked`` and the
+    command doesn't start (another GUI runtime call pending: app.py:7405)."""
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    choices = (
+        SimpleNamespace(id="pages", name="pages"),
+        SimpleNamespace(id="scenes", name="scenes"),
+    )
+    row = Adw.ComboRow(model=Gtk.StringList.new(["Follow schedule", "pages", "scenes"]))
+    fake = SimpleNamespace(
+        _loading=False,
+        _app=SimpleNamespace(
+            runtime_status=status,
+            session=SimpleNamespace(manual_playlist=None),
+            activate_playlist_async=lambda _pid: False,
+            resume_schedule_async=lambda: False,
+        ),
+        _playback_selected=SchedulesPage._playback_selected,
+    )
+    first = SchedulesPage._playback_selected(fake._app.session, choices, _truth(status))
+    if first is None:
+        unnamed_pick.show(row)
+    else:
+        row.set_selected(first)
+    changed = SchedulesPage._make_playback_changed(fake, choices)  # type: ignore[arg-type]
+    row.set_selected(picked)
+    changed(row, None)
+    shown = _shown_item(row)
+    print(f"built on {first!r}; after a command that didn't start: {shown!r}")
+    return shown
+
+
+def test_n4_classic_a_command_that_didnt_start_leaves_no_optimistic_claim() -> None:
+    # The pick "pages" holds (stood in for); the person chose "Follow schedule", and
+    # nothing was sent. schedules_page.py:1131-1135: "A failure therefore cannot leave
+    # an optimistic manual/schedule claim."
+    shown = _classic_changed(_at_the_ceiling(_mirrored_pick_rows()), 0)
+    assert shown == unnamed_pick.UNNAMED_PICK, f"the row says {shown!r}; the pick still holds"
+
+
+def test_control_n4_below_the_ceiling_the_row_goes_back_to_the_pick() -> None:
+    assert _classic_changed(_mirrored_pick_rows(), 0) == "pages"
+
+
+def _next_details(status: dict[str, Any], *, shown: int | None = None) -> str:
+    """The next Displays page's Playing now row after ``_refresh_details`` builds its
+    model (displays.py:528-538) for a mirrored display."""
+    from wall_in_one.ui.next.displays import DisplaysPage
+
+    [route, *_rest] = _routes(status)
+    row = Adw.ComboRow()
+    fake = MagicMock()
+    fake.play_row = row
+    fake._play_ids = []
+    if shown is not None:
+        # The row was built before (its model is the page's own) and shows ``shown``.
+        fake._play_ids = ["", "pages", "scenes"]
+        row.set_model(Gtk.StringList.new(["Follow the schedule", "pages", "scenes"]))
+        row.set_selected(shown)
+    fake.state.playlists = [
+        SimpleNamespace(id="pages", name="pages", automatic=False),
+        SimpleNamespace(id="scenes", name="scenes", automatic=False),
+    ]
+    fake.scheduling.runtime_blocked.return_value = ""
+    fake._route.return_value = route
+    fake._shown.return_value = None
+    fake._status.return_value = ("Playing", "media-playback-start-symbolic", False)
+    fake.why.return_value = "why"
+    fake._play_selected = lambda r, ids: DisplaysPage._play_selected(fake, r, ids)
+    display = SimpleNamespace(connector=route_connector(status), model="", placed=False)
+    DisplaysPage._refresh_details(fake, display, True)  # type: ignore[arg-type]
+    print(f"next Playing now row: {_shown_item(row)!r} of {fake._play_ids}")
+    return _shown_item(row)
+
+
+def route_connector(status: dict[str, Any]) -> str:
+    return str(status["displays"][0]["connector"])
+
+
+def test_n4_next_a_pick_held_isnt_shown_as_follow_the_schedule() -> None:
+    # The page's first build (or any change to the playlists) re-models the row, which
+    # starts on row 0; no field names the pick and no record is trusted.
+    shown = _next_details(_at_the_ceiling(_mirrored_pick_rows()))
+    assert shown == unnamed_pick.UNNAMED_PICK, f"a pick holds, and the row says {shown!r}"
+
+
+def test_n4_next_a_row_the_person_left_on_a_playlist_stays_there_at_the_ceiling() -> None:
+    status = _at_the_ceiling(_mirrored_pick_rows())
+    assert _next_details(status, shown=1) == "pages"
+
+
+def test_n4_next_a_row_on_follow_the_schedule_is_blanked_when_a_pick_holds() -> None:
+    status = _at_the_ceiling(_mirrored_pick_rows())
+    assert _next_details(status, shown=0) == unnamed_pick.UNNAMED_PICK
+
+
+def test_control_n4_next_below_the_ceiling_the_row_is_the_pick() -> None:
+    assert _next_details(_mirrored_pick_rows()) == "pages"
+
+
+def test_n4_the_classic_combo_doesnt_rest_on_a_record_the_service_path_never_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gtk_helpers import spin_until
+    from tests.test_ui_runtime import _close
+    from wall_in_one.session import QUICK_CHOICE_ID, QUICK_CHOICE_NAME
+
+    application, window, items = _app_with_playlists(tmp_path, monkeypatch)
+    sent: list[str] = []
+    _send_ok(monkeypatch, sent)
+    try:
+        # "Your pick" (the quick-choice save's path) records the quick choice ...
+        application.session.playlists.set_singleton(
+            QUICK_CHOICE_ID, QUICK_CHOICE_NAME, items[0].path
+        )
+        application.session.use_playlist(QUICK_CHOICE_ID)
+        # ... then Follow schedule goes through the service, which doesn't clear it.
+        assert application.resume_schedule_async()
+        spin_until(lambda: window.busy == [True, False])
+        assert sent == ["schedule-follow None"]
+        assert application.session.manual_playlist == QUICK_CHOICE_ID  # the stale record
+        reply = _at_the_ceiling(_mirrored_pick_rows())
+        assert _classic_overall(application.session, reply) is None
+    finally:
+        _close(application)
+
+
+def test_n4_the_classic_combo_after_the_apps_own_pick_isnt_follow_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gtk_helpers import spin_until
+    from tests.test_ui_runtime import _close
+
+    application, window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    sent: list[str] = []
+    _send_ok(monkeypatch, sent)
+    try:
+        pages = application.session.playlists.by_name("pages")
+        assert application.activate_playlist_async(pages.id)
+        spin_until(lambda: window.busy == [True, False])
+        assert sent == [f"playlist-use {pages.id}"]
+        # The service took the pick; the record is None. The reply can't name the pick.
+        assert application.session.manual_playlist is None
+        reply = _at_the_ceiling(_mirrored_pick_rows())
+        assert _classic_overall(application.session, reply) is None
+    finally:
+        _close(application)
+
+
+def _display_row_after(selected: int | None, then: int | None) -> tuple[str, int]:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    row = Adw.ComboRow(model=Gtk.StringList.new(["Follow schedule", "pages", "scenes"]))
+    fake = SimpleNamespace(_loading=False, _display_selected_echo={})
+    for step in (selected, then):
+        SchedulesPage._set_display_selected(fake, "DP-1", row, step)  # type: ignore[arg-type]
+        # What the handler does with its echo, as GTK's notify would have called it.
+        fake._display_selected_echo.clear()
+    return _shown_item(row), row.get_model().get_n_items()  # type: ignore[union-attr]
+
+
+def test_n7_the_classic_display_row_of_an_unsure_pick_names_no_playlist() -> None:
+    assert _display_row_after(2, None) == (unnamed_pick.UNNAMED_PICK, 4)
+
+
+def test_n7_the_classic_display_row_drops_the_item_once_the_pick_is_named() -> None:
+    assert _display_row_after(None, 1) == ("pages", 3)
 
 
 # ------------------------------------------------------------------ N8 ---------

@@ -15,7 +15,7 @@ from gi.repository import Adw, Gdk, Gtk
 
 from wall_in_one import config, runtime_config
 from wall_in_one.library import schedules
-from wall_in_one.ui import playback_verbs, runtime_truth
+from wall_in_one.ui import playback_verbs, runtime_truth, unnamed_pick
 from wall_in_one.ui.pending_edits import queue_intent, settle_intent
 from wall_in_one.ui.plain_text import plain
 
@@ -200,9 +200,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         try:
             row.set_sensitive(True)
             row.set_subtitle(self._playback_description(session, truth))
-            selected = self._playback_selected(session, self._playback_choices, truth)
-            if selected is not None:
-                row.set_selected(selected)
+            self._place_playback(
+                row, self._playback_selected(session, self._playback_choices, truth)
+            )
         finally:
             self._loading = False
 
@@ -245,7 +245,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
             model=Gtk.StringList.new(["Follow schedule", *(one.name for one in choices)]),
         )
         selected = self._playback_selected(session, choices, truth)
-        row.set_selected(Gtk.INVALID_LIST_POSITION if selected is None else selected)
+        if selected is None:
+            unnamed_pick.show(row)
+        else:
+            row.set_selected(selected)
         self._playback_row = row
         self._playback_choices = choices
         row.connect("notify::selected", self._make_playback_changed(choices))
@@ -515,12 +518,12 @@ class SchedulesPage(Gtk.ScrolledWindow):
     def _display_playback_selected(
         display: runtime_truth.DisplayRuntimeTruth,
         choices: tuple[Any, ...],
-    ) -> int:
+    ) -> int | None:
         if not display.manual_override:
             return 0
         if display.route_unsure:
             # The pick may be what plays or what stands in for it: put it on neither.
-            return int(Gtk.INVALID_LIST_POSITION)
+            return None
         # The person's pick, also while a stand-in plays for it.
         for index, playlist in enumerate(choices, start=1):
             if playlist.id == display.asked_playlist_id:
@@ -710,17 +713,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
     ) -> int | None:
         """The selected row, or None to leave the selector where it is.
 
-        A pick the reply can't name (``pick_stood_in``) is placed by the app's own
-        record of it, which can lead or lag the service; with no match the selector
-        stays, and is never put on the stand-in or on "Follow schedule".
+        A pick the reply can't name (``pick_stood_in``), or can't tell from what stands in
+        for it (``route_unsure``), is not placed: ``session.manual_playlist`` is written
+        only by the app's own paths, not by a pick made through the service (``ctl``,
+        the companion), so it can be stale. The selector is never put on the stand-in
+        or on "Follow schedule" (see `_place_playback`).
         """
-        if truth is not None and truth.route_unsure:
-            # The pick may be what plays or what stands in for it.
-            return None
-        if truth is not None and truth.pick_stood_in:
-            for index, playlist in enumerate(choices, start=1):
-                if playlist.id == session.manual_playlist:
-                    return index
+        if truth is not None and (truth.route_unsure or truth.pick_stood_in):
             return None
         manual_id = (
             # The person's pick, also while a stand-in plays for it.
@@ -1141,11 +1140,26 @@ class SchedulesPage(Gtk.ScrolledWindow):
     def _clock_value(hour: Gtk.DropDown, minute: Gtk.DropDown) -> str:
         return f"{hour.get_selected():02d}:{minute.get_selected():02d}"
 
+    @staticmethod
+    def _place_playback(row: Adw.ComboRow, selected: int | None) -> None:
+        """Put the overall selector on ``selected``; None is a pick no field names.
+
+        The row then stays where it is, except on "Follow schedule", which would say no
+        pick holds: that becomes the unnamed-pick item (`unnamed_pick`).
+        """
+        if selected is not None:
+            unnamed_pick.drop(row)
+            row.set_selected(selected)
+        elif row.get_selected() == 0:
+            unnamed_pick.show(row)
+
     def _make_playback_changed(self, choices: tuple[Any, ...]) -> Any:
         def changed(row: Adw.ComboRow, _property: object) -> None:
             if self._loading:
                 return
             index = row.get_selected()
+            if index > len(choices):
+                return  # the unnamed-pick item: it names nothing to ask for
             try:
                 (
                     self._app.activate_playlist_async(choices[index - 1].id)
@@ -1162,7 +1176,13 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 try:
                     truth = runtime_truth.from_status(getattr(self._app, "runtime_status", None))
                     selected = self._playback_selected(self._app.session, choices, truth)
-                    if selected is not None:
+                    # A pick no field names can't be told from the click, which may be
+                    # the one the service just refused: the unnamed-pick item, never
+                    # the click.
+                    if selected is None:
+                        unnamed_pick.show(row)
+                    else:
+                        unnamed_pick.drop(row)
                         row.set_selected(selected)
                 finally:
                     self._loading = False
@@ -1182,8 +1202,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if self._display_selected_echo.get(connector) == index:
                 self._display_selected_echo.pop(connector, None)
                 return
-            if self._loading:
-                return
+            if self._loading or index > len(choices):
+                return  # (above the choices is the unnamed-pick item)
             started = False
             try:
                 started = (
@@ -1218,9 +1238,31 @@ class SchedulesPage(Gtk.ScrolledWindow):
         self,
         connector: str,
         row: Adw.ComboRow,
-        selected: int,
+        selected: int | None,
     ) -> None:
-        """Set service-owned selection without echoing it as a user command."""
+        """Set service-owned selection without echoing it as a user command.
+
+        None is a pick the reply can't name: the unnamed-pick item (`unnamed_pick`).
+        """
+        model = row.get_model()
+        if selected is None:
+            count = model.get_n_items() if model is not None else 0
+            if unnamed_pick.is_shown(row):
+                if row.get_selected() == count - 1:
+                    return
+                selected = count - 1
+            else:
+                selected = count
+            self._display_selected_echo[connector] = selected
+            unnamed_pick.show(row)
+            return
+        if unnamed_pick.is_shown(row):
+            self._display_selected_echo.pop(connector, None)
+            kept, self._loading = self._loading, True
+            try:
+                unnamed_pick.drop(row)
+            finally:
+                self._loading = kept
         if row.get_selected() == selected:
             return
         self._display_selected_echo[connector] = selected

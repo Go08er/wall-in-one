@@ -31,7 +31,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-from wall_in_one.ui import runtime_truth
+from wall_in_one.ui import runtime_truth, unnamed_pick
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.displays_arrangement import CSS as ARRANGEMENT_CSS
 from wall_in_one.ui.next.displays_arrangement import Arrangement, LinkGlyph, MonitorTile, TileInfo
@@ -491,17 +491,17 @@ class DisplaysPage(Page):
         """Which "Playing now" row to select, or None to leave the selector where it is.
 
         The person's pick, also while a stand-in plays for it. A pick no field names
-        (`pick_stood_in`) is placed by the app's own record of it, which can lead or lag
-        the service; with no match the selector stays, and is never put on the stand-in
-        or on "Follow the schedule".
+        (`pick_stood_in`), or can't be told from its stand-in (`route_unsure`), is not
+        placed: the app's own record of a pick isn't written for one made through the
+        service, so it can be stale. The selector is never put on the stand-in or on
+        "Follow the schedule" (see `_refresh_details`).
         """
         if route is None or route.route != "pick":
             return 0
         if route.route_unsure:
             return None
         if route.pick_stood_in:
-            recorded = self.scheduling.manual_pick()
-            return play_ids.index(recorded) if recorded in play_ids else None
+            return None
         picked = route.stand_in_for or route.playlist_id
         return play_ids.index(picked) if picked in play_ids else 0
 
@@ -533,7 +533,9 @@ class DisplaysPage(Page):
 
         mine = [p for p in self.state.playlists if not p.automatic]
         play_ids = ["", *(p.id for p in mine)]
-        if play_ids != self._play_ids:
+        prior = self.play_row.get_selected()
+        reset = play_ids != self._play_ids
+        if reset:
             self._play_ids = play_ids
             self.play_row.set_model(
                 Gtk.StringList.new(["Follow the schedule", *(p.name for p in mine)])
@@ -541,7 +543,14 @@ class DisplaysPage(Page):
         # The person's pick, also while a stand-in plays for it.
         selected = self._play_selected(route, play_ids)
         if selected is not None:
+            unnamed_pick.drop(self.play_row)
             self.play_row.set_selected(selected)
+        elif reset and 0 < prior < len(play_ids):
+            # A new model starts on row 0; keep the row where the person left it.
+            self.play_row.set_selected(prior)
+        elif reset or self.play_row.get_selected() == 0:
+            # Never "Follow the schedule" while a pick holds.
+            unnamed_pick.show(self.play_row)
         self.play_row.set_sensitive(not runtime_off)
         self.play_row.set_subtitle(
             runtime_off
@@ -860,6 +869,13 @@ class DisplaysPage(Page):
             return
         connector = "" if self._mirrored() else self._selected
         self.scheduling.play_now(connector, self._play_ids[index])
+        if self._play_selected(self._route(self._selected), self._play_ids) is None:
+            # A pick no field names: the click can't be confirmed, so it isn't shown.
+            self._loading = True
+            try:
+                unnamed_pick.show(row)
+            finally:
+                self._loading = False
         # The runtime's next status moves this row; until then it shows the last one.
         self._refresh_soon()
 

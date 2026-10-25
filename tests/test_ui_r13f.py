@@ -752,10 +752,11 @@ def _classic_selected(status: dict[str, Any], recorded: str | None) -> tuple[Any
     )
 
 
-def test_n3_the_classic_combo_follows_the_apps_record_of_the_pick() -> None:
-    # "scenes" plays in place of the pick, and the app's record says the pick is "pages".
+def test_n3_the_classic_combo_doesnt_rest_on_the_apps_record_of_the_pick() -> None:
+    # "scenes" plays in place of the pick. The app's record says "pages", but a pick made
+    # through the service (ctl, the companion) never writes it, so it may be stale (r13f N4).
     overall, _display = _classic_selected(_mirrored_pick_stood_in(), "pages")
-    assert overall == 1, overall
+    assert overall is None, overall
 
 
 def test_n3_the_classic_combo_stays_when_the_record_doesnt_match() -> None:
@@ -770,27 +771,22 @@ def test_control_n3_the_classic_combo_below_the_ceiling_is_the_pick() -> None:
     assert overall == 1, overall  # the service names the pick "pages"
 
 
-def _next_selected(status: dict[str, Any], recorded: str | None) -> int | None:
+def _next_selected(status: dict[str, Any]) -> int | None:
     from wall_in_one.ui.next.displays import DisplaysPage
     from wall_in_one.ui.next.real_schedule import RealScheduling
 
     truth = _truth(status)
     [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
-    fake = SimpleNamespace(scheduling=SimpleNamespace(manual_pick=lambda: recorded))
+    fake = SimpleNamespace()
     return DisplaysPage._play_selected(fake, route, ["", "pages", "scenes"])  # type: ignore[arg-type]
 
 
-def test_n3_the_next_combo_follows_the_apps_record_of_the_pick() -> None:
-    assert _next_selected(_mirrored_pick_stood_in(), "pages") == 1
-
-
-def test_n3_the_next_combo_stays_when_the_record_doesnt_match() -> None:
-    for recorded in (None, "gone"):
-        assert _next_selected(_mirrored_pick_stood_in(), recorded) is None, recorded
+def test_n3_the_next_combo_doesnt_rest_on_the_apps_record_of_the_pick() -> None:
+    assert _next_selected(_mirrored_pick_stood_in()) is None
 
 
 def test_control_n3_the_next_combo_below_the_ceiling_is_the_pick() -> None:
-    assert _next_selected(_status("pick-refused"), None) == 1
+    assert _next_selected(_status("pick-refused")) == 1
 
 
 def test_control_n3_an_independent_pick_at_the_ceiling_is_still_hedged() -> None:

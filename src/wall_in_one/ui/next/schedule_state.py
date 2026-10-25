@@ -247,11 +247,6 @@ class Scheduling(Protocol):
         """Why runtime commands (rotation, play now) are off now, or empty."""
         ...
 
-    def manual_pick(self) -> str | None:
-        """The playlist id of the pick the app itself made, or None. It can lead or lag
-        the service, so it only places a selector, never decides what is true."""
-        ...
-
     def playlist_label(self, pid: str) -> str | None:
         """What to call a playlist `AppState.playlists` hides (a "Your pick" one a rule
         or a display can still name), or None when no such playlist exists."""

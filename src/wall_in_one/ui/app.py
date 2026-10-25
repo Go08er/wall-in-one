@@ -2603,7 +2603,9 @@ class Application(Adw.Application):
             if judged is None:
                 return True
             settings, why = judged
-            older = look.status is not None
+            older = look.status is not None and not runtime_config.nothing_to_play_supported(
+                look.status
+            )
             quit_older = why == _NAMES_WEB and older
             document = runtime_config.nothing_to_play_document(
                 settings, runtime_config.WEB_OFF_REASON

@@ -158,13 +158,18 @@ Saving `settings.toml` doesn't take the compiler lock, so a publication can
 hold settings read before the person changed them. For
 `allow_web_wallpapers` that matters: a publication that read it on must not
 install a document that allows web wallpapers once it is off. So, just before
-the atomic rename, each publication takes the settings file's own lock (the
-one every save of it takes, inside the compiler lock), reads the setting
-again, and holds that lock through the rename. When it no longer says what
-the document was compiled for, the document is compiled again for what it
-says, and nothing is written meanwhile. A settings file that can't be read is
-taken as web wallpapers off, their default. A hand edit takes no lock; the
-next publication or service start reads it.
+the atomic rename, a publication compiled for web wallpapers on takes the
+settings file's own lock (the one every save of it takes, inside the compiler
+lock), reads the setting again, and holds that lock through the rename. One
+compiled for them off waits for no lock: its document neither allows web
+wallpapers nor names a web page that can play, so installing it can't break
+the rule. It reads the setting once without the lock, so that a snapshot from
+before the person turned them on is compiled again for that; a turn-on saved
+after that read publishes after it. When the setting no longer says what the
+document was compiled for, the document is compiled again for what it says,
+and nothing is written meanwhile. A settings file that can't be read is taken
+as web wallpapers off, their default. A hand edit takes no lock; the next
+publication or service start reads it.
 
 Loading changed bytes is also not synonymous with restarting the current
 wallpaper. The service compares the fully resolved effective output/entry set,

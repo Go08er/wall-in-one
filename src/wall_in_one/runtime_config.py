@@ -2810,7 +2810,7 @@ def overrides_from_a_newer_build(text: str | None) -> bool:
 
 @contextmanager
 def _web_setting_held(settings: config.Settings, target: Path) -> Iterator[None]:
-    """Hold ``settings.toml`` still while ``target`` is installed, if it agrees with ``settings``.
+    """Install ``target`` only while ``settings.toml`` agrees with ``settings`` where it matters.
 
     Every publication compiles from settings read before its library scan,
     or before its compile (the window's own snapshot, under ``--service``),
@@ -2819,18 +2819,33 @@ def _web_setting_held(settings: config.Settings, target: Path) -> Iterator[None]
     is still compiling, and that one would then install a document that
     allows them (review r13c, D2). Only the setting's own lock, the one every
     writer of ``settings.toml`` takes (`config.save`, `config.mutate`), keeps
-    it still: it is taken here, inside the compiler lock (the order every
-    writer keeps: compiler, then a store's own lock), ``allow_web_wallpapers``
-    is read again under it, and it is held across the install, so nothing
-    the app saves can change the setting between that read and the rename.
+    it still: for a document compiled for web wallpapers on, it is taken
+    here, inside the compiler lock (the order every writer keeps: compiler,
+    then a store's own lock), ``allow_web_wallpapers`` is read again under
+    it, and it is held across the install, so nothing the app saves can
+    turn them off between that read and the rename.
+
+    A document compiled for them off takes no lock (review r13d, N1): it
+    neither allows them nor names a web page that can play (`_resolved_entry`
+    leaves each out, `_document_head` the key), so installing it keeps the
+    web-off rule whatever the file says meanwhile. The setting is still read
+    once, without the lock, so that a snapshot taken before the person
+    turned them on is compiled again for that rather than installed after
+    the publication that turn-on asked for. A turn-on saved after that read
+    is published after this install: its publication starts once the save
+    is done (the window's own; under ``--service``, with the settings it
+    saved) and waits for the compiler lock held here, so it follows this
+    install and carries the key.
 
     When the file no longer says what ``settings`` does,
     `_WebSettingMovedError` is raised before anything is written, with what
     it says now: the caller compiles again for that and comes back here. A
     file that can't be read strictly, or isn't there, isn't known to allow
-    web wallpapers, so it counts as off (their default). A hand edit takes no
-    lock and is outside this; the next publication, or the next start's
-    compile, reads it.
+    web wallpapers, so it counts as off (their default). Every writer
+    replaces it by a rename (`state_file.write_atomic_text`), so a read
+    without the lock sees one whole file. A hand edit takes no lock and is
+    outside this; the next publication, or the next start's compile, reads
+    it.
 
     Only for the live ``runtime.toml``: a document for any other path is
     never loaded by the service. A lock this user can't open for writing (a
@@ -2843,6 +2858,11 @@ def _web_setting_held(settings: config.Settings, target: Path) -> Iterator[None]
         yield
         return
     source = paths.settings_path()
+    if not settings.allow_web_wallpapers:
+        if _web_wallpapers_saved_on(source):
+            raise _WebSettingMovedError(True)
+        yield
+        return
     with ExitStack() as held:
         if source.parent.is_dir():
             try:
@@ -2854,13 +2874,17 @@ def _web_setting_held(settings: config.Settings, target: Path) -> Iterator[None]
                         f"installed ({error}); the last-known-good runtime configuration was "
                         "left untouched"
                     ) from error
-        try:
-            fresh = config.load_strict(source).allow_web_wallpapers
-        except config.ConfigError:
-            fresh = False
-        if fresh != settings.allow_web_wallpapers:
-            raise _WebSettingMovedError(fresh)
+        if not _web_wallpapers_saved_on(source):
+            raise _WebSettingMovedError(False)
         yield
+
+
+def _web_wallpapers_saved_on(source: Path) -> bool:
+    """Whether ``source`` says ``allow_web_wallpapers = true`` now; unreadable says off."""
+    try:
+        return config.load_strict(source).allow_web_wallpapers
+    except config.ConfigError:
+        return False
 
 
 def _web_setting_kept_moving() -> RuntimeConfigError:
@@ -2876,8 +2900,9 @@ def write(settings: config.Settings, session: Session, path: Path | None = None)
     Each file is replaced atomically on its own; the pair is not. A refused
     ``runtime.toml`` leaves both files as they were, and so does a failed
     ``runtime.toml`` install, which puts the previous overrides back. What is
-    installed is compiled for the ``allow_web_wallpapers`` that
-    ``settings.toml`` holds at that moment (`_web_setting_held`).
+    installed never allows web wallpapers while ``settings.toml`` says they
+    are off, and is compiled again for them when it says on before the
+    install (`_web_setting_held`).
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):
@@ -2924,12 +2949,13 @@ def publish_changes(
     A `RuntimeConfigNotDurableError` carries the same answer in ``changes``:
     every file listed was published, only a folder sync failed.
 
-    What is installed, or kept as it is, was compiled for the
-    ``allow_web_wallpapers`` that ``settings.toml`` holds at that moment
-    (`_web_setting_held`): when the person changed it after ``settings``
-    was read, the document is compiled again for what it says now (review
-    r13c, D2). So an unchanged document that allows web wallpapers is not
-    kept once they were turned off either.
+    What is installed, or kept as it is, never allows web wallpapers while
+    ``settings.toml`` says they are off (`_web_setting_held`): when the
+    person changed the setting after ``settings`` was read, the document is
+    compiled again for what it says now (review r13c, D2). So an unchanged
+    document that allows web wallpapers is not kept once they were turned
+    off either. Only a document compiled for them on waits for the
+    setting's lock (review r13d, N1).
     """
     target = path if path is not None else paths.runtime_config_path()
     with compiler_lock(target):

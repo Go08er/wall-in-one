@@ -597,3 +597,33 @@ def test_u_l_c_a_second_click_after_the_first_is_still_a_click(
         assert app.sent == [("playlist-use", ids["scenes"])] * 2, app.sent
     finally:
         session.shutdown()
+
+
+def _scenes_named(ids: dict[str, str]) -> dict[str, Any]:
+    return _renamed(_mirrored_pick_rows_playing(), {"pages": ids["scenes"], "scenes": ids["pages"]})
+
+
+@pytest.mark.parametrize("held", [None, _scenes_named], ids=["real-revert", "noop-revert"])
+def test_u_l_c_a_later_click_on_the_reverted_row_is_still_sent(
+    held: Any,
+    items: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The revert's echo is spent once GObject re-emits it, and only a revert that moved
+    # the row leaves one. After a reply moves the row off the reverted item, a real click
+    # back onto that item is a click, not the echo. "noop-revert": the app already holds
+    # the clicked item, so the revert puts the row where the click left it.
+    page, app, ids, session = _classic(items, monkeypatch, independent=False, status=_pages_named)
+    try:
+        row = _overall(page)
+        if held is not None:
+            app.runtime_status = held(ids)
+        row.set_selected(_index(session, ids["scenes"]))
+        app.runtime_status = _following_rows(ids)
+        page.runtime_status_changed(session)  # the reply moves the row to Follow schedule
+        assert row.get_selected() == 0
+        back = ids["pages"] if held is None else ids["scenes"]
+        row.set_selected(_index(session, back))
+        assert app.sent == [("playlist-use", ids["scenes"]), ("playlist-use", back)], app.sent
+    finally:
+        session.shutdown()

@@ -1222,3 +1222,64 @@ def test_control_no_quit_once_a_second_ctrl_c_has_come(
         _judged_at_exit(application)
     assert service.verbs == []
     assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()
+
+
+# -- after review r13g: what a cut look raises, and the look's one bound -------------------------
+
+
+class _LookError(Exception):
+    """What the held look raises (this test)."""
+
+
+@pytest.mark.parametrize("variant", ["after-the-cut", "control-within-the-wait"])
+def test_a_look_that_fails_once_its_wait_was_cut_is_logged(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    variant: str,
+) -> None:
+    """An older service heard, and a file naming scenes, whose look at the Workshop items
+    (`workshop.web_among`) is held, then fails. Past the look's bound (put behind it here) the
+    step stops waiting: the ids count as web pages, the file is replaced, and the failure, once
+    the look is let go, is logged. Before: it landed on a future nothing read, and nothing said
+    it. The control: the look fails within the wait; the step's own handler logs it, once, and
+    nothing else does."""
+    application = profiles().application
+    _content, scenes = _workshop(2)
+    text = _naming(scenes)
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["an-older-service"])
+    cut = variant == "after-the-cut"
+    monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", -1.0 if cut else GIVE_UP)
+    began, release = threading.Event(), threading.Event()
+    looks: list[threading.Thread] = []
+
+    def failing(_ids: Any, _give_up: Any = None) -> tuple[bool, bool]:
+        looks.append(threading.current_thread())
+        began.set()
+        release.wait(GIVE_UP)
+        raise _LookError("the look failed (this test)")
+
+    monkeypatch.setattr(workshop, "web_among", failing)
+    caplog.set_level(logging.WARNING, logger=app_module.LOGGER.name)
+    if not cut:
+        release.set()
+    try:
+        application._web_off_on_disk_at_exit()
+    finally:
+        release.set()
+    assert began.wait(GIVE_UP), "the look never began"
+    for look in looks:
+        look.join(GIVE_UP)
+        assert not look.is_alive(), "the look never ended"
+    _judged_at_exit(application)
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if record.exc_info is not None and isinstance(record.exc_info[1], _LookError)
+    ]
+    if not cut:
+        assert len(said) == 1 and "could not be checked" in said[0], said
+        return
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()
+    assert len(said) == 1, f"a look that failed once its wait was cut was logged {len(said)} times"

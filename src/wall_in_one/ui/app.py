@@ -347,9 +347,19 @@ def _unless_given_up[Judged](
     handler between the slices (`SHUTDOWN_INTERRUPT_POLL_SECONDS`). ``until``
     (a `time.monotonic` deadline) ends it too, never later: the last slice is
     cut to it. The thread is a daemon, so the process doesn't wait for work it
-    stopped waiting for. What ``work`` raises is raised here.
+    stopped waiting for. What ``work`` raises is raised here, or, once the
+    wait was cut, logged: nothing reads it then.
     """
     done: Future[Judged] = Future()
+
+    def unread(finished: Future[Judged]) -> None:
+        error = finished.exception()
+        if error is not None:
+            LOGGER.error(
+                "what the end of a shutdown had stopped waiting for (a parse, a look at "
+                "Workshop items, or a quit) then failed",
+                exc_info=error,
+            )
 
     def run() -> None:
         try:
@@ -360,11 +370,13 @@ def _unless_given_up[Judged](
     threading.Thread(target=run, name=SHUTDOWN_LOOK_THREAD, daemon=True).start()
     while not done.done():
         if give_up():
+            done.add_done_callback(unread)
             return cut
         slice_ = SHUTDOWN_INTERRUPT_POLL_SECONDS
         if until is not None:
             left = until - time.monotonic()
             if left <= 0:
+                done.add_done_callback(unread)
                 return cut
             slice_ = min(slice_, left)
         futures.wait((done,), timeout=slice_)

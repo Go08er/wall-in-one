@@ -226,8 +226,9 @@ def _rule_in_force(
 ) -> str | None:
     """The rule a row follows: its own id, or with the id left out, the rule in force.
 
-    The reply leaves every row's id null only at its size ceiling
-    (``schedule_rule_id_omitted``). Mirrored, one rule is in force for the whole
+    The reply leaves ids null per row, only at its size ceiling
+    (``schedule_rule_id_omitted``); a row that kept its id is trusted as it is,
+    and only a null one is filled in. Mirrored, one rule is in force for the whole
     screen, and ``schedules[].in_force`` still says which. A transition being
     retried leaves the row on its earlier rule, so then nothing is named.
     """

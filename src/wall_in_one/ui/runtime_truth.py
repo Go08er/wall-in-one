@@ -507,7 +507,9 @@ def _inferred_stand_ins(
 
     With the rule's id left out (``schedule_rule_id_omitted``), or naming no rule
     the inventory lists, the playlist can't be looked up, so the row is marked
-    unsure like a pick rather than guessed.
+    unsure like a pick rather than guessed. The service leaves ids out per row, so
+    a row that kept its id is trusted whatever the flag says; only a null one is
+    hedged.
     """
     found: list[DisplayRuntimeTruth] = []
     for display in displays:

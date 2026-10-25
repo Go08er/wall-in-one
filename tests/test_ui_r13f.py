@@ -886,3 +886,46 @@ def test_control_n5_both_uis_say_unlisted_rows_with_no_mark_the_same_way() -> No
     said = " \u00b7 3 can\u2019t play here"
     assert _classic_count((_scene("12345"),), omitted=3).endswith(said)
     assert _count_line(3, marked=False).endswith(said)
+
+
+# ------------------------------------------------- rule ids left out per row ----
+
+
+def _independent_rules_one_id_kept() -> dict[str, Any]:
+    """Independent, two rows on rule r1 (-> pages, refused; ``scenes`` stands in), at the
+    ceiling with ``schedule_rule_id_omitted``: the service left out the longer row's id
+    only, so DP-1 keeps ``r1`` and DP-2's is null."""
+    status = _at_the_ceiling(_mirrored_rule_window(ceiling=False))
+    status["display_mode"] = "independent"
+    status["automatic_retry"] = None
+    [row] = status["displays"]
+    row.pop("automatic_retry", None)
+    row["automatic_retry"] = None
+    first = {**row, "connector": "DP-1", "schedule_rule_id": "r1"}
+    second = {**row, "connector": "DP-2", "schedule_rule_id": None}
+    status["displays"] = [first, second]
+    status["schedule_rule_id_omitted"] = True
+    return status
+
+
+def test_rule_ids_left_out_per_row_only_the_null_row_is_hedged() -> None:
+    truth = _truth(_independent_rules_one_id_kept())
+    kept, left_out = truth.displays
+    assert kept.stand_in_for == "pages" and not kept.route_unsure
+    assert left_out.stand_in_for is None and left_out.route_unsure
+
+
+def test_control_rule_ids_left_out_on_every_row_hedges_every_row() -> None:
+    status = _independent_rules_one_id_kept()
+    status["displays"][0]["schedule_rule_id"] = None
+    truth = _truth(status)
+    assert all(row.route_unsure and row.stand_in_for is None for row in truth.displays)
+
+
+def test_rule_ids_left_out_per_row_the_route_keeps_its_own_id() -> None:
+    from wall_in_one.ui.next.real_schedule import RealScheduling
+
+    truth = _truth(_independent_rules_one_id_kept())
+    kept, left_out = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    assert kept.rule_id == "r1" and not kept.route_unsure
+    assert left_out.rule_id is None and left_out.route_unsure

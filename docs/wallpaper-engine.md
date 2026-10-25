@@ -228,13 +228,18 @@ runs the check below. A save of the setting still being written then is
 waited for, as long as such a save can take (its locks, and the check of the
 service that "Stop animations on battery" makes: about 70 seconds at most);
 with none, nothing is waited for. The lock is waited for two seconds at most,
-and only when there is a file to replace; another writer holding it past that
-installs only what the setting allows. A second Ctrl-C ends both waits at
-once. A save the app stops waiting for (that Ctrl-C, or its bound) still lands
-before the process exits, so one that turns the setting off is judged as if it
-had landed: a file that allows web wallpapers is replaced all the same. Should
-that save then fail, nothing plays while the setting stays on, until a
-publication gets through.
+and only when there is a file to replace. A second Ctrl-C ends both waits at
+once. What they leave is judged again before the process exits, which waits
+for it anyway: a save the app stopped waiting for (that Ctrl-C, or its bound)
+still lands, and a lock it didn't get is let go. Once that save has landed and
+the app's own publication has ended, the setting and the file are read again
+under the lock (waited for five seconds), and a file that allows web
+wallpapers while the setting is off is replaced. That covers the app's own
+publication that read the setting before the save landed, and so rightly, then,
+installed a file that allows them. A save that fails leaves the setting on, and
+the file as it is. Only a third Ctrl-C, which ends the process at once, or
+another program holding the lock past those five seconds, leaves such a file;
+the next start's compile, or its check of a kept file (below), judges it.
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
 a web page, names a Workshop item whose type can't be checked, allows web

@@ -196,6 +196,12 @@ def _join_lanes() -> None:
     for lane in dict.fromkeys(_LANES):
         lane.shutdown(wait=True)
     _LANES.clear()
+    # The end of the shutdown's later judgement, once the save and the lane it waits for are done
+    # (none at f127a31, which these tests are also run against).
+    for thread in threading.enumerate():
+        if thread.name == getattr(app_module, "WEB_OFF_AT_EXIT_THREAD", None):
+            thread.join(GIVE_UP)
+            assert not thread.is_alive(), "the judgement at exit never ended"
     dial_rows._PENDING.clear()  # a timer of a loop that has ended: nothing may reach the next test
 
 
@@ -1014,8 +1020,8 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
     while the end of the shutdown waits for it ends that wait: ``run()`` returns at once, and the
     save it cut off isn't waited for (the person cut it off). It still lands, as the process's
     exit waits for it, with web wallpapers off: so the file that allows them is replaced all the
-    same. Before (r13e, L3's last case): it was left, and the page played on while they were
-    off."""
+    same, once it has landed (review r13f, L1: it is judged then, not as if it had). Before
+    (r13e, L3's last case): it was left, and the page played on while they were off."""
     application, clip, _slow, _spans = _setup(
         monkeypatch,
         tmp_path,
@@ -1078,7 +1084,7 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
 
 
 @pytest.mark.parametrize("variant", ["turns-web-off", "control-another-setting"])
-def test_a_save_still_written_past_its_bound_that_turns_web_off_is_judged_as_landed(
+def test_a_save_still_written_past_its_bound_that_turns_web_off_is_judged_once_it_lands(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
 ) -> None:
     """``--service``, web wallpapers on, Ctrl-C just after a toggle, no number waiting: the save
@@ -1086,8 +1092,8 @@ def test_a_save_still_written_past_its_bound_that_turns_web_off_is_judged_as_lan
     short here), and lands only once ``run()`` has returned, as the process's exit waits for it.
     Before (r13e, L3's last case): the step read the setting still on and left the file that
     allows web wallpapers, and the save then turned them off. Now a save that turns them off is
-    judged as landed, and the file is replaced. The control: a save of another setting; the file
-    is left as it is."""
+    judged once it has landed (review r13f, L1), and the file is replaced. The control: a save
+    of another setting; the file is left as it is."""
     application, clip, _slow, spans = _setup(
         monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
     )
@@ -1194,11 +1200,17 @@ def test_a_second_ctrl_c_ends_the_wait_for_the_compiler_lock(
     The wait's own bound is put out of reach, so only the holder or the Ctrl-C can end it.
     Before (r13e, L1): the step's Ctrl-C handler was installed only while it waited for a save,
     so PyGObject's swallowed this one, and the lock was waited for until the holder let go. The
-    control: the holder lets go while the step waits, and the file is replaced."""
+    file is still replaced, once the holder lets go, before the process exits (review r13f, L1:
+    at f127a31 it was left, allowing web wallpapers while they were off). The control: the
+    holder lets go while the step waits, and the file is replaced."""
     application, clip, _slow, spans = _setup(
         monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
     )
     monkeypatch.setattr(app_module, "SHUTDOWN_WEB_OFF_LOCK_SECONDS", 2 * GIVE_UP)
+    # The later judgement's wait too (not there at f127a31, which this test is also run against).
+    monkeypatch.setattr(
+        app_module, "SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS", GIVE_UP, raising=False
+    )
     failures: list[str] = []
     marks: dict[str, float] = {}
     holding = threading.Event()
@@ -1283,10 +1295,10 @@ def test_a_second_ctrl_c_ends_the_wait_for_the_compiler_lock(
     assert not failures, failures
     assert not spans, "a settle ran, with no number waiting"
     assert config.load_strict().allow_web_wallpapers is False
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+        "settings.toml says web wallpapers are off, and the file on disk still allows them"
+    )
     if not second:
-        assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
-            "settings.toml says web wallpapers are off, and the file on disk still allows them"
-        )
         return
     assert "second" in marks, "the second Ctrl-C was never sent"
     assert ended < marks["let go"], (

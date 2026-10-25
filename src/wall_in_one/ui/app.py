@@ -307,8 +307,14 @@ SETTINGS_SAVE_SECONDS: Final = (
     + client.TIMEOUT
 )
 #: How long that step waits for the compiler lock: briefly, since a publication
-#: holding it reads the setting under it (review r13c, D2).
+#: holding it reads the setting under it (review r13c, D2), and what is left is
+#: judged once it has settled (`Application._web_off_judged_once_landed`).
 SHUTDOWN_WEB_OFF_LOCK_SECONDS: Final = 2.0
+#: How long that later judgement waits for the compiler lock, once the save and
+#: this process's runtime lane are done: as any writer of the file waits for it.
+SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS: Final = runtime_config.COMPILER_LOCK_TIMEOUT_SECONDS
+#: That judgement's thread's name.
+WEB_OFF_AT_EXIT_THREAD: Final = "wio-web-off-at-exit"
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
 #: The line the compiler writes in ``[settings]`` while it allows web wallpapers
@@ -820,6 +826,12 @@ class Application(Adw.Application):
         self._shutting_down = False
         #: A second interrupt (Ctrl-C) ended the shutdown settle (`_settle_before_shutdown`).
         self._settle_cut = False
+        #: The runtime lane `do_shutdown` let go of, whose running job the process's
+        #: exit waits for: the end of the shutdown's judgement once it is done
+        #: (`_web_off_judged_once_landed`).
+        self._runtime_lane_at_exit: ThreadPoolExecutor | None = None
+        #: That judgement's thread, while one runs (tests join it).
+        self._web_off_deferred: threading.Thread | None = None
         self._removal_active = False
         self._removal_runtime_invalidated = False
         # A committed Delete/Trash retains a second hold until a post-delete
@@ -858,9 +870,9 @@ class Application(Adw.Application):
         #: (`_prepare_settings_batch`): what that batch owns and settles, and
         #: nothing accepted after it. None between batches.
         self._settings_batch_generation: int | None = None
-        #: Whether that batch turns web wallpapers off: what the end of a
-        #: shutdown judges by while it is still being written
-        #: (`_settings_save_landed`). Set with the generation.
+        #: Whether that batch turns web wallpapers off: one still being written
+        #: when the end of a shutdown stops waiting for it is judged once it
+        #: lands (`_turn_off_in_flight`). Set with the generation.
         self._settings_batch_turns_web_off = False
         self._settings_requested = self._settings
         self._runtime_status_pending = False
@@ -2242,6 +2254,7 @@ class Application(Adw.Application):
             # socket and refuses a race-late registration. Invalidate queued
             # work too; no completion may reach the destroyed window.
             self._runtime_jobs.shutdown(wait=False, cancel_futures=True)
+            self._runtime_lane_at_exit = self._runtime_jobs
             self._runtime_jobs = None
         # What a publication the shutdown cut would have replaced, while web
         # wallpapers are off, is replaced on disk now, file-only (r13d, N11).
@@ -2281,11 +2294,10 @@ class Application(Adw.Application):
         page while the setting is off, until it next starts (review r13d,
         N11).
 
-        So, once a save still being written has landed, or the wait for it has
-        ended (below): when ``settings.toml`` says web wallpapers are off, or
-        that save turns them off, and the file on disk allows them
-        (``allow_web_wallpapers = true``, compiled while they were on, which
-        turns the service's own check off), the file is replaced with the
+        So, when ``settings.toml`` says web wallpapers are off and the file on
+        disk allows them (``allow_web_wallpapers = true``, compiled while they
+        were on, which turns the service's own check off), the file is
+        replaced with the
         document that plays nothing (`runtime_config.nothing_to_play_document`),
         as `_web_off_not_running` replaces it when no service runs. Both are
         schema 8, so whatever could load the one loads the other, and the
@@ -2321,38 +2333,54 @@ class Application(Adw.Application):
         nothing is asked of the service: the shutdown has cut the socket calls
         off, and one would hold the exit.
 
-        Bounded, and waiting only for what can matter. A settings save still
-        being written is waited for, for as long as such a save itself can
-        take (`SETTINGS_SAVE_SECONDS`, its locks and its check of the
-        service); with none, nothing is waited for. Then the setting and the
-        file are looked at without the lock (every writer replaces each by a
-        rename), and with nothing to replace, the lock isn't waited for
-        either. Otherwise it is waited for briefly
-        (`SHUTDOWN_WEB_OFF_LOCK_SECONDS`): a lock still held then is another
-        publication's, which reads the setting under it and installs only
-        what it allows (review r13c, D2), so nothing is written here; what
-        that leaves is this process's own lane holding it past the wait and
-        then failing. Looking at the file costs a search of its text for the
-        compiler's own line for the key, and for any spelling of the key
-        (`_may_allow_web_wallpapers`), which a compiled document never has;
-        only a hand edit that has one is parsed, on a thread a second Ctrl-C
-        stops waiting for (review r13f, N2). So a quit takes at most the
-        settle's bound, that save's bound while one is being written, and the
-        lock's.
+        Bounded, and waiting only for what can matter. A settings save that
+        turns web wallpapers off and is still being written is waited for, for
+        as long as such a save itself can take (`SETTINGS_SAVE_SECONDS`, its
+        locks and its check of the service); with none, nothing is waited
+        for. Then the setting and the file are looked at without the lock
+        (every writer replaces each by a rename), and with nothing to replace,
+        the lock isn't waited for either. Otherwise it is waited for briefly
+        (`SHUTDOWN_WEB_OFF_LOCK_SECONDS`). Looking at the file costs a search
+        of its text for the compiler's own line for the key, and for any
+        spelling of the key (`_may_allow_web_wallpapers`), which a compiled
+        document never has; only a hand edit that has one is parsed, on a
+        thread a second Ctrl-C stops waiting for (review r13f, N2). So a quit
+        takes at most the settle's bound, that save's bound while one is being
+        written, and the lock's.
 
-        A second Ctrl-C, during the settle or here, ends these waits at once
-        (review r13c, N-2): the save still being written is then not waited
-        for, and the lock is only tried. Its handler is installed for the
-        whole step (`_second_interrupt_ends_the_settle`), and each wait looks
-        for it every `SHUTDOWN_INTERRUPT_POLL_SECONDS`, the lock's included
-        (`runtime_config.compiler_lock`'s ``give_up``; review r13e, L1).
-        That save isn't lost, though: the process waits for it before it
-        exits (`_shutdown_authoring_jobs`), and so for one still being
-        written past its own bound. So one that turns web wallpapers off is
-        judged as if it had landed (review r13e, L3): a file that allows them
-        is replaced all the same. Should it then fail, nothing plays while
-        they stay on, until a publication gets through. What has already
-        landed is acted on as ever, which waits for nothing. Never raises.
+        What those waits leave is judged once it has settled, before the
+        process exits (`_web_off_judged_once_landed`; review r13f, L1): a
+        turn-off still being written when the wait for it ended (its bound,
+        or a second Ctrl-C), and a file to replace whose lock wasn't had. A
+        publication holding the lock reads the setting again under the
+        setting's own lock before it installs (review r13c, D2), but one that
+        read it before such a save landed rightly installs a document that
+        allows web wallpapers. This process's own lane is one: a save that also
+        changes the library's sources waits for `_runtime_removal_lock`, which
+        the lane holds for its whole publication, and one under the migration
+        marker's lock waits for the lane's hold of that; so the lane installed
+        for web wallpapers on after the step, and the save then landed with
+        nothing left to publish it. That judgement, on a thread of its own,
+        waits for the save, then for this process's runtime lane (the
+        process's exit waits for both anyway), then for the compiler lock
+        (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`; a holder then is another
+        process's, which reads the landed setting), and judges what is on
+        disk then, as here, settings and file read again under the lock. A
+        save that failed left the setting on, so the file is left, and one
+        that landed and was turned on again since is left as well (N3). Only
+        a third Ctrl-C (which ends the process at its exit's join), or
+        another process's writer holding the lock past that wait, gets past
+        it; the next start's compile, or its check of a kept file, then
+        judges the file.
+
+        A second Ctrl-C, during the settle or here, ends the step's waits at
+        once (review r13c, N-2): the save still being written is then not
+        waited for, and the lock is only tried. Its handler is installed for
+        the whole step (`_second_interrupt_ends_the_settle`), and each wait
+        looks for it every `SHUTDOWN_INTERRUPT_POLL_SECONDS`, the lock's
+        included (`runtime_config.compiler_lock`'s ``give_up``; review r13e,
+        L1). What has already landed is acted on as ever, which waits for
+        nothing. Never raises.
         """
         restore = self._second_interrupt_ends_the_settle()
         try:
@@ -2367,24 +2395,40 @@ class Application(Adw.Application):
 
     def _replace_web_off_on_disk(self) -> None:
         """`_web_off_on_disk_at_exit`'s work."""
-        turning_off = self._settings_save_landed()
+        saving = self._turn_off_in_flight()
         target = paths.runtime_config_path()
-        if self._web_off_but_allowed_on_disk(target, turning_off=turning_off) is None:
-            return  # nothing to replace: the lock isn't waited for
+        source = paths.settings_path()
+        settled = True
+        cut = lambda: self._settle_cut  # noqa: E731
+        if self._web_off_but_allowed_on_disk(target, source, cut) is not None:
+            settled = self._replaced_under_the_lock(
+                target,
+                source,
+                timeout=0.0 if self._settle_cut else SHUTDOWN_WEB_OFF_LOCK_SECONDS,
+                give_up=cut,
+            )
+        if saving is not None or not settled:
+            self._web_off_judged_once_landed(saving, target, source)
+
+    def _replaced_under_the_lock(
+        self, target: Path, source: Path, *, timeout: float, give_up: Callable[[], bool]
+    ) -> bool:
+        """In one hold of the compiler lock: judged again, and replaced if it must be.
+
+        Whether the lock was had (in ``timeout``, unless ``give_up`` first):
+        `_web_off_but_allowed_on_disk` on what is on disk now, and the document
+        that plays nothing installed in this same hold when it says so.
+        """
         with contextlib.ExitStack() as held:
             try:
                 held.enter_context(
-                    runtime_config.compiler_lock(
-                        timeout=0.0 if self._settle_cut else SHUTDOWN_WEB_OFF_LOCK_SECONDS,
-                        give_up=lambda: self._settle_cut,
-                    )
+                    runtime_config.compiler_lock(target, timeout=timeout, give_up=give_up)
                 )
             except runtime_config.RuntimeConfigError:
-                return  # a publication holds it, and installs only what the setting allows
-            # Judged again, on what is on disk now, and installed in this same hold.
-            settings = self._web_off_but_allowed_on_disk(target, turning_off=turning_off)
+                return False
+            settings = self._web_off_but_allowed_on_disk(target, source, give_up)
             if settings is None:
-                return
+                return True
             document = runtime_config.nothing_to_play_document(
                 settings, runtime_config.WEB_OFF_REASON
             )
@@ -2396,46 +2440,90 @@ class Application(Adw.Application):
                 "Allow web wallpapers is off, but the configuration on disk allowed web "
                 "wallpapers; it was replaced at shutdown with one that plays nothing"
             )
+        return True
+
+    def _web_off_judged_once_landed(
+        self, saving: Future[Any] | None, target: Path, source: Path
+    ) -> None:
+        """`_replaced_under_the_lock` once ``saving`` and this process's runtime lane are done.
+
+        On a thread of its own (`_web_off_deferred`), which isn't a daemon: the
+        process's exit waits for it, as it waits for the save's worker and the
+        lane's (`_runtime_lane_at_exit`), so it takes no longer than they do
+        but for its own wait for the compiler lock
+        (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`) and its look at the file.
+        ``target`` and ``source`` are the files as the step found them. Only
+        files and that lock are touched; nothing of GTK, and no socket.
+        """
+        lane = self._runtime_lane_at_exit
+        never = lambda: False  # noqa: E731
+
+        def judge() -> None:
+            try:
+                if saving is not None:
+                    futures.wait((saving,))
+                if lane is not None:
+                    lane.shutdown(wait=True)
+                if not self._replaced_under_the_lock(
+                    target, source, timeout=SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS, give_up=never
+                ):
+                    LOGGER.warning(
+                        "the runtime configuration on disk was not checked against Allow web "
+                        "wallpapers at exit: another writer held the compiler lock for over "
+                        "%s s; the next start judges it",
+                        SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
+                    )
+            except Exception:
+                LOGGER.exception(
+                    "the runtime configuration on disk could not be checked against "
+                    "Allow web wallpapers at exit"
+                )
+
+        thread = threading.Thread(target=judge, name=WEB_OFF_AT_EXIT_THREAD)
+        self._web_off_deferred = thread
+        thread.start()
 
     def _web_off_but_allowed_on_disk(
-        self, target: Path, *, turning_off: bool
+        self, target: Path, source: Path, give_up: Callable[[], bool]
     ) -> config.Settings | None:
-        """``settings.toml`` as read now, when it says web wallpapers are off, or a save still
-        being written turns them off (``turning_off``), and ``target`` may allow them
-        (`_may_allow_web_wallpapers`, whose parse a second Ctrl-C ends: then it counts as
-        allowing them); otherwise None."""
+        """``source`` (``settings.toml``) as read now, when it says web wallpapers are off and
+        ``target`` may allow them (`_may_allow_web_wallpapers`, whose parse ``give_up`` ends: then
+        it counts as allowing them); otherwise None. Read now, never a snapshot of before: a turn-
+        off still being written is judged once it has landed (`_web_off_judged_once_landed`), and a
+        save turned on since is what it says (review r13f, N3)."""
         try:
-            settings = config.load_strict()
+            settings = config.load_strict(source)
         except config.ConfigError:
             return None  # as for `_web_off_guard`: the next compile says what is wrong with it
-        if settings.allow_web_wallpapers and not turning_off:
+        if settings.allow_web_wallpapers:
             return None
         try:
             on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
         except OSError, UnicodeDecodeError:
             return None
-        if on_disk is None or not _may_allow_web_wallpapers(on_disk, lambda: self._settle_cut):
+        if on_disk is None or not _may_allow_web_wallpapers(on_disk, give_up):
             return None
-        return replace(settings, allow_web_wallpapers=False)
+        return settings
 
-    def _settings_save_landed(self) -> bool:
+    def _turn_off_in_flight(self) -> Future[Any] | None:
         """Wait for a settings save still being written: until it ends, its bound, or a Ctrl-C.
 
         Only a save at the head of the authoring lane, unsettled: the
         worker's run is then that save's. A number's write, say, isn't waited
         for. A second Ctrl-C ends the wait (`_second_interrupt_ends_the_settle`,
         installed by the step for all of it); one during the settle means it
-        isn't begun. Whether such a save, still not done when the wait ends,
-        turns web wallpapers off (`_settings_batch_turns_web_off`): it lands
-        before the process exits all the same. One that is done has said
-        what it saved in ``settings.toml``, or failed.
+        isn't begun. Such a save, when it turns web wallpapers off
+        (`_settings_batch_turns_web_off`) and still isn't done when the wait
+        ends; otherwise None. It lands before the process exits all the same,
+        and is judged then (`_web_off_judged_once_landed`). One that is done
+        has said what it saved in ``settings.toml``, or failed.
         """
         with self._settings_authoring_lock:
             saving_settings = self._settings_batch_generation is not None
             turns_web_off = self._settings_batch_turns_web_off
         saving = self._authoring_future if saving_settings else None
         if saving is None:
-            return False
+            return None
         deadline = time.monotonic() + SETTINGS_SAVE_SECONDS
         while not saving.done() and not self._settle_cut:
             remaining = deadline - time.monotonic()
@@ -2443,7 +2531,7 @@ class Application(Adw.Application):
                 break
             # In slices: Python runs the Ctrl-C handler between them.
             futures.wait((saving,), timeout=min(remaining, SHUTDOWN_INTERRUPT_POLL_SECONDS))
-        return turns_web_off and not saving.done()
+        return saving if turns_web_off and not saving.done() else None
 
     def _on_close_request(self, window: Gtk.Window) -> bool:
         # Every settings edit is persisted by ``update_settings``.  Saving the
@@ -2558,7 +2646,7 @@ class Application(Adw.Application):
         """Let a Ctrl-C during the settle end it; what puts the previous handler back.
 
         The last step of the shutdown installs it too, for all of its work,
-        and its waits look for it: for a settings save (`_settings_save_landed`)
+        and its waits look for it: for a settings save (`_turn_off_in_flight`)
         and for the compiler lock (`_web_off_on_disk_at_exit`).
 
         PyGObject's SIGINT fallback calls ``quit()`` once and ignores every

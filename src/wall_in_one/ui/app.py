@@ -5620,7 +5620,7 @@ class Application(Adw.Application):
         """
         if not known:
             if allows:
-                return "may hold a configuration that allows web wallpapers"
+                return "may hold a configuration that may allow web wallpapers"
             if titles or unchecked:
                 held = Application._held_web_words(titles, unchecked)
                 return f"may hold a configuration that {held}"

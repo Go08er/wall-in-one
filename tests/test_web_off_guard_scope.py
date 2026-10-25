@@ -771,3 +771,11 @@ def test_what_another_writer_installs_while_the_guard_waits_for_the_lock_is_judg
         return
     assert _acted(sent) == ["stop", "reload"], said
     assert _plays_nothing()
+
+
+# -- the guard's held words are hedged as far as what they say (r13l) ---------------------------
+
+
+def test_with_no_status_the_held_words_hedge_the_allow_too() -> None:
+    said = app_module.Application._held_web_words([], [], allows=True, known=False)
+    assert said == "may hold a configuration that may allow web wallpapers"

@@ -304,6 +304,34 @@ fn a_failing_assertion_never_leaves_the_service_running() {
     assert!(reaped, "the guard left the service unreaped");
 }
 
+#[test]
+fn a_process_handle_tells_running_exited_and_reaped_apart() {
+    // Review r13e N10: what the guard test above reads. A process still running is neither
+    // exited nor reaped; once it exits it is exited but still ours to collect; once collected,
+    // reaped. Every signal goes through the handle, never a pid.
+    let child = Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let process = ProcessHandle::of(&child).unwrap();
+    let running = (process.is_running(), process.is_reaped());
+    process.kill();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process.is_running() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let exited = (process.is_running(), process.is_reaped());
+    process.reap();
+    let reaped = (process.is_running(), process.is_reaped());
+    drop(child);
+    assert_eq!(running, (true, false), "running");
+    assert_eq!(exited, (false, false), "exited, not yet collected");
+    assert_eq!(reaped, (false, true), "collected");
+}
+
 /// A handle on one process (a pidfd), taken while it is a child of ours and unreaped. Unlike
 /// its pid, it never names another process once that one is reaped.
 struct ProcessHandle(OwnedFd);
@@ -339,40 +367,46 @@ impl ProcessHandle {
         }
     }
 
+    /// `waitid` on this one process with `flags`, again for as long as a signal interrupts
+    /// it (review r13e N10: an interrupted wait says nothing about the process).
+    fn wait(&self, flags: libc::c_int) -> std::io::Result<()> {
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let waited = unsafe {
+                libc::waitid(
+                    libc::P_PIDFD,
+                    libc::id_t::try_from(self.0.as_raw_fd()).unwrap(),
+                    &mut info,
+                    flags,
+                )
+            };
+            if waited == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
     /// Wait for it to exit and collect it. Only for a child of ours not yet reaped.
     fn reap(&self) {
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        while unsafe {
-            libc::waitid(
-                libc::P_PIDFD,
-                libc::id_t::try_from(self.0.as_raw_fd()).unwrap(),
-                &mut info,
-                libc::WEXITED,
-            )
-        } == -1
-        {
-            let error = std::io::Error::last_os_error();
-            assert_eq!(
-                error.kind(),
-                std::io::ErrorKind::Interrupted,
-                "waitid: {error}"
-            );
+        if let Err(error) = self.wait(libc::WEXITED) {
+            panic!("waitid: {error}");
         }
     }
 
     /// Whether whoever started it has collected it: a pidfd of a process
-    /// already reaped has nothing left to wait for.
+    /// already reaped has nothing left to wait for (ECHILD). One still there,
+    /// running or exited, is waited for without being collected. Any other
+    /// failure says neither, so it is never read as either.
     fn is_reaped(&self) -> bool {
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let waited = unsafe {
-            libc::waitid(
-                libc::P_PIDFD,
-                libc::id_t::try_from(self.0.as_raw_fd()).unwrap(),
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+        match self.wait(libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) {
+            Ok(()) => false,
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => true,
+            Err(error) => panic!("waitid on a pidfd: {error}"),
+        }
     }
 
     /// SIGKILL to this one process, if it is still there.

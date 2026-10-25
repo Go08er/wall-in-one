@@ -55,8 +55,15 @@ def _is_default(session: Session, playlist: playlists.Playlist) -> bool:
     return runtime_config.default_playlist_id(saved, session) == playlist.id
 
 
-def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
+def _deletion_body(
+    session: Session,
+    playlist: playlists.Playlist,
+    truth: runtime_truth.RuntimeTruth | None = None,
+) -> str:
     """Describe every authored reference removed with ``playlist``.
+
+    ``truth`` is the service's status, which names a pick the app's own record of one
+    doesn't (a pick made through ``ctl`` or the companion).
 
     This is deliberately independent of GTK so the destructive confirmation
     cannot drift away from what ``_delete_confirmed`` actually cascades.
@@ -76,7 +83,7 @@ def _deletion_body(session: Session, playlist: playlists.Playlist) -> str:
         )
     if _is_default(session, playlist):
         consequences.append("the saved default selection")
-    if session.manual_playlist == playlist.id:
+    if any(runtime_truth.pick_holders(truth, session.manual_playlist, playlist.id)):
         consequences.append("the current manual override")
     return (
         "This removes "
@@ -2042,7 +2049,11 @@ class PlaylistsPage(Gtk.Box):
             return
         dialog = Adw.AlertDialog(
             heading=f"Delete {playlist.name}?",
-            body=_deletion_body(session, playlist),
+            body=_deletion_body(
+                session,
+                playlist,
+                runtime_truth.from_status(getattr(self._app, "runtime_status", None)),
+            ),
         )
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("delete", "Delete")

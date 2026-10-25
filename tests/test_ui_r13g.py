@@ -981,3 +981,58 @@ def test_a_pick_the_reply_cant_name_isnt_released_on_doubt(
     # It may be another playlist's pick, which the person wants; the service drops a
     # pick whose playlist the published document no longer has.
     assert not _delete(tmp_path, monkeypatch, pick="pages", ceiling=True)
+
+
+def _warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pick: str) -> str:
+    from tests.test_ui_runtime import _close
+    from wall_in_one.ui import playlists_page
+
+    application, _window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    try:
+        ids = {one.name: one.id for one in application.session.playlists.all()}
+        status = _status_naming(ids[pick], ids["scenes" if pick == "pages" else "pages"])
+        truth = runtime_truth.from_status(status)
+        return playlists_page._deletion_body(
+            application.session, application.session.playlists.get(ids["pages"]), truth
+        )
+    finally:
+        _close(application)
+
+
+def test_the_classic_delete_warning_names_the_pick_the_service_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert "the current manual override" in _warning(tmp_path, monkeypatch, "pages")
+
+
+def test_control_the_classic_delete_warning_leaves_out_another_playlists_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert "manual override" not in _warning(tmp_path, monkeypatch, "scenes")
+
+
+def test_the_next_delete_warning_names_the_pick_the_service_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_ui_runtime import _close
+    from wall_in_one.ui.next.real_playlists import RealPlaylists
+
+    application, _window, _items = _app_with_playlists(tmp_path, monkeypatch)
+    try:
+        ids = {one.name: one.id for one in application.session.playlists.all()}
+        for pick, named in (("pages", True), ("scenes", False)):
+            application._status_model.adopt(
+                _status_naming(ids[pick], ids["scenes" if pick == "pages" else "pages"])
+            )
+            view = application._status_model.view
+            fake = SimpleNamespace(
+                _backend=SimpleNamespace(status_model=application._status_model),
+                _session=application.session,
+                _editable=lambda _pid: application.session.playlists.get(ids["pages"]),
+                _saved_default=lambda: "",
+            )
+            print(view.service)
+            text = RealPlaylists.delete_warning(fake, ids["pages"])  # type: ignore[arg-type]
+            assert ("manual override" in text) is named, text
+    finally:
+        _close(application)

@@ -503,7 +503,10 @@ class DisplaysPage(Page):
         if route.pick_stood_in:
             return None
         picked = route.stand_in_for or route.playlist_id
-        return play_ids.index(picked) if picked in play_ids else 0
+        if picked in play_ids:
+            return play_ids.index(picked)
+        # The next UI lists no quick choice: row 0 would be "Follow the schedule".
+        return None if route.quick else 0
 
     def _refresh_details(self, display: DisplayInfo, mirrored: bool) -> None:
         scheduling = self.scheduling
@@ -534,6 +537,7 @@ class DisplaysPage(Page):
         mine = [p for p in self.state.playlists if not p.automatic]
         play_ids = ["", *(p.id for p in mine)]
         prior = self.play_row.get_selected()
+        prior_id = self._play_ids[prior] if 0 <= prior < len(self._play_ids) else ""
         reset = play_ids != self._play_ids
         if reset:
             self._play_ids = play_ids
@@ -542,13 +546,21 @@ class DisplaysPage(Page):
             )
         # The person's pick, also while a stand-in plays for it.
         selected = self._play_selected(route, play_ids)
+        # A quick pick has no row, and the row mustn't rest on another playlist.
+        quick = (
+            selected is None
+            and route is not None
+            and route.quick
+            and not route.pick_stood_in
+            and not route.route_unsure
+        )
         if selected is not None:
             unnamed_pick.drop(self.play_row)
             self.play_row.set_selected(selected)
-        elif reset and 0 < prior < len(play_ids):
-            # A new model starts on row 0; keep the row where the person left it.
-            self.play_row.set_selected(prior)
-        elif reset or self.play_row.get_selected() == 0:
+        elif reset and prior_id in play_ids[1:] and not quick:
+            # A new model starts on row 0; keep the playlist the person left it on.
+            self.play_row.set_selected(play_ids.index(prior_id))
+        elif reset or self.play_row.get_selected() == 0 or quick:
             # Never "Follow the schedule" while a pick holds.
             unnamed_pick.show(self.play_row)
         self.play_row.set_sensitive(not runtime_off)

@@ -501,23 +501,29 @@ def pick_holders(
     """Where a manual pick of ``playlist_id`` holds: (the whole screen, these connectors).
 
     The app's own record of a pick (``session.manual_playlist``) is written only by its
-    own paths, not by a pick made through the service (``ctl``, the companion), so the
-    service's status is read too, where it names the pick: the playlist asked for by a
-    manual route (its ``stand_in_for`` when a stand-in plays). A pick no field names
-    (the reply ceiling) is named by neither, and so not here.
+    own paths, not by a pick made through the service (``ctl``, the companion), so it can
+    be stale. Where the service names the pick (the playlist asked for by a manual route,
+    its ``stand_in_for`` when a stand-in plays) that answer wins; the record is used only
+    where it names none (an older service, nothing heard, the reply ceiling).
     """
-    whole = record == playlist_id
     connectors: list[str] = []
-    if truth is not None:
-        independent = truth.display_mode == "independent"
-        if not independent and truth.is_manual and truth.asked_playlist_id == playlist_id:
-            whole = True
-        if independent:
-            connectors = [
-                row.connector
-                for row in truth.displays
-                if row.connected and row.manual_override and row.asked_playlist_id == playlist_id
-            ]
+    if truth is None:
+        return record == playlist_id, ()
+    independent = truth.display_mode == "independent"
+    if independent:
+        # An unsure row's asked playlist may be its stand-in: it names nothing.
+        rows = [
+            row
+            for row in truth.displays
+            if row.connected and row.manual_override and not row.route_unsure
+        ]
+        named = any(row.asked_playlist_id for row in rows)
+        connectors = [row.connector for row in rows if row.asked_playlist_id == playlist_id]
+        whole = not named and record == playlist_id
+    else:
+        named = truth.is_manual and not truth.route_unsure and bool(truth.asked_playlist_id)
+        # The service's answer wins; the app's record only where it names no pick.
+        whole = truth.asked_playlist_id == playlist_id if named else record == playlist_id
     return whole, tuple(connectors)
 
 

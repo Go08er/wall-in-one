@@ -19,6 +19,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
 UNNAMED_PICK = "Your pick (not named by this reply)"
+#: Set on the row's model while its last item is the placeholder, so a playlist
+#: named like it is not taken for it.
+_MARK = "_wio_unnamed_pick"
 
 
 def _strings(row: Adw.ComboRow) -> Gtk.StringList | None:
@@ -30,7 +33,7 @@ def is_shown(row: Adw.ComboRow) -> bool:
     """Whether the row's last item is the placeholder."""
     model = _strings(row)
     count = model.get_n_items() if model is not None else 0
-    return model is not None and count > 0 and model.get_string(count - 1) == UNNAMED_PICK
+    return model is not None and count > 0 and getattr(model, _MARK, False)
 
 
 def show(row: Adw.ComboRow) -> None:
@@ -40,6 +43,7 @@ def show(row: Adw.ComboRow) -> None:
         return
     if not is_shown(row):
         model.append(UNNAMED_PICK)
+        setattr(model, _MARK, True)
     row.set_selected(model.get_n_items() - 1)
 
 
@@ -48,9 +52,4 @@ def drop(row: Adw.ComboRow) -> None:
     model = _strings(row)
     if model is not None and is_shown(row):
         model.remove(model.get_n_items() - 1)
-
-
-def is_placeholder(row: Adw.ComboRow, index: int) -> bool:
-    """Whether ``index`` is the placeholder item (a user's selection of it is ignored)."""
-    model = _strings(row)
-    return model is not None and is_shown(row) and index == model.get_n_items() - 1
+        setattr(model, _MARK, False)

@@ -822,8 +822,7 @@ class RealPlaylists:
             parts.append(f"{assigned} display assignment{'' if assigned == 1 else 's'}")
         if self._saved_default() == pid:
             parts.append("the saved default selection")
-        view = self._backend.status_model.view
-        truth = view.truth if view.service == "running" else None
+        truth = self._backend.status_model.view.truth
         if any(runtime_truth.pick_holders(truth, session.manual_playlist, pid)):
             parts.append("the current manual override")
         listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + f" and {parts[-1]}"

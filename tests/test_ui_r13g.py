@@ -547,7 +547,7 @@ def test_n7_next_independent_combo_isnt_put_on_what_may_be_the_stand_in() -> Non
     from wall_in_one.ui.next.displays import DisplaysPage
 
     [route] = _routes(_independent_pick_at_the_ceiling())
-    fake = SimpleNamespace(scheduling=SimpleNamespace(manual_pick=lambda: None))
+    fake = SimpleNamespace()
     selected = DisplaysPage._play_selected(fake, route, ["", "pages", "scenes"])  # type: ignore[arg-type]
     assert selected != 2, "the Playing now row says the pick is scenes"
 
@@ -969,10 +969,18 @@ def test_control_deleting_another_playlist_than_the_pick_keeps_the_pick(
     assert not _delete(tmp_path, monkeypatch, pick="scenes")
 
 
-def test_control_deleting_the_playlist_the_apps_record_names_releases_it(
+def test_deleting_the_playlist_the_apps_record_names_keeps_the_pick_the_service_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert _delete(tmp_path, monkeypatch, pick="scenes", record="pages")
+    # The record is stale (a pick made through the service doesn't rewrite it): the
+    # service's answer wins (r13g U-L1).
+    assert not _delete(tmp_path, monkeypatch, pick="scenes", record="pages")
+
+
+def test_deleting_the_playlist_the_apps_record_names_releases_it_where_the_reply_names_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _delete(tmp_path, monkeypatch, pick="scenes", record="pages", ceiling=True)
 
 
 def test_a_pick_the_reply_cant_name_isnt_released_on_doubt(

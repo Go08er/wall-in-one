@@ -394,7 +394,11 @@ its taboo rules), the display plays the document's `default_playlist`, then
 `all-media`, each only when something of it can play. The display row then
 names that stand-in as its `playlist_id`, as `entry_id` is its entry, and the
 playlist asked for as `stand_in_for`; `assigned_playlist_id`, `route_source`
-and `schedule_rule_id` stay what chose the refused one. A rule's window
+and `schedule_rule_id` stay what chose the refused one. In both modes a row's
+`route_source` and `schedule_rule_id` are those of the decision it shows: from
+a rule's boundary to the tick that applies it, the rule that still decides,
+and for a pick, no rule. (The top-level `schedule` says what the schedule
+chooses now.) A rule's window
 starting or ending onto a playlist whose stand-in is already shown changes
 nothing on screen, and a pick of a playlist known to be refused leaves the
 stand-in's rotation where it is. When nothing can play at all, the display

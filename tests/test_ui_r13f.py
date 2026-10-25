@@ -611,6 +611,74 @@ def test_q3_classic_default_row_of_the_captured_web_off_reply() -> None:
     assert text == "Default rotation · Nothing to play: web wallpapers are off", text
 
 
+# ------------------------------------------------------------------ Q4 ---------
+
+
+def _renderer_stopped(*, left_out: bool) -> dict[str, Any]:
+    status = copy.deepcopy(_status("pick-plays"))
+    error = "linux-wallpaperengine exited with status 1"
+    status["renderer_failed"] = True
+    status["last_error"] = "" if left_out else error
+    for row in status["displays"]:
+        row["renderer_failed"] = True
+        row["last_error"] = "" if left_out else error
+    if left_out:
+        status["diagnostics_omitted"] = True
+    return status
+
+
+def test_q4_classic_summary_of_a_stopped_renderer_whose_error_was_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary, control, _reports = _classic_window(
+        [_renderer_stopped(left_out=True)], tmp_path, monkeypatch
+    )
+    assert control.startswith("Renderer stopped")  # precondition: renderer_failed is read
+    assert "renderer stopped" in summary.casefold(), summary
+
+
+def test_control_q4_classic_summary_of_a_stopped_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary, _control, _reports = _classic_window(
+        [_renderer_stopped(left_out=False)], tmp_path, monkeypatch
+    )
+    assert "renderer stopped" in summary.casefold(), summary
+
+
+def test_q4_classic_an_error_left_out_isnt_said_again_when_it_comes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = _renderer_stopped(left_out=False)
+    _summary, _control, reports = _classic_window(
+        [error, _renderer_stopped(left_out=True), error], tmp_path, monkeypatch
+    )
+    assert len(reports) == 1, reports
+
+
+def _next_reports(statuses: list[dict[str, Any]]) -> list[str]:
+    from wall_in_one.ui.next.window import NextWindow
+
+    reports: list[str] = []
+    fake = SimpleNamespace(
+        _protocol_error="", _runtime_error="", _missing_said=None, report=reports.append
+    )
+    for status in statuses:
+        NextWindow.show_runtime_status(fake, status)  # type: ignore[arg-type]
+    print(f"next reports={reports!r}")
+    return reports
+
+
+def test_q4_next_an_error_left_out_isnt_said_again_when_it_comes_back() -> None:
+    error = _renderer_stopped(left_out=False)
+    assert len(_next_reports([error, _renderer_stopped(left_out=True), error])) == 1
+
+
+def test_control_q4_next_the_same_error_twice_is_said_once() -> None:
+    error = _renderer_stopped(left_out=False)
+    assert len(_next_reports([error, error])) == 1
+
+
 def test_control_gate_version_1_with_the_flag_infers_nothing() -> None:
     status = _mirrored_default_stood_in(rule_now=False, ceiling=True)
     status["status_version"] = 1

@@ -66,6 +66,7 @@ from gi.repository import Adw, Gio, GLib, Gtk
 from wall_in_one import __version__, config, setup_check
 from wall_in_one.session import Session
 from wall_in_one.theme import source
+from wall_in_one.ui import runtime_truth
 from wall_in_one.ui.launch_rows import LaunchRows
 from wall_in_one.ui.next import displays, library, playlists, schedule, status_line, store, thumbs
 from wall_in_one.ui.next.catalog import CLASSIC_HINT
@@ -405,7 +406,8 @@ class NextWindow(ShellWindow):
             if output_error != self._runtime_error:
                 self.report(f"Display discovery is degraded: {output_error}")
             self._runtime_error = output_error
-        else:
+        elif not runtime_truth.diagnostics_left_out(status):
+            # Left out is the reply's size, not "no error": the same error back is not new.
             self._runtime_error = ""
 
     def show_runtime_unavailable(self) -> None:

@@ -1049,14 +1049,15 @@ class MainWindow(Adw.ApplicationWindow):
             if isinstance(nothing, str) and nothing
             else f"{state} {playlist}"
         )
+        left_out = runtime_truth.diagnostics_left_out(status)
+        failure_state = (
+            "playback disabled; paired still retained"
+            if self._renderer_taboo
+            else setup_check.RENDERER_MISSING_SUMMARY
+            if missing_only
+            else "renderer stopped; Retry available"
+        )
         if isinstance(last_error, str) and last_error:
-            failure_state = (
-                "playback disabled; paired still retained"
-                if self._renderer_taboo
-                else setup_check.RENDERER_MISSING_SUMMARY
-                if missing_only
-                else "renderer stopped; Retry available"
-            )
             self._runtime_summary = f"{failure_state} · {_bounded_runtime_error(last_error)}"
             self._subtitle.set_tooltip_text(last_error)
             # A renderer that is missing is said once while the service's
@@ -1076,10 +1077,16 @@ class MainWindow(Adw.ApplicationWindow):
             if output_error != self._runtime_error:
                 self.report(f"Display discovery is degraded: {output_error}")
             self._runtime_error = output_error
+        elif left_out and self._renderer_failed:
+            # The error was left out of the reply, but the renderer still stopped; what
+            # was said before is not said again when it comes back.
+            self._runtime_summary = f"{failure_state} · {runtime_truth.DIAGNOSTICS_LEFT_OUT}"
+            self._subtitle.set_tooltip_text(None)
         else:
-            self._runtime_error = ""
+            if not left_out:
+                self._runtime_error = ""
             self._runtime_summary = f"{shown} ({source}){stood_in}"
-            if runtime_truth.diagnostics_left_out(status):
+            if left_out:
                 # An empty error here is the reply's size, not "no error".
                 self._runtime_summary += f" · {runtime_truth.DIAGNOSTICS_LEFT_OUT}"
             self._subtitle.set_tooltip_text(None)

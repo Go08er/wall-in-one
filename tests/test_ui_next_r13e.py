@@ -331,6 +331,7 @@ def _at_the_ceiling(status: dict[str, Any]) -> dict[str, Any]:
     for row in status["displays"]:
         row.pop("stand_in_for", None)
     assert status["refused_omitted"] > 0
+    status["stand_in_for_omitted"] = True  # the service says it dropped some
     return status
 
 
@@ -733,3 +734,36 @@ def test_control_n10_the_library_topic_rebuilds() -> None:
     fake = MagicMock()
     LibraryPage._on_changed(fake, MagicMock(), "library")
     fake._rebuild.assert_called_once_with()
+
+
+# ------------------------------------------------------------------ L3 trigger --
+
+
+def test_l3_no_flag_no_inference_even_in_the_old_heuristics_shape() -> None:
+    # refused == [] with refused_omitted > 0 is no longer taken for a dropped
+    # stand_in_for; an older service never sends the flag.
+    for source in ("default", "assignment", "schedule", "manual"):
+        base = _independent(source) if source != "manual" else _status("pick-refused")
+        status = _at_the_ceiling(base)
+        del status["stand_in_for_omitted"]
+        truth = runtime_truth.from_status(status)
+        assert truth is not None
+        assert truth.stand_in_for is None and not truth.pick_unsure, source
+        assert all(not d.stand_in_for and not d.pick_unsure for d in truth.displays), source
+
+
+def test_l3_a_false_flag_infers_nothing() -> None:
+    status = _at_the_ceiling(_independent("default"))
+    status["stand_in_for_omitted"] = False
+    truth = runtime_truth.from_status(status)
+    assert truth is not None and truth.displays[0].stand_in_for is None
+
+
+def test_l3_the_flag_keeps_a_row_that_kept_its_own_stand_in() -> None:
+    status = _at_the_ceiling(_independent_two(second_stands_in_for=None))
+    status["displays"][0]["stand_in_for"] = "pages"
+    truth = runtime_truth.from_status(status)
+    assert truth is not None
+    first, second = truth.displays
+    assert first.stand_in_for == "pages" and second.stand_in_for is None
+    assert second.route_source == "manual" and second.pick_unsure

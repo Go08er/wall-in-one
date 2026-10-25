@@ -393,15 +393,10 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     refused, refused_omitted = refused_from_status(status)
     nothing_to_play = status.get("nothing_to_play")
     pick_unsure = False
-    if (
-        status_version == 2
-        and refused_omitted > 0
-        and not refused
-        and stand_in_for is None
-        and not any(display.stand_in_for for display in parsed_displays)
-    ):
-        # The reply's size ceiling dropped every `stand_in_for`. The rows still
-        # say what each asked for, except for a pick.
+    if status_version == 2 and status.get("stand_in_for_omitted") is True:
+        # The service says the reply's size dropped some `stand_in_for`. A row
+        # that kept its own is left; the others still say what they asked for,
+        # except for a pick.
         parsed_displays = _inferred_stand_ins(
             parsed_displays,
             parsed_schedules,
@@ -460,6 +455,9 @@ def _inferred_stand_ins(
     found: list[DisplayRuntimeTruth] = []
     for display in displays:
         if not display.connected or display.nothing_to_play:
+            found.append(display)
+            continue
+        if display.stand_in_for:
             found.append(display)
             continue
         if display.route_source == "manual":

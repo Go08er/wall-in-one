@@ -16576,3 +16576,155 @@ fn control_an_independent_boundary_that_learns_another_refusal_applies_nothing()
     assert_eq!(applied, Vec::<String>::new());
     assert!(motion);
 }
+
+// -- review r13i R-L-a: a refusal learned for one independent route, of what another shows ---
+//
+// A refusal is kept by item, but what learned it applied only the routes it was given: a route
+// that showed the same item kept it and its motion, while status listed the item as refused.
+// Every other route whose display shows an item just refused is now applied too, and moves on
+// as any apply does.
+
+/// Independent DP-1 and HDMI-A-1, DP-1 assigned to all-media: all-media-1 is the scene
+/// 3000000031 and pages-1 the scene `pages_1`; eve names `rule`.
+fn independent_shared_item_document(rule: &str, pages_1: &str) -> String {
+    default_rule_document(rule)
+        .replace(
+            "display_mode = \"mirrored\"",
+            "display_mode = \"independent\"",
+        )
+        .replace(
+            "theme_source_connector = \"\"",
+            "theme_source_connector = \"DP-1\"",
+        )
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"all-media-1\"\nkind = \"still\"\n",
+            "id = \"all-media-1\"\nkind = \"scene\"\nscene_id = \"3000000031\"\n",
+        )
+        .replace(
+            "id = \"pages-1\"\nkind = \"still\"\n",
+            &format!("id = \"pages-1\"\nkind = \"scene\"\nscene_id = \"{pages_1}\"\n"),
+        )
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+        )
+}
+
+/// HDMI-A-1's entry and whether its motion runs, the items status lists as refused, and where a
+/// row and its screen disagree.
+fn hdmi_after(
+    label: &str,
+    runtime: &mut Runtime<RuntimeDriver>,
+    state: &Arc<Mutex<RuntimeDriverState>>,
+    at: chrono::NaiveDateTime,
+) -> (String, bool, Vec<String>, Vec<String>) {
+    let problems = rows_off_screen(label, runtime, state, at);
+    let snapshot = status(runtime, at);
+    let refused = snapshot["refused"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| row["scene_id"].as_str().unwrap().to_string())
+        .collect();
+    let entry = route(&snapshot, "HDMI-A-1")["entry_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let motion = state.lock().unwrap().active_outputs.contains("HDMI-A-1");
+    (entry, motion, refused, problems)
+}
+
+/// HDMI-A-1 holds a pick of all-media, so eve doesn't move it. At 16:00 DP-1's ask-ahead learns
+/// pages-1 is refused: the item HDMI-A-1 shows when `shared`, another otherwise.
+fn another_route_refused_at_a_boundary(shared: bool) -> (String, bool, Vec<String>, Vec<String>) {
+    let pages_1 = if shared { "3000000031" } else { "3000000032" };
+    let (mut runtime, state) = default_rule_runtime(
+        independent_shared_item_document("pages", pages_1),
+        &[],
+        on_the_third(15, 0),
+    );
+    let reply = runtime_command(
+        &mut runtime,
+        on_the_third(15, 5),
+        "on",
+        Some("HDMI-A-1 playlist-use all-media"),
+    );
+    assert!(reply.ok, "{}", reply.message);
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    state
+        .lock()
+        .unwrap()
+        .refuse_when_asked
+        .insert("pages-1".into());
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    hdmi_after("16:00", &mut runtime, &state, on_the_third(16, 0))
+}
+
+#[test]
+fn a_refusal_learned_at_one_routes_boundary_moves_another_showing_the_item_on() {
+    let (entry, motion, refused, problems) = another_route_refused_at_a_boundary(true);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(refused, vec!["3000000031".to_string()]);
+    assert_eq!(
+        entry, "all-media-2",
+        "HDMI-A-1 keeps all-media-1, an item listed as refused"
+    );
+    assert!(!motion, "all-media-1's motion still runs on HDMI-A-1");
+}
+
+#[test]
+fn control_a_refusal_of_another_item_at_one_routes_boundary_leaves_the_other_route() {
+    let (entry, motion, refused, problems) = another_route_refused_at_a_boundary(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(refused, vec!["3000000032".to_string()]);
+    assert_eq!(entry, "all-media-1");
+    assert!(motion);
+}
+
+/// The same through a command: DP-1 on mixed, whose mixed-2 is a scene, the item HDMI-A-1's
+/// all-media-1 is when `shared`. `on DP-1 next` asks about mixed-2 and learns it is refused.
+fn another_route_refused_by_a_command(shared: bool) -> (String, bool, Vec<String>, Vec<String>) {
+    let mixed_2 = if shared { "3000000031" } else { "3000000033" };
+    let document = independent_shared_item_document("pages", "3000000032")
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+        )
+        .replace(
+            "id = \"mixed-2\"\nkind = \"still\"\n",
+            &format!("id = \"mixed-2\"\nkind = \"scene\"\nscene_id = \"{mixed_2}\"\n"),
+        );
+    let at = on_the_third(12, 0);
+    let (mut runtime, state) = default_rule_runtime(document, &[], at);
+    assert!(state.lock().unwrap().active_outputs.contains("HDMI-A-1"));
+    state
+        .lock()
+        .unwrap()
+        .refuse_when_asked
+        .insert("mixed-2".into());
+    let reply = runtime_command(&mut runtime, at, "on", Some("DP-1 next"));
+    assert!(reply.ok, "{}", reply.message);
+    hdmi_after("next", &mut runtime, &state, at)
+}
+
+#[test]
+fn a_refusal_learned_by_one_routes_command_moves_another_showing_the_item_on() {
+    let (entry, motion, refused, problems) = another_route_refused_by_a_command(true);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(refused, vec!["3000000031".to_string()]);
+    assert_eq!(
+        entry, "all-media-2",
+        "HDMI-A-1 keeps all-media-1, an item listed as refused"
+    );
+    assert!(!motion, "all-media-1's motion still runs on HDMI-A-1");
+}
+
+#[test]
+fn control_a_refusal_of_another_item_by_one_routes_command_leaves_the_other_route() {
+    let (entry, motion, refused, problems) = another_route_refused_by_a_command(false);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(refused, vec!["3000000033".to_string()]);
+    assert_eq!(entry, "all-media-1");
+    assert!(motion);
+}

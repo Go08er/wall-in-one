@@ -1968,6 +1968,7 @@ impl<D: WallpaperDriver> Runtime<D> {
             }
         }
 
+        let known = self.refused_scenes.len();
         for connector in &connectors {
             if pending_at_start.contains(connector) || self.pending_routes.contains_key(connector) {
                 continue;
@@ -2075,6 +2076,25 @@ impl<D: WallpaperDriver> Runtime<D> {
                     route.last_cycle = now;
                     route.last_error = "every entry in this playlist is taboo this session".into();
                     self.refresh_independent_last_error();
+                }
+            }
+        }
+        // What a route's boundary learned ahead can be of what another route
+        // shows, which nothing here applied: that one moves on too (review
+        // r13i R-L-a), unless an apply before it already moved it.
+        if self.refused_scenes.len() > known {
+            let mut others: Vec<String> = self
+                .routes_showing_refused(&HashSet::new())
+                .into_iter()
+                .collect();
+            others.sort();
+            for connector in others {
+                if self
+                    .routes_showing_refused(&HashSet::new())
+                    .contains(&connector)
+                    && let Some(route) = self.routes.get(&connector).cloned()
+                {
+                    self.start_route_automatic(connector, route.clone(), route, "schedule", now);
                 }
             }
         }
@@ -3909,6 +3929,7 @@ impl<D: WallpaperDriver> Runtime<D> {
     }
 
     fn apply_independent_in_batch(&mut self, selected: &HashSet<String>) -> Result<String, String> {
+        let known = self.refused_scenes.len();
         self.skip_refused_routes(selected);
         let mut result = self.apply_routes(selected);
         // As in mirrored mode (`apply_current_in_batch`).
@@ -3916,7 +3937,32 @@ impl<D: WallpaperDriver> Runtime<D> {
             self.skip_refused_routes(selected);
             result = self.apply_routes(selected);
         }
+        // A refusal is kept by item, so one learned here can be of what a
+        // route not selected shows: that one moves on the same way (review
+        // r13i R-L-a). Its failures are its own row's; the caller's stay.
+        if self.refused_scenes.len() > known {
+            let others = self.routes_showing_refused(selected);
+            if !others.is_empty() {
+                let failures = std::mem::take(&mut self.last_apply_failures);
+                let _ = self.apply_independent_in_batch(&others);
+                self.last_apply_failures = failures;
+            }
+        }
         result
+    }
+
+    /// The routes but `except`, and but those waiting to try again, whose
+    /// display shows an item that is refused.
+    fn routes_showing_refused(&self, except: &HashSet<String>) -> HashSet<String> {
+        self.current_targets(&self.target_outputs)
+            .into_iter()
+            .filter(|target| {
+                !except.contains(&target.output)
+                    && !self.pending_routes.contains_key(&target.output)
+                    && self.is_refused(&target.entry)
+            })
+            .map(|target| target.output)
+            .collect()
     }
 
     /// `skip_refused_mirrored` for the `selected` independent routes: each

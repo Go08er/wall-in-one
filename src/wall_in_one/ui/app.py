@@ -2620,8 +2620,8 @@ class Application(Adw.Application):
                 )
             if why == _ALLOWS:
                 LOGGER.info(
-                    "Allow web wallpapers is off, but the configuration on disk allowed web "
-                    "wallpapers; it was replaced at shutdown with one that plays nothing"
+                    "Allow web wallpapers is off, but the configuration on disk may have "
+                    "allowed web wallpapers; it was replaced at shutdown with one that plays nothing"
                 )
             elif not older:
                 LOGGER.warning(
@@ -5493,7 +5493,7 @@ class Application(Adw.Application):
             return ""
         lead = (
             "Allow web wallpapers is off, but the configuration on disk, which the wallpaper "
-            "service loads when it starts, allows web wallpapers"
+            "service loads when it starts, may allow web wallpapers"
         )
         try:
             document = runtime_config.nothing_to_play_document(
@@ -5563,7 +5563,7 @@ class Application(Adw.Application):
         named = ", ".join(titles)
         ids = ", ".join(unchecked)
         if allows:
-            allowing = "allows web wallpapers"
+            allowing = "may allow web wallpapers"
             return f"{allowing}, and names {named}" if titles else allowing
         if titles and unchecked:
             return (

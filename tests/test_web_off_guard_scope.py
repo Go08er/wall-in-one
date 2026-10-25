@@ -419,7 +419,7 @@ def test_an_unloaded_document_on_disk_that_allows_web_is_ended(
     assert _plays_nothing()
     assert said.startswith(
         "Allow web wallpapers is off, but the configuration on disk, which the wallpaper "
-        "service loads the next time it checks the file, allows web wallpapers. "
+        "service loads the next time it checks the file, may allow web wallpapers. "
     ), said
     assert "the last still Noctalia was given stays on screen" in said
 
@@ -632,7 +632,7 @@ def test_with_no_service_running_a_document_that_allows_web_wallpapers_is_replac
     assert _plays_nothing(), paths.runtime_config_path().read_text(encoding="utf-8")
     assert said.startswith(
         "Allow web wallpapers is off, but the configuration on disk, which the wallpaper "
-        "service loads when it starts, allows web wallpapers. The service isn\u2019t running"
+        "service loads when it starts, may allow web wallpapers. The service isn\u2019t running"
     ), said
 
 
@@ -710,7 +710,7 @@ def test_with_no_service_running_a_toml_1_1_document_that_allows_web_is_replaced
         assert paths.runtime_config_path().read_text(encoding="utf-8") == text
         return
     assert _plays_nothing(), paths.runtime_config_path().read_text(encoding="utf-8")
-    assert "allows web wallpapers. The service isn\u2019t running" in said, said
+    assert "may allow web wallpapers. The service isn\u2019t running" in said, said
 
 
 # -- review r13f, N3's class: the setting is read again under the lock -------------------------

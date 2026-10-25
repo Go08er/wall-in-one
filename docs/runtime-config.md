@@ -818,6 +818,11 @@ because the schedule still moves a paused route, and is `null`:
   hundreds of rules on dozens of displays can exhaust that, and the displays
   left over report `null`.
 
+At the change the winner plays on every display it moves: a mirrored rule
+that names the default playlist moves a display assigned to another playlist
+onto the default, and back when it ends, though the playlist in force is the
+default either way.
+
 The cycle deadline is `null` when the route is paused, does not cycle, or is
 not connected. Stopped routes keep rotating stills, so they keep a deadline.
 Mirrored mode has one timer, so every mirrored row carries the same deadline.

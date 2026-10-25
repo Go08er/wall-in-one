@@ -15103,3 +15103,479 @@ fn past_the_band_only_as_many_errors_go_as_must_and_one_byte_rule_ids_stay() {
         assert_row_units_left_out_wouldnt_fit(&label, &snapshot, wire, "R");
     }
 }
+
+// -- r13e N9: in mirrored mode a rule naming the default reaches displays assigned elsewhere ---
+//
+// DP-1 is assigned `mixed`, HDMI-A-1 `all-media` (the default). A rule `eve` names `all-media`
+// from 16:00 to 17:00. In mirrored mode a rule in force plays its playlist on every display, so
+// at 16:00 DP-1 changes to all-media, and at 17:00 back to mixed. The playlist in force is the
+// default either way, so the tick took it for a change of provenance only and applied nothing:
+// DP-1's row said all-media while its screen showed mixed, and the other way round after 17:00.
+
+fn default_rule_document(rule_playlist: &str) -> String {
+    let mut document = String::from(
+        r#"schema_version = 4
+config_generation = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+default_playlist = "all-media"
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = false
+display_mode = "mirrored"
+theme_source_connector = ""
+[renderer]
+noctalia_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = false
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 0
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+"#,
+    );
+    for (playlist, entries) in [("all-media", 2), ("mixed", 2), ("pages", 1)] {
+        document.push_str(&format!(
+            "[[playlists]]\nid = \"{playlist}\"\nname = \"{playlist}\"\n"
+        ));
+        for index in 1..=entries {
+            document.push_str(&format!(
+                "[[playlists.entries]]\nid = \"{playlist}-{index}\"\nkind = \"still\"\n\
+                 still = \"/stills/{playlist}-{index}.png\"\n\
+                 palette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+            ));
+        }
+    }
+    document.push_str(&format!(
+        "[[schedules]]\nid = \"eve\"\nplaylist = \"{rule_playlist}\"\nstart = \"16:00\"\n\
+         end = \"17:00\"\n[[displays]]\nconnector = \"DP-1\"\nplaylist = \"mixed\"\n\
+         [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"all-media\"\n"
+    ));
+    document
+}
+
+fn on_the_third(hour: u32, minute: u32) -> chrono::NaiveDateTime {
+    NaiveDate::from_ymd_opt(2026, 8, 3)
+        .unwrap()
+        .and_hms_opt(hour, minute, 0)
+        .unwrap()
+}
+
+/// What each output was last given, by the driver's own log.
+fn screen_of(state: &Arc<Mutex<RuntimeDriverState>>) -> std::collections::BTreeMap<String, String> {
+    let state = state.lock().unwrap();
+    state
+        .applied_outputs
+        .iter()
+        .cloned()
+        .zip(state.applies.iter().map(|(entry, _)| entry.clone()))
+        .collect()
+}
+
+/// Where a display's row and its screen disagree on the entry it shows.
+fn rows_off_screen(
+    label: &str,
+    runtime: &mut Runtime<RuntimeDriver>,
+    state: &Arc<Mutex<RuntimeDriverState>>,
+    at: chrono::NaiveDateTime,
+) -> Vec<String> {
+    let snapshot = status(runtime, at);
+    let screen = screen_of(state);
+    ["DP-1", "HDMI-A-1"]
+        .into_iter()
+        .filter_map(|connector| {
+            let row = route(&snapshot, connector);
+            (screen.get(connector).map(String::as_str) != row["entry_id"].as_str()).then(|| {
+                format!(
+                    "{label}: {connector}'s row says {} ({} by {}), the screen has {:?}",
+                    row["entry_id"],
+                    row["playlist_id"],
+                    row["route_source"],
+                    screen.get(connector)
+                )
+            })
+        })
+        .collect()
+}
+
+fn default_rule_runtime(
+    document: String,
+    refused: &[&str],
+    start: chrono::NaiveDateTime,
+) -> (Runtime<RuntimeDriver>, Arc<Mutex<RuntimeDriverState>>) {
+    let parsed = Config::from_bytes(document.into_bytes()).unwrap();
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        refuse_when_asked: refused.iter().map(|entry| entry.to_string()).collect(),
+        ..RuntimeDriverState::default()
+    }));
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        parsed,
+        RuntimeDriver(state.clone()),
+        start,
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    (runtime, state)
+}
+
+#[test]
+fn a_mirrored_rule_naming_the_default_reaches_displays_assigned_elsewhere() {
+    let mut problems = Vec::new();
+    // Into the rule: started at 15:00, ticked at 16:00.
+    let (mut runtime, state) =
+        default_rule_runtime(default_rule_document("all-media"), &[], on_the_third(15, 0));
+    problems.extend(rows_off_screen(
+        "15:00",
+        &mut runtime,
+        &state,
+        on_the_third(15, 0),
+    ));
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    problems.extend(rows_off_screen(
+        "16:00",
+        &mut runtime,
+        &state,
+        on_the_third(16, 0),
+    ));
+    assert_eq!(
+        screen_of(&state).get("DP-1").map(String::as_str),
+        Some("all-media-1"),
+        "the rule's playlist is on DP-1"
+    );
+    // Out of it: started at 16:30 inside it, ticked at 17:00 and 17:30.
+    let (mut runtime, state) = default_rule_runtime(
+        default_rule_document("all-media"),
+        &[],
+        on_the_third(16, 30),
+    );
+    problems.extend(rows_off_screen(
+        "16:30 start",
+        &mut runtime,
+        &state,
+        on_the_third(16, 30),
+    ));
+    runtime.tick(on_the_third(17, 0), Instant::now() + Duration::from_secs(1));
+    problems.extend(rows_off_screen(
+        "17:00",
+        &mut runtime,
+        &state,
+        on_the_third(17, 0),
+    ));
+    runtime.tick(
+        on_the_third(17, 30),
+        Instant::now() + Duration::from_secs(2),
+    );
+    problems.extend(rows_off_screen(
+        "17:30",
+        &mut runtime,
+        &state,
+        on_the_third(17, 30),
+    ));
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(
+        screen_of(&state).get("DP-1").map(String::as_str),
+        Some("mixed-1"),
+        "DP-1's own playlist is back"
+    );
+}
+
+#[test]
+fn a_mirrored_rule_whose_stand_in_is_the_default_reaches_displays_assigned_elsewhere() {
+    // The same through a stand-in: the rule names `pages`, whose one entry (a scene) the
+    // driver refuses, so the default (all-media) stands in for it; what plays is the default
+    // either way, and DP-1, on `mixed`, has to move all the same.
+    let document = default_rule_document("pages")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(
+            "id = \"pages-1\"\nkind = \"still\"\n",
+            "id = \"pages-1\"\nkind = \"scene\"\nscene_id = \"3000000001\"\n",
+        );
+    let (mut runtime, state) = default_rule_runtime(document, &["pages-1"], on_the_third(15, 0));
+    let mut problems = rows_off_screen("15:00", &mut runtime, &state, on_the_third(15, 0));
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let snapshot = status(&mut runtime, on_the_third(16, 0));
+    assert_eq!(route(&snapshot, "DP-1")["stand_in_for"], "pages");
+    problems.extend(rows_off_screen(
+        "16:00",
+        &mut runtime,
+        &state,
+        on_the_third(16, 0),
+    ));
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn control_a_mirrored_rule_naming_another_playlist_reaches_displays_assigned_elsewhere() {
+    // A rule naming `pages`, which plays: the playlist in force changes, which was always
+    // applied.
+    let (mut runtime, state) =
+        default_rule_runtime(default_rule_document("pages"), &[], on_the_third(15, 0));
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let mut problems = rows_off_screen("16:00", &mut runtime, &state, on_the_third(16, 0));
+    runtime.tick(on_the_third(17, 0), Instant::now() + Duration::from_secs(2));
+    problems.extend(rows_off_screen(
+        "17:00",
+        &mut runtime,
+        &state,
+        on_the_third(17, 0),
+    ));
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn a_mirrored_rule_naming_the_default_that_changes_nothing_on_screen_applies_nothing() {
+    // The other side of N9: where every display already shows the default (DP-1 assigned to it
+    // too), the rule coming into force and going out changes only what decides; nothing is
+    // applied again.
+    let document = default_rule_document("all-media").replace(
+        "connector = \"DP-1\"\nplaylist = \"mixed\"",
+        "connector = \"DP-1\"\nplaylist = \"all-media\"",
+    );
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    let applies = state.lock().unwrap().applies.len();
+    runtime.tick(on_the_third(16, 0), Instant::now() + Duration::from_secs(1));
+    let snapshot = status(&mut runtime, on_the_third(16, 0));
+    assert_eq!(route(&snapshot, "DP-1")["schedule_rule_id"], "eve");
+    runtime.tick(on_the_third(17, 0), Instant::now() + Duration::from_secs(2));
+    let snapshot = status(&mut runtime, on_the_third(17, 0));
+    assert!(route(&snapshot, "DP-1")["schedule_rule_id"].is_null());
+    assert_eq!(
+        state.lock().unwrap().applies.len(),
+        applies,
+        "applied again"
+    );
+}
+
+/// The r13e sequence's document: rules noon (pages), aft-a and aft-b (mixed, back to back),
+/// eve (the default, all-media) and late, with DP-1 assigned mixed and HDMI-A-1 all-media.
+fn mirrored_sequence_document(generation: char, rename_second: bool) -> String {
+    let rules = format!(
+        "[[schedules]]\nid = \"noon\"\nplaylist = \"pages\"\nstart = \"11:00\"\nend = \"13:00\"\n\
+         [[schedules]]\nid = \"aft-a\"\nplaylist = \"mixed\"\nstart = \"13:00\"\nend = \"14:00\"\n\
+         [[schedules]]\nid = \"{}\"\nplaylist = \"mixed\"\nstart = \"14:00\"\nend = \"15:00\"\n\
+         [[schedules]]\nid = \"eve\"\nplaylist = \"all-media\"\nstart = \"16:00\"\nend = \"17:00\"\n\
+         [[schedules]]\nid = \"late\"\nplaylist = \"late\"\nstart = \"18:00\"\nend = \"19:00\"\n",
+        if rename_second { "aft-c" } else { "aft-b" }
+    );
+    skip_document(
+        "all-media",
+        &[
+            ("all-media", &["", ""]),
+            ("mixed", &["", ""]),
+            ("pages", &["", ""]),
+            ("late", &[""]),
+        ],
+        &format!(
+            "{rules}[[displays]]\nconnector = \"DP-1\"\nplaylist = \"mixed\"\n\
+             [[displays]]\nconnector = \"HDMI-A-1\"\nplaylist = \"all-media\"\n"
+        ),
+    )
+    .replace(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        &generation.to_string().repeat(64),
+    )
+}
+
+#[test]
+fn a_mirrored_sequence_keeps_every_row_and_its_screen_on_one_decision() {
+    // Review r13e T6, 15 steps: start inside a rule, a hotplug, a pick, Follow schedule, a
+    // reload while picked and one inside the rule, ticks across boundaries (a hand-over to a
+    // rule of the same playlist, named and not applied again), a reload renaming the rule in
+    // force, the default's own rule (N9: 16:00 and 17:00), and a failing transition, whose
+    // rows show the baseline while it retries.
+    let root = directory("r13e-n3-sequence");
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, mirrored_sequence_document('a', false)).unwrap();
+    let day = on_the_third;
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        ..RuntimeDriverState::default()
+    }));
+    let parsed = Config::load(&config_path).unwrap();
+    let mut runtime = Runtime::new(
+        config_path.clone(),
+        parsed,
+        RuntimeDriver(state.clone()),
+        day(11, 30),
+    )
+    .unwrap();
+    runtime.apply_current().unwrap();
+    let mut clock = Instant::now();
+    let mut problems: Vec<String> = Vec::new();
+    let step = |label: &str,
+                runtime: &mut Runtime<RuntimeDriver>,
+                at: chrono::NaiveDateTime,
+                expected: &[(&str, &str, &str, &str)],
+                screen_should_follow: bool|
+     -> Vec<String> {
+        let mut problems = Vec::new();
+        let snapshot = status(runtime, at);
+        let screen = screen_of(&state);
+        for (connector, source, rule, playlist) in expected {
+            let row = route(&snapshot, connector);
+            let said = (
+                row["route_source"].as_str().unwrap(),
+                row["schedule_rule_id"].as_str().unwrap_or("null"),
+                row["playlist_id"].as_str().unwrap(),
+            );
+            if said != (*source, *rule, *playlist) {
+                problems.push(format!(
+                    "{label}: {connector} says {said:?}, the decision is {source}/{rule}/{playlist}"
+                ));
+            }
+            if screen_should_follow
+                && screen.get(*connector).map(String::as_str) != row["entry_id"].as_str()
+            {
+                problems.push(format!(
+                    "{label}: {connector}'s row names entry {} but the screen has {:?}",
+                    row["entry_id"],
+                    screen.get(*connector)
+                ));
+            }
+        }
+        problems
+    };
+    let both = |source: &'static str, rule: &'static str, playlist: &'static str| {
+        [
+            ("DP-1", source, rule, playlist),
+            ("HDMI-A-1", source, rule, playlist),
+        ]
+    };
+    let assignments = [
+        ("DP-1", "assignment", "null", "mixed"),
+        ("HDMI-A-1", "assignment", "null", "all-media"),
+    ];
+    let start = both("schedule", "noon", "pages");
+    problems.extend(step("start 11:30", &mut runtime, day(11, 30), &start, true));
+    // Hotplug inside the rule.
+    state.lock().unwrap().connected_outputs =
+        Some(vec!["DP-1".into(), "DP-2".into(), "HDMI-A-1".into()]);
+    clock += Duration::from_secs(6);
+    runtime.tick(day(11, 31), clock);
+    let hotplugged = [
+        ("DP-2", "schedule", "noon", "pages"),
+        ("DP-1", "schedule", "noon", "pages"),
+    ];
+    problems.extend(step(
+        "hotplug 11:31",
+        &mut runtime,
+        day(11, 31),
+        &hotplugged,
+        true,
+    ));
+    assert!(runtime_command(&mut runtime, day(11, 32), "playlist-use", Some("mixed")).ok);
+    let picked = both("manual", "null", "mixed");
+    problems.extend(step("pick 11:32", &mut runtime, day(11, 32), &picked, true));
+    assert!(runtime_command(&mut runtime, day(11, 33), "schedule-follow", None).ok);
+    problems.extend(step(
+        "follow 11:33",
+        &mut runtime,
+        day(11, 33),
+        &start,
+        true,
+    ));
+    assert!(runtime_command(&mut runtime, day(11, 34), "playlist-use", Some("mixed")).ok);
+    fs::write(&config_path, mirrored_sequence_document('b', false)).unwrap();
+    let reply = runtime_command(&mut runtime, day(11, 35), "reload", None);
+    assert!(reply.ok, "{}", reply.message);
+    problems.extend(step(
+        "reload picked 11:35",
+        &mut runtime,
+        day(11, 35),
+        &picked,
+        true,
+    ));
+    assert!(runtime_command(&mut runtime, day(11, 36), "schedule-follow", None).ok);
+    fs::write(&config_path, mirrored_sequence_document('c', false)).unwrap();
+    assert!(runtime_command(&mut runtime, day(11, 37), "reload", None).ok);
+    problems.extend(step(
+        "reload in noon 11:37",
+        &mut runtime,
+        day(11, 37),
+        &start,
+        true,
+    ));
+    clock += Duration::from_secs(1);
+    runtime.tick(day(13, 0), clock);
+    let aft_a = both("schedule", "aft-a", "mixed");
+    problems.extend(step("tick 13:00", &mut runtime, day(13, 0), &aft_a, true));
+    let applies = state.lock().unwrap().applies.len();
+    clock += Duration::from_secs(1);
+    runtime.tick(day(14, 0), clock);
+    let aft_b = both("schedule", "aft-b", "mixed");
+    problems.extend(step("tick 14:00", &mut runtime, day(14, 0), &aft_b, true));
+    if state.lock().unwrap().applies.len() != applies {
+        problems.push("14:00: a hand-over to a rule of the same playlist applied again".into());
+    }
+    fs::write(&config_path, mirrored_sequence_document('d', true)).unwrap();
+    assert!(runtime_command(&mut runtime, day(14, 30), "reload", None).ok);
+    let aft_c = both("schedule", "aft-c", "mixed");
+    problems.extend(step(
+        "reload rename 14:30",
+        &mut runtime,
+        day(14, 30),
+        &aft_c,
+        true,
+    ));
+    if state.lock().unwrap().applies.len() != applies {
+        problems.push("14:30: a reload renaming the rule in force applied again".into());
+    }
+    for (label, at, expected) in [
+        ("tick 15:00", day(15, 0), &assignments),
+        (
+            "tick 16:00 (the default's rule)",
+            day(16, 0),
+            &both("schedule", "eve", "all-media"),
+        ),
+        ("tick 17:00", day(17, 0), &assignments),
+    ] {
+        clock += Duration::from_secs(1);
+        runtime.tick(at, clock);
+        problems.extend(step(label, &mut runtime, at, expected, true));
+    }
+    // A transition that fails: the rows say the baseline while it retries.
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.fail_entry_id = Some("late-1".into());
+        recorded.fail_entry_attempts_remaining = usize::MAX;
+    }
+    for attempt in 1..=3 {
+        clock += Duration::from_secs(3);
+        runtime.tick(day(18, 0), clock);
+        let label = format!("tick 18:00, attempt {attempt}");
+        problems.extend(step(&label, &mut runtime, day(18, 0), &assignments, false));
+    }
+    // `late`'s one entry is taboo now: nothing of it can play, the baseline stays.
+    clock += Duration::from_secs(3);
+    runtime.tick(day(18, 1), clock);
+    problems.extend(step(
+        "tick 18:01",
+        &mut runtime,
+        day(18, 1),
+        &assignments,
+        true,
+    ));
+    state.lock().unwrap().fail_entry_id = None;
+    clock += Duration::from_secs(3);
+    runtime.tick(day(19, 0), clock);
+    problems.extend(step(
+        "tick 19:00",
+        &mut runtime,
+        day(19, 0),
+        &assignments,
+        true,
+    ));
+    fs::remove_dir_all(&root).unwrap();
+    assert!(problems.is_empty(), "{problems:#?}");
+}

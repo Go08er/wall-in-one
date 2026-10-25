@@ -1767,7 +1767,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             // Which rule decides is part of the decision: a rule handing over
             // to another of the same playlist changes what status names.
             let routing_changed = rule != self.schedule_rule;
-            if playlist_changed && (overrode || self.config.displays.is_empty()) {
+            // With assignments, a rule coming into force moves every
+            // assigned display onto its playlist, and one going out of force
+            // moves them back, even when the playlist in force is the
+            // default either way (review r13e N9).
+            let assignments_move = routing_changed
+                && !self.config.displays.is_empty()
+                && overrode != self.schedule_rule.is_some();
+            if (playlist_changed || assignments_move && overrode)
+                && (overrode || self.config.displays.is_empty())
+            {
                 // Known before the change is decided, not learned by
                 // applying it: a stand-in that already plays isn't started
                 // again.
@@ -1776,8 +1785,12 @@ impl<D: WallpaperDriver> Runtime<D> {
             // A playlist the service refused throughout plays its stand-in
             // (`stand_in`): a change to one whose stand-in is what already
             // plays changes nothing on screen.
-            let shown_changed = playlist_changed
-                && self.shown_playlist_id(&wanted) != self.shown_playlist_id(&self.active_playlist);
+            let shown_changed = (playlist_changed
+                && self.shown_playlist_id(&wanted)
+                    != self.shown_playlist_id(&self.active_playlist))
+                || (assignments_move
+                    && self.mirrored_shown(overrode, &wanted)
+                        != self.mirrored_shown(!overrode, &self.active_playlist));
             if (routing_changed || playlist_changed) && !shown_changed {
                 // Only provenance changed (for example, a schedule rule
                 // naming the already-active default). Commit the truth
@@ -2705,6 +2718,34 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.stand_in(reference)
             .or_else(|| self.config.playlist(reference))
             .map_or_else(|| reference.to_string(), |playlist| playlist.id.clone())
+    }
+
+    /// What each connected display shows in mirrored mode with `active` in
+    /// force, as `current_targets` chooses: with a rule deciding (`ruled`)
+    /// or a pick, `active` on every display; otherwise, with assignments,
+    /// each display's own playlist or the default. Each as
+    /// `shown_playlist_id` names it: a stand-in for one refused throughout.
+    fn mirrored_shown(&self, ruled: bool, active: &str) -> Vec<String> {
+        if self.config.displays.is_empty() {
+            return vec![self.shown_playlist_id(active)];
+        }
+        self.target_outputs
+            .iter()
+            .map(|output| {
+                let reference = if self.manual_playlist.is_some() || ruled {
+                    active
+                } else {
+                    self.config
+                        .displays
+                        .iter()
+                        .find(|display| display.connector == *output)
+                        .map_or(self.config.default_playlist.as_str(), |display| {
+                            display.playlist.as_str()
+                        })
+                };
+                self.shown_playlist_id(reference)
+            })
+            .collect()
     }
 
     /// The playlist asked for (`reference`, a pick, a rule's, an assignment

@@ -5627,7 +5627,7 @@ class Application(Adw.Application):
         if allows:
             if titles:
                 shown = ", ".join(titles)
-                return f"plays {shown}, from a configuration that may allow web wallpapers"
+                return f"may play {shown}, from a configuration that may allow web wallpapers"
             return "holds a configuration that may allow web wallpapers"
         if titles and not unchecked:
             return f"plays {', '.join(titles)}"

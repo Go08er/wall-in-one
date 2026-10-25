@@ -779,3 +779,8 @@ def test_what_another_writer_installs_while_the_guard_waits_for_the_lock_is_judg
 def test_with_no_status_the_held_words_hedge_the_allow_too() -> None:
     said = app_module.Application._held_web_words([], [], allows=True, known=False)
     assert said == "may hold a configuration that may allow web wallpapers"
+
+
+def test_a_page_is_said_to_play_only_as_far_as_the_allow_is_hedged() -> None:
+    said = app_module.Application._held_web_words(["Item 1"], [], allows=True)
+    assert said == "may play Item 1, from a configuration that may allow web wallpapers"

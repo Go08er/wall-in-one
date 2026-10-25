@@ -13,6 +13,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from concurrent import futures
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -293,9 +294,23 @@ MAX_GUI_AUTHORING_QUEUE: Final = 32
 #: (SIGINT's ``quit()``) keeps running the loop for the numbers it hands on to
 #: be saved, and published: as long as ``ctl`` gives one authoring change.
 SHUTDOWN_SETTLE_SECONDS: Final = client.AUTHORING_TIMEOUT
-#: How long the last step of a shutdown waits, all told, for a settings save
-#: still being written and for the compiler lock (`Application._web_off_on_disk_at_exit`).
-SHUTDOWN_WEB_OFF_SECONDS: Final = 2.0
+#: The longest a settings save can take, from the timeouts it can spend: the
+#: migration marker's lock it is written under (`legacy_migration.unattended_transaction`),
+#: then the settings file's own lock, and under that the check of the service that
+#: "Stop animations on battery" makes (`runtime_compatibility.require_schema`), whose
+#: status call and check of the loaded units share one `client.TIMEOUT`. What the
+#: last step of a shutdown waits for a save still being written, at most
+#: (`Application._web_off_on_disk_at_exit`).
+SETTINGS_SAVE_SECONDS: Final = (
+    legacy_migration.MIGRATION_LOCK_TIMEOUT_SECONDS
+    + state_file.MUTATION_LOCK_TIMEOUT_SECONDS
+    + client.TIMEOUT
+)
+#: How long that step waits for the compiler lock: briefly, since a publication
+#: holding it reads the setting under it (review r13c, D2).
+SHUTDOWN_WEB_OFF_LOCK_SECONDS: Final = 2.0
+#: How often a wait in that step looks whether a second Ctrl-C has ended it.
+SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
 PACKAGE_SOURCE_ACTION: Final = "package-source"
 PRESENT_PACKAGE_ACTION: Final = "present-package"
 # Installed Nix package directories are immutable and distinguish revisions
@@ -2219,33 +2234,35 @@ class Application(Adw.Application):
         nothing is asked of the service: the shutdown has cut the socket
         calls off, and one would hold the exit.
 
-        Bounded: the save and the lock are waited for `SHUTDOWN_WEB_OFF_SECONDS`
-        all told, so the quit takes at most the settle's bound and this; the
-        compile is the library's in memory, and isn't interrupted. A lock
-        still held then is another publication's, which reads the setting
-        under it and installs only what it allows (review r13c, D2), so
-        nothing is written here. What that leaves is this process's own lane
-        holding it past the wait and then failing. Never raises.
+        Bounded, and waiting only for what can matter. A settings save still
+        being written is waited for, for as long as such a save itself can
+        take (`SETTINGS_SAVE_SECONDS`, its locks and its check of the
+        service); with none, nothing is waited for. The compiler lock is
+        waited for briefly (`SHUTDOWN_WEB_OFF_LOCK_SECONDS`): a lock still held
+        then is another publication's, which reads the setting under it and
+        installs only what it allows (review r13c, D2), so nothing is written
+        here; what that leaves is this process's own lane holding it past
+        the wait and then failing. So a quit takes at most the settle's
+        bound, that save's bound while one is being written, and the lock's;
+        the compile is the library's in memory, and isn't interrupted.
+
+        A second Ctrl-C, during the settle or here, ends these waits at once
+        (review r13c, N-2): the save still being written is then not waited
+        for, and the lock is only tried. Losing that save is accepted: the
+        person cut it off. What has already landed is still acted on, which
+        waits for nothing. Never raises.
         """
         try:
-            self._replace_web_off_on_disk(time.monotonic() + SHUTDOWN_WEB_OFF_SECONDS)
+            self._replace_web_off_on_disk()
         except Exception:
             LOGGER.exception(
                 "the runtime configuration on disk could not be checked against "
                 "Allow web wallpapers at shutdown"
             )
 
-    def _replace_web_off_on_disk(self, deadline: float) -> None:
-        """`_web_off_on_disk_at_exit`'s work, every wait ending by ``deadline``."""
-        # Only a settings save at the head of the authoring lane, unsettled: the
-        # worker's run is then that save's. A number's write, say, isn't waited
-        # for, so a second Ctrl-C still ends the shutdown at once (r13c, N-2).
-        with self._settings_authoring_lock:
-            saving_settings = self._settings_batch_generation is not None
-        saving = self._authoring_future if saving_settings else None
-        if saving is not None:
-            with contextlib.suppress(Exception):  # landed, failed or still running: read below
-                saving.result(timeout=max(0.0, deadline - time.monotonic()))
+    def _replace_web_off_on_disk(self) -> None:
+        """`_web_off_on_disk_at_exit`'s work."""
+        self._settings_save_landed()
         try:
             settings = config.load_strict()
         except config.ConfigError:
@@ -2256,7 +2273,9 @@ class Application(Adw.Application):
         with contextlib.ExitStack() as held:
             try:
                 held.enter_context(
-                    runtime_config.compiler_lock(timeout=max(0.0, deadline - time.monotonic()))
+                    runtime_config.compiler_lock(
+                        timeout=0.0 if self._settle_cut else SHUTDOWN_WEB_OFF_LOCK_SECONDS
+                    )
                 )
             except runtime_config.RuntimeConfigError:
                 return  # a publication holds it, and installs only what the setting allows
@@ -2284,6 +2303,31 @@ class Application(Adw.Application):
                 "Allow web wallpapers is off, but the configuration on disk could play a web "
                 "wallpaper; it was replaced at shutdown"
             )
+
+    def _settings_save_landed(self) -> None:
+        """Wait for a settings save still being written: until it ends, its bound, or a Ctrl-C.
+
+        Only a save at the head of the authoring lane, unsettled: the
+        worker's run is then that save's. A number's write, say, isn't waited
+        for. A second Ctrl-C ends the wait (`_second_interrupt_ends_the_settle`,
+        installed for it); one during the settle means it isn't begun.
+        """
+        with self._settings_authoring_lock:
+            saving_settings = self._settings_batch_generation is not None
+        saving = self._authoring_future if saving_settings else None
+        if saving is None or saving.done() or self._settle_cut:
+            return
+        deadline = time.monotonic() + SETTINGS_SAVE_SECONDS
+        restore = self._second_interrupt_ends_the_settle()
+        try:
+            while not saving.done() and not self._settle_cut:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                # In slices: Python runs the Ctrl-C handler between them.
+                futures.wait((saving,), timeout=min(remaining, SHUTDOWN_INTERRUPT_POLL_SECONDS))
+        finally:
+            restore()
 
     def _web_off_document_now(self, settings: config.Settings, status: object) -> str:
         """What `_web_off_on_disk_at_exit` installs: a web-off compile, else nothing to play."""
@@ -2412,6 +2456,9 @@ class Application(Adw.Application):
 
     def _second_interrupt_ends_the_settle(self) -> Callable[[], None]:
         """Let a Ctrl-C during the settle end it; what puts the previous handler back.
+
+        The last step of the shutdown installs it too, while it waits for a
+        settings save (`_settings_save_landed`).
 
         PyGObject's SIGINT fallback calls ``quit()`` once and ignores every
         later SIGINT while ``run()`` is on the stack, which it still is in

@@ -213,10 +213,13 @@ it installed anything (it was turned off just before Ctrl-C, say) leaves the
 file it would have replaced. So, last, while the setting is off, a file on
 disk that would play a web page, judged as above, is replaced with what a
 publication would install, or with the document that plays nothing, without
-asking the service anything: its own check of the file loads it. That step
-waits at most two seconds, for a save of the setting still being written and
-for the lock; another writer holding the lock past that installs only what
-the setting allows.
+asking the service anything: its own check of the file loads it. A save of
+the setting still being written then is waited for, as long as such a save
+can take (its locks, and the check of the service that "Stop animations on
+battery" makes: about 70 seconds at most); with none, nothing is waited for.
+The lock is waited for two seconds at most; another writer holding it past
+that installs only what the setting allows. A second Ctrl-C ends both waits
+at once, and the save it cuts off is then not acted on.
 At service start, a kept document (the one there already, kept because the
 compile failed) is refused with exit 78 while the setting is off, if it plays
 a web page, names a Workshop item whose type can't be checked, or allows web

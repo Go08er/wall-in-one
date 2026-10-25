@@ -58,6 +58,7 @@ from tests.test_ui_next_window import (  # noqa: E402
     application_lanes,
     run_application,
     sandboxed_runtime,
+    settled,
 )
 from tests.test_ui_renderer_dials import _own, toolkit  # noqa: E402,F401
 from tests.test_ui_renderer_settle_quit import _after, _clip, _rows, _scanned  # noqa: E402
@@ -117,12 +118,22 @@ def _setup(
     settle_seconds: float,
     reload_seconds: float = 0.0,
     allow_web: bool = False,
+    battery: bool = False,
 ) -> tuple[Application, Path, _Slow, _Settles]:
-    """The application, its video, the faked service, and how long each settle took."""
+    """The application, its video, the faked service, and how long each settle took.
+
+    ``battery``: "Stop animations on battery" on, so that every save of the settings checks
+    the service (`runtime_compatibility.require_schema`), here a no-op unless a test says.
+    """
     fake = sandboxed_runtime(monkeypatch, tmp_path)
-    if allow_web:
-        config.update({"allow_web_wallpapers": True})
     monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    if allow_web or battery:
+        config.update(
+            {
+                **({"allow_web_wallpapers": True} if allow_web else {}),
+                **({"stop_animations_on_battery": True} if battery else {}),
+            }
+        )
     monkeypatch.setattr(app_module, "SHUTDOWN_SETTLE_SECONDS", settle_seconds)
     slow = _Slow(fake.send_runtime, reload_seconds)
     monkeypatch.setattr(client, "send_runtime", slow)
@@ -719,3 +730,192 @@ def test_web_turned_off_as_the_loop_ends_leaves_no_file_that_allows_them(
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
         "settings.toml says web wallpapers are off, and the file on disk still allows them"
     )
+
+
+# -- r13d N11: a save of the setting slower than 2 s, within its own bound ---------------------
+
+
+def _held_save_check(
+    monkeypatch: pytest.MonkeyPatch,
+    held: Callable[[], None],
+) -> None:
+    """The save's check of the service ("Stop animations on battery"), as it runs on the
+    authoring worker: ``held`` runs in it, standing for a status call that hasn't answered."""
+
+    def check(_schema: int) -> None:
+        if threading.current_thread().name.startswith("control-authoring"):
+            held()
+
+    monkeypatch.setattr(runtime_compatibility, "require_schema", check)
+
+
+def _in_the_last_steps_wait() -> bool:
+    """Whether the shutdown's own Ctrl-C handler is installed, as it is while it waits."""
+    handler = signal.getsignal(signal.SIGINT)
+    return "_second_interrupt_ends_the_settle" in getattr(handler, "__qualname__", "")
+
+
+#: Longer than the 2 s the end of the shutdown waited at 5bd68ef, well inside a save's bound.
+SLOW_SAVE: float = 4.0
+
+
+def test_a_save_turning_web_off_slower_than_two_seconds_is_still_waited_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--service``, "Stop animations on battery" on, Ctrl-C just after the web toggle, no
+    number waiting: the toggle's save is still checking the service when the loop ends, and its
+    status call answers only 4 s after the shutdown has dropped its runtime lane, within what
+    such a save can take. Before: the end of the shutdown waited 2 s, read the setting still on,
+    and left the file that allows web wallpapers."""
+    application, clip, _slow, spans = _setup(
+        monkeypatch,
+        tmp_path,
+        ui="classic",
+        service=True,
+        settle_seconds=2.0,
+        allow_web=True,
+        battery=True,
+    )
+    failures: list[str] = []
+    answered = threading.Event()
+    timers: list[threading.Timer] = []
+
+    def status_call() -> None:
+        _until(
+            lambda: application._runtime_shutdown and application._runtime_jobs is None,
+            failures,
+            "the shutdown to drop its runtime lane",
+        )
+        timer = threading.Timer(SLOW_SAVE, answered.set)  # the service answers, late
+        timers.append(timer)
+        timer.start()
+        if not answered.wait(GIVE_UP):
+            failures.append("the status call was never answered")
+
+    _held_save_check(monkeypatch, status_call)
+    published: list[bool] = []
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        published.append(runtime_config.allows_web_wallpapers(paths.runtime_config_path()))
+        assert application.update_settings_async(allow_web_wallpapers=False)
+        application.quit()  # what SIGINT's fallback calls
+
+    try:
+        _run(application, scenario(), service=True)
+    finally:
+        answered.set()
+        for timer in timers:
+            timer.cancel()
+            timer.join()
+    assert not failures, failures
+    assert published == [True], "the first publication didn't allow web wallpapers"
+    assert timers, "the save never checked the service"
+    assert not spans, "a settle ran, with no number waiting"
+    assert config.load_strict().allow_web_wallpapers is False
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+        "settings.toml says web wallpapers are off, and the file on disk still allows them"
+    )
+
+
+def test_a_quit_with_no_save_being_written_waits_for_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The control. A settings save that has landed and settled before the quit: the end of the
+    shutdown waits for nothing, however long a save may take. Timed from the authoring lane's
+    shutdown to the stills' (the step in between), against a margin far below any wait it has."""
+    application, clip, _slow, _spans = _setup(
+        monkeypatch, tmp_path, ui="classic", service=False, settle_seconds=2.0
+    )
+    marks: dict[str, float] = {}
+    saved: list[bool] = []
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        assert application.update_settings_async(
+            shuffle=True, on_success=lambda _settings: saved.append(True)
+        )
+        yield "the save to settle", lambda: bool(saved) and settled(application)
+        lanes = application._shutdown_authoring_jobs
+        stills = application._stills.shutdown
+
+        def lanes_down() -> None:
+            lanes()
+            marks["lanes"] = time.monotonic()
+
+        def stills_down() -> None:
+            marks["stills"] = time.monotonic()
+            stills()
+
+        monkeypatch.setattr(application, "_shutdown_authoring_jobs", lanes_down)
+        monkeypatch.setattr(application._stills, "shutdown", stills_down)
+        application.quit()
+
+    _run(application, scenario(), service=False)
+    assert saved == [True]
+    assert {"lanes", "stills"} <= marks.keys(), marks
+    took = marks["stills"] - marks["lanes"]
+    assert took < 1.0, f"the end of the shutdown waited {took:.2f}s with no save being written"
+
+
+def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same slow save, whose status call doesn't answer while the app runs. A second Ctrl-C
+    while the end of the shutdown waits for it ends that wait: ``run()`` returns at once, and the
+    save it cut off isn't waited for (the person cut it off)."""
+    application, clip, _slow, _spans = _setup(
+        monkeypatch,
+        tmp_path,
+        ui="classic",
+        service=True,
+        settle_seconds=2.0,
+        allow_web=True,
+        battery=True,
+    )
+    failures: list[str] = []
+    marks: dict[str, float] = {}
+    answered = threading.Event()
+
+    def status_call() -> None:
+        _until(
+            lambda: _in_the_last_steps_wait() or answered.is_set(),
+            failures,
+            "the wait for the save",
+        )
+        if answered.is_set():  # run() is over
+            failures.append("the shutdown ended without waiting for the save")
+            return
+        marks["second"] = time.monotonic()
+        _interrupt(failures)  # the second Ctrl-C, while it waits
+        if not answered.wait(GIVE_UP):
+            failures.append("the status call was never answered")
+
+    _held_save_check(monkeypatch, status_call)
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        assert application.update_settings_async(allow_web_wallpapers=False)
+        _LANES.extend(application_lanes(application))  # its worker, joined after the run
+        application.quit()  # the first Ctrl-C (SIGINT's fallback calls this)
+
+    def launch() -> bool:
+        application.activate()
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(launch)
+    _LANES.clear()
+    ended = 0.0
+    with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+        try:
+            run_application(application, scenario())
+        finally:
+            ended = time.monotonic()
+            answered.set()
+            _join_lanes()
+    assert not failures, failures
+    assert "second" in marks, "the second Ctrl-C was never sent"
+    assert ended - marks["second"] < 1.0, (
+        f"run() returned {ended - marks['second']:.2f}s after the second Ctrl-C"
+    )
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, "handler not restored"

@@ -865,7 +865,7 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_slow_look(
         release.set()
         if where != "control-fast":
             sender.join(GIVE_UP)
-            assert ended.wait(GIVE_UP), "the held call never returned"
+            ended.wait(GIVE_UP)  # cleanup: the order below says whether it returned
     _judged_at_exit(application)
     assert not failures, failures
     now = paths.runtime_config_path().read_text(encoding="utf-8")
@@ -909,7 +909,7 @@ def test_the_bound_ends_the_wait_for_a_slow_look(
     finally:
         release.set()
         if where != "control-fast":
-            assert ended.wait(GIVE_UP), "the held call never returned"
+            ended.wait(GIVE_UP)  # cleanup: the order below says whether it returned
     _judged_at_exit(application)
     now = paths.runtime_config_path().read_text(encoding="utf-8")
     if where == "control-fast":

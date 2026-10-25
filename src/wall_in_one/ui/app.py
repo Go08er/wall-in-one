@@ -3433,7 +3433,8 @@ class Application(Adw.Application):
         # From `do_shutdown` on, ``--service`` too: its synchronous publication
         # would hold the loop for as long as the service takes to answer (a
         # reload waits up to RUNTIME_ACTION_TIMEOUT), past the settle's bound
-        # (review r13c, G1-L1). On the lane, the shutdown cuts it off.
+        # (review r13c, G1-L1). On the lane, the shutdown cuts it off, and the
+        # web-off guard after one it cut isn't needed (`_stopping_web_after_failure`).
         if not self._service_start or self._shutting_down:
             published = self._publish_runtime_async()
             if published and self._removal_convergence_held:
@@ -4571,6 +4572,26 @@ class Application(Adw.Application):
         poll of the file, and the next service start is guarded
         (``--service-startup-prepare``). Socket calls past that point would
         hold the process's exit for as long as they wait.
+
+        Under ``--service`` that includes the publications from `do_shutdown`
+        on, which run on this lane too (`_publish_runtime_for_context`), and
+        the one the shutdown is for needs no guard (review r13d, N11): the
+        publication of a renderer number it handed on. A number doesn't move
+        ``allow_web_wallpapers``. Every move of it adopted before
+        `do_shutdown` was published synchronously on GTK, this guard
+        included (`_publish_runtime`), so the service was left on a document
+        that plays no web page while the setting is off, or the guard has
+        already ended what it could and said so (a move another program
+        saved is its own publication's to guard). A number's publication that
+        fails leaves the service on that. One cut at its reload has
+        installed what it compiled from the file under the compiler lock,
+        which allows no web page while the setting is off
+        (`runtime_config.publish_changes`), for the service's poll to load.
+        One that wasn't compiled yet installs nothing and fails nothing.
+        What is left is a move of the setting saved while the settle's loop
+        runs (a gesture in a window still open, a save already under way):
+        its publication, or the number's, which reads the file, is the
+        window's case above, as at any quit of the window's own process.
         """
         if publication.deferred or self._runtime_shutdown:
             return publication

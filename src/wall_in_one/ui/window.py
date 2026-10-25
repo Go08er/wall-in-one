@@ -948,6 +948,8 @@ class MainWindow(Adw.ApplicationWindow):
             if truth is not None and truth.stand_in_for
             else " \u00b7 your pick can\u2019t play here"
             if truth is not None and truth.pick_stood_in
+            else f" \u00b7 {runtime_truth.PICK_OR_STAND_IN}"
+            if truth is not None and truth.route_unsure
             else ""
         )
         power = runtime_truth.power_from_status(status)

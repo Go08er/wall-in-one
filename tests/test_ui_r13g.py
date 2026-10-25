@@ -476,3 +476,105 @@ def test_the_rule_in_force_is_named_when_its_playlist_is_on_screen() -> None:
     # Every row's id left out, r1 (-> pages) in force and pages on screen: r1 it is.
     routes = _routes(_mirrored_rule_rows(on_screen="pages", rule="r1", stalled=False))
     assert [route.rule_id for route in routes] == ["r1", "r1"]
+
+
+# ------------------------------------------------------------------ N7 ---------
+
+
+def _independent_pick_at_the_ceiling() -> dict[str, Any]:
+    from tests.test_ui_next_r13e import _independent
+
+    status = _at_the_ceiling(_independent("manual", asked="pages", plays="scenes"))
+    assert status.get("stand_in_for_omitted") is True
+    return status
+
+
+def test_n7_classic_independent_row_of_an_unsure_pick_hedges() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = _truth(_independent_pick_at_the_ceiling())
+    [row] = truth.displays
+    assert row.route_unsure  # precondition
+    text = SchedulesPage._display_playback_description(row, truth, taboo=False)
+    print(f"classic row: {text!r}")
+    assert "stands in" in text or "stand-in" in text, (
+        "the pick may be 'pages' (refused) with 'scenes' standing in; the row says "
+        f"{text!r}, i.e. the manual override is scenes"
+    )
+
+
+def test_n7_classic_independent_combo_isnt_put_on_what_may_be_the_stand_in() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = _truth(_independent_pick_at_the_ceiling())
+    choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
+    selected = SchedulesPage._display_playback_selected(truth.displays[0], choices)
+    assert selected != 2, "the per-display combo says the pick is scenes"
+
+
+def test_n7_classic_detail_of_an_unsure_pick_hedges(monkeypatch: pytest.MonkeyPatch) -> None:
+    import wall_in_one.ui.playlists_page as page
+    from wall_in_one.ui.playlists_page import PlaylistsPage
+
+    monkeypatch.setattr(page, "_playlist_availability", lambda _s, _p: (1, 0))
+    monkeypatch.setattr(page, "_is_default", lambda _s, _p: False)
+    labels: list[str] = []
+    fake = SimpleNamespace(
+        _app=SimpleNamespace(runtime_status=_independent_pick_at_the_ceiling()),
+        _play_button=SimpleNamespace(
+            set_label=labels.append, set_tooltip_text=lambda _t: None, set_sensitive=lambda _s: None
+        ),
+    )
+
+    class P(list[int]):
+        id = "scenes"
+        name = "scenes"
+        entries = (1,)
+
+    one = P([1])
+    detail = PlaylistsPage._playlist_detail(fake, SimpleNamespace(), one)  # type: ignore[arg-type]
+    PlaylistsPage._sync_play_button(fake, SimpleNamespace(manual_playlist=None), one)  # type: ignore[arg-type]
+    print(f"classic detail={detail!r} button={labels!r}")
+    assert labels == ["Playing now · pick or stand-in"]  # precondition: the button hedges
+    assert "playing manually" not in detail, (
+        f"its own Play button hedges; the detail says {detail!r}"
+    )
+
+
+def test_n7_next_independent_combo_isnt_put_on_what_may_be_the_stand_in() -> None:
+    from wall_in_one.ui.next.displays import DisplaysPage
+
+    [route] = _routes(_independent_pick_at_the_ceiling())
+    fake = SimpleNamespace(scheduling=SimpleNamespace(manual_pick=lambda: None))
+    selected = DisplaysPage._play_selected(fake, route, ["", "pages", "scenes"])  # type: ignore[arg-type]
+    assert selected != 2, "the Playing now row says the pick is scenes"
+
+
+def test_control_n7_next_pages_hedge_the_unsure_pick() -> None:
+    text, playing, _showing = _on_screen(_independent_pick_at_the_ceiling(), "scenes")
+    assert text == f"On screen now · {runtime_truth.PICK_OR_STAND_IN}" and not playing
+
+
+def test_n7_the_classic_summary_hedges_an_unsure_pick() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = _truth(_independent_pick_at_the_ceiling())
+    text = SchedulesPage._playback_description(None, truth)  # type: ignore[arg-type]
+    assert runtime_truth.PICK_OR_STAND_IN in text, text
+
+
+def test_n7_the_classic_overall_combo_isnt_put_on_follow_schedule_or_the_stand_in() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = _truth(_independent_pick_at_the_ceiling())
+    choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
+    session = SimpleNamespace(manual_playlist="scenes")
+    assert SchedulesPage._playback_selected(session, choices, truth) is None  # type: ignore[arg-type]
+
+
+def test_n7_both_status_lines_hedge_an_unsure_pick() -> None:
+    from wall_in_one.ui.next import status_line
+
+    model = RuntimeStatusModel()
+    model.adopt(_independent_pick_at_the_ceiling())
+    assert runtime_truth.PICK_OR_STAND_IN in status_line.describe(model.view)

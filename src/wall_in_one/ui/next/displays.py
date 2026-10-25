@@ -497,6 +497,8 @@ class DisplaysPage(Page):
         """
         if route is None or route.route != "pick":
             return 0
+        if route.route_unsure:
+            return None
         if route.pick_stood_in:
             recorded = self.scheduling.manual_pick()
             return play_ids.index(recorded) if recorded in play_ids else None

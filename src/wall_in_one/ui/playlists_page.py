@@ -1107,6 +1107,8 @@ class PlaylistsPage(Gtk.Box):
             playing = f" · {runtime_truth.nothing_to_play_sentence(nothing)}"
         elif active and truth is not None and truth.pick_stood_in:
             playing = " · plays in place of your pick"
+        elif active and truth is not None and truth.route_unsure:
+            playing = f" · playing · {runtime_truth.PICK_OR_STAND_IN}"
         elif active:
             playing = (
                 " · playing manually"

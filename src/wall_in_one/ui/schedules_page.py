@@ -518,6 +518,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
     ) -> int:
         if not display.manual_override:
             return 0
+        if display.route_unsure:
+            # The pick may be what plays or what stands in for it: put it on neither.
+            return int(Gtk.INVALID_LIST_POSITION)
         # The person's pick, also while a stand-in plays for it.
         for index, playlist in enumerate(choices, start=1):
             if playlist.id == display.asked_playlist_id:
@@ -585,6 +588,10 @@ class SchedulesPage(Gtk.ScrolledWindow):
             if display.stand_in_for
             else runtime_truth.pick_stand_in_sentence(display.playlist)
             if display.pick_stood_in
+            else f"{display.playlist} ({runtime_truth.PICK_OR_STAND_IN})"
+            if display.route_unsure and display.route_source == "manual"
+            else f"{display.playlist} ({runtime_truth.SCHEDULE_OR_STAND_IN})"
+            if display.route_unsure
             else display.playlist
         )
         parts = [route, playing, playback]
@@ -666,6 +673,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
                 return f"Manual override · {nothing}."
             if stand_in:
                 return f"Manual override · {stand_in}."
+            if truth.route_unsure:
+                hedge = runtime_truth.PICK_OR_STAND_IN
+                return f"Manual override · {truth.playlist} is playing ({hedge})."
             return f"Manual override · {truth.playlist} is playing."
         if truth.is_multi_display:
             return "Following schedule · screens use their assigned or default playlists."
@@ -693,6 +703,9 @@ class SchedulesPage(Gtk.ScrolledWindow):
         record of it, which can lead or lag the service; with no match the selector
         stays, and is never put on the stand-in or on "Follow schedule".
         """
+        if truth is not None and truth.route_unsure:
+            # The pick may be what plays or what stands in for it.
+            return None
         if truth is not None and truth.pick_stood_in:
             for index, playlist in enumerate(choices, start=1):
                 if playlist.id == session.manual_playlist:

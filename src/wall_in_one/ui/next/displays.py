@@ -518,7 +518,8 @@ class DisplaysPage(Page):
             )
         # The person's pick, also while a stand-in plays for it.
         picked = (
-            route.stand_in_for or route.playlist_id
+            # A pick the reply can't name has no id of its own: show what plays.
+            (route.stand_in_for if route.stand_in_for in play_ids else route.playlist_id)
             if route is not None and route.route == "pick"
             else ""
         )

@@ -76,6 +76,8 @@ def _playing(view: RuntimeStatusView, status: dict[str, object]) -> str:
         if truth is not None and truth.stand_in_for:
             # The service refused every entry of what was asked for.
             parts.append(f"\u201c{truth.stand_in_for_name}\u201d can\u2019t play here")
+        elif truth is not None and truth.pick_stood_in:
+            parts.append("your pick can\u2019t play here")
     if runtime_truth.diagnostics_left_out(status):
         # The reply's size emptied the error fields: not "no error".
         parts.append(runtime_truth.DIAGNOSTICS_LEFT_OUT)

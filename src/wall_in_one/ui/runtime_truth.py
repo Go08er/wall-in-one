@@ -36,6 +36,11 @@ def stand_in_sentence(asked: str, playing: str) -> str:
     return f"\u201c{asked}\u201d can\u2019t play here, so \u201c{playing}\u201d is playing"
 
 
+def pick_stand_in_sentence(playing: str) -> str:
+    """Say that the pick can't play and ``playing`` stands in, when the pick isn't named."""
+    return f"Your pick can\u2019t play here, so \u201c{playing}\u201d is playing"
+
+
 def stand_ins_sentence(asked: Iterable[str], playing: str) -> str:
     """`stand_in_sentence` for a playing playlist that stands in for several.
 
@@ -132,10 +137,19 @@ class DisplayRuntimeTruth:
     #: ``stand_in_for``: what plays may be what the route asked for, or what stands
     #: in for it. The app can't tell.
     route_unsure: bool = False
+    #: A pick that certainly can't play, on a reply that dropped its ``stand_in_for``:
+    #: mirrored, every row shares the pick's decision and the flag says one had a
+    #: stand-in, so this row plays one. Which playlist the pick was isn't said.
+    pick_stood_in: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
-        """The playlist this display asked for: its own, or the one stood in for."""
+        """The playlist this display asked for: its own, or the one stood in for.
+
+        Empty for a pick stood in for, which no field names.
+        """
+        if self.pick_stood_in:
+            return ""
         return self.stand_in_for or self.playlist_id
 
 
@@ -248,10 +262,14 @@ class RuntimeTruth:
     nothing_to_play: str = ""
     #: The summary's pick, on a reply that dropped its ``stand_in_for``.
     route_unsure: bool = False
+    #: The same, when every connected display's pick is certainly stood in for.
+    pick_stood_in: bool = False
 
     @property
     def asked_playlist_id(self) -> str:
         """The summary's playlist asked for: its own, or the one stood in for."""
+        if self.pick_stood_in:
+            return ""
         return self.stand_in_for or self.playlist_id
 
     def refusal(self, scene_id: str) -> RefusedTruth | None:
@@ -414,13 +432,15 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
     refused, refused_omitted = refused_from_status(status)
     nothing_to_play = status.get("nothing_to_play")
     route_unsure = False
+    pick_stood_in = False
     if status_version == 2 and status.get("stand_in_for_omitted") is True:
         # The service says the reply's size dropped some `stand_in_for`. A row
         # that kept its own is left; the others still say what they asked for,
-        # except for a pick.
+        # except for a pick (named by no field).
         parsed_displays = _inferred_stand_ins(
             parsed_displays,
             parsed_schedules,
+            independent=display_mode == "independent",
             names=names,
         )
         heard = {
@@ -432,7 +452,16 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
             [(asked, playing)] = heard
             if asked and playing == playlist_id:
                 stand_in_for = asked
-        route_unsure = source == "manual" and stand_in_for is None
+        unnamed = source == "manual" and stand_in_for is None
+        # Mirrored, every row's pick is certainly stood in for: say so, don't hedge.
+        here = [d for d in parsed_displays if d.connected and not d.nothing_to_play]
+        pick_stood_in = (
+            unnamed
+            and bool(here)
+            and all(d.pick_stood_in for d in here)
+            and {d.playlist_id for d in here} == {playlist_id}
+        )
+        route_unsure = unnamed and not pick_stood_in
     return RuntimeTruth(
         playlist_id=playlist_id,
         playlist=playlist,
@@ -453,6 +482,7 @@ def from_status(status: Mapping[str, object] | None) -> RuntimeTruth | None:
         refused_omitted=refused_omitted,
         nothing_to_play=nothing_to_play if isinstance(nothing_to_play, str) else "",
         route_unsure=route_unsure,
+        pick_stood_in=pick_stood_in,
     )
 
 
@@ -460,6 +490,7 @@ def _inferred_stand_ins(
     displays: tuple[DisplayRuntimeTruth, ...],
     schedules: tuple[RuntimeScheduleTruth, ...],
     *,
+    independent: bool,
     names: Mapping[str, str],
 ) -> tuple[DisplayRuntimeTruth, ...]:
     """Each row's ``stand_in_for``, worked out from what the row still says.
@@ -469,8 +500,10 @@ def _inferred_stand_ins(
     The playlist asked for is the row's own decision, never the top-level
     ``schedule``, which is what the schedule chooses now: a default or an
     assignment is the row's ``assigned_playlist_id``, a rule is its
-    ``schedule_rule_id``'s playlist. A pick is on no field: the row is marked
-    unsure instead.
+    ``schedule_rule_id``'s playlist. A pick is on no field. Mirrored, every row
+    shares the pick's decision and the flag says one had a stand-in, so the pick
+    is certainly stood in for (though not which playlist it was); independent, the
+    row is marked unsure instead.
 
     With the rule's id left out (``schedule_rule_id_omitted``), or naming no rule
     the inventory lists, the playlist can't be looked up, so the row is marked
@@ -485,7 +518,11 @@ def _inferred_stand_ins(
             found.append(display)
             continue
         if display.route_source == "manual":
-            found.append(replace(display, route_unsure=True))
+            found.append(
+                replace(display, route_unsure=True)
+                if independent
+                else replace(display, pick_stood_in=True)
+            )
             continue
         if display.route_source == "schedule":
             rule = next((one for one in schedules if one.id == display.schedule_rule_id), None)

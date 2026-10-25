@@ -216,6 +216,11 @@ def _is_quick_choice(playlist_id: str) -> bool:
     return playlist_id == QUICK_CHOICE_ID or playlist_id.startswith(DISPLAY_QUICK_CHOICE_ID_PREFIX)
 
 
+#: A route's ``stand_in_for`` when its pick is stood in for but not named: pages
+#: that read it as set say "your pick" (``quick``) rather than quote it.
+_PICK_STOOD_IN: Final = "your pick"
+
+
 def _rule_in_force(
     truth: runtime_truth.RuntimeTruth, display: runtime_truth.DisplayRuntimeTruth
 ) -> str | None:
@@ -454,8 +459,9 @@ class RealScheduling:
                     playlist=display.playlist,
                     rule_id=_rule_in_force(truth, display),
                     until="" if display.route_source == "manual" else display.until or "",
-                    quick=_is_quick_choice(display.asked_playlist_id),
-                    stand_in_for=display.stand_in_for or "",
+                    quick=display.pick_stood_in or _is_quick_choice(display.asked_playlist_id),
+                    stand_in_for=display.stand_in_for
+                    or (_PICK_STOOD_IN if display.pick_stood_in else ""),
                     stand_in_for_name=display.stand_in_for_name,
                     nothing_to_play=display.nothing_to_play,
                     route_unsure=display.route_unsure,
@@ -477,8 +483,8 @@ class RealScheduling:
                 playlist_id=truth.playlist_id,
                 playlist=truth.playlist,
                 rule_id=truth.schedule_rule_id,
-                quick=_is_quick_choice(truth.asked_playlist_id),
-                stand_in_for=truth.stand_in_for or "",
+                quick=truth.pick_stood_in or _is_quick_choice(truth.asked_playlist_id),
+                stand_in_for=truth.stand_in_for or (_PICK_STOOD_IN if truth.pick_stood_in else ""),
                 stand_in_for_name=truth.stand_in_for_name,
                 nothing_to_play=truth.nothing_to_play,
                 route_unsure=truth.route_unsure,

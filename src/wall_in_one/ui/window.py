@@ -946,6 +946,8 @@ class MainWindow(Adw.ApplicationWindow):
         stood_in = (
             f" \u00b7 \u201c{truth.stand_in_for_name}\u201d can\u2019t play here"
             if truth is not None and truth.stand_in_for
+            else " \u00b7 your pick can\u2019t play here"
+            if truth is not None and truth.pick_stood_in
             else ""
         )
         power = runtime_truth.power_from_status(status)

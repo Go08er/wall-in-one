@@ -1105,6 +1105,8 @@ class PlaylistsPage(Gtk.Box):
         nothing = truth.nothing_to_play_for(playlist.id) if truth is not None else ""
         if active and nothing:
             playing = f" · {runtime_truth.nothing_to_play_sentence(nothing)}"
+        elif active and truth is not None and truth.pick_stood_in:
+            playing = " · plays in place of your pick"
         elif active:
             playing = (
                 " · playing manually"
@@ -1378,6 +1380,8 @@ class PlaylistsPage(Gtk.Box):
         )
         stood_in = truth is not None and truth.stand_in_for == playlist.id
         nothing = truth.nothing_to_play_for(playlist.id) if truth is not None else ""
+        # Plays in place of a pick the reply can't name: not the pick itself.
+        in_place = truth is not None and truth.pick_stood_in and playlist.id == truth.playlist_id
         usable, unavailable = _playlist_availability(session, playlist)
         if not usable:
             self._play_button.set_label(
@@ -1393,6 +1397,8 @@ class PlaylistsPage(Gtk.Box):
         self._play_button.set_label(
             "Picked · nothing to play"
             if manual and nothing
+            else "Plays in place of your pick"
+            if in_place
             else "Picked · can\u2019t play here"
             if manual and stood_in
             else "Playing now · pick or stand-in"
@@ -1408,6 +1414,8 @@ class PlaylistsPage(Gtk.Box):
         self._play_button.set_tooltip_text(
             runtime_truth.nothing_to_play_sentence(nothing)
             if manual and nothing
+            else runtime_truth.pick_stand_in_sentence(playlist.name)
+            if in_place
             else runtime_truth.stand_in_sentence(playlist.name, truth.playlist)
             if stood_in and truth is not None
             else skipped

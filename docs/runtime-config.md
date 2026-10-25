@@ -443,8 +443,10 @@ out, in order:
    for is left to what 0.4.0's fields say. When the flag is set, the app works
    it out from `assigned_playlist_id` (a display on its assignment or the
    default) and from `schedules[].playlist_id` of the row's `schedule_rule_id`
-   (a rule); for a pick (`route_source` `manual`) nothing says it, so the app
-   hedges;
+   (a rule); for a pick (`route_source` `manual`) nothing names the playlist.
+   Mirrored, every row shares the pick's decision and the flag says one had a
+   stand-in, so the app says the pick is stood in for without naming it;
+   independent, it hedges;
 3. as at 0.4.0, `outputs`;
 4. `missing_renderers`' paths, then its rows;
 5. the oldest taboo records.

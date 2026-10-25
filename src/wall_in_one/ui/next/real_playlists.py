@@ -447,6 +447,8 @@ class RealPlaylists:
                 return "", False, ()
             if truth.nothing_to_play:
                 return runtime_truth.nothing_to_play_sentence(truth.nothing_to_play), False, ()
+            if truth.pick_stood_in:
+                return runtime_truth.pick_stand_in_sentence(truth.playlist), False, ()
             if truth.stand_in_for:
                 # It stands in for what was asked for: not the pick, not scheduled.
                 return (
@@ -464,8 +466,10 @@ class RealPlaylists:
         here = [display for display in here if not display.nothing_to_play]
         # A display that shows it only because the service refused what was asked
         # for isn't showing it by pick or by schedule.
-        stood = [display for display in here if display.stand_in_for]
-        showing = [display for display in here if not display.stand_in_for]
+        stood = [display for display in here if display.stand_in_for or display.pick_stood_in]
+        showing = [
+            display for display in here if not (display.stand_in_for or display.pick_stood_in)
+        ]
         # Each display that shows it has an entry on screen, a stand-in's too.
         entries = tuple(
             (display.entry_id, display.connector) for display in here if display.entry_id
@@ -473,8 +477,13 @@ class RealPlaylists:
         if nothing and not here:
             return runtime_truth.nothing_to_play_sentence(nothing[0].nothing_to_play), False, ()
         if stood and not showing:
-            text = runtime_truth.stand_ins_sentence(
-                (display.stand_in_for_name for display in stood), stood[0].playlist
+            text = (
+                runtime_truth.pick_stand_in_sentence(stood[0].playlist)
+                if all(display.pick_stood_in for display in stood)
+                else runtime_truth.stand_ins_sentence(
+                    (display.stand_in_for_name for display in stood if display.stand_in_for),
+                    stood[0].playlist,
+                )
             )
             return text, False, entries
         if not showing:

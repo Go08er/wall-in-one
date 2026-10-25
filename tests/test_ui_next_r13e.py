@@ -553,17 +553,17 @@ def test_l3_a_mirrored_default_at_the_ceiling_is_known_too() -> None:
     assert truth is not None and truth.displays[0].stand_in_for == "pages"
 
 
-def test_l3_a_pick_at_the_ceiling_is_unsure_not_claimed() -> None:
-    truth = runtime_truth.from_status(_at_the_ceiling(_status("pick-refused")))
+def test_l3_an_independent_pick_at_the_ceiling_is_unsure_not_claimed() -> None:
+    truth = runtime_truth.from_status(_at_the_ceiling(_independent("manual")))
     assert truth is not None
     assert truth.route_unsure and truth.displays[0].route_unsure
-    assert truth.stand_in_for is None
+    assert truth.stand_in_for is None and not truth.pick_stood_in
 
 
 def test_l3_the_pick_hedge_names_what_plays_and_doesnt_claim_the_pick() -> None:
     from wall_in_one.ui.next.state import Reason, reason_text
 
-    text, playing, _showing = _on_screen(_at_the_ceiling(_status("pick-refused")), "scenes")
+    text, playing, _showing = _on_screen(_at_the_ceiling(_independent("manual")), "all-media")
     assert text == f"On screen now \u00b7 {runtime_truth.PICK_OR_STAND_IN}" and not playing
     said = reason_text(Reason("pick", "scenes", route_unsure=True))
     assert said == "\u201cscenes\u201d is playing", said
@@ -838,6 +838,18 @@ def test_a_mirrored_pick_without_a_rule_id_is_still_a_pick() -> None:
     from wall_in_one.ui.next.real_schedule import RealScheduling
 
     status = _rule_ids_left_out(_at_the_ceiling(_status("pick-refused")))
+    truth = runtime_truth.from_status(status)
+    assert truth is not None
+    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    assert route.route == "pick" and route.rule_id is None
+    # Mirrored, it is certainly stood in for (N3), so it isn't hedged.
+    assert route.stand_in_for and not route.route_unsure
+
+
+def test_an_independent_pick_without_a_rule_id_is_still_a_hedged_pick() -> None:
+    from wall_in_one.ui.next.real_schedule import RealScheduling
+
+    status = _rule_ids_left_out(_at_the_ceiling(_independent("manual")))
     truth = runtime_truth.from_status(status)
     assert truth is not None
     [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]

@@ -517,7 +517,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
             return 0
         # The person's pick, also while a stand-in plays for it.
         for index, playlist in enumerate(choices, start=1):
-            if playlist.id == display.asked_playlist_id:
+            # A pick the reply can't name is shown as what plays in its place.
+            if playlist.id == (display.asked_playlist_id or display.playlist_id):
                 return index
         return 0
 
@@ -580,6 +581,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         playing = (
             runtime_truth.stand_in_sentence(display.stand_in_for_name, display.playlist)
             if display.stand_in_for
+            else runtime_truth.pick_stand_in_sentence(display.playlist)
+            if display.pick_stood_in
             else display.playlist
         )
         parts = [route, playing, playback]
@@ -651,6 +654,8 @@ class SchedulesPage(Gtk.ScrolledWindow):
         stand_in = (
             runtime_truth.stand_in_sentence(truth.stand_in_for_name, truth.playlist)
             if truth.stand_in_for
+            else runtime_truth.pick_stand_in_sentence(truth.playlist)
+            if truth.pick_stood_in
             else ""
         )
         if truth.is_manual:
@@ -682,7 +687,7 @@ class SchedulesPage(Gtk.ScrolledWindow):
     ) -> int:
         manual_id = (
             # The person's pick, also while a stand-in plays for it.
-            truth.asked_playlist_id
+            (truth.asked_playlist_id or truth.playlist_id)
             if truth is not None and truth.is_manual
             else session.manual_playlist
             if truth is None

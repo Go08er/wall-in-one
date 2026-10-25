@@ -707,8 +707,11 @@ class RealAppState(GObject.Object):
             wid = self._current.get(display.connector, "")
             route = _ROUTES.get(display.route_source, "default")
             # What was asked for, also when a stand-in plays for it.
-            picked_one = route == "pick" and _is_quick_choice(display.asked_playlist_id)
-            stood_in = display.stand_in_for is not None
+            # A pick the reply can't name is still "your pick" (`pick_stood_in`).
+            picked_one = display.pick_stood_in or (
+                route == "pick" and _is_quick_choice(display.asked_playlist_id)
+            )
+            stood_in = display.stand_in_for is not None or display.pick_stood_in
             until = "" if route == "pick" else display.until or ""
             reason = Reason(
                 route,
@@ -728,8 +731,10 @@ class RealAppState(GObject.Object):
         if not rows:
             # A version-1 runtime: one answer for every display.
             route = "pick" if truth.is_manual else "schedule"
-            picked_one = route == "pick" and _is_quick_choice(truth.asked_playlist_id)
-            stood_in = truth.stand_in_for is not None
+            picked_one = truth.pick_stood_in or (
+                route == "pick" and _is_quick_choice(truth.asked_playlist_id)
+            )
+            stood_in = truth.stand_in_for is not None or truth.pick_stood_in
             wid = next(iter(self._current.values()), "")
             name = self._index[wid].name if wid in self._index else ""
             reason = Reason(

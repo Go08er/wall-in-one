@@ -435,7 +435,7 @@ def test_control_q2_with_rule_ids_the_rule_is_playing() -> None:
     assert (rule_id, said) == ("r1", ("Playing", "playing"))
 
 
-def test_q2_a_retried_transition_names_no_rule_it_cant_be_sure_of() -> None:
+def test_control_q2_a_retried_transition_names_no_rule_it_cant_be_sure_of() -> None:
     # The row stays on its earlier rule while a transition is retried, so with the id
     # left out the rule now in force is not necessarily the row's.
     status = _mirrored_rule_in_force(ids_left_out=True)
@@ -448,7 +448,7 @@ def test_q2_a_retried_transition_names_no_rule_it_cant_be_sure_of() -> None:
     assert rule_id is None, rule_id
 
 
-def test_q2_independent_names_no_rule_either() -> None:
+def test_control_q2_independent_names_no_rule_either() -> None:
     # `in_force` is the global answer, not one display's.
     status = _mirrored_rule_in_force(ids_left_out=True)
     status["display_mode"] = "independent"
@@ -516,7 +516,9 @@ def test_control_q3_classic_schedule_summary_of_a_pick_that_plays() -> None:
     assert text == "Manual override · pages is playing.", text
 
 
-def _classic_playlists(status: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+def _classic_playlists(
+    status: dict[str, Any], monkeypatch: pytest.MonkeyPatch, pid: str = "pages"
+) -> tuple[str, str]:
     import wall_in_one.ui.playlists_page as page
     from wall_in_one.ui.playlists_page import PlaylistsPage
 
@@ -531,8 +533,8 @@ def _classic_playlists(status: dict[str, Any], monkeypatch: pytest.MonkeyPatch) 
     )
 
     class P(list[int]):  # len() and .entries
-        id = "pages"
-        name = "pages"
+        id = pid
+        name = pid
         entries = (1,)
 
     one = P([1])
@@ -677,6 +679,100 @@ def test_q4_next_an_error_left_out_isnt_said_again_when_it_comes_back() -> None:
 def test_control_q4_next_the_same_error_twice_is_said_once() -> None:
     error = _renderer_stopped(left_out=False)
     assert len(_next_reports([error, error])) == 1
+
+
+# ------------------------------------------------------------------ N3 ---------
+
+
+def _mirrored_pick_stood_in() -> dict[str, Any]:
+    """pick-refused.json at the ceiling: the pick ``pages`` is refused, ``scenes`` stands in."""
+    status = _at_the_ceiling(_status("pick-refused"))
+    assert status["stand_in_for_omitted"] is True and status["display_mode"] == "mirrored"
+    return status
+
+
+def test_q5_mirrored_pick_at_the_ceiling_is_certainly_stood_in_for() -> None:
+    text, playing, _showing = _on_screen(_mirrored_pick_stood_in(), "scenes")
+    hedge = getattr(runtime_truth, "PICK_OR_STAND_IN", "your pick, or what stands in for it")
+    assert hedge not in text, (
+        f"mirrored, one row, the flag set: the pick is stood in for, and the detail says {text!r}"
+    )
+    assert text == "Your pick can\u2019t play here, so \u201cscenes\u201d is playing"
+    assert not playing
+
+
+def test_n3_the_row_and_the_summary_are_a_pick_stood_in_not_unsure() -> None:
+    truth = _truth(_mirrored_pick_stood_in())
+    [row] = truth.displays
+    assert not row.route_unsure and row.stand_in_for is None
+    assert not truth.route_unsure
+    assert getattr(row, "pick_stood_in", False) and getattr(truth, "pick_stood_in", False)
+    # No field names the pick, so nothing is taken for it.
+    assert row.asked_playlist_id == "" and truth.asked_playlist_id == ""
+
+
+def test_n3_the_next_pages_say_it_plainly() -> None:
+    from tests.test_ui_next_r13e import _displays_rows
+    from wall_in_one.ui.next import status_line
+    from wall_in_one.ui.next.real_schedule import RealScheduling
+
+    status = _mirrored_pick_stood_in()
+    truth = _truth(status)
+    [route] = RealScheduling._read_routes(None, truth)  # type: ignore[arg-type]
+    assert route.route == "pick" and route.quick and route.stand_in_for
+    assert not route.route_unsure
+    model = RuntimeStatusModel()
+    model.adopt(status)
+    assert "your pick can\u2019t play here" in status_line.describe(model.view)
+    sentence = "Your pick can\u2019t play here, so \u201cscenes\u201d is playing"
+    plays, why = _displays_rows(status)
+    assert why == sentence, why
+    assert plays == f"Not in use now \u00b7 {sentence[0].lower()}{sentence[1:]}", plays
+
+
+def test_n3_the_classic_pages_say_it_plainly(monkeypatch: pytest.MonkeyPatch) -> None:
+    status = _mirrored_pick_stood_in()
+    sentence = "Your pick can\u2019t play here, so \u201cscenes\u201d is playing"
+    assert _classic_summary(status) == f"Manual override \u00b7 {sentence}."
+    assert sentence in _classic_row(status, "ALL")
+    detail, button = _classic_playlists(status, monkeypatch, "scenes")
+    assert "playing manually" not in detail and "pick" in detail, detail
+    assert button == "Plays in place of your pick", button
+
+
+def test_n3_the_classic_combos_still_show_a_pick_not_follow_schedule() -> None:
+    from wall_in_one.ui.schedules_page import SchedulesPage
+
+    truth = _truth(_mirrored_pick_stood_in())
+    choices = (SimpleNamespace(id="pages"), SimpleNamespace(id="scenes"))
+    assert SchedulesPage._display_playback_selected(truth.displays[0], choices) == 2
+    session = SimpleNamespace(manual_playlist=None)
+    assert SchedulesPage._playback_selected(session, choices, truth) == 2  # type: ignore[arg-type]
+
+
+def test_control_n3_an_independent_pick_at_the_ceiling_is_still_hedged() -> None:
+    status = _mirrored_pick_stood_in()
+    status["display_mode"] = "independent"
+    truth = _truth(status)
+    assert truth.displays[0].route_unsure and not getattr(truth.displays[0], "pick_stood_in", False)
+    assert truth.route_unsure and not getattr(truth, "pick_stood_in", False)
+    text, _playing, _showing = _on_screen(status, "scenes")
+    assert text == f"On screen now \u00b7 {runtime_truth.PICK_OR_STAND_IN}", text
+
+
+def test_control_n3_below_the_ceiling_the_services_word_is_used() -> None:
+    truth = _truth(_status("pick-refused"))
+    assert truth.displays[0].stand_in_for == "pages"
+    assert not getattr(truth.displays[0], "pick_stood_in", False)
+    assert not getattr(truth, "pick_stood_in", False)
+
+
+def test_control_n3_a_mirrored_pick_that_plays_nothing_is_not_a_stand_in() -> None:
+    status = _at_the_ceiling(_mirrored_pick_plays_nothing(nothing=True))
+    status["stand_in_for_omitted"] = True
+    truth = _truth(status)
+    assert not getattr(truth.displays[0], "pick_stood_in", False)
+    assert not getattr(truth, "pick_stood_in", False)
 
 
 def test_control_gate_version_1_with_the_flag_infers_nothing() -> None:

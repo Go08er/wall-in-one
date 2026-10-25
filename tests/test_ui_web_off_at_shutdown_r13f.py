@@ -14,6 +14,9 @@ application. Review r13f found, at f127a31:
   landed), and the save landed off. Web wallpapers off, and a file that allows them.
 * **N3:** a turn-off still being written was judged as landed once, before the lock: a document
   for them on, installed once they were turned on again after it landed, was replaced.
+* **L2:** with no status heard, or one from a service older than schema 8 (which has no check of
+  an item's type), a file that names a web page was left: such a service plays it. 040b3aa
+  replaced it, after a scan of the whole Workshop.
 
 What the step can't settle itself (a turn-off still being written, a lock it didn't get) is
 judged again on a thread once the save and this process's lane are done (`_web_off_deferred`);
@@ -44,8 +47,11 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from tests.test_ui_codex030_round1b import profiles, toolkit  # noqa: E402, F401
+from tests.test_ui_renderer_settle_shutdown import HEARD, _naming  # noqa: E402
+from tests.test_ui_web_off_at_shutdown import _heard, _scans, _workshop  # noqa: E402
 from tests.test_web_off_toml_1_1 import DOCUMENTS, document  # noqa: E402
 from wall_in_one import config, paths, runtime_compatibility, runtime_config  # noqa: E402
+from wall_in_one.library import workshop  # noqa: E402
 from wall_in_one.ui import app as app_module  # noqa: E402
 
 #: How long anything here waits before it gives up: past it the test fails, it doesn't hang.
@@ -545,3 +551,231 @@ def test_the_lanes_lock_held_past_a_second_ctrl_c_is_waited_for_once_it_ends(
     assert not runtime_config.allows_web_wallpapers(target), (
         "settings.toml says web wallpapers are off, and the file on disk allows them"
     )
+
+
+# -- L2: a file that names a web page, for a service with no check of an item's type ------------
+
+
+def _web_page(count: int) -> str:
+    """The web page `_workshop` installs after ``count`` scenes."""
+    return str(2_000_000_000 + count)
+
+
+def _preset(content: Any, identifier: str, base: str) -> None:
+    """A Wallpaper Engine preset (values for ``base``, no type of its own) in ``content``."""
+    folder = content / identifier
+    folder.mkdir()
+    (folder / "project.json").write_text(
+        json.dumps({"title": f"Preset of {base}", "preset": {"x": 1}, "dependency": base})
+    )
+
+
+def _as_0_4_0_wrote_it(scenes: list[str]) -> str:
+    """A ``runtime.toml`` in 0.4.0's own shape (review r13f's legacy producer, q4): each Workshop
+    item an entry of kind "scene" with its ``scene_id`` and the still it was paired with."""
+    lines = ["schema_version = 4", f'config_generation = "{"e" * 64}"', 'default_playlist = "p"']
+    lines += ["", "[[playlists]]", 'id = "p"', 'name = "All media"']
+    for scene in scenes:
+        lines += [
+            "",
+            "[[playlists.entries]]",
+            f'id = "{scene[-16:]:0>16}"',
+            'kind = "scene"',
+            f'scene_id = "{scene}"',
+            'still = "/home/someone/Pictures/wallpapers/plain.png"',
+        ]
+    return "\n".join(lines) + "\n"
+
+
+NAMES = (
+    "a-web-page",
+    "0-4-0s-document-whose-scene-became-a-web-page",
+    "a-preset-of-a-web-page",
+    "a-hand-edit-naming-a-web-page",
+    "a-hand-edit-in-toml-1-1",
+    "control-scenes-only",
+    "control-0-4-0s-document-as-published",
+    "control-a-preset-of-a-scene",
+    "control-a-hand-edit-naming-scenes",
+    "control-toml-1-1-naming-scenes",
+)
+
+
+def _naming_document(content: Any, scenes: list[str], names: str) -> str:
+    web = _web_page(len(scenes))
+    if names == "a-web-page":
+        return _naming([*scenes, web])
+    if names.startswith("0-4-0s-document-whose"):
+        # A Workshop update since: the item 0.4.0 compiled as a scene is a web page now.
+        (content / scenes[0] / "project.json").write_text(
+            json.dumps({"type": "web", "title": "Item 0", "file": "index.html"})
+        )
+        (content / scenes[0] / "index.html").write_text("<html></html>")
+        return _as_0_4_0_wrote_it(scenes[:1])
+    if names == "control-0-4-0s-document-as-published":
+        return _as_0_4_0_wrote_it(scenes[:1])
+    if "preset" in names:
+        base = web if names == "a-preset-of-a-web-page" else scenes[0]
+        _preset(content, "2100000000", base)
+        return (
+            _naming(scenes[1:])
+            + 'scene_base = "'
+            + base
+            + '"\n'
+            + ('[[playlists.entries]]\nscene_id = "2100000000"\n')
+        )
+    if names in ("a-hand-edit-naming-a-web-page", "control-a-hand-edit-naming-scenes"):
+        named = [*scenes, web] if "web" in names else scenes
+        return _naming([]) + "".join(f'[[playlists.entries]]\nscene_id="{one}"\n' for one in named)
+    if names == "a-hand-edit-in-toml-1-1":
+        return _naming([]) + f'name = "\\x41"\n[[playlists.entries]]\nscene_id="{scenes[0]}"\n'
+    assert names in ("control-scenes-only", "control-toml-1-1-naming-scenes"), names
+    text = _naming(scenes)
+    return text.replace('id = "p"\n', 'id = "p"\nname = "\\x41"\n', 1) if "1-1" in names else text
+
+
+@pytest.mark.parametrize("heard", list(HEARD))
+@pytest.mark.parametrize("names", NAMES)
+def test_a_file_naming_a_web_page_for_a_service_without_a_type_check(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    heard: str,
+    names: str,
+) -> None:
+    """s1 and q4. Web wallpapers off, and a file that allows none but names a Workshop web page
+    (or a preset of one, or 0.4.0's document whose scene became one since): a service older
+    than schema 8 plays it. Before (f127a31): left, for none heard and for an older service.
+    Now each id's own project.json is read, and nothing else: no scan. A hand edit is parsed for
+    its ids, and one that isn't TOML 1.0 can't be checked: replaced too. For a service that
+    reads 8 (the control status) every one is left: it checks each item itself; and the files
+    that name only scenes (the controls) are left whatever was heard."""
+    application = profiles().application
+    content, scenes = _workshop(3)
+    text = _naming_document(content, scenes, names)
+    _on_disk(text)
+    _heard(monkeypatch, HEARD[heard])
+    scans = _scans(monkeypatch)
+    application._web_off_on_disk_at_exit()
+    _judged_at_exit(application)
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    assert not scans, f"the step scanned the Workshop {len(scans)} time(s)"
+    if not names.startswith("control") and heard != "control-reads-eight":
+        assert now == _nothing_to_play(), (
+            f"web wallpapers are off, {heard} has no check of an item's type, and the file on "
+            f"disk still names a web page ({names})"
+        )
+        return
+    assert now == text, f"a file {heard} plays no web page from was replaced ({names})"
+
+
+def _reads_of(
+    monkeypatch: pytest.MonkeyPatch, then: Callable[[], None] = lambda: None
+) -> list[str]:
+    """Every ``project.json`` the Workshop look reads from here on; ``then`` after the first."""
+    read_project = workshop._read_project
+    reads: list[str] = []
+
+    def recorded(directory: Any, *arguments: Any, **keywords: Any) -> Any:
+        reads.append(directory.name)
+        found = read_project(directory, *arguments, **keywords)
+        if len(reads) == 1:
+            then()
+        return found
+
+    monkeypatch.setattr(workshop, "_read_project", recorded)
+    return reads
+
+
+def test_only_the_ids_the_file_names_are_read(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded by the file, not by the library: of 40 installed scenes, the file names 3, and
+    only theirs are read, once each; no folder is listed. Left: none is a web page."""
+    application = profiles().application
+    _content, scenes = _workshop(40)
+    text = _naming(scenes[:3])
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["nothing"])
+    listed: list[bool] = []
+    scan_content = workshop.scan_content_directories
+
+    def recorded(*arguments: Any, **keywords: Any) -> Any:
+        listed.append(True)
+        return scan_content(*arguments, **keywords)
+
+    monkeypatch.setattr(workshop, "scan_content_directories", recorded)
+    reads = _reads_of(monkeypatch)
+    application._web_off_on_disk_at_exit()
+    assert not listed, "a content directory was listed"
+    assert sorted(reads) == sorted(scenes[:3]), reads
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize("variant", ["second-ctrl-c", "past-its-bound", "control"])
+def test_a_second_ctrl_c_or_the_bound_ends_the_look_and_fails_closed(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    variant: str,
+) -> None:
+    """The file names only scenes, for a service whose status wasn't heard. A second Ctrl-C (a
+    real SIGINT) after the first project.json is read ends the look: the ids it didn't reach
+    count as web pages, and the file is replaced. So does the look's bound, put behind it here.
+    The control: the look ends by itself (every id read: `test_only_the_ids_the_file_names_are_
+    read`), and the file is left."""
+    application = profiles().application
+    _content, scenes = _workshop(5)
+    text = _naming(scenes)
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["nothing"])
+    if variant == "past-its-bound":
+        # Not there at f127a31, which this test is also run against.
+        monkeypatch.setattr(app_module, "SHUTDOWN_WORKSHOP_LOOK_SECONDS", -1.0, raising=False)
+    reads = _reads_of(
+        monkeypatch,
+        then=(lambda: os.kill(os.getpid(), signal.SIGINT))
+        if variant == "second-ctrl-c"
+        else lambda: None,
+    )
+    application._web_off_on_disk_at_exit()
+    now = paths.runtime_config_path().read_text(encoding="utf-8")
+    if variant == "control":
+        assert now == text
+        return
+    assert len(reads) <= 1, f"the look went on after it was ended: {reads}"
+    assert now == _nothing_to_play(), "a file the look couldn't finish with was left"
+
+
+def test_the_later_judgement_reads_the_ids_too(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second Ctrl-C while this process's lane holds the compiler lock, an older service, and a
+    file that names a web page (no key): the step can't settle it, and the judgement once the
+    lane is done reads the ids, uncut. Before: left."""
+    application = profiles().application
+    _content, scenes = _workshop(2)
+    text = _naming([*scenes, _web_page(2)])
+    _on_disk(text)
+    _heard(monkeypatch, HEARD["an-older-service"])
+    application._settle_cut = True
+    holding = threading.Event()
+    returned = threading.Event()
+    failures: list[str] = []
+
+    def lane() -> None:
+        with runtime_config.compiler_lock():
+            holding.set()
+            if not returned.wait(GIVE_UP):
+                failures.append("the step never returned")
+
+    running = _on_the_runtime_lane(application, lane)
+    try:
+        assert holding.wait(GIVE_UP)
+        application._web_off_on_disk_at_exit()
+    finally:
+        returned.set()
+        running.result(GIVE_UP)
+        _judged_at_exit(application)
+    assert not failures, failures
+    assert paths.runtime_config_path().read_text(encoding="utf-8") == _nothing_to_play()

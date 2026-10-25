@@ -861,6 +861,11 @@ def _named_scenes(path: Path | None, text: str | None = None) -> set[str]:
         document = tomllib.loads(text) if text is not None else {}
     except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError:
         return set()
+    return _scene_ids(document)
+
+
+def _scene_ids(document: object) -> set[str]:
+    """Every ``scene_id`` and ``scene_base`` string anywhere in a parsed document."""
     named: set[str] = set()
     pending: list[object] = [document]
     while pending:
@@ -1034,6 +1039,42 @@ def may_spell_key(text: str, key: str) -> bool:
     quit, which a full parse made slow).
     """
     return key in text or _ESCAPED_KEYS[key].search(text) is not None
+
+
+#: How the compiler writes the Workshop id an entry plays, or its preset's base:
+#: on a line of its own (`_resolved_entry`), a Workshop id being digits only.
+_COMPILED_SCENE: Final = re.compile(r'^(scene_id|scene_base) = "([0-9]+)"$', re.MULTILINE)
+
+
+def compiled_scenes(text: str) -> frozenset[str] | None:
+    """The Workshop ids ``text`` names, read off the compiler's own lines; None if it may name more.
+
+    Unparsed, in a few searches of the text: when every occurrence of
+    ``scene_id`` and ``scene_base`` in it is on such a line (`_COMPILED_SCENE`)
+    and no quoted key spells either (`may_spell_key`), those lines are all it
+    names, as any reader of TOML 1.0 or 1.1 reads it. A document the compiler
+    wrote, 0.4.0's included, is always one. Otherwise (a hand edit, or the
+    name in a title) None: `named_scenes` parses it.
+    """
+    found = _COMPILED_SCENE.findall(text)
+    for key in ("scene_id", "scene_base"):
+        if text.count(key) != sum(1 for name, _identifier in found if name == key):
+            return None
+        if _ESCAPED_KEYS[key].search(text) is not None:
+            return None
+    return frozenset(identifier for _name, identifier in found)
+
+
+def named_scenes(text: str) -> frozenset[str] | None:
+    """The Workshop ids ``text`` names (`_named_scenes`), parsed; None if it isn't TOML 1.0.
+
+    The service may read ids in one that isn't (`not_toml_1_0`), so None
+    means "can't be told", never "none".
+    """
+    try:
+        return frozenset(_scene_ids(tomllib.loads(text)))
+    except tomllib.TOMLDecodeError, RecursionError:
+        return None
 
 
 def web_wallpapers_in(texts: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:

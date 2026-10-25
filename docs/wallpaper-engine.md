@@ -220,11 +220,21 @@ one reads all the library's authoring again from disk, which is too long to
 hold a quit for. The setting and the file are read again under the compiler
 lock, and the replacement is installed in that same hold, so a document
 another writer installed meanwhile is judged as it is. A file that doesn't
-allow web wallpapers is left as it is: a service that reads schema 8 plays no
-web page from it (below). Only a service older than that, still running after
-an update, plays a web page such a file names, until it is restarted, as it
-should be after an update ([installing.md](installing.md)); its start then
-runs the check below. A save of the setting still being written then is
+allow web wallpapers is left as it is when the service last heard reads schema
+8: it plays no web page from it (below). When none was heard, or the one heard
+is older than that (it has no check of its own), the Workshop items the file
+names are looked up, each by its own `project.json` (no scan of the Workshop),
+and the file is replaced in the same way when one is a web page, a preset of
+one, or can't be checked. That look stops at a second Ctrl-C, or after two
+seconds, and what it hasn't reached counts as a web page. An older service
+that is still running after an update can't load the document that plays
+nothing, though: it keeps playing what it holds until it is restarted, as it
+should be after an update ([installing.md](installing.md)), and the app's log
+says so. Only a compile for that service's schema, or telling it to quit,
+would stop it, and neither is done at the end of a quit. What the replacement
+does is make sure nothing started next plays the page: an older service can't
+load it, and the updated one plays nothing until a publication gets through;
+its start runs the check below. A save of the setting still being written then is
 waited for, as long as such a save can take (its locks, and the check of the
 service that "Stop animations on battery" makes: about 70 seconds at most);
 with none, nothing is waited for. The lock is waited for two seconds at most,

@@ -315,6 +315,10 @@ SHUTDOWN_WEB_OFF_LOCK_SECONDS: Final = 2.0
 SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS: Final = runtime_config.COMPILER_LOCK_TIMEOUT_SECONDS
 #: That judgement's thread's name.
 WEB_OFF_AT_EXIT_THREAD: Final = "wio-web-off-at-exit"
+#: How long that step looks at the Workshop items a file names, at most, for a
+#: service with no check of an item's type of its own (`_may_name_a_web_page`):
+#: past it, those it hasn't looked at count as web pages.
+SHUTDOWN_WORKSHOP_LOOK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
 #: The line the compiler writes in ``[settings]`` while it allows web wallpapers
@@ -373,6 +377,70 @@ def _may_allow_web_wallpapers(text: str, give_up: Callable[[], bool] = lambda: F
     return _unless_given_up(
         lambda: runtime_config.allows_web_wallpapers(text=text), give_up, cut=True
     )
+
+
+def _may_name_a_web_page(text: str, give_up: Callable[[], bool]) -> bool:
+    """Whether ``text`` names a Workshop item that is, or may be, a web wallpaper's.
+
+    The ids it names are read off the compiler's own lines
+    (`runtime_config.compiled_scenes`), or, from a hand edit, from a parse
+    (`runtime_config.named_scenes`) on a thread of its own
+    (`_unless_given_up`). Then each id's own ``project.json`` is read
+    (`workshop.may_be_web`), and nothing else: no scan of the Workshop
+    (review r13e, L1), so it takes as long as the file's ids make it, which
+    `SHUTDOWN_WORKSHOP_LOOK_SECONDS` bounds. Fails closed: one that isn't TOML
+    1.0, an id that can't be checked, and every id left once ``give_up`` says
+    so or that bound has passed count as a web page.
+    """
+    named = runtime_config.compiled_scenes(text)
+    if named is None:
+        named = _unless_given_up(lambda: runtime_config.named_scenes(text), give_up, cut=None)
+        if named is None:
+            return True
+    if not named:
+        return False
+    deadline = time.monotonic() + SHUTDOWN_WORKSHOP_LOOK_SECONDS
+    return workshop.may_be_web(sorted(named), lambda: give_up() or time.monotonic() > deadline)
+
+
+#: Why the end of a shutdown replaces a file (`_may_play_web_while_off`).
+_ALLOWS: Final = "allows"
+_NAMES: Final = "names"
+
+
+def _may_play_web_while_off(text: str, status: object, give_up: Callable[[], bool]) -> str:
+    """Why a service that loads ``text`` may play a web page while web wallpapers are off; or "".
+
+    `_ALLOWS`: it may allow them, which any service obeys (`_may_allow_web_wallpapers`).
+    Otherwise a service that reads schema 8 plays no page: it reads each
+    item's type before it starts the engine. One not confirmed to (``status``,
+    the last one heard, lists no 8, or none was heard) has no such check:
+    `_NAMES`, when the file names a web page, or an item that can't be
+    checked (`_may_name_a_web_page`; review r13f, L2).
+    """
+    if _may_allow_web_wallpapers(text, give_up):
+        return _ALLOWS
+    if runtime_config.nothing_to_play_supported(status):
+        return ""
+    return _NAMES if _may_name_a_web_page(text, give_up) else ""
+
+
+@dataclass(slots=True)
+class _ExitLook:
+    """What the end of a shutdown judges a file by: the service last heard, and what it found.
+
+    One look for the step's own judgements, before the lock and under it,
+    which each text is judged once for (`reasons`); another for the later one.
+    """
+
+    status: object
+    reasons: dict[str, str] = field(default_factory=dict)
+
+    def why(self, text: str, give_up: Callable[[], bool]) -> str:
+        """`_may_play_web_while_off`, once for each text."""
+        if text not in self.reasons:
+            self.reasons[text] = _may_play_web_while_off(text, self.status, give_up)
+        return self.reasons[text]
 
 
 PACKAGE_SOURCE_ACTION: Final = "package-source"
@@ -2311,17 +2379,27 @@ class Application(Adw.Application):
         second Ctrl-C. The one this step made from the Session in memory put
         an older compile over another writer's newer document.
 
-        Nothing else is replaced. A file that doesn't allow web wallpapers
-        lets no page play on a service that reads schema 8: it reads each
-        item's type before it starts the engine. Only a service older than
-        that, still running after an update, has no such check and plays a
-        web page such a file names. That is left as it is until that service
-        next starts (it is to be restarted after an update): its start check
-        then compiles again, or refuses with exit 78 a kept file that plays a
-        web page while they are off, and the updated service checks each
-        item itself. Judging that here needs a scan of the Workshop, seconds
-        long for a large library (L1), and the service's status, which is
-        the last one heard; neither is asked for here.
+        A file that doesn't allow web wallpapers lets no page play on a
+        service that reads schema 8: it reads each item's type before it
+        starts the engine. One not confirmed to (the status last heard lists
+        no 8, or none was heard) has no such check, and plays a web page such
+        a file names: so for it, the file is replaced as well when it names a
+        Workshop item that is, or may be, a web page (review r13f, L2;
+        `_may_play_web_while_off`). Only the ``project.json`` of each id the
+        file names is read, never a scan of the Workshop (r13e, L1), so the
+        look is bounded by the file; it stops at a second Ctrl-C, or after
+        `SHUTDOWN_WORKSHOP_LOOK_SECONDS`, and an id it can't check, or hasn't
+        reached, counts as a web page. That replacement can't stop a service
+        older than schema 8 that is still running after an update, though:
+        it can't load the document that plays nothing, and keeps playing what
+        it holds until it is restarted, as it should be after an update (its
+        start check then compiles again, or refuses with exit 78 a kept file
+        that plays a web page while they are off). Only a compile for its
+        schema, or a socket call, could; neither is made here (r13e, L1 and
+        L2), and the log says to restart it. What the replacement does is see
+        that nothing started next plays the page: an older service can't load
+        it, and the updated one plays nothing until a publication gets
+        through.
 
         Judged and installed in one hold of the compiler lock, on what is on
         disk then: ``settings.toml`` and the file are read again under it, so
@@ -2398,20 +2476,28 @@ class Application(Adw.Application):
         saving = self._turn_off_in_flight()
         target = paths.runtime_config_path()
         source = paths.settings_path()
+        look = _ExitLook(self.runtime_status)
         settled = True
         cut = lambda: self._settle_cut  # noqa: E731
-        if self._web_off_but_allowed_on_disk(target, source, cut) is not None:
+        if self._web_off_but_allowed_on_disk(target, source, look, cut) is not None:
             settled = self._replaced_under_the_lock(
                 target,
                 source,
+                look,
                 timeout=0.0 if self._settle_cut else SHUTDOWN_WEB_OFF_LOCK_SECONDS,
                 give_up=cut,
             )
         if saving is not None or not settled:
-            self._web_off_judged_once_landed(saving, target, source)
+            self._web_off_judged_once_landed(saving, target, source, look.status)
 
     def _replaced_under_the_lock(
-        self, target: Path, source: Path, *, timeout: float, give_up: Callable[[], bool]
+        self,
+        target: Path,
+        source: Path,
+        look: _ExitLook,
+        *,
+        timeout: float,
+        give_up: Callable[[], bool],
     ) -> bool:
         """In one hold of the compiler lock: judged again, and replaced if it must be.
 
@@ -2426,9 +2512,10 @@ class Application(Adw.Application):
                 )
             except runtime_config.RuntimeConfigError:
                 return False
-            settings = self._web_off_but_allowed_on_disk(target, source, give_up)
-            if settings is None:
+            judged = self._web_off_but_allowed_on_disk(target, source, look, give_up)
+            if judged is None:
                 return True
+            settings, why = judged
             document = runtime_config.nothing_to_play_document(
                 settings, runtime_config.WEB_OFF_REASON
             )
@@ -2436,14 +2523,25 @@ class Application(Adw.Application):
                 runtime_config.install_nothing_to_play(document, target)
             except runtime_config.RuntimeConfigNotDurableError as uncertain:
                 LOGGER.warning("%s", uncertain)  # installed: only its folder sync failed
-            LOGGER.info(
-                "Allow web wallpapers is off, but the configuration on disk allowed web "
-                "wallpapers; it was replaced at shutdown with one that plays nothing"
-            )
+            if why == _ALLOWS:
+                LOGGER.info(
+                    "Allow web wallpapers is off, but the configuration on disk allowed web "
+                    "wallpapers; it was replaced at shutdown with one that plays nothing"
+                )
+            else:
+                LOGGER.warning(
+                    "Allow web wallpapers is off, and the configuration on disk named a web "
+                    "wallpaper, or a Workshop item whose type couldn\u2019t be checked, for a "
+                    "wallpaper service with no check of its own (%s); it was replaced at "
+                    "shutdown with one that plays nothing. A wallpaper service older than this "
+                    "app can\u2019t load that, and keeps playing what it holds until it is "
+                    "restarted: systemctl --user restart wall-in-one",
+                    "none was heard from" if look.status is None else "it is older than this app",
+                )
         return True
 
     def _web_off_judged_once_landed(
-        self, saving: Future[Any] | None, target: Path, source: Path
+        self, saving: Future[Any] | None, target: Path, source: Path, status: object
     ) -> None:
         """`_replaced_under_the_lock` once ``saving`` and this process's runtime lane are done.
 
@@ -2452,8 +2550,9 @@ class Application(Adw.Application):
         lane's (`_runtime_lane_at_exit`), so it takes no longer than they do
         but for its own wait for the compiler lock
         (`SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS`) and its look at the file.
-        ``target`` and ``source`` are the files as the step found them. Only
-        files and that lock are touched; nothing of GTK, and no socket.
+        ``target`` and ``source`` are the files as the step found them, and
+        ``status`` what it had last heard. Only files and that lock are
+        touched; nothing of GTK, and no socket.
         """
         lane = self._runtime_lane_at_exit
         never = lambda: False  # noqa: E731
@@ -2465,7 +2564,11 @@ class Application(Adw.Application):
                 if lane is not None:
                     lane.shutdown(wait=True)
                 if not self._replaced_under_the_lock(
-                    target, source, timeout=SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS, give_up=never
+                    target,
+                    source,
+                    _ExitLook(status),
+                    timeout=SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
+                    give_up=never,
                 ):
                     LOGGER.warning(
                         "the runtime configuration on disk was not checked against Allow web "
@@ -2484,13 +2587,14 @@ class Application(Adw.Application):
         thread.start()
 
     def _web_off_but_allowed_on_disk(
-        self, target: Path, source: Path, give_up: Callable[[], bool]
-    ) -> config.Settings | None:
-        """``source`` (``settings.toml``) as read now, when it says web wallpapers are off and
-        ``target`` may allow them (`_may_allow_web_wallpapers`, whose parse ``give_up`` ends: then
-        it counts as allowing them); otherwise None. Read now, never a snapshot of before: a turn-
-        off still being written is judged once it has landed (`_web_off_judged_once_landed`), and a
-        save turned on since is what it says (review r13f, N3)."""
+        self, target: Path, source: Path, look: _ExitLook, give_up: Callable[[], bool]
+    ) -> tuple[config.Settings, str] | None:
+        """``source`` (``settings.toml``) as read now, and why ``target`` must be replaced: when
+        the setting is off and a service may play a web page from the file (`_ExitLook.why`,
+        whose look ``give_up`` ends: then it counts as one); otherwise None. Read now, never a
+        snapshot of before: a turn-off still being written is judged once it has landed
+        (`_web_off_judged_once_landed`), and a save turned on since is what it says (review
+        r13f, N3)."""
         try:
             settings = config.load_strict(source)
         except config.ConfigError:
@@ -2501,9 +2605,10 @@ class Application(Adw.Application):
             on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
         except OSError, UnicodeDecodeError:
             return None
-        if on_disk is None or not _may_allow_web_wallpapers(on_disk, give_up):
+        if on_disk is None:
             return None
-        return settings
+        why = look.why(on_disk, give_up)
+        return (settings, why) if why else None
 
     def _turn_off_in_flight(self) -> Future[Any] | None:
         """Wait for a settings save still being written: until it ends, its bound, or a Ctrl-C.

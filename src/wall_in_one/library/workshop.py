@@ -959,6 +959,58 @@ def holds_web(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> bool
     return "web" in {base.kind, base.declared_type, base.lenient_type}
 
 
+def may_be_web(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> bool:
+    """Whether any Workshop item of ``ids`` is, or may be, a web wallpaper's (`holds_web`).
+
+    Bounded by ``ids``, not by the library: no folder is listed. Each id is
+    looked for in every content directory (`content_directories`), and every
+    copy's `project.json` is read as the scan reads one (`_read_project`: at
+    most `MAX_PROJECT_BYTES`, a regular file, no symbolic link); a preset's
+    base is read the same way. Fails closed: an id that isn't a Workshop id,
+    one installed nowhere this can look (Steam's folder unreadable or not
+    mounted, the item gone), one whose `project.json` can't be read, and all
+    of them once ``give_up`` says so, asked before each read, count as one.
+    For a service with no check of an item's type of its own
+    (`Application._web_off_on_disk_at_exit`; review r13f, L2).
+    """
+    directories = content_directories()
+    read: dict[str, tuple[WorkshopItem | None, ...]] = {}
+
+    def copies(identifier: str) -> tuple[WorkshopItem | None, ...] | None:
+        """Every installed copy of ``identifier``, None for one that can't be read; or None."""
+        if identifier in read:
+            return read[identifier]
+        found: list[WorkshopItem | None] = []
+        for content in directories:
+            if give_up():
+                return None
+            folder = content / identifier
+            if _is_folder(folder, follow=False, on_unseen=None):
+                found.append(_read_project(folder))
+        read[identifier] = tuple(found)
+        return read[identifier]
+
+    for identifier in ids:
+        if not is_workshop_id(identifier):
+            return True
+        items = copies(identifier)
+        if not items:
+            return True  # given up, or installed nowhere this can look
+        for item in items:
+            if item is None:
+                return True
+            if item.kind != PRESET or not is_workshop_id(item.dependency):
+                if holds_web(item, {}):
+                    return True
+                continue
+            bases = copies(item.dependency)
+            if not bases or any(base is None for base in bases):
+                return True
+            if any(holds_web(item, {item.dependency: base}) for base in bases if base):
+                return True
+    return False
+
+
 def why_not_played(item: MediaItem, allow_web: bool) -> str:
     """Why a Wallpaper Engine item is never played here as things are, or empty.
 

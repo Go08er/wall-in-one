@@ -1133,9 +1133,6 @@ pub struct Runtime<D: WallpaperDriver> {
     /// and never saved; a reload forgets them. Status lists them
     /// (`refused`), which is how the person learns of them.
     refused_scenes: Refusals,
-    /// How many of `refused_scenes` the tick's sweep has moved routes off
-    /// (`tick_independent`): it sweeps again only once more are refused.
-    swept_refusals: usize,
     authoritative_generation: u64,
     routes: HashMap<String, DisplayRoute>,
     route_generation: u64,
@@ -1228,7 +1225,6 @@ impl<D: WallpaperDriver> Runtime<D> {
             taboo,
             taboo_order,
             refused_scenes: Refusals::default(),
-            swept_refusals: 0,
             authoritative_generation: 0,
             routes: HashMap::new(),
             route_generation: 0,
@@ -2079,25 +2075,6 @@ impl<D: WallpaperDriver> Runtime<D> {
                     route.last_cycle = now;
                     route.last_error = "every entry in this playlist is taboo this session".into();
                     self.refresh_independent_last_error();
-                }
-            }
-        }
-        // A refusal is kept by item, so one learned since the last sweep, by
-        // a command, a reload, AC resume or this tick, can be of what a route
-        // nothing applied shows: that one moves on too, with the retries of
-        // any automatic move (reviews r13i R-L-a, r13j R-L-b to R-L-d, R-N9).
-        // Here, outside any rollback, so none undoes the move on the row
-        // only. What the sweep learns itself is swept at the next tick. Its
-        // moves are skips, a pick's too, not a schedule's (r13j R-N10).
-        if self.refused_scenes.len() > self.swept_refusals {
-            self.swept_refusals = self.refused_scenes.len();
-            let mut others: Vec<String> = self.routes_showing_refused().into_iter().collect();
-            others.sort();
-            for connector in others {
-                if self.routes_showing_refused().contains(&connector)
-                    && let Some(route) = self.routes.get(&connector).cloned()
-                {
-                    self.start_route_automatic(connector, route.clone(), route, "skip", now);
                 }
             }
         }
@@ -3939,18 +3916,6 @@ impl<D: WallpaperDriver> Runtime<D> {
         result
     }
 
-    /// The routes but those waiting to try again whose display shows an item
-    /// that is refused. A route that plays nothing shows none.
-    fn routes_showing_refused(&self) -> HashSet<String> {
-        self.current_targets(&self.target_outputs)
-            .into_iter()
-            .filter(|target| {
-                !self.pending_routes.contains_key(&target.output) && self.is_refused(&target.entry)
-            })
-            .map(|target| target.output)
-            .collect()
-    }
-
     /// `skip_refused_mirrored` for the `selected` independent routes: each
     /// moves to its next entry that can play, then to its stand-in through
     /// its decision (`route_decision`), or to nothing. Asked ahead the same
@@ -5464,8 +5429,6 @@ impl<D: WallpaperDriver> Runtime<D> {
             current_time: self.current_time,
             config_epoch: self.config_epoch,
         };
-        // The candidate's refusals, and a rollback's, are swept afresh.
-        self.swept_refusals = 0;
         if mode_changed {
             // The session's Cycle override is kept: it holds until the service
             // exits or `cycle default`, whichever mode the routes are in.

@@ -419,7 +419,9 @@ and `last_error` and `renderer_failed` say nothing about it. The service's
 journal names each skipped entry with its reason, and status lists the items.
 The service remembers what it refused for the document it holds and asks each
 item once, in one pass along a playlist however long the run of refused
-entries; a reload, the file poll's included, forgets.
+entries; a reload, the file poll's included, forgets. With independent
+displays, a display already showing an item that another display learns is
+refused keeps it until that display's own next change.
 
 | Field | Where | Meaning |
 |---|---|---|

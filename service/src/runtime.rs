@@ -6463,7 +6463,15 @@ impl<D: WallpaperDriver> Runtime<D> {
                         // `abridge_rows` keeps the shortest of each group's
                         // kind, so one comes back on its own only after every
                         // one before it of its group and kind (review r13g
-                        // R-N4).
+                        // R-N4). It has no test of its own (review r13i
+                        // R-N7): a case takes an error unit under about 34
+                        // bytes on the wire beside units of chosen lengths,
+                        // at a room exact to the byte. The ceiling corners of
+                        // tests/service.rs (`floor_corner` and those built on
+                        // it or beside it) fail every row on one entry of
+                        // quotes, hundreds of bytes of error each, under one
+                        // rule's id; a case needs a corner of its own, and an
+                        // instance its units can reach found for it.
                         let before_out = given[..index].iter().zip(&back).any(
                             |(&(_, other_kind, other_place), &other_back)| {
                                 !other_back && other_kind == kind && other_place == place

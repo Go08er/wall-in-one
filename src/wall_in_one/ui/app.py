@@ -676,6 +676,11 @@ class _AuthoringTask:
     #: What `Application._settle_before_shutdown` waits for, and what a shutdown still
     #: attempts when it never started (`Application._shutdown_authoring_jobs`).
     handed_on: bool = False
+    #: A change the person made (`Application.authoring_action_async`'s callers but the
+    #: application's own two, its library reconciliation and its runtime-health ingestion),
+    #: not the application's own work: what a first Ctrl-C counts and offers to drop
+    #: (`Application._changes_a_quit_would_drop`).
+    edit: bool = False
     #: What the work saved but could not confirm durable (`state_file.report_not_durable`).
     spoken: _Said = field(default_factory=_Said, compare=False)
 
@@ -1003,6 +1008,9 @@ class Application(Adw.Application):
         #: saved: the shutdown drops them instead of handing them on
         #: (`_quit_without_waiting_changes`).
         self._quit_without_waiting = False
+        #: The careful quit under way is the one that countdown ended in: a
+        #: Ctrl-C during it quits without what is still waiting.
+        self._quit_counted_down = False
         #: A Ctrl-C quit at once, or came once the shutdown had begun: ``run()``
         #: then ends as a Ctrl-C ends a GApplication's, with KeyboardInterrupt.
         self._ctrl_c_quit = False
@@ -3003,30 +3011,37 @@ class Application(Adw.Application):
     def _ctrl_c(self) -> bool:
         """One Ctrl-C, on GTK: the first quits carefully, any later one at once.
 
-        The first is `_first_ctrl_c`. Once it counts down, or once a quit was
-        asked (the careful quit it then makes, or ``ctl quit``), a Ctrl-C
-        quits at once, without what is still waiting to be saved
-        (`_quit_without_waiting_changes`). Once the shutdown has begun, one
-        ends its waits (`_on_sigint`), and once ``run()`` has returned, Python's
-        own handler ends the process's exit: someone who keeps pressing it is
-        out at the fourth at the most. Esc during the countdown cancels the
-        quit, and leaves nothing of it: the next Ctrl-C is a first again.
+        The first is `_first_ctrl_c`. Once it counts down, or once the careful
+        quit it makes then is under way, a Ctrl-C quits at once, without what
+        is still waiting to be saved (`_quit_without_waiting_changes`); never a
+        quit it didn't start (``ctl quit``), whose first Ctrl-C is a first.
+        Once the shutdown has begun, one ends its waits (`_on_sigint`), and
+        once ``run()`` has returned, Python's own handler ends the process's
+        exit: someone who keeps pressing it is out at the fourth at the most.
+        Esc during the countdown cancels the quit, and leaves nothing of it:
+        the next Ctrl-C is a first again.
         """
         if self._shutting_down:
             self._settle_cut = True
             self._ctrl_c_quit = True
-        elif self._quit_countdown is not None or self._quit_requested or self._quit_without_waiting:
+        elif (
+            self._quit_countdown is not None
+            or self._quit_counted_down
+            or self._quit_without_waiting
+        ):
             self._quit_without_waiting_changes()
         else:
             self._first_ctrl_c()
         return GLib.SOURCE_REMOVE
 
     def _first_ctrl_c(self) -> None:
-        """A first Ctrl-C: quit as ``ctl quit`` does, after a countdown when changes are waiting.
+        """A first Ctrl-C: a countdown when the person's changes are waiting, then a careful quit.
 
-        With nothing waiting to be saved, at once, and saying nothing
-        (`request_quit`: it still waits for what is being written, and for the
-        application's own tails, a scan or a publication). Otherwise what is
+        With none of the person's changes waiting, or with a quit already
+        under way that this Ctrl-C didn't start (``ctl quit`` in ``--service``),
+        at once and saying nothing, as before the countdown: ``quit()``, which
+        hands on what is waiting (`do_shutdown`), and never waits for the
+        application's own tails, a scan or a publication. Otherwise what is
         waiting is held for `QUIT_COUNTDOWN_SECONDS`, counted down on standard
         error (`quit_countdown`), so that the person can quit without it (a
         second Ctrl-C) or not quit at all (Esc), and then saved and waited for
@@ -3036,8 +3051,9 @@ class Application(Adw.Application):
         lands. A write already being written when it is pressed goes on.
         """
         changes = self._changes_a_quit_would_drop()
-        if not changes:
-            self.request_quit()
+        if not changes or self._quit_requested:
+            self._ctrl_c_quit = True
+            self.quit()
             return
         self._authoring_held = True
         self._quit_countdown = quit_countdown.Countdown(
@@ -3055,17 +3071,21 @@ class Application(Adw.Application):
             self._quit_countdown_done()
 
     def _changes_a_quit_would_drop(self) -> int:
-        """How many accepted changes aren't being written yet: what a second Ctrl-C would drop.
+        """How many of the person's changes aren't being written yet: what a second Ctrl-C drops.
 
-        Each number waiting out its settle time (`dial_rows.waiting`), each
-        authoring task queued (a number handed on is one), and each Settings
-        field accepted that no batch being written has taken: a Settings batch
-        still queued counts as its fields. Not one that turns web wallpapers
-        off, which is never dropped (`_drop_waiting_settings`); not what is
-        being written now, which is never stopped; and none of the
-        application's own work: the repair that opens authoring (the one
-        queued task that doesn't wait for it, ``requires_migration``), a scan,
-        a publication.
+        Each renderer number waiting out its settle time (`dial_rows.waiting`:
+        only a row's own nudge starts one); each authoring task queued that is
+        the person's (`_AuthoringTask.edit`: a gesture in either window, a
+        number handed on included, whatever `authoring_action_async` is given
+        but for the library's reconciliation after a scan and the ingestion
+        of the service's health); and each Settings field accepted that no
+        batch being written has taken (every one comes from a gesture: a
+        Settings row, a playlist made the default, the first folder chosen, a
+        scheme), a Settings batch still queued counting as its fields. Not
+        one that turns web wallpapers off, which is never dropped
+        (`_drop_waiting_settings`); not what is being written now, which is
+        never stopped; and none of the application's own work: those two
+        tasks, the repair that opens authoring, a scan, a publication.
         """
         with self._settings_authoring_lock:
             took = self._settings_batch_generation
@@ -3078,13 +3098,14 @@ class Application(Adw.Application):
         queued = sum(
             1
             for task in self._authoring_queue
-            if task.requires_migration and task.prepare != self._prepare_settings_batch
+            if task.edit and task.prepare != self._prepare_settings_batch
         )
         return dial_rows.waiting() + queued + settings
 
     def _quit_countdown_done(self) -> None:
         """The countdown is over: what it held is saved, and the application quits once it is."""
         self._quit_countdown = None
+        self._quit_counted_down = True
         self._let_held_authoring_go()
         self.request_quit()
 
@@ -3118,13 +3139,17 @@ class Application(Adw.Application):
         saved, and the end of the shutdown waits for it and judges the file
         on disk by it, as for any such save (`_drop_waiting_settings`). What is
         being written goes on, and the process's exit waits for it. A quit that
-        comes any other way still hands everything on, as before.
+        comes any other way still hands everything on, as before. Said once,
+        during the countdown or after it (`QUIT_WITHOUT_THEM`).
         """
-        counting = self._quit_countdown is not None
+        said = "" if self._quit_without_waiting else QUIT_WITHOUT_THEM
         self._quit_without_waiting = True
         self._authoring_held = True
         self._ctrl_c_quit = True
-        self._end_quit_countdown(QUIT_WITHOUT_THEM if counting else "")
+        if self._quit_countdown is not None:
+            self._end_quit_countdown(said)
+        elif said:
+            quit_countdown.say(said)
         self.quit()
 
     def _hand_on_waiting_numbers(self) -> int:
@@ -4070,6 +4095,7 @@ class Application(Adw.Application):
             finished,
             failure=lambda message: self._library_reconciliation_failed(generation, message),
             allow_during_quit=True,
+            edit=False,  # the application's own: a scan's result
         )
 
     def _library_reconciliation_failed(self, generation: int, message: str) -> None:
@@ -4656,6 +4682,7 @@ class Application(Adw.Application):
         guard_migration_transaction: bool = True,
         queue_if_busy: bool = False,
         allow_during_quit: bool = False,
+        edit: bool = False,
     ) -> server.Deferred:
         """Run one durable control mutation without lending GTK to the disk.
 
@@ -4712,6 +4739,7 @@ class Application(Adw.Application):
                     guard_migration_transaction=guard_migration_transaction,
                     application_held=application_held,
                     handed_on=dial_rows.handing_on(),
+                    edit=edit,
                 )
             )
             self._start_next_authoring_task()
@@ -4952,6 +4980,7 @@ class Application(Adw.Application):
         requires_migration: bool = True,
         guard_migration_transaction: bool = True,
         allow_during_quit: bool = False,
+        edit: bool = True,
     ) -> bool:
         """Queue one GTK action on the same ordered durability actor.
 
@@ -4974,6 +5003,10 @@ class Application(Adw.Application):
           "Saved, but it couldn't be applied" (`_after_failed_finish`); a
           caller with its own settlement for that case gives
           ``saved_not_applied``.
+
+        ``edit`` is False for the application's own work, never the person's
+        change, which a first Ctrl-C then neither counts nor offers to drop
+        (`_changes_a_quit_would_drop`).
         """
         if self._authoring_shutdown or self._runtime_shutdown:
             return False
@@ -5020,6 +5053,7 @@ class Application(Adw.Application):
             guard_migration_transaction=guard_migration_transaction,
             queue_if_busy=True,
             allow_during_quit=allow_during_quit,
+            edit=edit,
         )
         deferred.start(replied)
         synchronous = False
@@ -6869,6 +6903,7 @@ class Application(Adw.Application):
             # around Pairings/config compilation, then releases it before a
             # potentially slow runtime reload.
             guard_migration_transaction=False,
+            edit=False,  # the application's own: what the service reported
         )
         if not accepted:
             with self._runtime_config_lock:

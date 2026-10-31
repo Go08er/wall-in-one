@@ -264,9 +264,9 @@ def test_web_turned_off_while_waiting_is_saved_by_a_quit_without_the_rest(
     for "1 change", not two: the turn-off is never dropped. A second quits without the edit; the
     turn-off is saved all the same, and the file on disk is replaced with the one that plays
     nothing (the shutdown's web-off safety write). ``control-web-off-alone``: with only the
-    turn-off waiting there is nothing a second Ctrl-C would drop, so no countdown and no line;
-    the first Ctrl-C saves it as ``ctl quit`` would, and its publication allows no web
-    wallpaper either."""
+    turn-off waiting there is nothing a second Ctrl-C would drop, so no countdown and no line:
+    the first Ctrl-C quits at once, handing the turn-off on, and the file is replaced all the
+    same, as at 55f26e1 (R41-2)."""
     application, clip, _slow, _spans = _setup(
         monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
     )
@@ -299,11 +299,6 @@ def test_web_turned_off_while_waiting_is_saved_by_a_quit_without_the_rest(
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
         "settings.toml says web wallpapers are off, and the file on disk still allows them"
     )
-    if alone:
-        # Saved before the quit, and published as any save is: a compile without them.
-        assert "Saving" not in err, err
-        assert not interrupted
-        return
     # Saved once the publications had ended: the shutdown's web-off safety write replaced it.
     assert paths.runtime_config_path().read_text(
         encoding="utf-8"
@@ -311,6 +306,9 @@ def test_web_turned_off_while_waiting_is_saved_by_a_quit_without_the_rest(
         config.load_strict(), runtime_config.WEB_OFF_REASON
     ), "not the document that plays nothing"
     assert interrupted
+    if alone:
+        assert "Saving" not in err, err
+        return
     assert "Queued" not in _names(), _names()
     assert err.count(_line("1 change")) == 1, err
 
@@ -325,8 +323,8 @@ def test_a_ctrl_c_with_nothing_waiting_quits_and_says_nothing(
     capfd: pytest.CaptureFixture[str],
     ui: str,
 ) -> None:
-    """Nothing accepted that isn't saved: one Ctrl-C quits, with no countdown and no line (at
-    55f26e1 too, through ``quit()``)."""
+    """Nothing accepted that isn't saved: one Ctrl-C quits at once, with no countdown and no
+    line, and ``run()`` ends as a Ctrl-C ends it (at 55f26e1 too, through ``quit()``)."""
     application, clip, _slow, _spans = _setup(
         monkeypatch, tmp_path, ui=ui, service=False, settle_seconds=2.0
     )
@@ -335,9 +333,10 @@ def test_a_ctrl_c_with_nothing_waiting_quits_and_says_nothing(
         yield "the first scan", _scanned(application, clip)
         _ctrl_c()
 
-    _run_to_the_end(application, scenario(), service=False)
+    interrupted = _run_to_the_end(application, scenario(), service=False)
     err = capfd.readouterr().err
     assert "Saving" not in err and "Quitting" not in err, err
+    assert interrupted
     assert application._window is None
 
 

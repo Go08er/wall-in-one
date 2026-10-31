@@ -43,7 +43,7 @@ from typing import Final
 
 from wall_in_one import file_io
 from wall_in_one.dials import MAX_TEXT_BYTES, PROPERTY_TYPES, SceneProperty, valid_text
-from wall_in_one.library.model import MediaItem, Unplayable, UnseenKind, is_absent
+from wall_in_one.library.model import Kind, MediaItem, Unplayable, UnseenKind, is_absent
 
 #: Where the scan is told about a place it could not look into: the folder,
 #: why (`UnseenKind`), and the system's words. Optional everywhere below.
@@ -51,6 +51,21 @@ OnUnseen = Callable[[Path, UnseenKind, str], None]
 
 #: Wallpaper Engine's Steam application id.
 APP_ID: Final = "431960"
+
+#: What a Wallpaper Engine wallpaper is labelled as in the grid: the
+#: `MediaItem.provider` of every item the scan lists from here
+#: (`scan.WORKSHOP_PROVIDER`).
+WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
+
+#: Where linux-wallpaperengine looks for `--bg <id>`, under the home folder, in
+#: its own order: the service's `ENGINE_WORKSHOP_FOLDERS` (service/src/workshop.rs),
+#: Steam's two usual homes, the Flatpak's and the Snap's. Each is followed by `<id>`.
+ENGINE_WORKSHOP_FOLDERS: Final = (
+    ".local/share/Steam/steamapps/workshop/content/431960",
+    ".steam/steam/steamapps/workshop/content/431960",
+    ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/workshop/content/431960",
+    "snap/steam/common/.local/share/Steam/steamapps/workshop/content/431960",
+)
 
 #: Where Steam keeps the file that lists every library folder.
 _LIBRARY_INDEX: Final = Path("steamapps") / "libraryfolders.vdf"
@@ -957,6 +972,83 @@ def holds_web(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> bool
     if base is None or base.kind == PRESET:
         return True
     return "web" in {base.kind, base.declared_type, base.lenient_type}
+
+
+def web_files_now(item: MediaItem) -> bool:
+    """Whether ``item``'s Workshop folder is, or may be, a web wallpaper's, read again now.
+
+    `previews_off` asks the scan, which is as old as it is: a Steam update can
+    turn a scene (or a video) into a web page, and nothing rescans for it. So
+    whatever hands one of a Workshop item's files to ffmpeg while web
+    wallpapers are off asks this just before. Its `project.json` is read as
+    the scan reads it (`_read_project`), and it fails closed as `holds_web`
+    does: a type that reads ``web`` in any spelling counts, and so does a
+    `project.json` that can't be read or isn't one. Only the item's own type
+    is read: what a preset's base is stays the scan's word. False for
+    anything the Workshop didn't list (`WORKSHOP_PROVIDER`): those are the
+    user's own files.
+    """
+    if item.provider != WORKSHOP_PROVIDER:
+        return False
+    # A scene's path is its folder; a video's is its file, in its folder.
+    project = _read_project(item.path if item.kind is Kind.SCENE else item.path.parent)
+    return project is None or "web" in {project.kind, project.declared_type, project.lenient_type}
+
+
+def engine_refusal(workshop_id: str) -> str:
+    """Why linux-wallpaperengine must not be given ``workshop_id`` while web wallpapers are off.
+
+    Empty when it may. The service's `refusal_without_web`
+    (service/src/workshop.rs), for the engines this app starts itself: a
+    scene's still, and the legacy Python playback. The engine finds
+    ``--bg <id>`` under the home folder, not where the scan found the item,
+    and reads its type again when it starts, so every folder of
+    `ENGINE_WORKSHOP_FOLDERS` that holds it is read now, as the scan reads a
+    `project.json` (`_read_project`). It may start only when each copy there
+    is a `scene` or a `video` and none reads ``web`` in any spelling
+    `holds_web` counts. A copy that can't be looked at or read, and an item
+    found in none of them, are refused. The home folder is the caller's
+    current one, as in `default_steam_roots`.
+    """
+    if not is_workshop_id(workshop_id):
+        return "it has no Workshop id that can be checked"
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return f"Workshop item {workshop_id} can\u2019t be checked: there is no home folder"
+    found = False
+    for folder in ENGINE_WORKSHOP_FOLDERS:
+        directory = home / folder / workshop_id
+        try:
+            # The engine follows a link to the item's folder, so this does.
+            info = directory.stat()
+        except OSError as error:
+            if is_absent(error):
+                continue
+            return (
+                f"Workshop item {workshop_id} can\u2019t be checked: "
+                f"{directory}: {error.strerror or error}"
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            continue
+        found = True
+        project = _read_project(directory)
+        if project is None:
+            return (
+                f"Workshop item {workshop_id}\u2019s project.json in {directory} can\u2019t be read"
+            )
+        if "web" in {project.kind, project.declared_type, project.lenient_type}:
+            return f"Workshop item {workshop_id} is a web page"
+        if project.declared_type not in ("scene", "video"):
+            return f"Workshop item {workshop_id} in {directory} is neither a scene nor a video"
+    if not found:
+        # A Steam library on another drive is one the scan lists and the
+        # engine never looks in.
+        return (
+            f"Workshop item {workshop_id} isn\u2019t where linux-wallpaperengine looks: "
+            f"Steam\u2019s, the Flatpak\u2019s and the Snap\u2019s Workshop folders under {home}"
+        )
+    return ""
 
 
 def web_among(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> tuple[bool, bool]:

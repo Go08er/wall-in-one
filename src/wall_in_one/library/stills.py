@@ -1875,7 +1875,10 @@ def capture_scene(
     temporary -- unless a display was measured and the engine is installed.
 
     ``allow_web`` is ``allow_web_wallpapers``. A web page while they are off is
-    refused before anything of it is opened: no preview read, no engine.
+    refused before anything of it is opened: no preview read, no engine. So is
+    one Steam has made a web page since the scan: its type is read again just
+    before, where ffmpeg or the engine would look (`workshop.web_files_now`,
+    `workshop.engine_refusal`).
     """
     if item.kind is not Kind.SCENE or not item.scene:
         raise StillError(f"{item.name} is not a Wallpaper Engine scene")
@@ -1889,6 +1892,9 @@ def capture_scene(
         # From the preview: no engine, and no display to size it for.
         if not force and not scene_capture_required(item, root, automatic=True):
             return target
+        if not allow_web and workshop.web_files_now(item):
+            # Steam may have made it a web page since the scan.
+            raise StillError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no still of {item.name}")
         source = _snapshot_source(item.path, Kind.SCENE)
         try:
             return _capture_scene_from_source(
@@ -1910,6 +1916,11 @@ def capture_scene(
         )
     if not force and not scene_capture_required(item, root, size=measured, automatic=True):
         return target
+    # The engine finds the id under the home folder, wherever the scan found
+    # it, and reads its type again there: so it is read there first.
+    refusal = "" if allow_web else workshop.engine_refusal(item.scene)
+    if refusal:
+        raise StillError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no still of {item.name} ({refusal})")
     source = _snapshot_source(item.path, Kind.SCENE)
     try:
         return _capture_scene_from_source(
@@ -2102,6 +2113,9 @@ def ensure(
     existing = pairing.find_still(item.path, roots=(root,))
     if existing is not None:
         return existing
+    if not allow_web and workshop.web_files_now(item):
+        # A Workshop video Steam has made a web page since the scan.
+        return None
     try:
         return generate(item.path, root, processes=processes)
     except StillFolderError as error:

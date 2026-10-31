@@ -461,9 +461,11 @@ def generate(
     """Return a cached thumbnail for ``item``, generating it if needed.
 
     ``allow_web`` is ``allow_web_wallpapers``. A web wallpaper while they are off
-    gets nothing: no cache lookup, no decode, no ffmpeg.
+    gets nothing: no cache lookup, no decode, no ffmpeg. Nor does a Workshop
+    item that Steam has made one since the scan: its folder is read again
+    first (`workshop.web_files_now`), before the key below stats its files.
     """
-    if workshop.previews_off(item, allow_web):
+    if workshop.previews_off(item, allow_web) or (not allow_web and workshop.web_files_now(item)):
         raise ThumbnailError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no thumbnail of {item.name}")
     if not is_available():
         raise ThumbnailError("ffmpeg is not installed")

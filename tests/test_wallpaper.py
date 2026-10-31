@@ -12,6 +12,7 @@ from typing import cast
 
 import pytest
 
+from tests.test_scenes import where_the_engine_looks
 from wall_in_one import file_io, paths
 from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
@@ -922,6 +923,7 @@ class FakeScenes:
 
 
 def _scene(tmp_path: Path) -> MediaItem:
+    where_the_engine_looks("1647046763")
     return MediaItem(
         path=tmp_path / "1647046763",
         kind=Kind.SCENE,

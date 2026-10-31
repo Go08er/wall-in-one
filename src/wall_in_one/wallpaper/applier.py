@@ -18,7 +18,7 @@ import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from wall_in_one.library import pairings
+from wall_in_one.library import pairings, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
@@ -81,6 +81,7 @@ class Applier:
         dynamics_enabled: bool,
         palette: pairings.PalettePolicy | None = None,
         generator: str = noctalia.DEFAULT_SCHEME,
+        allow_web: bool = False,
     ) -> Applied:
         """Put ``item`` on screen, honouring the dynamics setting.
 
@@ -90,6 +91,9 @@ class Applier:
         generate from the previous picture. The renderer goes last because it
         covers the still, and because a palette that fails should not leave a
         video running over the wrong colours.
+
+        ``allow_web`` is ``allow_web_wallpapers``: while it is off, a scene's
+        type is read again before the engine is started (`_start_scene`).
         """
         if item.unplayable is not None:
             # Never handed to a renderer (docs/wallpaper-engine.md).
@@ -110,7 +114,7 @@ class Applier:
         if not moving:
             applied = Applied(item=item, path=target, animated=False)
         elif item.kind is Kind.SCENE:
-            applied = self._start_scene(item, target)
+            applied = self._start_scene(item, target, allow_web=allow_web)
         else:
             applied = self._start_video(item, target)
         self._current = applied
@@ -157,7 +161,7 @@ class Applier:
         with contextlib.suppress(noctalia.NoctaliaError):
             noctalia.set_wallpaper(still, self.output or None)
 
-    def _start_scene(self, item: MediaItem, path: Path) -> Applied:
+    def _start_scene(self, item: MediaItem, path: Path, *, allow_web: bool) -> Applied:
         """Hand a Wallpaper Engine scene to `linux-wallpaperengine`.
 
         Refuses rather than fights. The engine is single-instance per output,
@@ -188,6 +192,12 @@ class Applier:
                 f"linux-wallpaperengine is already running on {self.output or 'this screen'} "
                 f"(pid {held[0]}), so {item.name} was not started. Stop the other one first."
             )
+        # The engine reads the type again when it starts, under the home
+        # folder: an update since the scan can have made it a web page. So it
+        # is read there first, as the service does before it starts one.
+        refusal = "" if allow_web else workshop.engine_refusal(item.rendered_scene)
+        if refusal:
+            raise ApplyError(f"{item.name} can\u2019t play: {workshop.WEB_OFF_REASON} ({refusal})")
         try:
             # A preset renders its base with its own values.
             self._scenes.start(item.rendered_scene, item.scene_properties)

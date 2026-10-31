@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_scenes import where_the_engine_looks
 from wall_in_one import worker_processes
 from wall_in_one.library import pairing, stills
 from wall_in_one.library.model import Kind, MediaItem
@@ -215,6 +216,7 @@ def scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MediaItem:
         raise AssertionError("the engine was run for a still its folder can't take")
 
     monkeypatch.setattr(scenes, "screenshot", engine)
+    where_the_engine_looks(SCENE)
     return item(folder, Kind.SCENE, SCENE)
 
 

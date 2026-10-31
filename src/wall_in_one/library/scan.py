@@ -32,7 +32,7 @@ from wall_in_one.library.model import (
 )
 
 #: What a Wallpaper Engine wallpaper is labelled as in the grid.
-WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
+WORKSHOP_PROVIDER: Final = workshop.WORKSHOP_PROVIDER
 
 #: Ceilings for one scan.
 MAX_ITEMS: Final = 4096

@@ -25,6 +25,7 @@ import pytest
 
 from tests.process_helpers import is_alive, kill_and_reap, reaped, subreaper
 from wall_in_one import worker_processes
+from wall_in_one.library import workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import outputs, scenes
 from wall_in_one.wallpaper.scenes import SceneRenderer
@@ -314,7 +315,20 @@ def test_an_unreadable_process_is_skipped_rather_than_fatal(tmp_path: Path) -> N
 # -- a scene as a library item --------------------------------------------
 
 
+def where_the_engine_looks(workshop_id: str, project: str = '{"type": "scene"}') -> Path:
+    """Install ``workshop_id`` where linux-wallpaperengine finds it, under this test's own HOME.
+
+    While web wallpapers are off, nothing is handed to the engine that isn't a
+    scene or a video there (`workshop.engine_refusal`).
+    """
+    folder = Path.home() / workshop.ENGINE_WORKSHOP_FOLDERS[0] / workshop_id
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "project.json").write_text(project, encoding="utf-8")
+    return folder
+
+
 def scene_item(workshop_id: str = "2149140853", still: Path | None = None) -> MediaItem:
+    where_the_engine_looks(workshop_id)
     return MediaItem(
         path=Path("/steam/workshop/content/431960") / workshop_id,
         kind=Kind.SCENE,
@@ -447,12 +461,16 @@ def test_the_applier_hands_a_preset_to_the_engine_as_its_base(
 
         def stop(self) -> None: ...
 
+    # The base is what the engine is given, so it is what is read: the
+    # preset's own folder, with no type, would be refused.
+    where_the_engine_looks("2777242023")
     preset = replace(
         scene_item("2946165131", still=tmp_path / "a.png"),
         workshop_type="preset",
         scene_base="2777242023",
         scene_properties=(("bloom", "true"),),
     )
+    where_the_engine_looks("2946165131", '{"dependency": "2777242023", "preset": {}}')
     applier = Applier(_QuietRenderer(), scene_renderer=Engine(), own_scene_renderer=True)  # type: ignore[arg-type]
     applier.apply(preset, dynamics_enabled=True)
     assert started == [("2777242023", (("bloom", "true"),))]

@@ -2187,6 +2187,7 @@ class Session:
             dynamics_enabled=self._settings.dynamics_enabled,
             palette=bundle.palette,
             generator=self._settings.preview_scheme,
+            allow_web=self._settings.allow_web_wallpapers,
         )
 
     def apply_current(self) -> Applied:

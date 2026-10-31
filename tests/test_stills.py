@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from tests import sync_faults
+from tests.test_scenes import where_the_engine_looks
 from wall_in_one import config, file_io, paths, programs
 from wall_in_one.library import pairing, pairings, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
@@ -1127,6 +1128,7 @@ def _scene(
     *,
     directory: Path | None = None,
 ) -> MediaItem:
+    where_the_engine_looks(workshop_id)
     return MediaItem(
         path=directory or Path("/steam/workshop/content/431960") / workshop_id,
         kind=Kind.SCENE,

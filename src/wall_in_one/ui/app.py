@@ -3130,7 +3130,7 @@ class Application(Adw.Application):
     def _quit_without_waiting_changes(self) -> None:
         """Quit at once, without the changes still waiting to be saved: a Ctrl-C after the first.
 
-        What a single Ctrl-C did before the countdown, ``quit()``, except that
+        ``quit()``, as a first Ctrl-C with nothing waiting makes, except that
         what the person accepted but isn't being written yet is dropped
         instead of handed on: the numbers waiting out their settle time, the
         authoring tasks queued and the Settings no batch being written has
@@ -3157,8 +3157,9 @@ class Application(Adw.Application):
 
         `dial_rows.flush_all`, for the ways the application ends that run
         this process's own code: a window's close, ``ctl quit`` and a first
-        Ctrl-C (`request_quit`), and a quit that comes another way, through
-        `do_shutdown`; not a Ctrl-C after the first, which drops them
+        Ctrl-C's countdown (`request_quit`), and a quit that comes another way,
+        a first Ctrl-C with none of the person's changes waiting among them,
+        through `do_shutdown`; not a Ctrl-C after the first, which drops them
         (`_quit_without_waiting_changes`).
         SIGTERM (there is no handler for it) and a lost display (GTK ends
         the process itself) run none of them: a number nudged under

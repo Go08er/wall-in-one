@@ -9,6 +9,9 @@
   ``signal.pthread_sigmask`` or ``signal.getsignal`` in the child.
 * **Q-N2:** ``ctl quit`` during the countdown, then Esc, said "Quitting cancelled." and quit all
   the same. It says that the quit goes on, and why.
+* **Q-L1, the owner's "save first":** after ``ctl quit``, a first Ctrl-C with a lone playlist
+  edit queued was ``quit()``, which dropped it, saying nothing. That quit now goes on saving
+  it, the press says so once, and the next press quits without it.
 
 Children are signalled by the exact pid this file started. No real terminal: ptys of the test's
 own, and the child is never dumpable (no core from SIGQUIT).
@@ -52,6 +55,97 @@ REPO = Path(__file__).resolve().parents[1]
 
 #: What Esc says when ``ctl quit`` asked to quit during the countdown (the coordinator's words).
 GOES_ON = "Quitting goes on: wall-in-one ctl quit asked for it."
+
+#: What a first Ctrl-C says while ``ctl quit`` saves one change (the owner's words), and what
+#: the next one says.
+SAVING_ONE = (
+    "Saving 1 change before quitting\u2026 press Ctrl-C again to quit immediately without them."
+)
+WITHOUT_THEM = "Quitting immediately without them."
+
+
+# -- Q-L1: ``ctl quit``, then a first Ctrl-C, with only a playlist edit waiting ---------------
+
+
+@pytest.mark.parametrize(
+    "press", ["one-ctrl-c", "two-ctrl-c", "control-no-ctrl-c", "control-nothing-waiting"]
+)
+def test_r14q_ctl_quit_then_a_first_ctrl_c_with_only_an_edit_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+    press: str,
+) -> None:
+    """--service. A save in progress; behind it one playlist edit (no number, no Settings, so
+    no settle drains the lane). ``ctl quit`` (request_quit) waits for it; the person presses
+    Ctrl-C. The owner's "save first": that quit goes on saving the edit, and the press says so
+    once, with no countdown and no Esc; ``two-ctrl-c``: the next press then quits without it,
+    as Ctrl-C again does. Before (a2f4632, and 55f26e1): the press was ``quit()``, which
+    dropped the edit, saying nothing. The controls: no press; and nothing waiting but the save
+    in progress, where the press is ``quit()`` at once, saying nothing, as before."""
+    application, clip, _slow, _spans = _setup(
+        monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0
+    )
+    lane = _Lane(application)
+    nothing = press == "control-nothing-waiting"
+    seen: dict[str, Any] = {}
+
+    def scenario() -> Iterator[Any]:
+        yield "the first scan", _scanned(application, clip)
+        assert lane.create("In flight", held=True)
+        yield "the save in progress", lane.started.is_set
+        if not nothing:
+            assert lane.create("Queued")
+        _LANES.extend(application_lanes(application))
+        application.request_quit()  # what `ctl quit` does in --service (GLib.idle_add)
+        yield "a moment", _after(0.2)
+        seen["quit requested"] = application._quit_requested
+        seen["count"] = application._changes_a_quit_would_drop()
+        if press != "control-no-ctrl-c":
+            _ctrl_c()
+            if press == "two-ctrl-c":
+                yield "the line", lambda: getattr(application, "_ctrl_c_saving", False)
+                assert not _counting(application), "a countdown, which can't stop ctl quit"
+                _ctrl_c()
+        lane.release_in(0.3)
+
+    try:
+        interrupted = _run_to_the_end(application, scenario(), service=True)
+    finally:
+        lane.close()
+    err = capfd.readouterr().err
+    _record(
+        f"Q1[{press}]",
+        seen=seen,
+        interrupted=interrupted,
+        names=sorted(_names()),
+        written=lane.written,
+        line=[one for one in err.splitlines() if "Saving" in one or "Quitting" in one],
+    )
+    assert seen["quit requested"]
+    assert seen["count"] == (0 if nothing else 1), seen
+    assert "In flight" in _names(), _names()
+    assert " in 5" not in err, err  # never a countdown here
+    if press == "one-ctrl-c":
+        assert "Queued" in _names(), (
+            "the playlist edit queued before the person's first Ctrl-C was dropped: "
+            f"{sorted(_names())}"
+        )
+        assert err.count(SAVING_ONE) == 1, err
+        assert WITHOUT_THEM not in err, err
+        assert not interrupted
+    elif press == "two-ctrl-c":
+        assert "Queued" not in _names(), _names()
+        assert lane.written == ["In flight"], lane.written
+        assert err.count(SAVING_ONE) == 1 and err.count(WITHOUT_THEM) == 1, err
+        assert interrupted
+    elif press == "control-no-ctrl-c":
+        assert "Queued" in _names(), _names()
+        assert "Saving" not in err and "Quitting" not in err, err
+        assert not interrupted
+    else:
+        assert "Saving" not in err and "Quitting" not in err, err
+        assert interrupted, "with nothing waiting, a Ctrl-C quits at once, as before"
 
 
 def _record(name: str, **facts: Any) -> None:

@@ -67,6 +67,11 @@ from wall_in_one.library.model import Kind  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
+#: What a first Ctrl-C says while ``ctl quit`` saves the person's changes (the owner's words).
+SAVING = (
+    "Saving {changes} before quitting\u2026 press Ctrl-C again to quit immediately without them."
+)
+
 
 def _record(name: str, **facts: Any) -> None:
     """What a probe saw, in its output (``-s``): the review's own record."""
@@ -86,7 +91,9 @@ def test_r14p_ctl_quit_then_a_first_ctrl_c_keeps_numbers_and_settings(
     """--service. A save in progress; behind it a playlist edit, a Settings change and a
     renderer number. ``ctl quit`` (request_quit) waits for them; the person then presses Ctrl-C
     once in the --service terminal. At 55f26e1 that press was PyGObject's quit(), which handed
-    the number and the Settings on (R41-2). Owner: a first Ctrl-C counts down first."""
+    the number and the Settings on (R41-2). Since the owner's "save first" (R14Q Q-L1) the
+    quit ``ctl quit`` asked for goes on saving all three, and the press says so once, with no
+    countdown (``tests/test_ui_ctrl_c_r14q.py`` has the press after it)."""
     application, clip, _slow, _spans = _setup(
         monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0
     )
@@ -131,8 +138,13 @@ def test_r14p_ctl_quit_then_a_first_ctrl_c_keeps_numbers_and_settings(
     assert seen["quit requested"]
     assert speed == 1.5, "the number accepted before the person's first Ctrl-C was dropped"
     assert shuffle_saved, "the Settings change accepted before the first Ctrl-C was dropped"
-    assert "Saving" not in err and "Quitting" not in err, err  # no countdown, so no Esc either
-    assert interrupted is (press == "one-ctrl-c")
+    assert "Quitting" not in err and "Saving 3 changes before quitting in" not in err, err
+    assert not interrupted
+    if press == "one-ctrl-c":
+        assert "Queued" in _names(), _names()
+        assert err.count(SAVING.format(changes="3 changes")) == 1, err
+    else:
+        assert "Saving" not in err, err
 
 
 # -- P3: a real SIGINT, sent as the terminal sends it, while the loop has nothing to do ----------

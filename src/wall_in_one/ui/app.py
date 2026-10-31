@@ -1010,9 +1010,10 @@ class Application(Adw.Application):
         #: saved: the shutdown drops them instead of handing them on
         #: (`_quit_without_waiting_changes`).
         self._quit_without_waiting = False
-        #: The careful quit under way is the one that countdown ended in: a
-        #: Ctrl-C during it quits without what is still waiting.
-        self._quit_counted_down = False
+        #: A first Ctrl-C has said the person's changes waiting are being saved,
+        #: by the careful quit its countdown ended in, or by ``ctl quit``'s: the
+        #: next quits without what is still waiting.
+        self._ctrl_c_saving = False
         #: A Ctrl-C quit at once, or came once the shutdown had begun: ``run()``
         #: then ends as a Ctrl-C ends a GApplication's, with KeyboardInterrupt.
         self._ctrl_c_quit = False
@@ -3013,10 +3014,10 @@ class Application(Adw.Application):
     def _ctrl_c(self) -> bool:
         """One Ctrl-C, on GTK: the first quits carefully, any later one at once.
 
-        The first is `_first_ctrl_c`. Once it counts down, or once the careful
-        quit it makes then is under way, a Ctrl-C quits at once, without what
-        is still waiting to be saved (`_quit_without_waiting_changes`); never a
-        quit it didn't start (``ctl quit``), whose first Ctrl-C is a first.
+        The first is `_first_ctrl_c`. Once it counts down, or once it has said
+        that a careful quit is saving the person's changes (the one its
+        countdown ends in, or ``ctl quit``'s), a Ctrl-C quits at once, without
+        what is still waiting to be saved (`_quit_without_waiting_changes`).
         Once the shutdown has begun, one ends its waits (`_on_sigint`), and
         once ``run()`` has returned, Python's own handler ends the process's
         exit: someone who keeps pressing it is out at the fourth at the most.
@@ -3026,11 +3027,7 @@ class Application(Adw.Application):
         if self._shutting_down:
             self._settle_cut = True
             self._ctrl_c_quit = True
-        elif (
-            self._quit_countdown is not None
-            or self._quit_counted_down
-            or self._quit_without_waiting
-        ):
+        elif self._quit_countdown is not None or self._ctrl_c_saving or self._quit_without_waiting:
             self._quit_without_waiting_changes()
         else:
             self._first_ctrl_c()
@@ -3039,12 +3036,15 @@ class Application(Adw.Application):
     def _first_ctrl_c(self) -> None:
         """A first Ctrl-C: a countdown when the person's changes are waiting, then a careful quit.
 
-        With none of the person's changes waiting, or with a quit already
-        under way that this Ctrl-C didn't start (``ctl quit`` in ``--service``),
-        at once and saying nothing, as before the countdown: ``quit()``, which
-        hands on the renderer numbers and the Settings waiting (`do_shutdown`),
-        drops another queued edit as it did then, and never waits for the
-        application's own tails, a scan or a publication. Otherwise what is
+        With none of the person's changes waiting, at once and saying nothing,
+        as before the countdown: ``quit()``, which hands on the renderer
+        numbers and the Settings waiting (`do_shutdown`) and never waits for
+        the application's own tails, a scan or a publication. With some
+        waiting and a careful quit already under way that this Ctrl-C didn't
+        start (``ctl quit`` in ``--service``), that quit goes on saving them,
+        which can't be cancelled from here: it says so once, with no countdown
+        and no Esc (`quit_countdown.saving`), and the next Ctrl-C quits without
+        them (the owner's "save first"). Otherwise what is
         waiting is held for `QUIT_COUNTDOWN_SECONDS`, counted down on standard
         error (`quit_countdown`), so that the person can quit without it (a
         second Ctrl-C) or not quit at all (Esc), and then saved and waited for
@@ -3054,9 +3054,13 @@ class Application(Adw.Application):
         lands. A write already being written when it is pressed goes on.
         """
         changes = self._changes_a_quit_would_drop()
-        if not changes or self._quit_requested:
+        if not changes:
             self._ctrl_c_quit = True
             self.quit()
+            return
+        if self._quit_requested:
+            self._ctrl_c_saving = True
+            quit_countdown.say(quit_countdown.saving(changes))
             return
         self._authoring_held = True
         self._quit_countdown = quit_countdown.Countdown(
@@ -3108,7 +3112,7 @@ class Application(Adw.Application):
     def _quit_countdown_done(self) -> None:
         """The countdown is over: what it held is saved, and the application quits once it is."""
         self._quit_countdown = None
-        self._quit_counted_down = True
+        self._ctrl_c_saving = True
         self._let_held_authoring_go()
         self.request_quit()
 
@@ -3152,7 +3156,8 @@ class Application(Adw.Application):
         on disk by it, as for any such save (`_drop_waiting_settings`). What is
         being written goes on, and the process's exit waits for it. A quit that
         comes any other way still hands everything on, as before. Said once,
-        during the countdown or after it (`QUIT_WITHOUT_THEM`).
+        during the countdown or after it, or after the line a first Ctrl-C
+        says while ``ctl quit`` saves them (`QUIT_WITHOUT_THEM`).
         """
         said = "" if self._quit_without_waiting else QUIT_WITHOUT_THEM
         self._quit_without_waiting = True

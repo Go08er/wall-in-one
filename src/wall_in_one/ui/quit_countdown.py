@@ -133,6 +133,18 @@ def say(line: str) -> None:
     _write(sys.stderr, f"{line}\n")
 
 
+def _changes(count: int) -> str:
+    return "1 change" if count == 1 else f"{count} changes"
+
+
+def saving(changes: int) -> str:
+    """What a first Ctrl-C says when a quit it didn't start is already saving them: no countdown."""
+    return (
+        f"Saving {_changes(changes)} before quitting\u2026 press Ctrl-C again to quit "
+        "immediately without them."
+    )
+
+
 def _write(out: TextIO | None, text: str) -> None:
     if not text or out is None:
         return
@@ -266,7 +278,7 @@ class Countdown:
                     signal.signal(number, previous)
 
     def _line(self) -> str:
-        changes = "1 change" if self._changes == 1 else f"{self._changes} changes"
+        changes = _changes(self._changes)
         # In place it counts down; said once, the line says how long.
         when = f"{self._left}…" if self._in_place else f"{self._left} seconds…"
         esc = ", or Esc to cancel quitting" if self.keys else ""

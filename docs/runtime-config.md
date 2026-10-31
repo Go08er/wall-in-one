@@ -612,9 +612,11 @@ daemon does not accumulate an unbounded session log.
 
 An automatic startup, schedule or cycle hand-over which cannot apply gets three
 attempts total, two seconds apart. Schedule and cycle transitions restore the
-prior selection and last-known-good wallpaper between attempts. Startup has no
-prior selection, so its paired still remains visible; after the third failure
-the route advances to another usable entry. In both cases the attributable
+prior selection and last-known-good wallpaper between attempts, except a rule
+boundary off a refused entry that a display shows, which doesn't restore it.
+There, as at startup, which has no prior selection, the paired still remains
+visible; after the third failure the route advances to another usable entry.
+In both cases the attributable
 playlist/entry becomes taboo for later automatic selection for the rest of the
 service session. Rejected socket input and failed reloads preserve a promised
 retry; an accepted explicit command or successful reload supersedes it. A

@@ -17111,3 +17111,104 @@ fn control_without_assignments_a_mirrored_boundary_with_a_third_entry_ends_on_it
     assert_eq!(screen.get("").map(String::as_str), Some("pages-3"));
     assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
 }
+
+// -- review r13n R-L-j: a mirrored move-on with nothing left and no stand-in ----------------
+//
+// As R-L-i, but nothing can stand in: the default all-media holds only the refused item. After
+// the third failure the rule's entry is taboo and nothing anywhere can play. The move-on found
+// nowhere to go and applied nothing, so a renderer the failed apply left running kept playing
+// under a row that said nothing plays there.
+
+/// Mirrored, motion on; DP-1 is on the default all-media [all-media-1, the item 3000000051]
+/// and HDMI-A-1 on mixed [two stills]; eve names pages [pages-1, the item] and, with
+/// `failing`, pages-2, a video. pages-1 is refused when asked and every apply on HDMI-A-1
+/// fails, so pages-2 plays on DP-1 alone. Started at 15:00 and ticked from the boundary to
+/// +601 s: the status then, and the driver.
+fn a_mirrored_boundary_onto_a_rule_with_nothing_left_anywhere(
+    failing: bool,
+) -> (serde_json::Value, Arc<Mutex<RuntimeDriverState>>) {
+    let entry = |id: &str| {
+        format!(
+            "[[playlists.entries]]\nid = \"{id}\"\nkind = \"still\"\nstill = \"/stills/{id}.png\"\n\
+             palette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+        )
+    };
+    let mut document = default_rule_document("pages")
+        .replace("dynamics_enabled = false", "dynamics_enabled = true")
+        .replace(&entry("all-media-2"), "")
+        .replace(
+            "connector = \"DP-1\"\nplaylist = \"mixed\"",
+            "connector = \"DP-1\"\nplaylist = \"all-media\"",
+        )
+        .replace(
+            "connector = \"HDMI-A-1\"\nplaylist = \"all-media\"",
+            "connector = \"HDMI-A-1\"\nplaylist = \"mixed\"",
+        );
+    if failing {
+        let video = entry("pages-2").replace(
+            "kind = \"still\"\n",
+            "kind = \"video\"\nmotion = \"/motion/pages-2.mp4\"\n",
+        );
+        document = document.replace(&entry("pages-1"), &format!("{}{video}", entry("pages-1")));
+    }
+    for id in ["all-media-1", "pages-1"] {
+        document = document.replace(
+            &format!("id = \"{id}\"\nkind = \"still\"\n"),
+            &format!("id = \"{id}\"\nkind = \"scene\"\nscene_id = \"3000000051\"\n"),
+        );
+    }
+    assert_eq!(
+        document.matches("scene_id = \"3000000051\"").count(),
+        2,
+        "the premise"
+    );
+    assert!(!document.contains("all-media-2"), "the premise");
+    assert_eq!(document.contains("pages-2"), failing, "the premise");
+    let (mut runtime, state) = default_rule_runtime(document, &[], on_the_third(15, 0));
+    {
+        let mut recorded = state.lock().unwrap();
+        recorded.refuse_when_asked.insert("pages-1".into());
+        recorded.fail_apply_output = Some("HDMI-A-1".into());
+    }
+    let at = on_the_third(16, 0);
+    let start = Instant::now();
+    for millis in [1_000, 3_100, 5_200, 7_300, 9_400, 61_000, 301_000, 601_000] {
+        runtime.tick(at, start + Duration::from_millis(millis));
+    }
+    (status(&mut runtime, at), state)
+}
+
+#[test]
+fn a_mirrored_move_on_with_nothing_left_and_no_stand_in_stops_what_the_failed_apply_left() {
+    let (snapshot, state) = a_mirrored_boundary_onto_a_rule_with_nothing_left_anywhere(true);
+    let dp1 = route(&snapshot, "DP-1");
+    assert!(!dp1["nothing_to_play"].is_null(), "the premise: {dp1}");
+    assert!(
+        snapshot["automatic_retry"].is_null(),
+        "the premise: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["taboo_entries"][0]["entry_id"], "pages-2",
+        "the premise: {snapshot}"
+    );
+    let recorded = state.lock().unwrap();
+    assert!(
+        recorded.active_outputs.is_empty(),
+        "pages-2's video still runs under a row that says nothing plays: {dp1}"
+    );
+    assert_eq!(recorded.retained_outputs.last().map(Vec::len), Some(0));
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}
+
+#[test]
+fn control_a_mirrored_boundary_onto_nothing_to_play_stops_everything() {
+    let (snapshot, state) = a_mirrored_boundary_onto_a_rule_with_nothing_left_anywhere(false);
+    assert!(
+        !route(&snapshot, "DP-1")["nothing_to_play"].is_null(),
+        "{snapshot}"
+    );
+    let recorded = state.lock().unwrap();
+    assert!(recorded.active_outputs.is_empty(), "{snapshot}");
+    assert_eq!(recorded.retained_outputs.last().map(Vec::len), Some(0));
+    assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
+}

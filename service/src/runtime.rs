@@ -2478,6 +2478,10 @@ impl<D: WallpaperDriver> Runtime<D> {
                                 restore_baseline: false,
                                 failures: Vec::new(),
                             });
+                        } else if self.current_targets(&self.target_outputs).is_empty() {
+                            // No stand-in either: an apply finds nothing to play and stops
+                            // what the failed one left (review r13n R-L-j).
+                            let _ = self.apply_current();
                         }
                     }
                 } else {

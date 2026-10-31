@@ -2773,15 +2773,23 @@ class Application(Adw.Application):
                     timeout=SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
                     give_up=never,
                 ):
-                    LOGGER.warning(
-                        "the runtime configuration on disk was not checked against Allow web "
-                        "wallpapers at exit: another writer held the compiler lock for over "
-                        "%s s; the next start judges it",
-                        SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
-                    )
                     look = _ExitLook(status)
                     judged = self._web_off_but_allowed_on_disk(target, source, look, never)
-                    if judged is not None:  # read only, unlocked: the file is left as it is
+                    if judged is None:
+                        LOGGER.warning(
+                            "the runtime configuration on disk was not checked against Allow web "
+                            "wallpapers at exit: another writer held the compiler lock for over "
+                            "%s s; the next start judges it",
+                            SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
+                        )
+                    else:
+                        LOGGER.warning(
+                            "Allow web wallpapers is off, and the configuration on disk could "
+                            "let a web wallpaper play, but it couldn\u2019t be replaced at exit: "
+                            "another writer held the compiler lock for over %s s",
+                            SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
+                        )
+                        # read only, unlocked: the file is left as it is
                         older = status is not None and not runtime_config.nothing_to_play_supported(
                             status
                         )

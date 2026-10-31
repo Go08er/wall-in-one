@@ -384,6 +384,26 @@ def test_t_4_a_lock_never_had_over_a_file_naming_an_item_an_older_service_may_pl
     assert not any("was sent quit at shutdown" in one for one in said), said
 
 
+@pytest.mark.parametrize("heard", ["control-reads-eight", "nothing", "an-older-service"])
+def test_s_n19_the_advice_on_the_lock_never_had_path_follows_a_line_saying_why(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    heard: str,
+) -> None:
+    """The file was judged (it could let a web wallpaper play) and not replaced: the line before
+    the advice says so and why, and nothing says the file was not checked or leaves it to the next
+    start."""
+    _, said = _lock_never_had(profiles, monkeypatch, caplog, heard)
+    at = next(i for i, one in enumerate(said) if RESTART in one)
+    why = said[at - 1]
+    assert "could let a web wallpaper play" in why, said
+    assert "couldn\u2019t be replaced at exit" in why, said
+    assert "compiler lock" in why, said
+    stale = ("was not checked", "the next start judges it")
+    assert not any(one_stale in one for one in said for one_stale in stale), said
+
+
 def test_control_s_n18_a_lock_never_had_over_a_file_the_holder_replaced_says_no_restart(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

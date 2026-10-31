@@ -210,7 +210,11 @@ install, under the lock its own save takes, and the document is compiled
 again for what it says ([runtime-config.md](runtime-config.md)).
 When the app ends, a publication of the setting that the quit cut off before
 it installed anything (it was turned off just before Ctrl-C, say) leaves the
-file it would have replaced. So, last, while the setting is off, a file on
+file it would have replaced. A Ctrl-C that quits without the changes still
+waiting to be saved never drops this one: turning web wallpapers off is the
+safe direction, so it is saved all the same, and judged here ([quitting from
+a terminal](../README.md#quitting-from-a-terminal)). So, last, while the
+setting is off, a file on
 disk that allows web wallpapers is replaced with the document that plays
 nothing, without asking the service anything: its own check of the file
 loads it. No wallpaper plays then until a publication gets through: the
@@ -225,7 +229,7 @@ allow web wallpapers is left as it is when the service last heard reads schema
 (it has no check of its own), the Workshop items the file names are looked up,
 each by its own `project.json` (no scan of the Workshop), and the file is
 replaced in the same way when one is a web page, a preset of one, or can't be
-checked. The wait for that look ends at a second Ctrl-C, or after two seconds,
+checked. The wait for that look ends at another Ctrl-C, or after two seconds,
 even while a slow disk or a hung mount holds it, and what it hasn't reached
 counts as a web page. A hand edit's parses share those same two seconds, and
 one cut counts as allowing web wallpapers (or as naming what can't be checked).
@@ -239,7 +243,7 @@ that is still running after an update can't load the document that plays
 nothing, though: it would keep playing what it holds. So when one was heard and
 the file names a web page its `project.json` confirms, the app tells it to quit,
 the one request the end of a quit sends: it waits a second for the answer at
-most, a second Ctrl-C ends that wait, and none is sent once a second Ctrl-C has
+most, another Ctrl-C ends that wait, and none is sent once another Ctrl-C has
 come. The service then stays stopped, and its next start runs the updated start
 check below. For an item that can't be checked it isn't told to quit; it plays
 what it holds until it is restarted, as it should be after an update
@@ -250,7 +254,7 @@ updated one plays nothing until a publication gets through. A save of the settin
 waited for, as long as such a save can take (its locks, and the check of the
 service that "Stop animations on battery" makes: about 70 seconds at most);
 with none, nothing is waited for. The lock is waited for two seconds at most,
-and only when there is a file to replace. A second Ctrl-C ends both waits at
+and only when there is a file to replace. Another Ctrl-C ends both waits at
 once. What they leave is judged again before the process exits, which waits
 for it anyway: a save the app stopped waiting for (that Ctrl-C, or its bound)
 still lands, and a lock it didn't get is let go. Once that save has landed and
@@ -260,7 +264,7 @@ wallpapers while the setting is off is replaced. That covers the app's own
 publication that read the setting before the save landed, and so rightly, then,
 installed a file that allows them. That later judgement's look at Workshop
 items is bounded by two seconds, and its quit by one. A save that fails leaves the setting on, and
-the file as it is. Only a third Ctrl-C, which ends the process at once, or
+the file as it is. Only one more Ctrl-C after that, which ends the process at once, or
 another program holding the lock past those five seconds, leaves such a file;
 the next start's compile, or its check of a kept file (below), judges it.
 At service start, a kept document (the one there already, kept because the

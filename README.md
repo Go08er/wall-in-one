@@ -325,6 +325,28 @@ shortcuts dialog; on an older one the keys still work and the menu item does
 nothing. The classic window has the same keys except `Ctrl+Space`, `Ctrl+N`
 and the `Alt` keys.
 
+### Quitting from a terminal
+
+Started from a terminal, the app quits on Ctrl-C there as it does for
+`wall-in-one ctl quit`: what you changed is saved first, and what is being
+written finishes. With nothing waiting to be saved there is no countdown.
+When changes are waiting (an edit queued behind another save, a setting, a
+renderer number still settling), it holds them for five seconds first, and
+counts down:
+
+    Saving 2 changes before quitting in 5… press Ctrl-C again to quit immediately without them, or Esc to cancel quitting.
+
+Ctrl-C again quits at once without them: what is already being written still
+finishes, nothing else is saved. Esc cancels the quit, and they are saved as
+usual. Esc is offered only when the app reads that terminal and runs in its
+foreground, and the terminal is put back as it was however the countdown
+ends. When standard error isn't a terminal, the line is written once, saying
+"in 5 seconds…". Turning **Allow web wallpapers** off is never dropped: it is
+saved whichever Ctrl-C quits, and the end of the quit still makes sure no web
+wallpaper plays ([Wallpaper Engine](docs/wallpaper-engine.md)). Once the quit
+itself has begun, another Ctrl-C ends its waits, and one more ends the process
+at once.
+
 ## Video wallpapers
 
 Videos are played by mpvpaper, with the paired still set through Noctalia

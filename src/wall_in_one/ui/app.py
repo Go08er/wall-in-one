@@ -2780,9 +2780,10 @@ class Application(Adw.Application):
                     )
                     if judged is None and read:
                         LOGGER.warning(
-                            "the runtime configuration on disk was read at exit and needs no "
-                            "replacement for Allow web wallpapers being off (it was not replaced "
-                            "under the lock: the compiler lock couldn\u2019t be taken within %s s)",
+                            "the runtime configuration on disk needs no replacement at exit "
+                            "(Allow web wallpapers is on now, or the file on disk can\u2019t let a "
+                            "web wallpaper play; it was not replaced under the lock: the compiler "
+                            "lock couldn\u2019t be taken within %s s)",
                             SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
                         )
                     elif judged is None:
@@ -2828,9 +2829,10 @@ class Application(Adw.Application):
         whose look ``give_up`` ends: then it counts as one); otherwise None. Read now, never a
         snapshot of before: a turn-off still being written is judged once it has landed
         (`_web_off_judged_once_landed`), and a save turned on since is what it says (review
-        r13f, N3). ``read``, when given, gets an item once the setting and the file have been
-        read (so a None after that means they need no replacing, not that they weren't looked
-        at)."""
+        r13f, N3). ``read``, when given, gets an item once the setting has been read as on, or
+        once it has been read as off and the file has been read too (so a None after that means
+        they need no replacing, not that they weren't looked at; the file was not read when the
+        setting is on)."""
         try:
             settings = config.load_strict(source)
         except config.ConfigError:

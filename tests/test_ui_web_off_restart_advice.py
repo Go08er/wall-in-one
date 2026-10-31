@@ -282,6 +282,7 @@ def _lock_never_had(
     text: str | None = None,
     web: int | None = None,
     install_while_held: str | None = None,
+    turn_web_on_while_held: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Another writer holds the compiler lock past the step's wait and the later judgement's
     (0.2 s and 0.5 s here), over ``text`` (default: a file that allows web wallpapers; ``web``:
@@ -316,6 +317,9 @@ def _lock_never_had(
                 tmp = path.with_name(path.name + ".other")
                 tmp.write_text(install_while_held, encoding="utf-8")
                 tmp.replace(path)
+            if turn_web_on_while_held:
+                time.sleep(0.35)
+                config.update({"allow_web_wallpapers": True})
             release.wait(30.0)
 
     thread = threading.Thread(target=holder)
@@ -449,9 +453,29 @@ def test_control_s_n18_a_lock_never_had_over_a_file_the_holder_replaced_says_no_
         "an-older-service",
         install_while_held=_naming([]),
     )
-    assert any("was read at exit and needs no replacement" in one for one in said), (
+    assert any("needs no replacement at exit" in one for one in said), (
         f"the premise (the path): {said}"
     )
+    assert not any("was not checked" in one for one in said), said
+    assert not any(RESTART in one for one in said), said
+    assert sent == []
+
+
+def test_control_s_n18_a_lock_never_had_while_the_holder_turns_web_on_says_so(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The holder turns Allow web wallpapers on while it holds the lock: the file is never read
+    then, and the setting is on. The line must not say the file was read or the setting is off."""
+    sent, said = _lock_never_had(
+        profiles, monkeypatch, caplog, "an-older-service", turn_web_on_while_held=True
+    )
+    assert config.load_strict(paths.settings_path()).allow_web_wallpapers, "the premise"
+    lines = [one for one in said if "needs no replacement at exit" in one]
+    assert len(lines) == 1, said
+    assert "Allow web wallpapers is on now" in lines[0], lines
+    assert "was read" not in lines[0] and "being off" not in lines[0], lines
     assert not any("was not checked" in one for one in said), said
     assert not any(RESTART in one for one in said), said
     assert sent == []

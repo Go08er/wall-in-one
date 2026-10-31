@@ -23,6 +23,7 @@ from typing import Final
 
 import pytest
 
+from tests.conftest import REAL_HOME
 from tests.process_helpers import is_alive, kill_and_reap, reaped, subreaper
 from wall_in_one import worker_processes
 from wall_in_one.library import workshop
@@ -319,8 +320,12 @@ def where_the_engine_looks(workshop_id: str, project: str = '{"type": "scene"}')
     """Install ``workshop_id`` where linux-wallpaperengine finds it, under this test's own HOME.
 
     While web wallpapers are off, nothing is handed to the engine that isn't a
-    scene or a video there (`workshop.engine_refusal`).
+    scene or a video there (`workshop.engine_refusal`). The conftest gives every
+    test a HOME of its own; without it this would write over `project.json` in
+    the account's real Steam folder, so it refuses to.
     """
+    if Path.home().resolve() == REAL_HOME.resolve():
+        pytest.fail(f"refusing to install Workshop item {workshop_id} under the real {REAL_HOME}")
     folder = Path.home() / workshop.ENGINE_WORKSHOP_FOLDERS[0] / workshop_id
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "project.json").write_text(project, encoding="utf-8")

@@ -28,6 +28,8 @@ from wall_in_one.ui import app as app_module  # noqa: E402
 
 RESTART = "systemctl --user restart wall-in-one"
 OLDER = "older than this app"
+CURRENT_SERVICE = "That service keeps the configuration it holds until it is restarted"
+IF_RUNNING = "If the wallpaper service is running"
 
 
 def _on_disk(text: str) -> None:
@@ -236,7 +238,9 @@ def test_s_n16_a_failed_install_tells_a_current_service_to_restart_without_calli
     )
     assert sent == []
     assert any("couldn\u2019t be replaced at shutdown" in one for one in said), said
-    assert any(RESTART in one for one in said), said
+    advice = [one for one in said if RESTART in one]
+    assert len(advice) == 1 and advice[0].startswith(CURRENT_SERVICE), said
+    assert not any(one.startswith(IF_RUNNING) for one in said), said  # the twin's line
     assert not any(OLDER in one for one in said), said
 
 

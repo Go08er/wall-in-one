@@ -975,33 +975,22 @@ def holds_web(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> bool
 
 
 def web_files_now(item: MediaItem) -> bool:
-    """Whether ``item``'s folder is, or may be, a web wallpaper's, read again now.
+    """Whether ``item``'s Workshop folder is, or may be, a web wallpaper's, read again now.
 
     `previews_off` asks the scan, which is as old as it is: a Steam update can
     turn a scene (or a video, or a preset's base) into a web page, and nothing
-    rescans for it. So whatever hands one of an item's files to ffmpeg or to
-    Noctalia while web wallpapers are off asks this just before. Each
-    `project.json` is read as the scan reads it (`_read_project`), and a type
-    that reads ``web`` in any spelling counts. What is read:
-
-    - For a Workshop item (`WORKSHOP_PROVIDER`), its own, and a preset's
-      base's where the scan found it (`MediaItem.scene_base_directory`, which
-      may be another Steam library's). Both fail closed as `holds_web` does:
-      one that can't be read or isn't one counts, and so does a base that is
-      gone or is itself a preset.
-    - For anything else, the one in the file's own folder: a library folder
-      inside Steam's Workshop folder lists a web wallpaper's pictures and
-      videos as the user's own. None there is the user's own folder, and so
-      is one with no web type in it (somebody else's project.json, read as
-      the scan reads one with no Wallpaper Engine fields). One that is there
-      and can't be read, or isn't one, counts.
+    rescans for it. So whatever hands one of a Workshop item's files to ffmpeg
+    while web wallpapers are off asks this just before. Its `project.json` is
+    read as the scan reads it (`_read_project`), and so is a preset's base's,
+    where the scan found it (`MediaItem.scene_base_directory`, which may be
+    another Steam library's). Both fail closed as `holds_web` does: a type
+    that reads ``web`` in any spelling counts, so does a `project.json` that
+    can't be read or isn't one, and so does a base that is gone or is itself
+    a preset. False for anything the Workshop didn't list
+    (`WORKSHOP_PROVIDER`): those are the user's own files, wherever they are.
     """
     if item.provider != WORKSHOP_PROVIDER:
-        heard, hear = _collecting()
-        project = _read_project(item.path.parent, hear)
-        if project is None:
-            return heard != [(item.path.parent, UnseenKind.NOT_A_WALLPAPER, NO_PROJECT)]
-        return "web" in {project.kind, project.declared_type, project.lenient_type}
+        return False
     # A scene's path is its folder; a video's is its file, in its folder.
     project = _read_project(item.path if item.kind is Kind.SCENE else item.path.parent)
     if project is None or "web" in {project.kind, project.declared_type, project.lenient_type}:

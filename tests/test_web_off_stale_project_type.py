@@ -12,9 +12,9 @@ a scene, and only ``project.json`` is changed before the request; the
 screenshot and ffmpeg boundaries are replaced with recorders that raise.
 
 The second half is the R14 review's probes: what the fresh read takes in
-besides an item's own type. A preset's base (L1), a library folder that is a
-Workshop item's (P1), a Workshop video's still beside it (P2), and the still
-maker asking again for a scene it was refused once the rescan says web (N1).
+besides an item's own type. A preset's base (L1), a Workshop video's still
+beside it (P2), and the still maker asking again for a scene it was refused
+once the rescan says web (N1).
 """
 
 from __future__ import annotations
@@ -24,18 +24,16 @@ import struct
 import subprocess
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from tests.conftest import REAL_HOME
 from tests.test_scenes import _QuietRenderer
 from tests.web_previews import Fixture
 from wall_in_one import thumbnails
 from wall_in_one.library import scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
-from wall_in_one.theme import noctalia
-from wall_in_one.theme.palette import PalettePair
 from wall_in_one.wallpaper import scenes
 from wall_in_one.wallpaper.applier import Applier, ApplyError
 
@@ -210,6 +208,8 @@ class _Tree:
 
     def link_home(self) -> None:
         """Where the engine looks under HOME: Steam's usual home, linked to the tree."""
+        if Path.home().resolve() == REAL_HOME.resolve():
+            pytest.fail(f"refusing to link a Steam folder under the real {REAL_HOME}")
         share = Path.home() / ".local" / "share"
         share.mkdir(parents=True, exist_ok=True)
         (share / "Steam").symlink_to(self.steam, target_is_directory=True)
@@ -267,58 +267,6 @@ def test_a_preset_whose_base_steam_made_web_gets_no_ffmpeg_while_web_is_off(
         assert not asked, "web-off ffmpeg was asked for a preset of a now-web base"
 
 
-def test_a_library_folder_inside_the_workshop_decodes_nothing_of_a_web_wallpapers(
-    tree: _Tree, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R14 P1: a library root that covers Steam's Workshop folder lists its files as local.
-
-    The listing stays (a copy in the user's own library wins over Steam's);
-    what is decoded with web off doesn't. The scene's folder is the control.
-    """
-    tree.make_web("200")
-    library = scan.scan([tree.content], include_workshop=False, records={})
-    assert {item.provider for item in library.items} == {"local"}
-    web_files = [item for item in library.items if item.path.parent.name == "200"]
-    scene_files = [item for item in library.items if item.path.parent.name == "230"]
-    assert {item.kind for item in web_files} == {Kind.STILL, Kind.VIDEO} and scene_files
-    asked = _decoder(monkeypatch)
-    for item in web_files:
-        assert not workshop.previews_off(item, False) and workshop.web_files_now(item)
-        with pytest.raises(thumbnails.ThumbnailError):
-            thumbnails.generate(item, force=True)
-    assert not asked, "web-off ffmpeg was asked for a web wallpaper's files"
-    for item in scene_files:
-        with pytest.raises(thumbnails.ThumbnailError):
-            thumbnails.generate(item, force=True)
-    assert len(asked) == len(scene_files)
-
-
-@pytest.mark.parametrize(
-    ("project", "refused"),
-    [
-        (None, False),  # none: the user's own folder
-        ('{"name": "my-site", "version": 2}', False),  # somebody else's project.json
-        ('{"type": "scene", "file": "scene.json"}', False),
-        ('{"type": " Web ", "file": "index.html"}', True),
-        ("[]", True),  # there, and not one that can be read
-        ("unreadable", True),
-    ],
-)
-def test_a_local_files_folder_is_a_web_wallpapers_only_if_its_project_json_may_say_so(
-    tmp_path: Path, project: str | None, refused: bool
-) -> None:
-    """R14 P1: what `workshop.web_files_now` says of a file the Workshop didn't list."""
-    picture = tmp_path / "pictures" / "a.png"
-    picture.parent.mkdir()
-    picture.write_bytes(_png(8, 8))
-    if project is not None:
-        (picture.parent / "project.json").write_text(project)
-    if project == "unreadable":
-        (picture.parent / "project.json").chmod(0o000)
-    item = MediaItem(path=picture, kind=Kind.STILL, size=1, mtime=0)
-    assert workshop.web_files_now(item) is refused
-
-
 def _video(tree: _Tree, state: str) -> MediaItem:
     """The Workshop video 210, paired by the scan with ``clip.png`` beside it."""
     item = tree.scan()["210"]
@@ -341,56 +289,6 @@ def test_a_workshop_videos_still_beside_it_is_not_used_once_its_folder_may_be_we
         assert still == item.paired_still
     else:
         assert still is None, "a now-web folder's still was used with web off"
-
-
-@pytest.mark.parametrize("dynamics", [False, True])
-@pytest.mark.parametrize("state", ["video-control", "stale-web"])
-def test_the_legacy_applier_hands_noctalia_no_still_from_a_now_web_folder(
-    tree: _Tree, monkeypatch: pytest.MonkeyPatch, state: str, dynamics: bool
-) -> None:
-    item = _video(tree, state)
-    shown: list[Path] = []
-    monkeypatch.setattr(noctalia, "set_wallpaper", lambda path, *_a: shown.append(path))
-
-    class Engine:
-        def stop(self) -> None: ...
-
-    applier = Applier(_QuietRenderer(), scene_renderer=Engine())  # type: ignore[arg-type]
-    if state == "stale-web" and not dynamics:
-        with pytest.raises(ApplyError):  # nothing else to show
-            applier.apply(item, dynamics_enabled=False)
-    else:
-        applier.apply(item, dynamics_enabled=dynamics)
-    assert shown == ([] if state == "stale-web" else [item.paired_still])
-
-
-@pytest.mark.parametrize("state", ["video-control", "stale-web"])
-def test_no_colours_are_generated_from_a_now_web_folders_still_while_web_is_off(
-    tree: _Tree, state: str
-) -> None:
-    from wall_in_one.ui.next.real_editing import RealEditing, SchemePreviews
-
-    item = _video(tree, state)
-    generated: list[Path] = []
-
-    def generate(image: Path, _scheme: str) -> PalettePair:
-        generated.append(image)
-        raise noctalia.NoctaliaError("intercepted: noctalia was not asked")
-
-    previews = SchemePreviews(lambda: None, generate)
-    editing = SimpleNamespace(
-        _shown=SimpleNamespace(item_of=lambda _wid: item, default_scheme=noctalia.ALL_SCHEMES[0]),
-        _scheme_previews=lambda: previews,
-        _representative=lambda _item: item.paired_still,  # the scan's word
-        _session=SimpleNamespace(settings=SimpleNamespace(allow_web_wallpapers=False)),
-    )
-    wallpaper = SimpleNamespace(id="210")
-    assert RealEditing.scheme_swatches(editing, wallpaper, None) == []  # type: ignore[arg-type]
-    pool = previews._pool
-    assert pool is not None
-    pool.shutdown(wait=True)  # the worker has done what it was given
-    previews.shutdown()
-    assert generated == ([] if state == "stale-web" else [item.paired_still])
 
 
 @pytest.mark.parametrize("state", ["scene-control", "stale-web"])

@@ -93,16 +93,11 @@ class Applier:
         video running over the wrong colours.
 
         ``allow_web`` is ``allow_web_wallpapers``: while it is off, a scene's
-        type is read again before the engine is started (`_start_scene`), and
-        a video's folder before its still is handed to Noctalia.
+        type is read again before the engine is started (`_start_scene`).
         """
         if item.unplayable is not None:
             # Never handed to a renderer (docs/wallpaper-engine.md).
             raise ApplyError(f"{item.name} can\u2019t play: {item.unplayable_reason}")
-        if item.kind is Kind.VIDEO and not allow_web and workshop.web_files_now(item):
-            # Steam may have made its folder a web wallpaper's since the scan,
-            # and the still paired with it may be one of that page's files.
-            item = item.with_still(None)
         target = item.playback_path(dynamics_enabled=dynamics_enabled)
         if target is None:
             raise ApplyError(f"{item.name} is a video with no still, and dynamics are off")

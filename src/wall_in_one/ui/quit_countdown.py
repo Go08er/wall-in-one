@@ -112,10 +112,8 @@ def _restore(fd: int) -> None:
         saved = _SAVED.pop(fd, None)
         if saved is None:
             return
-        try:
+        with contextlib.suppress(termios.error, OSError):
             termios.tcsetattr(fd, termios.TCSANOW, saved)
-        except termios.error, OSError:
-            pass
     finally:
         if blocked is not None:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)

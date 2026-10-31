@@ -2113,14 +2113,15 @@ def ensure(
             return None
         except StillError:
             return None
+    if not allow_web and workshop.web_files_now(item):
+        # A video whose folder Steam has made a web wallpaper's since the
+        # scan: the still paired with it may be one of that page's files.
+        return None
     if item.paired_still is not None:
         return item.paired_still
     existing = pairing.find_still(item.path, roots=(root,))
     if existing is not None:
         return existing
-    if not allow_web and workshop.web_files_now(item):
-        # A Workshop video Steam has made a web page since the scan.
-        return None
     try:
         return generate(item.path, root, processes=processes)
     except StillFolderError as error:

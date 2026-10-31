@@ -288,6 +288,11 @@ class StillMaker:
                 is not None
             ):
                 made += 1
+            elif not item.holds_web and workshop.web_files_now(item):
+                # Refused because its folder may be a web wallpaper's now, even
+                # with web on: only an item the scan knew as one is told the
+                # setting. Not counted as attempted, so the rescan's is asked for.
+                self._attempted.discard(item.path)
         if self._processes.cancelled():
             return
         if refused:

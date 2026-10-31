@@ -141,6 +141,10 @@ class MediaItem:
     #: wallpaper it is a preset of. Empty: `scene` itself. `scene` stays this
     #: item's own id, which is what its pairing, still and taboo key on.
     scene_base: str = ""
+    #: The folder the scan found `scene_base` in, which may be in another
+    #: Steam library than the preset's own; ``None`` when it found none. Where
+    #: its type is read again (`library.workshop.web_files_now`).
+    scene_base_directory: Path | None = None
     #: A preset's property values, by name in name order, already checked
     #: against the base's own declarations (`library.workshop`).
     scene_properties: tuple[tuple[str, str], ...] = ()

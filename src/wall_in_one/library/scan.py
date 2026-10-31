@@ -516,6 +516,9 @@ def workshop_items(
                         else item.kind
                     ),
                     scene_base=plays.base,
+                    scene_base_directory=(
+                        by_id[plays.base].directory if plays.base in by_id else None
+                    ),
                     scene_properties=plays.properties,
                     scene_settings=(
                         ()

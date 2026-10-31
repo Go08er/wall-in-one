@@ -10,20 +10,32 @@ fallback drives, starts the engine the same way and is held to the same.
 No engine or decoder is started. The private Workshop fixture is scanned as
 a scene, and only ``project.json`` is changed before the request; the
 screenshot and ffmpeg boundaries are replaced with recorders that raise.
+
+The second half is the R14 review's probes: what the fresh read takes in
+besides an item's own type. A preset's base (L1), a library folder that is a
+Workshop item's (P1), a Workshop video's still beside it (P2), and the still
+maker asking again for a scene it was refused once the rescan says web (N1).
 """
 
 from __future__ import annotations
 
 import json
+import struct
 import subprocess
+import zlib
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from tests.test_scenes import _QuietRenderer
 from tests.web_previews import Fixture
 from wall_in_one import thumbnails
-from wall_in_one.library import scan, stills
-from wall_in_one.library.model import MediaItem
+from wall_in_one.library import scan, stills, workshop
+from wall_in_one.library.model import Kind, MediaItem
+from wall_in_one.theme import noctalia
+from wall_in_one.theme.palette import PalettePair
 from wall_in_one.wallpaper import scenes
 from wall_in_one.wallpaper.applier import Applier, ApplyError
 
@@ -118,3 +130,309 @@ def test_a_legacy_scene_start_reads_the_type_again_before_the_engine_is_started(
         with pytest.raises(ApplyError):
             applier.apply(item, dynamics_enabled=True)
         assert not started, "web-off scene start dispatched the engine on the scan's old type"
+
+
+# -- R14: what else the fresh read takes in ------------------------------------------
+
+
+def _png(width: int, height: int) -> bytes:
+    """A real PNG: whatever reads its header reads one."""
+    raw = b"".join(b"\0" + b"\x80\x80\x80" * width for _ in range(height))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = struct.pack(">I", zlib.crc32(kind + data))
+        return struct.pack(">I", len(data)) + kind + data + crc
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+class _Tree:
+    """A private Steam tree: a scene (200), a video with a still beside it (210),
+    and a scene (230) with a preset of it (220). A second Steam library is
+    scanned too, empty unless a test moves an item into it."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.steam = tmp_path / "steam"
+        self.other = tmp_path / "other-steam"
+        self.contents = tuple(
+            steam / "steamapps" / "workshop" / "content" / workshop.APP_ID
+            for steam in (self.steam, self.other)
+        )
+        self.content = self.contents[0]
+        self.root = tmp_path / "library"
+        (self.root / "Wall-in-One" / "Automatic Stills").mkdir(parents=True)
+        scene = {"type": "scene", "file": "scene.json"}
+        self.put("200", {**scene, "title": "S", "preview": "p.png"})
+        self.put("210", {"type": "video", "title": "V", "file": "clip.mp4", "preview": "p.png"})
+        (self.content / "210" / "clip.png").write_bytes(_png(8, 8))  # the video's still
+        self.put("230", {**scene, "title": "B", "preview": "bp.png"})
+        self.put(
+            "220", {"title": "P", "dependency": "230", "preset": {"a": 1}, "preview": "pp.png"}
+        )
+
+    def put(self, wid: str, project: dict[str, Any]) -> None:
+        folder = self.content / wid
+        folder.mkdir(parents=True)
+        (folder / "project.json").write_text(json.dumps(project))
+        for name in ("scene.json", "scene.pkg", "clip.mp4", "index.html"):
+            (folder / name).write_bytes(b"x")
+        for name in ("p.png", "preview.jpg", "bp.png", "pp.png"):
+            (folder / name).write_bytes(_png(8, 8))
+
+    def folder(self, wid: str) -> Path:
+        return next(content / wid for content in self.contents if (content / wid).is_dir())
+
+    def elsewhere(self, wid: str) -> None:
+        """Move ``wid`` into the second Steam library."""
+        self.contents[1].mkdir(parents=True, exist_ok=True)
+        self.folder(wid).rename(self.contents[1] / wid)
+
+    def make_web(self, wid: str) -> None:
+        """What a Steam update can do to a scene's or a video's folder."""
+        (self.folder(wid) / "project.json").write_text(
+            json.dumps({"type": "web", "title": "W", "file": "index.html", "preview": "p.png"})
+        )
+
+    def scan(self) -> dict[str, MediaItem]:
+        library = scan.scan(
+            [self.root],
+            include_workshop=True,
+            workshop_roots=(self.steam, self.other),
+            records={},
+        )
+        return {(item.scene or item.path.parent.name): item for item in library.items}
+
+    def link_home(self) -> None:
+        """Where the engine looks under HOME: Steam's usual home, linked to the tree."""
+        share = Path.home() / ".local" / "share"
+        share.mkdir(parents=True, exist_ok=True)
+        (share / "Steam").symlink_to(self.steam, target_is_directory=True)
+
+
+@pytest.fixture
+def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Tree:
+    monkeypatch.setattr(thumbnails, "cache_directory", lambda: tmp_path / "cache")
+    monkeypatch.setattr(thumbnails, "is_available", lambda: True)
+    monkeypatch.setattr(stills, "is_available", lambda: True)
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    return _Tree(tmp_path)
+
+
+def _decoder(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Every ffmpeg command line asked for, each refused."""
+    asked: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        asked.append([str(part) for part in argv])
+        raise OSError("intercepted: the decoder was not started")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return asked
+
+
+@pytest.mark.parametrize("where", ["beside", "another-library"])
+@pytest.mark.parametrize("state", ["scene-control", "stale", "fresh-control"])
+def test_a_preset_whose_base_steam_made_web_gets_no_ffmpeg_while_web_is_off(
+    tree: _Tree, monkeypatch: pytest.MonkeyPatch, where: str, state: str
+) -> None:
+    """R14 L1: a fresh scan calls a preset of a web base web (`workshop.holds_web`).
+
+    So the read before ffmpeg reads the base too, where the scan found it: in
+    another Steam library than the preset's, one that is still a scene is no
+    reason to refuse.
+    """
+    if where == "another-library":
+        tree.elsewhere("230")
+    preset = tree.scan()["220"]
+    assert not preset.holds_web
+    if state != "scene-control":
+        tree.make_web("230")
+    if state == "fresh-control":
+        preset = tree.scan()["220"]
+        assert preset.holds_web
+    asked = _decoder(monkeypatch)
+    with pytest.raises((thumbnails.ThumbnailError, stills.StillError)):
+        thumbnails.generate(preset, force=True)
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(preset, tree.root, force=True)
+    if state == "scene-control":
+        assert asked, "a preset of a scene got no thumbnail or still"
+    else:
+        assert not asked, "web-off ffmpeg was asked for a preset of a now-web base"
+
+
+def test_a_library_folder_inside_the_workshop_decodes_nothing_of_a_web_wallpapers(
+    tree: _Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R14 P1: a library root that covers Steam's Workshop folder lists its files as local.
+
+    The listing stays (a copy in the user's own library wins over Steam's);
+    what is decoded with web off doesn't. The scene's folder is the control.
+    """
+    tree.make_web("200")
+    library = scan.scan([tree.content], include_workshop=False, records={})
+    assert {item.provider for item in library.items} == {"local"}
+    web_files = [item for item in library.items if item.path.parent.name == "200"]
+    scene_files = [item for item in library.items if item.path.parent.name == "230"]
+    assert {item.kind for item in web_files} == {Kind.STILL, Kind.VIDEO} and scene_files
+    asked = _decoder(monkeypatch)
+    for item in web_files:
+        assert not workshop.previews_off(item, False) and workshop.web_files_now(item)
+        with pytest.raises(thumbnails.ThumbnailError):
+            thumbnails.generate(item, force=True)
+    assert not asked, "web-off ffmpeg was asked for a web wallpaper's files"
+    for item in scene_files:
+        with pytest.raises(thumbnails.ThumbnailError):
+            thumbnails.generate(item, force=True)
+    assert len(asked) == len(scene_files)
+
+
+@pytest.mark.parametrize(
+    ("project", "refused"),
+    [
+        (None, False),  # none: the user's own folder
+        ('{"name": "my-site", "version": 2}', False),  # somebody else's project.json
+        ('{"type": "scene", "file": "scene.json"}', False),
+        ('{"type": " Web ", "file": "index.html"}', True),
+        ("[]", True),  # there, and not one that can be read
+        ("unreadable", True),
+    ],
+)
+def test_a_local_files_folder_is_a_web_wallpapers_only_if_its_project_json_may_say_so(
+    tmp_path: Path, project: str | None, refused: bool
+) -> None:
+    """R14 P1: what `workshop.web_files_now` says of a file the Workshop didn't list."""
+    picture = tmp_path / "pictures" / "a.png"
+    picture.parent.mkdir()
+    picture.write_bytes(_png(8, 8))
+    if project is not None:
+        (picture.parent / "project.json").write_text(project)
+    if project == "unreadable":
+        (picture.parent / "project.json").chmod(0o000)
+    item = MediaItem(path=picture, kind=Kind.STILL, size=1, mtime=0)
+    assert workshop.web_files_now(item) is refused
+
+
+def _video(tree: _Tree, state: str) -> MediaItem:
+    """The Workshop video 210, paired by the scan with ``clip.png`` beside it."""
+    item = tree.scan()["210"]
+    assert item.kind is Kind.VIDEO and item.paired_still == tree.content / "210" / "clip.png"
+    if state == "stale-web":
+        tree.make_web("210")
+    return item
+
+
+@pytest.mark.parametrize("state", ["video-control", "stale-web"])
+def test_a_workshop_videos_still_beside_it_is_not_used_once_its_folder_may_be_web(
+    tree: _Tree, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """R14 P2: the scan's pairing is as old as the scan; the still is in the folder."""
+    item = _video(tree, state)
+    asked = _decoder(monkeypatch)
+    still = stills.ensure(item, tree.root)
+    assert not asked
+    if state == "video-control":
+        assert still == item.paired_still
+    else:
+        assert still is None, "a now-web folder's still was used with web off"
+
+
+@pytest.mark.parametrize("dynamics", [False, True])
+@pytest.mark.parametrize("state", ["video-control", "stale-web"])
+def test_the_legacy_applier_hands_noctalia_no_still_from_a_now_web_folder(
+    tree: _Tree, monkeypatch: pytest.MonkeyPatch, state: str, dynamics: bool
+) -> None:
+    item = _video(tree, state)
+    shown: list[Path] = []
+    monkeypatch.setattr(noctalia, "set_wallpaper", lambda path, *_a: shown.append(path))
+
+    class Engine:
+        def stop(self) -> None: ...
+
+    applier = Applier(_QuietRenderer(), scene_renderer=Engine())  # type: ignore[arg-type]
+    if state == "stale-web" and not dynamics:
+        with pytest.raises(ApplyError):  # nothing else to show
+            applier.apply(item, dynamics_enabled=False)
+    else:
+        applier.apply(item, dynamics_enabled=dynamics)
+    assert shown == ([] if state == "stale-web" else [item.paired_still])
+
+
+@pytest.mark.parametrize("state", ["video-control", "stale-web"])
+def test_no_colours_are_generated_from_a_now_web_folders_still_while_web_is_off(
+    tree: _Tree, state: str
+) -> None:
+    from wall_in_one.ui.next.real_editing import RealEditing, SchemePreviews
+
+    item = _video(tree, state)
+    generated: list[Path] = []
+
+    def generate(image: Path, _scheme: str) -> PalettePair:
+        generated.append(image)
+        raise noctalia.NoctaliaError("intercepted: noctalia was not asked")
+
+    previews = SchemePreviews(lambda: None, generate)
+    editing = SimpleNamespace(
+        _shown=SimpleNamespace(item_of=lambda _wid: item, default_scheme=noctalia.ALL_SCHEMES[0]),
+        _scheme_previews=lambda: previews,
+        _representative=lambda _item: item.paired_still,  # the scan's word
+        _session=SimpleNamespace(settings=SimpleNamespace(allow_web_wallpapers=False)),
+    )
+    wallpaper = SimpleNamespace(id="210")
+    assert RealEditing.scheme_swatches(editing, wallpaper, None) == []  # type: ignore[arg-type]
+    pool = previews._pool
+    assert pool is not None
+    pool.shutdown(wait=True)  # the worker has done what it was given
+    previews.shutdown()
+    assert generated == ([] if state == "stale-web" else [item.paired_still])
+
+
+@pytest.mark.parametrize("state", ["scene-control", "stale-web"])
+def test_with_web_on_a_scene_refused_as_web_is_asked_for_again_after_the_rescan(
+    tree: _Tree, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """R14 N1: the still maker tells only a scan-known web item that web is on.
+
+    So a scene Steam has made a web page is refused, whatever the setting; the
+    rescan's web item must not then be kept out as already attempted. The
+    control is a scene the engine fails on, which is not asked for again.
+    """
+    from wall_in_one.ui.stills import StillMaker
+
+    tree.link_home()
+    stale = tree.scan()["200"]
+    if state == "stale-web":
+        tree.make_web("200")
+    engine: list[str] = []
+
+    def screenshot(scene: str, *_args: object, **_kwargs: object) -> None:
+        engine.append(scene)
+        raise scenes.SceneError("intercepted: the engine was not started")
+
+    monkeypatch.setattr(scenes, "screenshot", screenshot)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_a: (64, 40))
+    maker = StillMaker(web_allowed=lambda: True)
+    submitted: list[tuple[MediaItem, ...]] = []
+    monkeypatch.setattr(
+        maker, "_submit", lambda _work, items, *_rest, context: submitted.append(items)
+    )
+    monkeypatch.setattr(maker, "_local_displays", lambda: ())
+    maker.request([stale], tree.root, lambda made: None)
+    assert submitted == [(stale,)]
+    maker._run((stale,), tree.root, lambda made: None)
+    rescanned = tree.scan()["200"]
+    maker.request([rescanned], tree.root, lambda made: None)
+    maker.shutdown()
+    if state == "stale-web":
+        assert engine == []
+        assert rescanned.holds_web and rescanned.still_from_preview
+        assert submitted == [(stale,), (rescanned,)], "the rescan's web item was never asked for"
+    else:
+        assert engine == ["200"]
+        assert submitted == [(stale,)]

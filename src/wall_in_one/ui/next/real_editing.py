@@ -274,7 +274,14 @@ class SchemePreviews:
     def known(self, image: Path, scheme: str) -> bool:
         return (image, scheme) in self._done
 
-    def request(self, image: Path, scheme: str) -> None:
+    def request(
+        self, image: Path, scheme: str, refused: Callable[[], bool] = lambda: False
+    ) -> None:
+        """Generate ``scheme`` from ``image`` on the worker, unless ``refused`` says so there.
+
+        A refusal is remembered as a failure is, so the redraw it causes
+        doesn't ask again.
+        """
         key = (image, scheme)
         if self._closed or key in self._done or key in self._pending:
             return
@@ -283,7 +290,13 @@ class SchemePreviews:
                 max_workers=PREVIEW_WORKERS, thread_name_prefix="next-scheme"
             )
         self._pending.add(key)
-        future = self._pool.submit(self._generate, image, scheme)
+
+        def generate() -> PalettePair:
+            if refused():
+                raise RuntimeError(f"no colours are generated from {image}")
+            return self._generate(image, scheme)
+
+        future = self._pool.submit(generate)
         future.add_done_callback(lambda done: self._finished(key, done))
 
     def _finished(self, key: tuple[Path, str], future: Future[PalettePair]) -> None:
@@ -685,7 +698,12 @@ class RealEditing:
             return []
         pair = previews.lookup(image, chosen)
         if pair is None:
-            previews.request(image, chosen)
+            # Read again on the worker, before noctalia opens the still: Steam
+            # may have made the folder it is in a web wallpaper's since the scan.
+            allowed = self._session.settings.allow_web_wallpapers
+            previews.request(
+                image, chosen, refused=lambda: not allowed and workshop.web_files_now(item)
+            )
             return []
         return _strip(pair.for_mode("dark" if dark else "light"))
 

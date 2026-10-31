@@ -2634,6 +2634,12 @@ class Application(Adw.Application):
                         "and its start check then compiles that file again or refuses it: "
                         "systemctl --user restart wall-in-one"
                     )
+                elif why == _ALLOWS:  # no service heard: it may or may not be running
+                    LOGGER.warning(
+                        "If the wallpaper service is running, it keeps the configuration it "
+                        "holds until it is restarted, and its start check then compiles that "
+                        "file again or refuses it: systemctl --user restart wall-in-one"
+                    )
             elif why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk may have "

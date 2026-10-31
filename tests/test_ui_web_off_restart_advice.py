@@ -240,6 +240,32 @@ def test_s_n16_a_failed_install_tells_a_current_service_to_restart_without_calli
     assert not any(OLDER in one for one in said), said
 
 
+@pytest.mark.parametrize("installed", [False, True], ids=["failed", "control-installed"])
+def test_s_n16_twin_a_failed_install_with_no_service_heard_says_to_restart_if_it_runs(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    installed: bool,
+) -> None:
+    """No status was heard, so the service may or may not be running; the control installed."""
+    sent, said = _step(
+        profiles,
+        monkeypatch,
+        caplog,
+        heard="nothing",
+        text=document("control-compiler-line")[0],
+        installed=installed,
+    )
+    assert sent == []
+    advice = [one for one in said if one.startswith("If the wallpaper service is running")]
+    if installed:
+        assert advice == [], said
+        return
+    assert any("couldn\u2019t be replaced at shutdown" in one for one in said), said
+    assert len(advice) == 1 and RESTART in advice[0], said
+    assert not any(OLDER in one for one in said), said
+
+
 # -- r13m S-N17 --------------------------------------------------------------------------------
 
 

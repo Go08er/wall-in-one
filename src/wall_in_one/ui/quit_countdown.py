@@ -69,15 +69,27 @@ def keys_usable(fd: int) -> bool:
 
 
 def _cbreak(fd: int) -> bool:
-    """Put the terminal ``fd`` in cbreak mode with echo off; whether it is."""
+    """Put the terminal ``fd`` in cbreak mode with echo off; whether it is.
+
+    What to put back is recorded before the terminal is changed, so that a
+    fatal signal's handler (`Countdown._hold_fatal_signals`) finds it whenever
+    the signal lands.
+    """
     try:
         saved = termios.tcgetattr(fd)
         mode = termios.tcgetattr(fd)
-        tty.cfmakecbreak(mode)  # ICANON and ECHO off; ISIG stays, so Ctrl-C is still SIGINT
-        termios.tcsetattr(fd, termios.TCSANOW, mode)
     except termios.error, OSError:
         return False
-    _SAVED.setdefault(fd, saved)
+    tty.cfmakecbreak(mode)  # ICANON and ECHO off; ISIG stays, so Ctrl-C is still SIGINT
+    fresh = fd not in _SAVED
+    if fresh:
+        _SAVED[fd] = saved
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, mode)
+    except termios.error, OSError:
+        if fresh:
+            _SAVED.pop(fd, None)
+        return False
     return True
 
 
@@ -85,21 +97,25 @@ def _restore(fd: int) -> None:
     """Put the terminal ``fd`` back as it was before `_cbreak`, if it isn't yet. Never raises.
 
     SIGTTOU is blocked meanwhile: a process sent to the background since
-    (Ctrl-Z, then ``bg``) would otherwise be stopped by it here. TCSANOW,
-    never a wait for output to drain, which a terminal held by Ctrl-S would
-    make last for ever at the process's exit.
+    (Ctrl-Z, then ``bg``) would otherwise be stopped by it here. So are the
+    `FATAL` signals, from before the attributes are taken until they are
+    set: one that lands then waits for the terminal to be put back, and a
+    handler that ran before finds them still there. TCSANOW, never a wait
+    for output to drain, which a terminal held by Ctrl-S would make last for
+    ever at the process's exit.
     """
-    saved = _SAVED.pop(fd, None)
-    if saved is None:
-        return
     try:
-        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU, *FATAL})
     except OSError, ValueError:
         blocked = None
     try:
-        termios.tcsetattr(fd, termios.TCSANOW, saved)
-    except termios.error, OSError:
-        pass
+        saved = _SAVED.pop(fd, None)
+        if saved is None:
+            return
+        try:
+            termios.tcsetattr(fd, termios.TCSANOW, saved)
+        except termios.error, OSError:
+            pass
     finally:
         if blocked is not None:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
@@ -134,8 +150,9 @@ class Countdown:
 
     ``changes``: how many changes a second Ctrl-C would drop, said in the line.
     ``done`` runs once the last second has passed, ``cancelled`` once Esc was
-    pressed; the countdown has stopped (`stop`) before either runs. GTK's
-    thread only.
+    pressed; the countdown has stopped (`stop`) before either runs. What
+    ``cancelled`` returns is said in place of `CANCELLED`, when it isn't
+    None. GTK's thread only.
     """
 
     def __init__(
@@ -145,7 +162,7 @@ class Countdown:
         tick_ms: int,
         *,
         done: Callable[[], None],
-        cancelled: Callable[[], None],
+        cancelled: Callable[[], str | None],
     ) -> None:
         self._changes = changes
         self._left = seconds
@@ -172,9 +189,15 @@ class Countdown:
 
     def start(self) -> None:
         fd = keys_fd()
-        if fd is not None and keys_usable(fd) and _cbreak(fd):
-            self._fd = fd
+        held = False
+        if fd is not None and keys_usable(fd):
+            # Before the terminal is changed: a fatal signal from here on puts it back.
             self._hold_fatal_signals()
+            held = _cbreak(fd)
+            if not held:
+                self._let_fatal_signals_go()
+        if held and fd is not None:
+            self._fd = fd
             channel = GLib.IOChannel.unix_new(fd)
             self._watch = GLib.io_add_watch(
                 channel,
@@ -319,6 +342,7 @@ class Countdown:
             self._done()
             return GLib.SOURCE_REMOVE
         self._watch = 0  # removed by returning
-        self.stop(CANCELLED)
-        self._cancelled()
+        self.stop()
+        instead = self._cancelled()
+        self._write(f"{instead or CANCELLED}\n")
         return GLib.SOURCE_REMOVE

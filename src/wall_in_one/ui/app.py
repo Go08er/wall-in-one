@@ -301,6 +301,8 @@ QUIT_COUNTDOWN_SECONDS: Final = 5
 QUIT_COUNTDOWN_TICK_MS: Final = 1000
 #: What a second Ctrl-C during that countdown says as it quits.
 QUIT_WITHOUT_THEM: Final = "Quitting immediately without them."
+#: What Esc during that countdown says when ``ctl quit`` asked to quit meanwhile.
+QUIT_GOES_ON: Final = "Quitting goes on: wall-in-one ctl quit asked for it."
 #: The longest a settings save can take, from the timeouts it can spend: the
 #: migration marker's lock it is written under (`legacy_migration.unattended_transaction`),
 #: then the settings file's own lock, and under that the check of the service that
@@ -3040,7 +3042,8 @@ class Application(Adw.Application):
         With none of the person's changes waiting, or with a quit already
         under way that this Ctrl-C didn't start (``ctl quit`` in ``--service``),
         at once and saying nothing, as before the countdown: ``quit()``, which
-        hands on what is waiting (`do_shutdown`), and never waits for the
+        hands on the renderer numbers and the Settings waiting (`do_shutdown`),
+        drops another queued edit as it did then, and never waits for the
         application's own tails, a scan or a publication. Otherwise what is
         waiting is held for `QUIT_COUNTDOWN_SECONDS`, counted down on standard
         error (`quit_countdown`), so that the person can quit without it (a
@@ -3109,10 +3112,19 @@ class Application(Adw.Application):
         self._let_held_authoring_go()
         self.request_quit()
 
-    def _quit_countdown_cancelled(self) -> None:
-        """Esc during the countdown: no quit, and what it held is saved as if it never ran."""
+    def _quit_countdown_cancelled(self) -> str | None:
+        """Esc during the countdown: no quit, and what it held is saved as if it never ran.
+
+        Unless ``ctl quit`` asked to quit meanwhile (``--service``): that quit
+        goes on, saving what was held as a careful quit does, and Esc says so
+        (`QUIT_GOES_ON`) instead of that the quit was cancelled.
+        """
         self._quit_countdown = None
         self._let_held_authoring_go()
+        if not self._quit_requested:
+            return None
+        self._maybe_finish_requested_quit()
+        return QUIT_GOES_ON
 
     def _let_held_authoring_go(self) -> None:
         """Let the authoring lane start what it held (`_authoring_held`), if it holds any."""
@@ -3161,8 +3173,9 @@ class Application(Adw.Application):
         a first Ctrl-C with none of the person's changes waiting among them,
         through `do_shutdown`; not a Ctrl-C after the first, which drops them
         (`_quit_without_waiting_changes`).
-        SIGTERM (there is no handler for it) and a lost display (GTK ends
-        the process itself) run none of them: a number nudged under
+        SIGTERM (it has a handler only while a first Ctrl-C's countdown holds
+        the terminal, and only to put the terminal back) and a lost display
+        (GTK ends the process itself) run none of them: a number nudged under
         `dial_rows.SETTLE_MS` before either is lost (review r13c, N-9). Each
         takes the queued write its timer would have taken, admitted even
         once a quit was asked (`dial_rows.handing_on`); that write holds the

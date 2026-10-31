@@ -366,6 +366,21 @@ preset whose base is web, not installed, unnamed or itself a preset. A malformed
 scene keeps its "Can't play" preview. The scan only `lstat`s the files `project.json` names
 (it never opens them).
 
+**Read again before a preview is made.** The scan's word is as old as the
+scan, and a Steam update can make a scene, a video or a preset's base a web
+wallpaper without one. So while the setting is off, a Workshop item's
+`project.json`, and a preset's base's where the scan found it, is read again
+just before ffmpeg is given one of its files (`workshop.web_files_now`), and
+the copies under the home folder, where linux-wallpaperengine looks, just
+before it is given the item's id (`workshop.engine_refusal`). One that reads
+`web`, or can't be read, gets nothing. Known gaps, none of which opens a web
+page: a picture the scan paired with a Workshop video, beside it in its
+folder, can still be used for its colours and by the legacy Python playback
+until the next scan; a preset whose own `project.json` now names another base
+is judged by the base the scan found; and a library folder you add that covers
+Steam's Workshop folder lists a web wallpaper's pictures and videos as your
+own files, which are previewed like any others.
+
 ### Executable wallpapers are never run
 
 Owner decision, for security: a Wallpaper Engine `application` wallpaper is a

@@ -4344,6 +4344,8 @@ class Application(Adw.Application):
             LOGGER.exception("a setting accepted before the shutdown could not be prepared")
             with self._settings_authoring_lock:
                 # Only the batch being written is still in flight, as before.
+                # What it took stays out of the pending fields: nothing reads
+                # them once the shutdown has begun.
                 self._settings_batch_generation = took
                 self._settings_batch_turns_web_off = turns_web_off
             return None

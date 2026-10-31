@@ -327,25 +327,32 @@ and the `Alt` keys.
 
 ### Quitting from a terminal
 
-Started from a terminal, the app quits on Ctrl-C there as it does for
-`wall-in-one ctl quit`: what you changed is saved first, and what is being
-written finishes. With nothing waiting to be saved there is no countdown.
-When changes are waiting (an edit queued behind another save, a setting, a
-renderer number still settling), it holds them for five seconds first, and
-counts down:
+Started from a terminal, the app quits on Ctrl-C there. When none of your
+changes is waiting to be saved, it quits at once, saying nothing, as it
+always did; what is being written finishes. So it does, as before, while
+`wall-in-one ctl quit` is already waiting (`--service`): the renderer
+numbers and settings still waiting are saved, other queued edits may not be.
+Otherwise, when some are waiting (an edit queued behind another save, a
+setting, a renderer number still settling), it holds them for five seconds
+first, and counts down:
 
     Saving 2 changes before quitting in 5… press Ctrl-C again to quit immediately without them, or Esc to cancel quitting.
 
-Ctrl-C again quits at once without them: what is already being written still
-finishes, nothing else is saved. Esc cancels the quit, and they are saved as
-usual. Esc is offered only when the app reads that terminal and runs in its
-foreground, and the terminal is put back as it was however the countdown
-ends. When standard error isn't a terminal, the line is written once, saying
-"in 5 seconds…". Turning **Allow web wallpapers** off is never dropped: it is
+Then it saves them and quits once they are saved, as `wall-in-one ctl quit`
+does. Ctrl-C again, during the countdown or while they are being saved,
+quits at once without what isn't being written yet, and says so: what is
+already being written still finishes. Esc cancels the quit, and they are
+saved as usual. Esc is offered only when the app reads that terminal and runs
+in its foreground; the terminal is put back as it was when the countdown
+ends, is cancelled or is cut short, and if the app is ended by SIGTERM,
+SIGHUP or SIGQUIT meanwhile (SIGKILL can't be caught). When standard error
+isn't a terminal, the line is written once, saying "in 5 seconds…". Only
+your own changes are counted: the app's own work, such as taking in a scan's
+result, isn't. Turning **Allow web wallpapers** off is never dropped: it is
 saved whichever Ctrl-C quits, and the end of the quit still makes sure no web
 wallpaper plays ([Wallpaper Engine](docs/wallpaper-engine.md)). Once the quit
-itself has begun, another Ctrl-C ends its waits, and one more ends the process
-at once.
+itself has begun, another Ctrl-C ends its waits, and one more ends the
+process at once.
 
 ## Video wallpapers
 

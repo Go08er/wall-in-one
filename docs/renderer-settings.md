@@ -208,10 +208,11 @@ A number is saved once it has stopped changing for 450 ms, so a spin through
 a range is one save. One still waiting when the app ends is saved then: on a
 window's close, on `wall-in-one ctl quit`, and on Ctrl-C once its five-second
 countdown is over ([quitting from a terminal](../README.md#quitting-from-a-terminal));
-Ctrl-C again during the countdown quits without it. A quit that comes another
-way, or a Ctrl-C again once the number is being saved, waits up to 15 s for
-that save and the publication it asks for (one more Ctrl-C ends the wait; the
-save still goes through). One whose time runs out while a
+Ctrl-C again, during the countdown or after it, quits without it. A Ctrl-C
+while `ctl quit` waits (`--service`) quits at once and saves it all the same;
+that quit, like a Ctrl-C again once the number is being saved, waits up to
+15 s for that save and the publication it asks for (one more Ctrl-C ends the
+wait; the save still goes through). One whose time runs out while a
 `ctl quit` waits for other saves is saved too, and the quit waits for it.
 SIGTERM, and a session that ends (the display goes away), end the process
 without the app's own code: a number nudged in the last 450 ms is lost then.

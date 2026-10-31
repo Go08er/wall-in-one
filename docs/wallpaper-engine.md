@@ -316,9 +316,11 @@ playlist takes over. While motion is off (on battery with the battery policy
 on, stopped, in a pause held from battery, or with motion turned off) nothing
 is asked, since nothing would be started: the entry's still shows, as any
 still-only entry's does, and the service asks once motion resumes. An item
-whose type changes between the service's read and the engine's own is refused
-by the engine's start instead: its still is up for that moment, and the
-service moves on at once. A playlist with nothing left that can play gives way
+whose type changes after that check is refused by the service's second check,
+just before it starts the engine: its still is up for that moment, and the
+service moves on at once. Both checks run before the engine is started. A
+change after the second one, in the moment before the engine reads the file
+itself, isn't caught. A playlist with nothing left that can play gives way
 to the document's default playlist, then to All media; with nothing left at
 all the display plays nothing, but for the known
 exceptions ([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never a taboo,
@@ -503,9 +505,10 @@ starts one from its JSON text (quoted), and a value set here replaces that.
 A true `scene` keeps the engine capture. Every other item listed as a scene
 gets its automatic still (the same `<id>.png` in `Automatic Stills`) from its
 own `preview` through ffmpeg: the first frame of a `.gif`, or the picture
-itself. It is made once and not re-judged against the display's size, since
-a preview is as large as it will ever be. An item that can't play gets no
-still at all.
+itself. A preset of a web wallpaper takes it from that wallpaper's preview
+(its own if that has none), since its settings aren't applied. It is made
+once and not re-judged against the display's size, since a preview is as large as it will ever be. An item that can't play gets
+no still at all.
 
 ### Reporting
 

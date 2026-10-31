@@ -358,7 +358,9 @@ it is for with its own settings. Executable (`application`) wallpapers are
 never run, for security, and any other type is listed but never played
 ([Wallpaper Engine](library.md#wallpaper-engine)). A true scene's still is
 captured through the engine in a window without anything appearing on screen;
-a web wallpaper's or a preset's comes from its own preview. The capture window
+a web wallpaper's comes from its own preview, and a preset's from its own
+preview too, except a preset of a web wallpaper, which uses that wallpaper's
+(its own if that has none). The capture window
 uses the display's physical mode as the compositor reports it (the service's
 snapshot, or GTK's monitors when no service answers), because the engine's
 default window produces a small portrait screenshot; when no display can be

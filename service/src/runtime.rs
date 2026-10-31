@@ -154,7 +154,7 @@ fn clean_error(value: &str) -> String {
         .collect()
 }
 
-fn truncate_middle(value: &str, maximum_bytes: usize) -> String {
+pub(crate) fn truncate_middle(value: &str, maximum_bytes: usize) -> String {
     let clean = clean_error(value);
     if clean.len() <= maximum_bytes {
         return clean;

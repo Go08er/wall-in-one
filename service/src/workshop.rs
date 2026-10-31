@@ -10,6 +10,7 @@
 //! web page or an item it can't classify (docs/wallpaper-engine.md). The
 //! runtime skips a refused entry to the next one that can play.
 
+use crate::runtime::truncate_middle;
 use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -29,6 +30,11 @@ pub const ENGINE_WORKSHOP_FOLDERS: &[&str] = &[
 
 /// The app's scan cap for one `project.json` (`workshop.MAX_PROJECT_BYTES`).
 pub const MAX_PROJECT_BYTES: u64 = 256 * 1024;
+
+/// The longest project `type` a refusal reason quotes, cut in the middle past
+/// it. `project.json` may be `MAX_PROJECT_BYTES` long, and a reason is logged
+/// and kept for the runtime's generation before status shortens it.
+const MAX_QUOTED_TYPE_BYTES: usize = 64;
 
 /// The home folder the engine resolves `--bg <id>` against: the service's
 /// own `HOME`, which its renderer children inherit. None when unset or not
@@ -118,6 +124,7 @@ fn classify(home: &Path, id: &str) -> Option<Why> {
             Ok(kind) if kind == "web" => return Some(Why::WebPage),
             Ok(kind) if kind == "scene" || kind == "video" => {}
             Ok(kind) => {
+                let kind = truncate_middle(&kind, MAX_QUOTED_TYPE_BYTES);
                 return Some(Why::Other(format!(
                     "Workshop item {id} has a type the service doesn't play ({kind:?}) in {}",
                     item.display()
@@ -539,6 +546,21 @@ mod tests {
         if unsafe { libc::geteuid() } != 0 {
             assert!(refused.is_some());
         }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_type_is_quoted_only_up_to_a_cap() {
+        let home = home("long-type");
+        // Multi-byte characters, so a cut must keep to character boundaries.
+        let long = "\u{e9}".repeat(100_000);
+        item(&home, 0, "50", &format!(r#"{{"type":"{long}"}}"#));
+        item(&home, 0, "51", r#"{"type":"application"}"#);
+        let reason = refusal_without_web(Some(&home), "50").unwrap().reason;
+        assert!(reason.len() < 1024, "{} bytes", reason.len());
+        assert!(reason.contains("[truncated]"));
+        let reason = refusal_without_web(Some(&home), "51").unwrap().reason;
+        assert!(reason.contains("(\"application\")"));
         fs::remove_dir_all(home).unwrap();
     }
 }

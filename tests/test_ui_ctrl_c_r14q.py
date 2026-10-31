@@ -335,3 +335,89 @@ def test_r14q_a_fatal_signal_landing_inside_restore(mode: str) -> None:
     assert facts["keys"] == "keys" and facts["during"], facts
     assert facts["status"] < 0, f"it didn't end by a signal: {facts}"
     assert facts["restored"], f"the terminal was left in cbreak mode, echo off: {facts}"
+
+
+# -- R14R R-N1: the same, with another thread to take the signal --------------------------------
+
+THREADED_RACE_CHILD = r"""
+import ctypes, fcntl, os, signal, sys, termios, time
+from concurrent.futures import ThreadPoolExecutor
+mode = sys.argv[1]
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE 0: never a core
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)  # the pty is this new session's terminal
+from gi.repository import GLib
+from wall_in_one.ui import quit_countdown
+if mode.startswith("threaded"):
+    # As the application's authoring lane: one worker, idle on its queue after a job.
+    lane = ThreadPoolExecutor(max_workers=1, thread_name_prefix="control-authoring")
+    lane.submit(lambda: None).result()
+real = termios.tcsetattr
+calls = []
+def pinned(fd, when, attributes):
+    calls.append(1)
+    # The second tcsetattr is `_restore`'s (the first is `_cbreak`'s): the saved attributes
+    # are taken, and not set yet.
+    if len(calls) == 2:
+        os.kill(os.getpid(), signal.SIGHUP if "term-then-hup" in mode else signal.SIGTERM)
+        time.sleep(0.2)  # long enough for another thread to take it, if there is one
+    return real(fd, when, attributes)
+termios.tcsetattr = pinned
+loop = GLib.MainLoop()
+seconds = 1 if "stop-then-term" in mode else 30
+countdown = quit_countdown.Countdown(1, seconds, 200, done=loop.quit, cancelled=loop.quit)
+countdown.start()
+print("keys" if countdown.keys else "no-keys", flush=True)
+loop.run()
+print("loop ended", flush=True)
+"""
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "threaded-stop-then-term",
+        "control-single-stop-then-term",
+        "threaded-term-then-hup",
+        "control-single-term-then-hup",
+    ],
+)
+def test_r14r_a_fatal_signal_inside_restore_with_another_thread(mode: str) -> None:
+    """R14R R-N1: a signal sent to the process (as ``kill``, systemd and Ctrl-\\ send it) once
+    ``_restore`` has taken the saved attributes, before tcsetattr. The application always has
+    other threads while a countdown runs, and one of them may take it; its handler still runs
+    on the main thread, and must find the attributes. ``stop-then-term``: SIGTERM as the
+    countdown stops by itself. ``term-then-hup``: the test sends SIGTERM while it counts, and
+    SIGHUP lands inside that handler's own restore. Controls: the same with no other thread."""
+    master, slave = os.openpty()
+    before = termios.tcgetattr(slave)
+    env = {**os.environ, "PYTHONPATH": str(REPO / "src")}
+    child = subprocess.Popen(
+        [sys.executable, "-c", THREADED_RACE_CHILD, mode],
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        env=env,
+        cwd=REPO,
+    )
+    facts: dict[str, Any] = {}
+    try:
+        ready, _, _ = select.select([child.stdout], [], [], 30)
+        assert ready, "the child never started its countdown"
+        facts["keys"] = child.stdout.readline().decode().strip()  # type: ignore[union-attr]
+        facts["during"] = _cbreak(termios.tcgetattr(slave))
+        if "term-then-hup" in mode:
+            os.kill(child.pid, signal.SIGTERM)  # the exact PID this test started
+        facts["status"] = child.wait(30)
+        facts["restored"] = termios.tcgetattr(slave) == before
+        facts["stderr"] = child.stderr.read().decode()[-200:]  # type: ignore[union-attr]
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(30)
+        os.close(slave)
+        os.close(master)
+    _record(f"R-N1[{mode}]", **facts)
+    assert facts["keys"] == "keys" and facts["during"], facts
+    assert facts["status"] < 0, f"it didn't end by a signal: {facts}"
+    assert facts["restored"], f"the terminal was left in cbreak mode, echo off: {facts}"

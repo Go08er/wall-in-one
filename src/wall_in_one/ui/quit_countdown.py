@@ -38,7 +38,11 @@ LOGGER = logging.getLogger(__name__)
 ESC: Final = b"\x1b"
 
 #: The signals that end the process at once, which a terminal in cbreak mode
-#: must not outlive: handled only while the countdown holds the terminal.
+#: must not outlive: handled only while the countdown holds the terminal. One
+#: that lands in the instant its handler is put back (`_let_fatal_signals_go`)
+#: can be lost, and the process then carries on as if it hadn't come: CPython
+#: drops a signal whose handler changed while it was pending (bpo-43406).
+#: Accepted: nothing short of not handling them at all avoids it.
 FATAL: Final = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
 #: The line that says the quit was cancelled, by Esc.
@@ -96,27 +100,29 @@ def _cbreak(fd: int) -> bool:
 def _restore(fd: int) -> None:
     """Put the terminal ``fd`` back as it was before `_cbreak`, if it isn't yet. Never raises.
 
-    SIGTTOU is blocked meanwhile: a process sent to the background since
-    (Ctrl-Z, then ``bg``) would otherwise be stopped by it here. So are the
-    `FATAL` signals, from before the attributes are taken until they are
-    set: one that lands then waits for the terminal to be put back, and a
-    handler that ran before finds them still there. TCSANOW, never a wait
-    for output to drain, which a terminal held by Ctrl-S would make last for
-    ever at the process's exit.
+    The attributes are forgotten only once they are set, so a `FATAL`
+    signal's handler that runs meanwhile, whichever of the process's threads
+    the signal came to, still finds them and sets them itself; setting them
+    twice does no harm. (Blocking the signals here would hold them off this
+    thread only.) SIGTTOU is blocked while they are set: a process sent to
+    the background since (Ctrl-Z, then ``bg``) would otherwise be stopped by
+    it here. TCSANOW, never a wait for output to drain, which a terminal
+    held by Ctrl-S would make last for ever at the process's exit.
     """
+    saved = _SAVED.get(fd)
+    if saved is None:
+        return
     try:
-        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU, *FATAL})
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
     except OSError, ValueError:
         blocked = None
     try:
-        saved = _SAVED.pop(fd, None)
-        if saved is None:
-            return
         with contextlib.suppress(termios.error, OSError):
             termios.tcsetattr(fd, termios.TCSANOW, saved)
     finally:
         if blocked is not None:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    _SAVED.pop(fd, None)
 
 
 def _restore_all() -> None:

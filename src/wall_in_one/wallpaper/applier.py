@@ -197,7 +197,7 @@ class Applier:
         # is read there first, as the service does before it starts one.
         refusal = "" if allow_web else workshop.engine_refusal(item.rendered_scene)
         if refusal:
-            raise ApplyError(f"{item.name} can\u2019t play: {workshop.WEB_OFF_REASON} ({refusal})")
+            raise ApplyError(f"{item.name} can\u2019t play while web wallpapers are off: {refusal}")
         try:
             # A preset renders its base with its own values.
             self._scenes.start(item.rendered_scene, item.scene_properties)

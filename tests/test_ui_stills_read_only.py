@@ -38,6 +38,7 @@ gi.require_version("Adw", "1")
 
 from tests import read_only_probe as ro  # noqa: E402
 from tests.gtk_helpers import settle, spin_until  # noqa: E402
+from tests.test_scenes import where_the_engine_looks  # noqa: E402
 from tests.test_stills_read_only import DISPLAY, FRAME, SCENE, read_only  # noqa: E402
 from tests.test_ui_next_window import toolkit  # noqa: E402,F401 -- a fixture: GTK, once
 from tests.test_ui_runtime import FakeWindow  # noqa: E402
@@ -297,6 +298,7 @@ def scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MediaItem:
         raise AssertionError("the engine was run for a still its folder can't take")
 
     monkeypatch.setattr(scenes, "screenshot", engine)
+    where_the_engine_looks(SCENE)
     return MediaItem(path=folder, kind=Kind.SCENE, size=0, mtime=0, scene=SCENE)
 
 

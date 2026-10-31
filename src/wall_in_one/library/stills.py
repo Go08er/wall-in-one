@@ -1893,8 +1893,12 @@ def capture_scene(
         if not force and not scene_capture_required(item, root, automatic=True):
             return target
         if not allow_web and workshop.web_files_now(item):
-            # Steam may have made it a web page since the scan.
-            raise StillError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no still of {item.name}")
+            # Steam may have made it a web page since the scan. Said without
+            # the setting: a caller passes False for anything not known web.
+            raise StillError(
+                f"{item.name}\u2019s folder may be a web wallpaper\u2019s now, "
+                "so no still was taken from its preview"
+            )
         source = _snapshot_source(item.path, Kind.SCENE)
         try:
             return _capture_scene_from_source(
@@ -1917,10 +1921,11 @@ def capture_scene(
     if not force and not scene_capture_required(item, root, size=measured, automatic=True):
         return target
     # The engine finds the id under the home folder, wherever the scan found
-    # it, and reads its type again there: so it is read there first.
+    # it, and reads its type again there: so it is read there first, and the
+    # refusal is said without the setting, as the preview's is above.
     refusal = "" if allow_web else workshop.engine_refusal(item.scene)
     if refusal:
-        raise StillError(f"{workshop.WEB_PREVIEW_OFF_NOTE}: no still of {item.name} ({refusal})")
+        raise StillError(f"{refusal}, so no still was taken for {item.name}")
     source = _snapshot_source(item.path, Kind.SCENE)
     try:
         return _capture_scene_from_source(

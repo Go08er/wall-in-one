@@ -1011,7 +1011,7 @@ def engine_refusal(workshop_id: str) -> str:
     current one, as in `default_steam_roots`.
     """
     if not is_workshop_id(workshop_id):
-        return "it has no Workshop id that can be checked"
+        return "its Workshop id can\u2019t be checked"
     try:
         home = Path.home()
     except RuntimeError:

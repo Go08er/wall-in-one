@@ -28,6 +28,7 @@ from urllib.parse import unquote
 
 import pytest
 
+from tests.test_scenes import where_the_engine_looks
 from wall_in_one import file_io, paths
 from wall_in_one.library import manage, pairing, scan, stills
 from wall_in_one.library.manage import ManageError
@@ -898,6 +899,7 @@ def test_workshop_delete_that_wins_during_scene_capture_prevents_late_publicatio
     scene_id = "1647046763"
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / scene_id
     installation.mkdir(parents=True)
+    where_the_engine_looks(scene_id)
     scene = MediaItem(
         path=installation,
         kind=Kind.SCENE,

@@ -342,8 +342,10 @@ Then it saves them and quits once they are saved, as `wall-in-one ctl quit`
 does. Ctrl-C again, during the countdown or while they are being saved,
 quits at once without what isn't being written yet, and says so: what is
 already being written still finishes. Esc cancels the quit, and they are
-saved as usual. Esc is offered only when the app reads that terminal and runs
-in its foreground; the terminal is put back as it was when the countdown
+saved as usual; unless `wall-in-one ctl quit` asked to quit meanwhile, and
+then that quit goes on, and Esc says so. Esc is offered only when the app
+reads that terminal and runs in its foreground; the terminal is put back as
+it was when the countdown
 ends, is cancelled or is cut short, and if the app is ended by SIGTERM,
 SIGHUP or SIGQUIT meanwhile (SIGKILL can't be caught). When standard error
 isn't a terminal, the line is written once, saying "in 5 seconds…". Only

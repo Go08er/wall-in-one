@@ -395,9 +395,11 @@ shown either, and moves on to the next entry of the same playlist. With motion
 off (stopped, on battery with the battery policy on, a pause held from
 battery, `dynamics_enabled = false`) nothing is started, so nothing is asked:
 a scene's still shows as before, and the next start of motion asks. An item
-whose type changes between the service's read and the engine's own is refused
-by the engine's start instead; its still is up until the service moves on, at
-once. When every entry of the playlist a display is on was refused (a taboo
+whose type changes after that check is refused by the service's second check,
+just before it starts the engine; its still is up until the service moves on,
+at once. Both checks run before the engine is started: a change after the
+second one, in the moment before the engine reads the file itself, isn't
+caught. When every entry of the playlist a display is on was refused (a taboo
 entry counts as unable to play too, but a playlist of taboo entries only keeps
 its taboo rules), the display plays the document's `default_playlist`, then
 `all-media`, each only when something of it can play. The display row then

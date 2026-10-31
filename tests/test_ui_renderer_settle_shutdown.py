@@ -14,7 +14,10 @@ loop until they settle (review r13b, G1). Review r13c found four things wrong wi
 * **N-2, a second Ctrl-C** did nothing: PyGObject's SIGINT fallback ignores every SIGINT after
   the first while ``run()`` is on the stack. Now it ends the wait, and a number still queued
   behind another write is still saved. A real SIGINT is raised in this process (to the handler
-  installed when it lands), as the kernel delivers one.
+  installed when it lands), as the kernel delivers one. Since r14o a first Ctrl-C saves what is
+  waiting after a countdown, and the one after it quits at once without it
+  (``tests/test_ui_ctrl_c_countdown.py``): the ``quit()`` these tests call stands for every other
+  way ``quit()`` comes, and their SIGINT for a Ctrl-C once it has.
 * **N-3, a number nudged while ``ctl quit`` waits** was refused without a word when its timer
   fired. Now it is saved, as one still waiting when the quit ends is.
 * **r13d N11, web wallpapers turned off while the shutdown settles:** that publication, on the
@@ -47,6 +50,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -229,7 +233,7 @@ def test_the_settle_is_bounded_while_the_publication_blocks(
         speed, _brightness = _rows(application, clip)
         speed.set_value(1.5)
         slow.armed = True  # the service hangs from here: each reload takes HANG
-        application.quit()  # what SIGINT's fallback calls
+        application.quit()  # a quit `request_quit` didn't ask for
 
     _run(application, scenario(), service=service)
     own = _own(clip, Kind.VIDEO)
@@ -338,13 +342,13 @@ def _interrupt(failures: list[str]) -> None:
     signal.raise_signal(signal.SIGINT)
 
 
-@pytest.mark.parametrize("variant", ["second-sigint", "one-sigint-control"])
+@pytest.mark.parametrize("variant", ["second-sigint", "control-no-sigint"])
 def test_a_second_sigint_cuts_the_settle_short(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
 ) -> None:
     """Windowed classic. The number's publication hangs on the runtime lane; the bound is the
     real one. Before: the second SIGINT did nothing, and ``run()`` returned only once the hang
-    was over (2.8 s after it, for a 3 s hang)."""
+    was over (2.8 s after it, for a 3 s hang). The control quits with no SIGINT at all."""
     application, clip, slow, _spans = _setup(
         monkeypatch,
         tmp_path,
@@ -364,21 +368,22 @@ def test_a_second_sigint_cuts_the_settle_short(
     def scenario() -> Iterator[Step]:
         yield "the first scan", _scanned(application, clip)
         handler = signal.getsignal(signal.SIGINT)
-        assert getattr(handler, "__module__", "") == "gi._ossighelper", (
-            f"PyGObject's SIGINT fallback is not installed here: {handler!r}"
+        assert handler is getattr(application, "_sigint_handler", None), (
+            f"the application's SIGINT handler is not installed here: {handler!r}"
         )
         speed, _brightness = _rows(application, clip)
         speed.set_value(1.5)
         _LANES.extend(application_lanes(application))
         slow.armed = True
         marks["first"] = time.monotonic()
-        _interrupt(failures)  # the first Ctrl-C: PyGObject calls application.quit()
+        application.quit()
         if variant == "second-sigint":
             GLib.timeout_add(300, second)  # runs inside the settle's own iterations
 
     _LANES.clear()
     ended = 0.0
-    with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+    # What run() raises once a Ctrl-C has come, as PyGObject's did.
+    with pytest.raises(KeyboardInterrupt) if variant == "second-sigint" else nullcontext():
         try:
             run_application(application, scenario())
         finally:
@@ -490,12 +495,12 @@ def test_a_second_sigint_isnt_held_by_a_scan_of_the_workshop(
         speed.set_value(1.5)
         _LANES.extend(application_lanes(application))
         slow.armed = True
-        _interrupt(failures)  # the first Ctrl-C: PyGObject calls application.quit()
+        application.quit()
         GLib.timeout_add(300, second)  # runs inside the settle's own iterations
 
     _LANES.clear()
     ended = 0.0
-    with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+    with pytest.raises(KeyboardInterrupt):  # what run() raises once a Ctrl-C has come
         try:
             run_application(application, scenario())
         finally:
@@ -559,11 +564,9 @@ def test_a_number_still_queued_when_the_settle_ends_is_still_saved(
         speed.set_value(1.5)
         brightness.set_value(20)
         _LANES.extend(application_lanes(application))
+        application.quit()
         if by_sigint:
-            _interrupt(failures)  # the first Ctrl-C
             GLib.timeout_add(300, second)
-        else:
-            application.quit()
 
     _LANES.clear()
     ended = 0.0
@@ -799,7 +802,7 @@ def test_web_turned_off_while_the_shutdown_settles_leaves_no_file_that_allows_th
         speed.set_value(1.5)
         slow.first = hung
         slow.armed = True
-        application.quit()  # what SIGINT's fallback calls
+        application.quit()  # a quit `request_quit` didn't ask for
 
     _run(application, scenario(), service=service)
     assert not failures, failures
@@ -861,7 +864,7 @@ def test_web_turned_off_as_the_loop_ends_leaves_no_file_that_allows_them(
         yield "the first scan", _scanned(application, clip)
         published.append(runtime_config.allows_web_wallpapers(paths.runtime_config_path()))
         assert application.update_settings_async(allow_web_wallpapers=False)
-        application.quit()  # what SIGINT's fallback calls
+        application.quit()  # a quit `request_quit` didn't ask for
 
     _run(application, scenario(), service=True)
     assert not failures, failures
@@ -971,7 +974,7 @@ def test_a_save_turning_web_off_slower_than_two_seconds_is_still_waited_for(
         yield "the first scan", _scanned(application, clip)
         published.append(runtime_config.allows_web_wallpapers(paths.runtime_config_path()))
         assert application.update_settings_async(allow_web_wallpapers=False)
-        application.quit()  # what SIGINT's fallback calls
+        application.quit()  # a quit `request_quit` didn't ask for
 
     try:
         _run(application, scenario(), service=True)
@@ -1073,7 +1076,7 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
         yield "the first scan", _scanned(application, clip)
         assert application.update_settings_async(allow_web_wallpapers=False)
         _LANES.extend(application_lanes(application))  # its worker, joined after the run
-        application.quit()  # the first Ctrl-C (SIGINT's fallback calls this)
+        application.quit()  # a quit `request_quit` didn't ask for
 
     def launch() -> bool:
         application.activate()
@@ -1082,7 +1085,7 @@ def test_a_second_ctrl_c_ends_the_wait_for_a_save_at_once(
     GLib.idle_add(launch)
     _LANES.clear()
     ended = 0.0
-    with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+    with pytest.raises(KeyboardInterrupt):  # what run() raises once a Ctrl-C has come
         try:
             run_application(application, scenario())
         finally:
@@ -1144,7 +1147,7 @@ def test_a_save_still_written_past_its_bound_that_turns_web_off_is_judged_once_i
             else application.update_settings_async(shuffle=True)
         )
         _LANES.extend(application_lanes(application))  # its worker, joined after the run
-        application.quit()  # what SIGINT's fallback calls
+        application.quit()  # a quit `request_quit` didn't ask for
 
     def launch() -> bool:
         application.activate()
@@ -1285,7 +1288,7 @@ def test_a_second_ctrl_c_ends_the_wait_for_the_compiler_lock(
         assert runtime_config.allows_web_wallpapers(paths.runtime_config_path())
         assert application.update_settings_async(allow_web_wallpapers=False)
         _LANES.extend(application_lanes(application))  # its worker, joined after the run
-        application.quit()  # the first Ctrl-C (SIGINT's fallback calls this)
+        application.quit()  # a quit `request_quit` didn't ask for
 
     ended = 0.0
     try:
@@ -1297,7 +1300,7 @@ def test_a_second_ctrl_c_ends_the_wait_for_the_compiler_lock(
 
             GLib.idle_add(launch)
             _LANES.clear()
-            with pytest.raises(KeyboardInterrupt):  # what PyGObject raises once run() returns
+            with pytest.raises(KeyboardInterrupt):  # what run() raises once a Ctrl-C has come
                 try:
                     run_application(application, scenario())
                 finally:
@@ -1377,7 +1380,7 @@ def test_a_global_renderer_number_accepted_behind_a_save_survives_quit(
         if mode == "request-quit":
             application.request_quit()
         else:
-            application.quit()  # what SIGINT's fallback calls
+            application.quit()  # a quit `request_quit` didn't ask for
 
     try:
         _run(application, scenario(), service=False)
@@ -1442,7 +1445,7 @@ def test_web_turned_off_in_or_behind_a_save_being_written_is_judged_once_it_land
         timer = threading.Timer(0.2, release.set)  # once the shutdown has begun
         timers.append(timer)
         timer.start()
-        application.quit()  # what SIGINT's fallback calls
+        application.quit()  # a quit `request_quit` didn't ask for
 
     def launch() -> bool:
         application.activate()

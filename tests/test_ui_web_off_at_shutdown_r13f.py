@@ -1206,7 +1206,7 @@ def test_a_second_ctrl_c_cuts_the_quit(
         service.order.append("step returned")
         assert service.verbs == ["quit"], "the older service playing a web page wasn't told to quit"
         assert service.closed.wait(GIVE_UP), "the app left the connection open"
-    assert "a second Ctrl-C ended the wait for its answer" in caplog.text, caplog.text
+    assert "another Ctrl-C ended the wait for its answer" in caplog.text, caplog.text
 
 
 def test_control_no_quit_once_a_second_ctrl_c_has_come(

@@ -82,6 +82,22 @@ def cancel_pending(owner: Hashable, key: str | None = None) -> None:
             cancel()
 
 
+def waiting() -> int:
+    """How many numbers are waiting out their settle time, from every pane."""
+    return len(_PENDING)
+
+
+def cancel_all() -> None:
+    """Drop every waiting number, whichever pane made it, without handing any on.
+
+    For a quit the person asked to make without them (a second Ctrl-C while
+    the application counts down to saving them): `flush_all`'s opposite.
+    """
+    for token, (_owner, _row, cancel, _flush) in tuple(_PENDING.items()):
+        _PENDING.pop(token, None)
+        cancel()
+
+
 def flush_all() -> int:
     """Hand on every waiting number now, each to the wallpaper it was entered for; how many.
 

@@ -69,7 +69,7 @@ from wall_in_one.session import (
     removal_lock_refusal,
 )
 from wall_in_one.theme import css, noctalia, source
-from wall_in_one.ui import dial_rows, monitors, runtime_truth
+from wall_in_one.ui import dial_rows, monitors, quit_countdown, runtime_truth
 from wall_in_one.ui.activity_log import ActivityLog
 from wall_in_one.ui.next.real_playlists import RenameResult
 from wall_in_one.ui.next.real_schedule import ColorsForgotten
@@ -291,9 +291,16 @@ RUNTIME_STATUS_TICK_SECONDS: Final = 2
 PALETTE_RELOAD_DEBOUNCE_MS: Final = 75
 MAX_GUI_AUTHORING_QUEUE: Final = 32
 #: How long a shutdown that wasn't asked for through `Application.request_quit`
-#: (SIGINT's ``quit()``) keeps running the loop for the numbers it hands on to
+#: (a bare ``quit()``) keeps running the loop for the numbers it hands on to
 #: be saved, and published: as long as ``ctl`` gives one authoring change.
 SHUTDOWN_SETTLE_SECONDS: Final = client.AUTHORING_TIMEOUT
+#: How long a first Ctrl-C holds the changes still waiting to be saved before it
+#: saves them and quits, so that a second can quit without them, or Esc cancel
+#: (`Application._first_ctrl_c`); counted down in steps of `QUIT_COUNTDOWN_TICK_MS`.
+QUIT_COUNTDOWN_SECONDS: Final = 5
+QUIT_COUNTDOWN_TICK_MS: Final = 1000
+#: What a second Ctrl-C during that countdown says as it quits.
+QUIT_WITHOUT_THEM: Final = "Quitting immediately without them."
 #: The longest a settings save can take, from the timeouts it can spend: the
 #: migration marker's lock it is written under (`legacy_migration.unattended_transaction`),
 #: then the settings file's own lock, and under that the check of the service that
@@ -984,6 +991,21 @@ class Application(Adw.Application):
         self._shutting_down = False
         #: A second interrupt (Ctrl-C) ended the shutdown settle (`_settle_before_shutdown`).
         self._settle_cut = False
+        #: The handler `run` installs for SIGINT while it runs (`_on_sigint`), or None.
+        self._sigint_handler: Callable[[int, Any], None] | None = None
+        #: A first Ctrl-C's countdown to saving what is still waiting (`_first_ctrl_c`).
+        self._quit_countdown: quit_countdown.Countdown | None = None
+        #: The authoring lane starts nothing new, and admits nothing new but what
+        #: a requested quit admits: during that countdown, and once a second
+        #: Ctrl-C has asked to quit without what is still waiting.
+        self._authoring_held = False
+        #: A second Ctrl-C asked to quit without the changes still waiting to be
+        #: saved: the shutdown drops them instead of handing them on
+        #: (`_quit_without_waiting_changes`).
+        self._quit_without_waiting = False
+        #: A Ctrl-C quit at once, or came once the shutdown had begun: ``run()``
+        #: then ends as a Ctrl-C ends a GApplication's, with KeyboardInterrupt.
+        self._ctrl_c_quit = False
         #: The runtime lane `do_shutdown` let go of, whose running job the process's
         #: exit waits for: the end of the shutdown's judgement once it is done
         #: (`_web_off_judged_once_landed`).
@@ -2366,7 +2388,7 @@ class Application(Adw.Application):
         GLib.idle_add(say, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
     def do_shutdown(self) -> None:
-        # A shutdown that `request_quit` didn't ask for (SIGINT's ``quit()``)
+        # A shutdown that `request_quit` didn't ask for (a bare ``quit()``)
         # ends the loop with the window open and numbers still waiting out
         # their settle time. Hand them on before anything is torn down, and run
         # the loop until their writes settle, as a close or ``ctl quit`` lets
@@ -2374,7 +2396,15 @@ class Application(Adw.Application):
         # Not a GTK teardown signal (`notify::root`): that runs while GTK is
         # already taking the window apart.
         self._shutting_down = True
-        self._hand_on_waiting_numbers()
+        # A first Ctrl-C's countdown ends with the loop, the terminal back as it was.
+        self._end_quit_countdown()
+        if self._quit_without_waiting:
+            # The person quit without them (a second Ctrl-C): dropped, never handed on.
+            dial_rows.cancel_all()
+        else:
+            # A quit from elsewhere during the countdown hands on what it held, as any quit.
+            self._let_held_authoring_go()
+            self._hand_on_waiting_numbers()
         if self._numbers_unsettled():
             self._settle_before_shutdown()
         current = state_file.set_durability_sink(self._previous_durability_sink)
@@ -2703,7 +2733,7 @@ class Application(Adw.Application):
         if self._settle_cut:
             LOGGER.warning(
                 "the wallpaper service, older than this app, wasn\u2019t told to quit at "
-                "shutdown: a second Ctrl-C had come; restart it: systemctl --user restart "
+                "shutdown: another Ctrl-C had come; restart it: systemctl --user restart "
                 "wall-in-one"
             )
             return
@@ -2728,7 +2758,7 @@ class Application(Adw.Application):
         if outcome is None:
             cancellation.cancel()  # its socket closed: nothing is left waiting on it
             outcome = (
-                f"a second Ctrl-C ended the wait for its answer; {restart}"
+                f"another Ctrl-C ended the wait for its answer; {restart}"
                 if self._settle_cut
                 else f"it didn\u2019t answer within {bound:g} s; {restart}"
             )
@@ -2918,13 +2948,193 @@ class Application(Adw.Application):
         self._quit_requested = True
         self._maybe_finish_requested_quit()
 
+    def run(self, argv: list[str] | None = None) -> int:
+        """`Gio.Application.run`, with this application's own Ctrl-C while it runs (`_on_sigint`).
+
+        Installed only where PyGObject would install its own, which calls
+        ``quit()`` at the first Ctrl-C and ignores every later one while
+        ``run()`` is on the stack: on the main thread, over Python's default
+        handler. PyGObject then installs none, and still wakes the loop on a
+        signal, so the handler runs promptly. Python's default handler is put
+        back as ``run()`` returns, so that a Ctrl-C after that ends the
+        process's exit, as it did. A Ctrl-C that quit at once, or came once
+        the shutdown had begun, ends ``run()`` with KeyboardInterrupt, as
+        PyGObject's does; a first Ctrl-C's careful quit returns as a close or
+        ``ctl quit`` does.
+        """
+        handler: Callable[[int, Any], None] | None = None
+        if (
+            threading.current_thread() is threading.main_thread()
+            and signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        ):
+            handler = self._on_sigint
+            try:
+                signal.signal(signal.SIGINT, handler)
+            except ValueError, OSError:
+                handler = None
+        self._sigint_handler = handler
+        try:
+            status = super().run(argv)
+        finally:
+            self._end_quit_countdown()
+            if handler is not None and signal.getsignal(signal.SIGINT) is handler:
+                with contextlib.suppress(ValueError, OSError):
+                    signal.signal(signal.SIGINT, signal.default_int_handler)
+            self._sigint_handler = None
+        if self._ctrl_c_quit:
+            raise KeyboardInterrupt
+        return status
+
+    def _on_sigint(self, _number: int, _frame: Any) -> None:
+        """SIGINT while ``run()`` runs: a Ctrl-C, handled on GTK's loop (`_ctrl_c`).
+
+        Python runs it between any two bytecodes of GTK's thread, with a lock
+        held as like as not, so it only asks the loop. Once the shutdown has
+        begun the loop runs only in the settle's own iterations: a Ctrl-C then
+        ends the shutdown's waits at once, as the handler they install for
+        themselves does (`_second_interrupt_ends_the_settle`).
+        """
+        if self._shutting_down:
+            self._settle_cut = True
+            self._ctrl_c_quit = True
+            return
+        GLib.idle_add(self._ctrl_c, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
+
+    def _ctrl_c(self) -> bool:
+        """One Ctrl-C, on GTK: the first quits carefully, any later one at once.
+
+        The first is `_first_ctrl_c`. Once it counts down, or once a quit was
+        asked (the careful quit it then makes, or ``ctl quit``), a Ctrl-C
+        quits at once, without what is still waiting to be saved
+        (`_quit_without_waiting_changes`). Once the shutdown has begun, one
+        ends its waits (`_on_sigint`), and once ``run()`` has returned, Python's
+        own handler ends the process's exit: someone who keeps pressing it is
+        out at the fourth at the most. Esc during the countdown cancels the
+        quit, and leaves nothing of it: the next Ctrl-C is a first again.
+        """
+        if self._shutting_down:
+            self._settle_cut = True
+            self._ctrl_c_quit = True
+        elif self._quit_countdown is not None or self._quit_requested or self._quit_without_waiting:
+            self._quit_without_waiting_changes()
+        else:
+            self._first_ctrl_c()
+        return GLib.SOURCE_REMOVE
+
+    def _first_ctrl_c(self) -> None:
+        """A first Ctrl-C: quit as ``ctl quit`` does, after a countdown when changes are waiting.
+
+        With nothing waiting to be saved, at once, and saying nothing
+        (`request_quit`: it still waits for what is being written, and for the
+        application's own tails, a scan or a publication). Otherwise what is
+        waiting is held for `QUIT_COUNTDOWN_SECONDS`, counted down on standard
+        error (`quit_countdown`), so that the person can quit without it (a
+        second Ctrl-C) or not quit at all (Esc), and then saved and waited for
+        by `request_quit`. Held: the authoring lane starts nothing meanwhile,
+        and admits only what a requested quit admits (`_admitted_during_quit`):
+        a number whose timer fires, the Settings coalesced behind a batch that
+        lands. A write already being written when it is pressed goes on.
+        """
+        changes = self._changes_a_quit_would_drop()
+        if not changes:
+            self.request_quit()
+            return
+        self._authoring_held = True
+        self._quit_countdown = quit_countdown.Countdown(
+            changes,
+            QUIT_COUNTDOWN_SECONDS,
+            QUIT_COUNTDOWN_TICK_MS,
+            done=self._quit_countdown_done,
+            cancelled=self._quit_countdown_cancelled,
+        )
+        try:
+            self._quit_countdown.start()
+        except Exception:
+            LOGGER.exception("the countdown to quitting could not start; quitting as asked")
+            self._end_quit_countdown()
+            self._quit_countdown_done()
+
+    def _changes_a_quit_would_drop(self) -> int:
+        """How many accepted changes aren't being written yet: what a second Ctrl-C would drop.
+
+        Each number waiting out its settle time (`dial_rows.waiting`), each
+        authoring task queued (a number handed on is one), and each Settings
+        field accepted that no batch being written has taken: a Settings batch
+        still queued counts as its fields. Not one that turns web wallpapers
+        off, which is never dropped (`_drop_waiting_settings`); not what is
+        being written now, which is never stopped; and none of the
+        application's own work: the repair that opens authoring (the one
+        queued task that doesn't wait for it, ``requires_migration``), a scan,
+        a publication.
+        """
+        with self._settings_authoring_lock:
+            took = self._settings_batch_generation
+            settings = sum(
+                1
+                for key, (accepted, value) in self._settings_authoring_pending.items()
+                if (took is None or accepted > took)
+                and not (key == "allow_web_wallpapers" and not value)
+            )
+        queued = sum(
+            1
+            for task in self._authoring_queue
+            if task.requires_migration and task.prepare != self._prepare_settings_batch
+        )
+        return dial_rows.waiting() + queued + settings
+
+    def _quit_countdown_done(self) -> None:
+        """The countdown is over: what it held is saved, and the application quits once it is."""
+        self._quit_countdown = None
+        self._let_held_authoring_go()
+        self.request_quit()
+
+    def _quit_countdown_cancelled(self) -> None:
+        """Esc during the countdown: no quit, and what it held is saved as if it never ran."""
+        self._quit_countdown = None
+        self._let_held_authoring_go()
+
+    def _let_held_authoring_go(self) -> None:
+        """Let the authoring lane start what it held (`_authoring_held`), if it holds any."""
+        if self._authoring_held:
+            self._authoring_held = False
+            self._start_next_authoring_task()
+
+    def _end_quit_countdown(self, said: str = "") -> None:
+        """Stop the countdown, if one runs: its timer, its watch of the terminal and the
+        terminal's mode, its line finished and then ``said``. What it held stays held."""
+        countdown, self._quit_countdown = self._quit_countdown, None
+        if countdown is not None:
+            countdown.stop(said)
+
+    def _quit_without_waiting_changes(self) -> None:
+        """Quit at once, without the changes still waiting to be saved: a Ctrl-C after the first.
+
+        What a single Ctrl-C did before the countdown, ``quit()``, except that
+        what the person accepted but isn't being written yet is dropped
+        instead of handed on: the numbers waiting out their settle time, the
+        authoring tasks queued and the Settings no batch being written has
+        taken (`do_shutdown`, `_shutdown_authoring_jobs`). The person chose not
+        to save them. Never a change that turns web wallpapers off: it is
+        saved, and the end of the shutdown waits for it and judges the file
+        on disk by it, as for any such save (`_drop_waiting_settings`). What is
+        being written goes on, and the process's exit waits for it. A quit that
+        comes any other way still hands everything on, as before.
+        """
+        counting = self._quit_countdown is not None
+        self._quit_without_waiting = True
+        self._authoring_held = True
+        self._ctrl_c_quit = True
+        self._end_quit_countdown(QUIT_WITHOUT_THEM if counting else "")
+        self.quit()
+
     def _hand_on_waiting_numbers(self) -> int:
         """Save every renderer number still waiting out its settle time; how many.
 
         `dial_rows.flush_all`, for the ways the application ends that run
-        this process's own code: a window's close, ``ctl quit``
-        (`request_quit`), and a quit that comes another way, such as Ctrl-C
-        (PyGObject's SIGINT fallback calls ``quit()``), through `do_shutdown`.
+        this process's own code: a window's close, ``ctl quit`` and a first
+        Ctrl-C (`request_quit`), and a quit that comes another way, through
+        `do_shutdown`; not a Ctrl-C after the first, which drops them
+        (`_quit_without_waiting_changes`).
         SIGTERM (there is no handler for it) and a lost display (GTK ends
         the process itself) run none of them: a number nudged under
         `dial_rows.SETTLE_MS` before either is lost (review r13c, N-9). Each
@@ -2953,12 +3163,13 @@ class Application(Adw.Application):
         (`_number_publication`) for as long as the runtime lane holds it. No
         other tail of the application: a Settings save, a removal, a scan
         (review r13c, G1-L2). What a ``ctl quit`` waits for is `_quit_waits`,
-        as before.
+        as before. Not one queued once a Ctrl-C asked to quit without it
+        (`_quit_without_waiting`): the lane holds it, and the shutdown drops it.
         """
         current = self._authoring_current
         if current is not None and current.handed_on:
             return True
-        if any(task.handed_on for task in self._authoring_queue):
+        if not self._quit_without_waiting and any(task.handed_on for task in self._authoring_queue):
             return True
         return self._number_publication and self._runtime_publication_held
 
@@ -2971,7 +3182,7 @@ class Application(Adw.Application):
         the loop, since every publication from `do_shutdown` on runs on the
         runtime lane, ``--service`` included (`_publish_runtime_for_context`),
         whose socket calls the shutdown then cuts off (review r13c, G1-L1).
-        A second Ctrl-C ends it at once (`_second_interrupt_ends_the_settle`,
+        A Ctrl-C ends it at once (`_second_interrupt_ends_the_settle`,
         N-2). Either way shutdown goes on as before, and every number handed
         on is still saved: a write already running reaches its durability
         boundary, and one still queued is started on the same worker
@@ -3002,8 +3213,9 @@ class Application(Adw.Application):
         later SIGINT while ``run()`` is on the stack, which it still is in
         `do_shutdown`, so a second Ctrl-C did nothing for as long as the
         settle took (review r13c, N-2). While it runs, a SIGINT sets
-        `_settle_cut` and is then handed to PyGObject's own handler, so that
-        ``run()`` still ends as a Ctrl-C ends it. Python runs the handler
+        `_settle_cut` and is then handed to the handler it replaced, this
+        application's own (`run`) or PyGObject's, so that ``run()`` still
+        ends as a Ctrl-C ends it. Python runs the handler
         between the loop's iterations: PyGObject wakes the loop on a signal,
         and so does the settle's tick. Off the main thread, or with a handler
         that isn't Python's (or one that ignores it), nothing changes.
@@ -3013,10 +3225,14 @@ class Application(Adw.Application):
         previous = signal.getsignal(signal.SIGINT)
         if previous is None or previous in (signal.SIG_IGN, signal.SIG_DFL):
             return lambda: None
+        own = self._sigint_handler
 
         def interrupted(number: int, frame: Any) -> None:
             self._settle_cut = True
-            if callable(previous) and getattr(previous, "__module__", "") == "gi._ossighelper":
+            if callable(previous) and (
+                (own is not None and previous is own)
+                or getattr(previous, "__module__", "") == "gi._ossighelper"
+            ):
                 previous(number, frame)
 
         try:
@@ -4192,6 +4408,7 @@ class Application(Adw.Application):
             self._authoring_migration_ready
             and not self._authoring_shutdown
             and not self._quit_requested
+            and not self._authoring_held
         )
 
     def require_authoring_ready(self, *, report: bool = True) -> bool:
@@ -4212,6 +4429,9 @@ class Application(Adw.Application):
         return False
 
     def _migration_blocked_response(self) -> Response:
+        if self._quit_requested or self._authoring_held:
+            # Not the gate: a quit is under way (`request_quit`, a Ctrl-C's countdown).
+            return Response.failure("application is shutting down")
         if self._authoring_gate_state == "checking":
             return Response.failure(
                 "current-profile authoring is still opening; retry shortly",
@@ -4254,19 +4474,28 @@ class Application(Adw.Application):
         running (review r13c, N-2). So are the Settings accepted but not yet
         being written (`_settings_handed_on`), after those numbers, where their
         batch would have queued. Nothing of it reaches the application
-        afterwards. Every other queued task is dropped, as before.
+        afterwards. Every other queued task is dropped, as before. After a
+        Ctrl-C that quit without what is still waiting, the numbers and the
+        Settings are dropped too, but for web wallpapers turned off
+        (`_quit_without_waiting`, `_drop_waiting_settings`).
         """
         self._authoring_shutdown = True
         queued = tuple(self._authoring_queue)
         self._authoring_queue.clear()
         handed: list[Callable[[], Any]] = []
         for task in queued:
-            if task.handed_on and (not task.requires_migration or self._authoring_migration_ready):
+            if (
+                task.handed_on
+                and not self._quit_without_waiting
+                and (not task.requires_migration or self._authoring_migration_ready)
+            ):
                 attempt = self._prepared_number(task)
                 if attempt is not None:
                     handed.append(attempt)
             self._finalize_authoring_task(task)
             self._release_authoring_lifetime(task)
+        if self._quit_without_waiting:
+            self._drop_waiting_settings()
         settings = self._settings_handed_on()
         if settings is not None:
             handed.append(settings)
@@ -4307,6 +4536,26 @@ class Application(Adw.Application):
                 return work()
 
         return guarded
+
+    def _drop_waiting_settings(self) -> None:
+        """Drop the Settings accepted and not yet being written, but for web wallpapers off.
+
+        For a quit without the changes still waiting (`_quit_without_waiting`).
+        What is left is handed on as ever (`_settings_handed_on`): web
+        wallpapers turned off is the safe direction, and is saved, and the end
+        of the shutdown judges the file on disk by it, whatever else is dropped.
+        What a batch being written took is that batch's, and
+        `_settings_handed_on` takes it out, as before.
+        """
+        with self._settings_authoring_lock:
+            pending = self._settings_authoring_pending
+            for key in [
+                key
+                for key, (_accepted, value) in pending.items()
+                if not (key == "allow_web_wallpapers" and not value)
+            ]:
+                del pending[key]
+            self._settings_roots_edits = []
 
     def _settings_handed_on(self) -> Callable[[], Any] | None:
         """The Settings accepted but not yet being written, prepared as their batch; or None.
@@ -4422,7 +4671,10 @@ class Application(Adw.Application):
             if (
                 self._authoring_shutdown
                 or self._runtime_shutdown
-                or (self._quit_requested and not self._admitted_during_quit(allow_during_quit))
+                or (
+                    (self._quit_requested or self._authoring_held)
+                    and not self._admitted_during_quit(allow_during_quit)
+                )
             ):
                 reply(Response.failure("application is shutting down"))
                 return
@@ -4467,11 +4719,12 @@ class Application(Adw.Application):
         return server.Deferred(start=start)
 
     def _start_next_authoring_task(self) -> None:
-        """Start a transaction only after the previous one has fully replied."""
+        """Start a transaction only after the previous one has fully replied, and not while held."""
         if (
             self._authoring_shutdown
             or self._runtime_shutdown
             or self._authoring_active
+            or self._authoring_held
             or not self._authoring_queue
         ):
             return
@@ -4724,7 +4977,9 @@ class Application(Adw.Application):
         """
         if self._authoring_shutdown or self._runtime_shutdown:
             return False
-        if self._quit_requested and not self._admitted_during_quit(allow_during_quit):
+        if (self._quit_requested or self._authoring_held) and not self._admitted_during_quit(
+            allow_during_quit
+        ):
             return False
         if requires_migration and not self._authoring_migration_ready:
             self.require_authoring_ready()

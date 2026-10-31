@@ -556,7 +556,7 @@ def test_s_n17_a_quit_not_answered_in_time_or_cut_says_to_restart(
     lines = [one for one in said if "was sent quit at shutdown" in one]
     assert len(lines) == 1, said
     expected = (
-        "didn\u2019t answer within 0.3 s" if how == "no-answer-in-time" else "a second Ctrl-C"
+        "didn\u2019t answer within 0.3 s" if how == "no-answer-in-time" else "another Ctrl-C"
     )
     assert expected in lines[0], lines
     assert RESTART in lines[0], lines

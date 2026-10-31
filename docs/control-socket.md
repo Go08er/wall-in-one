@@ -193,7 +193,8 @@ not accepted through `on`.
 An automatic startup, schedule or cycle hand-over which cannot apply gets three
 attempts total, two seconds apart (a renderer program that is not there is not
 such a failure: see [missing renderers](#missing-renderers)). The service keeps or restores the
-last-known-good still between attempts; after the third failure it marks that
+last-known-good still between attempts (an entry refused meanwhile is stepped
+over, not restored: [exceptions](runtime-config.md#nothing-to-play-schema-8)); after the third failure it marks that
 resolved entry taboo for the session and advances to another usable candidate.
 An already-started renderer which later exits does not enter that retry machine:
 the service reaps its process group, reapplies the paired still and records the

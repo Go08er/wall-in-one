@@ -2774,11 +2774,21 @@ class Application(Adw.Application):
                     give_up=never,
                 ):
                     look = _ExitLook(status)
-                    judged = self._web_off_but_allowed_on_disk(target, source, look, never)
-                    if judged is None:
+                    read: list[bool] = []
+                    judged = self._web_off_but_allowed_on_disk(
+                        target, source, look, never, read=read
+                    )
+                    if judged is None and read:
+                        LOGGER.warning(
+                            "the runtime configuration on disk was read at exit and needs no "
+                            "replacement for Allow web wallpapers being off (it was not replaced "
+                            "under the lock: the compiler lock couldn\u2019t be taken within %s s)",
+                            SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
+                        )
+                    elif judged is None:
                         LOGGER.warning(
                             "the runtime configuration on disk was not checked against Allow web "
-                            "wallpapers at exit: another writer held the compiler lock for over "
+                            "wallpapers at exit: the compiler lock couldn\u2019t be taken within "
                             "%s s; the next start judges it",
                             SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
                         )
@@ -2786,7 +2796,7 @@ class Application(Adw.Application):
                         LOGGER.warning(
                             "Allow web wallpapers is off, and the configuration on disk could "
                             "let a web wallpaper play, but it couldn\u2019t be replaced at exit: "
-                            "another writer held the compiler lock for over %s s",
+                            "the compiler lock couldn\u2019t be taken within %s s",
                             SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
                         )
                         # read only, unlocked: the file is left as it is
@@ -2805,19 +2815,29 @@ class Application(Adw.Application):
         thread.start()
 
     def _web_off_but_allowed_on_disk(
-        self, target: Path, source: Path, look: _ExitLook, give_up: Callable[[], bool]
+        self,
+        target: Path,
+        source: Path,
+        look: _ExitLook,
+        give_up: Callable[[], bool],
+        *,
+        read: list[bool] | None = None,
     ) -> tuple[config.Settings, str] | None:
         """``source`` (``settings.toml``) as read now, and why ``target`` must be replaced: when
         the setting is off and a service may play a web page from the file (`_ExitLook.why`,
         whose look ``give_up`` ends: then it counts as one); otherwise None. Read now, never a
         snapshot of before: a turn-off still being written is judged once it has landed
         (`_web_off_judged_once_landed`), and a save turned on since is what it says (review
-        r13f, N3)."""
+        r13f, N3). ``read``, when given, gets an item once the setting and the file have been
+        read (so a None after that means they need no replacing, not that they weren't looked
+        at)."""
         try:
             settings = config.load_strict(source)
         except config.ConfigError:
             return None  # as for `_web_off_guard`: the next compile says what is wrong with it
         if settings.allow_web_wallpapers:
+            if read is not None:
+                read.append(True)
             return None
         try:
             on_disk = file_io.read_regular_text(target, runtime_config.MAX_RUNTIME_CONFIG_BYTES)
@@ -2825,6 +2845,8 @@ class Application(Adw.Application):
             return None
         if on_disk is None:
             return None
+        if read is not None:
+            read.append(True)
         why = look.why(on_disk, give_up)
         return (settings, why) if why else None
 

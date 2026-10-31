@@ -400,7 +400,37 @@ def test_s_n19_the_advice_on_the_lock_never_had_path_follows_a_line_saying_why(
     assert "could let a web wallpaper play" in why, said
     assert "couldn\u2019t be replaced at exit" in why, said
     assert "compiler lock" in why, said
-    stale = ("was not checked", "the next start judges it")
+    stale = ("was not checked", "the next start judges it", "another writer held")
+    assert not any(one_stale in one for one in said for one_stale in stale), said
+
+
+@pytest.mark.parametrize("why", ["names", "names-web"])
+def test_s_n19_the_advice_follows_a_line_saying_why_for_a_file_naming_an_item(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    why: str,
+) -> None:
+    """r13p N-2: the same pin as above for `_NAMES` and `_NAMES_WEB`, not only `_ALLOWS`."""
+    if why == "names":
+        _, said = _lock_never_had(
+            profiles, monkeypatch, caplog, "an-older-service", text=_naming(["2000000099"])
+        )
+    else:
+        _, said = _lock_never_had(
+            profiles,
+            monkeypatch,
+            caplog,
+            "an-older-service",
+            text=_naming([str(2_000_000_001)]),
+            web=1,
+        )
+    at = next(i for i, one in enumerate(said) if RESTART in one)
+    line = said[at - 1]
+    assert "could let a web wallpaper play" in line, said
+    assert "couldn\u2019t be replaced at exit" in line, said
+    assert "compiler lock" in line, said
+    stale = ("was not checked", "the next start judges it", "another writer held")
     assert not any(one_stale in one for one in said for one_stale in stale), said
 
 
@@ -419,7 +449,10 @@ def test_control_s_n18_a_lock_never_had_over_a_file_the_holder_replaced_says_no_
         "an-older-service",
         install_while_held=_naming([]),
     )
-    assert any("was not checked" in one for one in said), f"the premise (the path): {said}"
+    assert any("was read at exit and needs no replacement" in one for one in said), (
+        f"the premise (the path): {said}"
+    )
+    assert not any("was not checked" in one for one in said), said
     assert not any(RESTART in one for one in said), said
     assert sent == []
 

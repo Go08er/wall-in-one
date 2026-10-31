@@ -320,8 +320,8 @@ whose type changes between the service's read and the engine's own is refused
 by the engine's start instead: its still is up for that moment, and the
 service moves on at once. A playlist with nothing left that can play gives way
 to the document's default playlist, then to All media; with nothing left at
-all the display plays nothing
-([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never a taboo,
+all the display plays nothing, but for the known
+exceptions ([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never a taboo,
 so nothing is saved against the item. The service's journal says what it
 skipped and why, and so does its status
 ([fields](runtime-config.md#nothing-to-play-schema-8)): `refused` lists the

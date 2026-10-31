@@ -363,8 +363,9 @@ stopped, and Noctalia keeps the last still it was given (there is no way to
 clear it). `play`, `toggle`, `next`, the rotation, a schedule and the file
 poll can't change that; `next`, `previous` and `random` answer `nothing to
 play: <reason>`, and `play` succeeds with the same words. It is a state, not a
-fault: `last_error` stays empty (except for an independent display whose third
-attempt failed with nothing left: see the end of the refusal paragraph below).
+fault: `last_error` stays empty (except where a display's third attempt failed
+with nothing left: an independent display, or a mirrored one at startup with
+assignments; see the end of the refusal paragraph below).
 Status says it on the display row and, when
 every connected display plays nothing, at the top:
 
@@ -410,7 +411,7 @@ chooses now.) A rule's window
 starting or ending onto a playlist whose stand-in is already shown changes
 nothing on screen, and a pick of a playlist known to be refused leaves the
 stand-in's rotation where it is. When nothing can play at all, the display
-plays nothing, exactly as above (except for the two cases at the end of this paragraph), with no `stand_in_for`: the reason is `this
+plays nothing, exactly as above (except for the cases at the end of this paragraph), with no `stand_in_for`: the reason is `this
 configuration doesn't allow web wallpapers` when every item it was refused
 (on its own playlist and on each that could stand in) is a web page, and `no
 wallpaper here can start` otherwise. `next`, `previous`, `random` and the
@@ -426,8 +427,10 @@ displays, a display already showing an item that another display learns is
 refused keeps it until that display's own next change (Play after a pause
 resumes it). When that display then has a change of its own that fails (the
 cycle's step or a command), the rollback can't put the refused item back: it
-steps over it onto the entry that just failed, so status may say "previous
-wallpaper restored" while that entry is up, or, if it keeps failing, name that
+steps over it onto the next entry of that playlist that can play (after the
+cycle's step or Next, the entry that just failed; after a pick, Previous or
+Random, another one), so status may say "previous wallpaper restored" while
+that entry is up, or, if it keeps failing, name that
 entry with `renderer_failed` while the screen keeps the refused item's still.
 A taboo learned on one display isn't applied to another independent display
 already showing that entry: when that display's playlist has nothing else that
@@ -638,8 +641,10 @@ attempts total, two seconds apart. Schedule and cycle transitions restore the
 prior selection and last-known-good wallpaper between attempts, except a rule
 boundary off a refused entry that a display shows, which doesn't restore it;
 the cycle's and a command's rollback step over an entry refused meanwhile onto
-the entry that just failed instead of restoring it (see the end of the
-nothing-to-play section).
+the next entry of that playlist that can play (after the cycle's step or Next,
+the entry that just failed; after a pick, Previous or Random, another one)
+instead of restoring it (see the refusal paragraph under
+[Nothing to play](#nothing-to-play-schema-8)).
 There, as at startup, which has no prior selection, the paired still remains
 visible; after the third failure the route advances to another usable entry.
 In both cases the attributable

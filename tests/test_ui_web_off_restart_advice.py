@@ -270,6 +270,92 @@ def test_s_n16_twin_a_failed_install_with_no_service_heard_says_to_restart_if_it
     assert not any(OLDER in one for one in said), said
 
 
+# -- r13n S-N18 --------------------------------------------------------------------------------
+
+
+def _lock_never_had(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    heard: str,
+    *,
+    allow_web: bool,
+) -> tuple[list[str], list[str]]:
+    """Another writer holds the compiler lock past the step's wait and the later judgement's
+    (0.2 s and 0.5 s here), over a file that allows web wallpapers. The log lines, the verbs."""
+    application = profiles().application
+    _on_disk(document("control-compiler-line")[0])
+    if allow_web:
+        config.update({"allow_web_wallpapers": True})
+    _heard(monkeypatch, HEARD[heard])
+    monkeypatch.setattr(app_module, "SHUTDOWN_WEB_OFF_LOCK_SECONDS", 0.2)
+    monkeypatch.setattr(app_module, "SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS", 0.5)
+    sent: list[str] = []
+
+    def send(verb: str, *_a: object, **_k: object) -> Response:
+        sent.append(verb)
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with runtime_config.compiler_lock():
+            holding.set()
+            release.wait(30.0)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    caplog.set_level(logging.INFO, logger=app_module.LOGGER.name)
+    try:
+        assert holding.wait(10.0)
+        application._web_off_on_disk_at_exit()
+        _judged_at_exit(application)
+    finally:
+        release.set()
+        thread.join(30.0)
+    said = [r.getMessage() for r in caplog.records if r.name == app_module.LOGGER.name]
+    return sent, said
+
+
+@pytest.mark.parametrize(
+    ("heard", "line"),
+    [
+        ("control-reads-eight", CURRENT_SERVICE),
+        ("nothing", IF_RUNNING),
+        ("an-older-service", "That service is older than this app"),
+    ],
+)
+def test_s_n18_a_lock_never_had_over_a_file_that_allows_web_says_to_restart(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    heard: str,
+    line: str,
+) -> None:
+    """The file was judged as one to replace and is left as it is: the restart is said in the
+    service's form, and no quit is sent from this path."""
+    sent, said = _lock_never_had(profiles, monkeypatch, caplog, heard, allow_web=False)
+    assert any("was not checked" in one for one in said), f"the premise: {said}"
+    advice = [one for one in said if RESTART in one]
+    assert len(advice) == 1 and advice[0].startswith(line), said
+    assert sent == []
+
+
+def test_control_s_n18_a_lock_never_had_with_web_allowed_says_no_restart(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Web wallpapers are on, so the file needs no replacing: nothing to advise."""
+    sent, said = _lock_never_had(
+        profiles, monkeypatch, caplog, "control-reads-eight", allow_web=True
+    )
+    assert not any(RESTART in one for one in said), said
+    assert sent == []
+
+
 # -- r13m S-N17 --------------------------------------------------------------------------------
 
 

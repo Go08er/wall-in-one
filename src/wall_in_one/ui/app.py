@@ -488,6 +488,27 @@ def _may_play_web_while_off(
     return ""
 
 
+def _log_restart_advice(why: str, look: _ExitLook, *, older: bool, quit_older: bool) -> None:
+    """What to tell the user when the file that must be replaced is left as it is."""
+    if older and not quit_older:  # no quit is sent: restarting is the remedy
+        LOGGER.warning(
+            "That service is older than this app, so it keeps playing what it "
+            "holds until it is restarted: systemctl --user restart wall-in-one"
+        )
+    elif why == _ALLOWS and look.status is not None:  # a current service
+        LOGGER.warning(
+            "That service keeps the configuration it holds until it is restarted, "
+            "and its start check then compiles that file again or refuses it: "
+            "systemctl --user restart wall-in-one"
+        )
+    elif why == _ALLOWS:  # no service heard: it may or may not be running
+        LOGGER.warning(
+            "If the wallpaper service is running, it keeps the configuration it "
+            "holds until it is restarted, and its start check then compiles that "
+            "file again or refuses it: systemctl --user restart wall-in-one"
+        )
+
+
 @dataclass(slots=True)
 class _ExitLook:
     """What the end of a shutdown judges a file by: the service last heard, and what it found.
@@ -2623,23 +2644,7 @@ class Application(Adw.Application):
                     error,
                 )
             if not replaced:
-                if older and not quit_older:  # no quit is sent: restarting is the remedy
-                    LOGGER.warning(
-                        "That service is older than this app, so it keeps playing what it "
-                        "holds until it is restarted: systemctl --user restart wall-in-one"
-                    )
-                elif why == _ALLOWS and look.status is not None:  # a current service
-                    LOGGER.warning(
-                        "That service keeps the configuration it holds until it is restarted, "
-                        "and its start check then compiles that file again or refuses it: "
-                        "systemctl --user restart wall-in-one"
-                    )
-                elif why == _ALLOWS:  # no service heard: it may or may not be running
-                    LOGGER.warning(
-                        "If the wallpaper service is running, it keeps the configuration it "
-                        "holds until it is restarted, and its start check then compiles that "
-                        "file again or refuses it: systemctl --user restart wall-in-one"
-                    )
+                _log_restart_advice(why, look, older=older, quit_older=quit_older)
             elif why == _ALLOWS:
                 LOGGER.info(
                     "Allow web wallpapers is off, but the configuration on disk may have "
@@ -2774,6 +2779,13 @@ class Application(Adw.Application):
                         "%s s; the next start judges it",
                         SHUTDOWN_WEB_OFF_DEFERRED_LOCK_SECONDS,
                     )
+                    look = _ExitLook(status)
+                    judged = self._web_off_but_allowed_on_disk(target, source, look, never)
+                    if judged is not None:  # read only, unlocked: the file is left as it is
+                        older = status is not None and not runtime_config.nothing_to_play_supported(
+                            status
+                        )
+                        _log_restart_advice(judged[1], look, older=older, quit_older=False)
             except Exception:
                 LOGGER.exception(
                     "the runtime configuration on disk could not be checked against "

@@ -421,7 +421,12 @@ The service remembers what it refused for the document it holds and asks each
 item once, in one pass along a playlist however long the run of refused
 entries; a reload, the file poll's included, forgets. With independent
 displays, a display already showing an item that another display learns is
-refused keeps it until that display's own next change.
+refused keeps it until that display's own next change. At a mirrored
+startup with display assignments, when one display's playlist has nothing left
+that can play and no stand-in while another display still has a target, that
+display keeps what its failed apply left and may keep playing it under "Nothing
+to play", until the cycle's next step, Play, Next, Follow schedule, a reload or
+a pick.
 
 | Field | Where | Meaning |
 |---|---|---|

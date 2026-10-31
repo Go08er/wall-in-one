@@ -979,15 +979,16 @@ def web_files_now(item: MediaItem) -> bool:
 
     `previews_off` asks the scan, which is as old as it is: a Steam update can
     turn a scene (or a video, or a preset's base) into a web page, and nothing
-    rescans for it. So whatever hands one of a Workshop item's files to ffmpeg
-    while web wallpapers are off asks this just before. Its `project.json` is
+    rescans for it. So whatever hands one of a Workshop item's files to ffmpeg,
+    or a still beside a Workshop video on to be shown (`stills.ensure`), while
+    web wallpapers are off asks this just before. Its `project.json` is
     read as the scan reads it (`_read_project`), and so is a preset's base's,
     where the scan found it (`MediaItem.scene_base_directory`, which may be
     another Steam library's). Both fail closed as `holds_web` does: a type
     that reads ``web`` in any spelling counts, so does a `project.json` that
     can't be read or isn't one, and so does a base that is gone or is itself
     a preset. False for anything the Workshop didn't list
-    (`WORKSHOP_PROVIDER`): those are the user's own files, wherever they are.
+    (`WORKSHOP_PROVIDER`): those are the user's own files.
     """
     if item.provider != WORKSHOP_PROVIDER:
         return False

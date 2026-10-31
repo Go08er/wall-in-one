@@ -375,11 +375,12 @@ the copies under the home folder, where linux-wallpaperengine looks, just
 before it is given the item's id (`workshop.engine_refusal`). One that reads
 `web`, or can't be read, gets nothing. Known gaps, none of which opens a web
 page: a picture the scan paired with a Workshop video, beside it in its
-folder, can still be used for its colours and by the legacy Python playback
-until the next scan; a preset whose own `project.json` now names another base
-is judged by the base the scan found; and a library folder you add that covers
-Steam's Workshop folder lists a web wallpaper's pictures and videos as your
-own files, which are previewed like any others.
+folder, is still that video's still until the next scan (the service shows it,
+as the legacy Python playback does, and its colours are made from it); a
+preset whose own `project.json` now names another base is judged by the base
+the scan found; and a library folder you add that covers Steam's Workshop
+folder lists a web wallpaper's pictures and videos as your own files, which
+are previewed like any others.
 
 ### Executable wallpapers are never run
 

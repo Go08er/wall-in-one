@@ -22,6 +22,10 @@ loop until they settle (review r13b, G1). Review r13c found four things wrong wi
   Now the end of the shutdown replaces it, file-only, with the document that plays nothing; it
   compiles nothing and scans nothing (r13e, L1 and L2), and a second Ctrl-C ends its wait for
   the compiler lock too.
+* **R41-2, a Settings change accepted behind a batch being written** (a spin row nudged again)
+  waits for that batch's completion to start its own, which the shutdown suppresses, and
+  ``quit()`` handed nothing on: it was lost. Now it goes to the same worker after that batch,
+  and the end of the shutdown waits for it, and judges the file by it, as for that batch.
 
 Real Application, both interfaces where it matters; the service is the suite's fake runtime,
 made to hang on ``reload`` where said. Nothing outside the test's sandbox is touched.
@@ -1323,3 +1327,143 @@ def test_a_second_ctrl_c_ends_the_wait_for_the_compiler_lock(
         f"run() returned {ended - marks['second']:.2f}s after the second Ctrl-C"
     )
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, "handler not restored"
+
+
+# -- R41-2: a Settings change accepted behind a batch being written ----------------------------
+
+
+@pytest.mark.parametrize("mode", ["request-quit", "direct-quit"])
+def test_a_global_renderer_number_accepted_behind_a_save_survives_quit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str
+) -> None:
+    """The new interface's Settings row for video speed: 1.25, whose batch is held briefly on
+    the worker, then 1.5 while it is written, which waits for that batch's completion to start
+    its own; then the quit. Before (review R41-2): ``quit()``, what SIGINT's fallback calls,
+    suppressed that completion and handed nothing on, so only 1.25 was written. Now the change
+    accepted behind the batch is handed to the same worker after it, as a number is. The
+    control: `request_quit` waits for that tail, as it did."""
+    application, clip, _slow, _spans = _setup(
+        monkeypatch, tmp_path, ui="next", service=False, settle_seconds=2.0
+    )
+    started = threading.Event()
+    release = threading.Event()
+    update = config.update
+    writes: list[dict[str, Any]] = []
+
+    def held(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+        writes.append(dict(changes))
+        if changes.get("video_speed") == 1.25:
+            started.set()
+            if not release.wait(GIVE_UP):
+                raise RuntimeError("the first settings write was never let go")
+        return update(changes, *arguments, **keywords)
+
+    monkeypatch.setattr(config, "update", held)
+    timers: list[threading.Timer] = []
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        window: Any = application._window
+        page = window.pages["settings"]
+        row = next(binding.row for binding in page._bindings if binding.key == "video_speed")
+        row.set_value(1.25)
+        yield "the first write to start", started.is_set
+        row.set_value(1.5)
+        assert application.requested_settings.video_speed == 1.5
+        assert application._settings_authoring_pending["video_speed"][1] == 1.5
+        timer = threading.Timer(0.2, release.set)
+        timers.append(timer)
+        timer.start()
+        if mode == "request-quit":
+            application.request_quit()
+        else:
+            application.quit()  # what SIGINT's fallback calls
+
+    try:
+        _run(application, scenario(), service=False)
+    finally:
+        release.set()
+        for timer in timers:
+            timer.join(GIVE_UP)
+    assert config.load_strict().video_speed == 1.5, (mode, writes)
+    assert [write.get("video_speed") for write in writes] == [1.25, 1.5], writes
+
+
+@pytest.mark.parametrize("turned_off_by", ["the-change-behind-it", "the-save-being-written"])
+def test_web_turned_off_in_or_behind_a_save_being_written_is_judged_once_it_lands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, turned_off_by: str
+) -> None:
+    """``--service``, web wallpapers on: one Settings change is being written, a second is
+    accepted behind it, and then ``quit()``. One of the two turns web wallpapers off, and that
+    write lands only once ``run()`` has returned, past the end of the shutdown's wait for the
+    save (made short here). What the shutdown hands on (review R41-2) is the save the end of the
+    shutdown waits for, and turns web wallpapers off if either does, so the file is still
+    replaced once it lands, as for one save alone. Before: ``[the-change-behind-it]`` lost the
+    toggle, and ``[the-save-being-written]`` the change behind it."""
+    application, clip, _slow, spans = _setup(
+        monkeypatch, tmp_path, ui="classic", service=True, settle_seconds=2.0, allow_web=True
+    )
+    monkeypatch.setattr(app_module, "SETTINGS_SAVE_SECONDS", 0.2)
+    behind = turned_off_by == "the-change-behind-it"
+    first, second = (
+        ({"video_speed": 1.25}, {"allow_web_wallpapers": False})
+        if behind
+        else ({"allow_web_wallpapers": False}, {"video_speed": 1.5})
+    )
+    failures: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    timers: list[threading.Timer] = []
+    writes: list[dict[str, Any]] = []
+    update = config.update
+
+    def held(changes: dict[str, Any], *arguments: Any, **keywords: Any) -> config.Settings:
+        if threading.current_thread() is not threading.main_thread():
+            writes.append(dict(changes))
+            turning = "allow_web_wallpapers" in changes
+            if changes == first:
+                started.set()
+            if turning and not returned.wait(GIVE_UP):
+                failures.append("run() never returned")
+            elif changes == first and not release.wait(GIVE_UP):
+                failures.append("the first write was never let go")
+        return update(changes, *arguments, **keywords)
+
+    monkeypatch.setattr(config, "update", held)
+
+    def scenario() -> Iterator[Step]:
+        yield "the first scan", _scanned(application, clip)
+        assert runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+        assert application.update_settings_async(**first)
+        yield "the first write to start", started.is_set
+        assert application.update_settings_async(**second)
+        _LANES.extend(application_lanes(application))  # its worker, joined after the run
+        timer = threading.Timer(0.2, release.set)  # once the shutdown has begun
+        timers.append(timer)
+        timer.start()
+        application.quit()  # what SIGINT's fallback calls
+
+    def launch() -> bool:
+        application.activate()
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(launch)
+    _LANES.clear()
+    try:
+        assert run_application(application, scenario()) == 0
+    finally:
+        returned.set()
+        release.set()
+        for timer in timers:
+            timer.join(GIVE_UP)
+        _join_lanes()
+    assert not failures, failures
+    assert not spans, "a settle ran, with no number waiting"
+    assert writes == [first, second], f"not each change once, in order: {writes}"
+    saved = config.load_strict()
+    assert saved.allow_web_wallpapers is False, "the toggle never landed"
+    assert saved.video_speed == (1.25 if behind else 1.5), saved
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path()), (
+        "settings.toml says web wallpapers are off, and the file on disk still allows them"
+    )

@@ -191,7 +191,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _save_in_order(works: Sequence[Callable[[], Any]]) -> None:
-    """Run each renderer number's write handed on at shutdown, one after another.
+    """Run each write handed on at shutdown, one after another: renderer numbers, then Settings.
 
     On the authoring worker, after the write it was queued behind
     (`Application._shutdown_authoring_jobs`). One that fails is logged and the
@@ -201,7 +201,7 @@ def _save_in_order(works: Sequence[Callable[[], Any]]) -> None:
         try:
             work()
         except Exception:
-            LOGGER.exception("a renderer setting handed on at shutdown could not be saved")
+            LOGGER.exception("a setting handed on at shutdown could not be saved")
 
 
 def _settings_published[Saved: (config.Settings, config.Settings | None)](
@@ -2857,7 +2857,9 @@ class Application(Adw.Application):
 
         Only a save at the head of the authoring lane, unsettled: the
         worker's run is then that save's. A number's write, say, isn't waited
-        for. A second Ctrl-C ends the wait (`_second_interrupt_ends_the_settle`,
+        for. When the shutdown handed Settings on behind it, the save is theirs,
+        which lands after it (`_settings_handed_on`). A second Ctrl-C ends the
+        wait (`_second_interrupt_ends_the_settle`,
         installed by the step for all of it); one during the settle means it
         isn't begun. Such a save, when it turns web wallpapers off
         (`_settings_batch_turns_web_off`) and still isn't done when the wait
@@ -4249,30 +4251,39 @@ class Application(Adw.Application):
         second Ctrl-C), is still saved: its work is prepared here and started
         on the same worker after the write it waited for, and the process
         waits for that worker before it exits, as for any write already
-        running (review r13c, N-2). Nothing of it reaches the application
+        running (review r13c, N-2). So are the Settings accepted but not yet
+        being written (`_settings_handed_on`), after those numbers, where their
+        batch would have queued. Nothing of it reaches the application
         afterwards. Every other queued task is dropped, as before.
         """
         self._authoring_shutdown = True
         queued = tuple(self._authoring_queue)
         self._authoring_queue.clear()
-        numbers: list[Callable[[], Any]] = []
+        handed: list[Callable[[], Any]] = []
         for task in queued:
             if task.handed_on and (not task.requires_migration or self._authoring_migration_ready):
                 attempt = self._prepared_number(task)
                 if attempt is not None:
-                    numbers.append(attempt)
+                    handed.append(attempt)
             self._finalize_authoring_task(task)
             self._release_authoring_lifetime(task)
-        if numbers:
+        settings = self._settings_handed_on()
+        if settings is not None:
+            handed.append(settings)
+        if handed:
             with contextlib.suppress(RuntimeError):
-                self._authoring_pool().submit(_save_in_order, tuple(numbers))
+                saving = self._authoring_pool().submit(_save_in_order, tuple(handed))
+                if settings is not None:
+                    # The settings save the end of the shutdown waits for
+                    # (`_turn_off_in_flight`): it lands after the one before it.
+                    self._authoring_future = saving
         if self._authoring_jobs is not None:
             # A running atomic store operation owns its own bounded lock/write
             # transaction and must be allowed to reach that durability
             # boundary.  It contains no Session or GTK object, and its late
             # completion is deliberately ineligible to touch the application.
-            # The numbers above are the only work queued behind it.
-            self._authoring_jobs.shutdown(wait=False, cancel_futures=not numbers)
+            # The writes handed on above are the only work queued behind it.
+            self._authoring_jobs.shutdown(wait=False, cancel_futures=not handed)
             self._authoring_jobs = None
 
     def _prepared_number(self, task: _AuthoringTask) -> Callable[[], Any] | None:
@@ -4296,6 +4307,49 @@ class Application(Adw.Application):
                 return work()
 
         return guarded
+
+    def _settings_handed_on(self) -> Callable[[], Any] | None:
+        """The Settings accepted but not yet being written, prepared as their batch; or None.
+
+        For `_shutdown_authoring_jobs`, as `_prepared_number` is for a number.
+        A change accepted while a batch is being written (a spin row nudged
+        again) waits for that batch's completion to start its own
+        (`_finish_settings_batch`), and one whose batch is still queued waits
+        for the lane; the shutdown suppresses the one and drops the other, so
+        a quit that `request_quit` didn't ask for (SIGINT's ``quit()``) lost
+        it (review R41-2). It is prepared here as at the head of the lane
+        (`_prepare_settings_batch`), its refusals included, without what the
+        batch being written took: that batch writes those itself, and this
+        one only what was accepted after it. It turns web wallpapers off if
+        either does, for the end of the shutdown (`_turn_off_in_flight`). One
+        that is refused is logged and dropped.
+        """
+        with self._settings_authoring_lock:
+            took = self._settings_batch_generation
+            turns_web_off = took is not None and self._settings_batch_turns_web_off
+            if took is not None:
+                pending = self._settings_authoring_pending
+                for key in [key for key, (accepted, _value) in pending.items() if accepted <= took]:
+                    del pending[key]
+                self._settings_roots_edits = [
+                    (accepted, edit)
+                    for accepted, edit in self._settings_roots_edits
+                    if accepted > took
+                ]
+            if not self._settings_authoring_pending:
+                return None
+        try:
+            prepared = self._prepare_settings_batch()
+        except Exception:
+            LOGGER.exception("a setting accepted before the shutdown could not be prepared")
+            with self._settings_authoring_lock:
+                # Only the batch being written is still in flight, as before.
+                self._settings_batch_generation = took
+                self._settings_batch_turns_web_off = turns_web_off
+            return None
+        with self._settings_authoring_lock:
+            self._settings_batch_turns_web_off = self._settings_batch_turns_web_off or turns_web_off
+        return prepared
 
     def _hold_authoring_lifetime(self) -> bool:
         """Keep a normal GUI resident until one accepted transaction settles."""

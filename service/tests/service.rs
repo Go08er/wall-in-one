@@ -17212,3 +17212,56 @@ fn control_a_mirrored_boundary_onto_nothing_to_play_stops_everything() {
     assert_eq!(recorded.retained_outputs.last().map(Vec::len), Some(0));
     assert_eq!(snapshot["renderer_failed"], false, "{snapshot}");
 }
+
+// -- review r13n T-2: the move-on gives way only to a stand-in that is another playlist ------
+//
+// A playlist whose every entry is only taboo, none refused, isn't refused throughout: it stands
+// in for itself (`stand_in`), so a move-on that found nothing left isn't scheduled again.
+
+/// A mirrored startup on the default all-media [all-media-1, a still that always fails], no
+/// assignments, nothing refused: three attempts, then all-media-1 is taboo and nothing more is
+/// applied. Were all-media taken for its own stand-in, the move-on would apply it again every
+/// 6 s for ever.
+#[test]
+fn a_mirrored_move_on_onto_a_taboo_only_playlist_is_not_applied_again() {
+    let mut document = default_rule_document("pages");
+    document.truncate(document.find("[[schedules]]").unwrap());
+    let document = document.replace(
+        "[[playlists.entries]]\nid = \"all-media-2\"\nkind = \"still\"\n\
+         still = \"/stills/all-media-2.png\"\npalette = { kind = \"keep\", mode = \"keep\" }\n",
+        "",
+    );
+    assert!(!document.contains("all-media-2"), "the premise");
+    assert!(!document.contains("[[displays]]"), "the premise");
+    let state = Arc::new(Mutex::new(RuntimeDriverState {
+        connected_outputs: Some(vec!["DP-1".into(), "HDMI-A-1".into()]),
+        fail_entry_id: Some("all-media-1".into()),
+        fail_entry_attempts_remaining: 10_000,
+        ..RuntimeDriverState::default()
+    }));
+    let at = on_the_third(12, 0);
+    let mut runtime = Runtime::new(
+        PathBuf::from("/tmp/runtime.toml"),
+        Config::from_bytes(document.into_bytes()).unwrap(),
+        RuntimeDriver(state.clone()),
+        at,
+    )
+    .unwrap();
+    let started = Instant::now();
+    assert!(runtime.apply_current().is_err(), "the premise");
+    assert!(runtime.schedule_initial_apply_retry(started), "the premise");
+    for seconds in (2..=600).step_by(2) {
+        runtime.tick(at, started + Duration::from_secs(seconds));
+    }
+    let snapshot = status(&mut runtime, at);
+    assert_eq!(
+        snapshot["taboo_entries"][0]["entry_id"], "all-media-1",
+        "the premise: {snapshot}"
+    );
+    assert_eq!(
+        state.lock().unwrap().applies.len(),
+        3,
+        "applies went on: {snapshot}"
+    );
+    assert!(snapshot["automatic_retry"].is_null(), "{snapshot}");
+}

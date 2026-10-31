@@ -427,15 +427,13 @@ displays, a display already showing an item that another display learns is
 refused keeps it until that display's own next change (Play after a pause
 resumes it). When that display then has a change of its own that fails (the
 cycle's step or a command), the rollback can't put the refused item back: it
-steps over it onto the next entry of that playlist that can play (after the
-cycle's step or Next, the entry that just failed; after a pick, Previous or
-Random, another one), so status may say "previous wallpaper restored" while
+steps over it onto the next entry of that playlist that can play, so status may say "previous wallpaper restored" while
 that entry is up, or, if it keeps failing, name that
 entry with `renderer_failed` while the screen keeps the refused item's still.
 A taboo learned on one display isn't applied to another independent display
 already showing that entry: when that display's playlist has nothing else that
 can play and no stand-in, its row says "Nothing to play" while its screen
-keeps the entry (a video that passed its start check keeps playing, or a
+keeps the entry (a video or scene that passed its start check keeps playing, or a
 still stays up), until that display's own next change or its rule's end. An
 independent display whose third attempt failed with nothing left and no
 stand-in plays nothing, but its row keeps `renderer_failed` and the
@@ -446,7 +444,7 @@ startup with display assignments, when one display's playlist has nothing left
 that can play and no stand-in while another display still has a target, that
 display keeps what its failed apply left and may keep playing it under "Nothing
 to play", until the next apply of every display: the cycle's next step, Play,
-Next, Random, Follow schedule, a pick, a reload, a display connected or
+Next, Previous, Random, Follow schedule, a pick, a reload, a display connected or
 removed, or a rule's boundary.
 
 | Field | Where | Meaning |
@@ -641,12 +639,11 @@ attempts total, two seconds apart. Schedule and cycle transitions restore the
 prior selection and last-known-good wallpaper between attempts, except a rule
 boundary off a refused entry that a display shows, which doesn't restore it;
 the cycle's and a command's rollback step over an entry refused meanwhile onto
-the next entry of that playlist that can play (after the cycle's step or Next,
-the entry that just failed; after a pick, Previous or Random, another one)
+the next entry of that playlist that can play
 instead of restoring it (see the refusal paragraph under
 [Nothing to play](#nothing-to-play-schema-8)).
 There, as at startup, which has no prior selection, the paired still remains
-visible; after the third failure the route advances to another usable entry.
+visible; after the third failure the route advances to another usable entry, or, with none left and no stand-in, plays nothing ([exceptions](#nothing-to-play-schema-8)).
 In both cases the attributable
 playlist/entry becomes taboo for later automatic selection for the rest of the
 service session. Rejected socket input and failed reloads preserve a promised

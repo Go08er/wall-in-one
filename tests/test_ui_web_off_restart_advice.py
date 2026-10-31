@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -283,12 +284,14 @@ def _lock_never_had(
     web: int | None = None,
     install_while_held: str | None = None,
     turn_web_on_while_held: bool = False,
+    while_held: Callable[[], None] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Another writer holds the compiler lock past the step's wait and the later judgement's
     (0.2 s and 0.5 s here), over ``text`` (default: a file that allows web wallpapers; ``web``:
     ``_workshop(web)`` first). ``install_while_held``: that writer installs this document, by
     temp file and rename, after the step's own judgement and while it still holds the lock.
-    The log lines, the verbs."""
+    ``while_held``: that writer calls this once after the step's own judgement, still holding
+    the lock. The log lines, the verbs."""
     import time
 
     application = profiles().application
@@ -320,6 +323,9 @@ def _lock_never_had(
             if turn_web_on_while_held:
                 time.sleep(0.35)
                 config.update({"allow_web_wallpapers": True})
+            if while_held is not None:
+                time.sleep(0.35)
+                while_held()
             release.wait(30.0)
 
     thread = threading.Thread(target=holder)
@@ -477,6 +483,38 @@ def test_control_s_n18_a_lock_never_had_while_the_holder_turns_web_on_says_so(
     assert "Allow web wallpapers is on now" in lines[0], lines
     assert "was read" not in lines[0] and "being off" not in lines[0], lines
     assert not any("was not checked" in one for one in said), said
+    assert not any(RESTART in one for one in said), said
+    assert sent == []
+
+
+@pytest.mark.parametrize("case", ["file-removed", "settings-unreadable"])
+def test_r13r_a_lock_never_had_over_a_file_or_setting_that_cannot_be_read_says_not_checked(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+) -> None:
+    """The holder, still holding the lock, removes the runtime file or makes settings.toml
+    unparseable: nothing was read, so the later judgement says the file was not checked and that
+    the next start judges it, and gives no restart advice."""
+
+    def remove_file() -> None:
+        paths.runtime_config_path().unlink()
+
+    def break_settings() -> None:
+        paths.settings_path().write_text("this is = = not toml\n", encoding="utf-8")
+
+    sent, said = _lock_never_had(
+        profiles,
+        monkeypatch,
+        caplog,
+        "an-older-service",
+        while_held=remove_file if case == "file-removed" else break_settings,
+    )
+    lines = [one for one in said if "was not checked against Allow web wallpapers" in one]
+    assert len(lines) == 1, said
+    assert "the next start judges it" in lines[0], lines
+    assert not any("needs no replacement at exit" in one for one in said), said
     assert not any(RESTART in one for one in said), said
     assert sent == []
 

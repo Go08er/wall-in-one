@@ -195,7 +195,7 @@ attempts total, two seconds apart (a renderer program that is not there is not
 such a failure: see [missing renderers](#missing-renderers)). The service keeps or restores the
 last-known-good still between attempts (an entry refused meanwhile is stepped
 over, not restored: [exceptions](runtime-config.md#nothing-to-play-schema-8)); after the third failure it marks that
-resolved entry taboo for the session and advances to another usable candidate.
+resolved entry taboo for the session and advances to another usable candidate, or, with none left and no stand-in, plays nothing ([exceptions](runtime-config.md#nothing-to-play-schema-8)).
 An already-started renderer which later exits does not enter that retry machine:
 the service reaps its process group, reapplies the paired still and records the
 exact entry in `last_error`. A Wallpaper Engine scene crash becomes taboo

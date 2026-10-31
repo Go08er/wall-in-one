@@ -507,8 +507,8 @@ gets its automatic still (the same `<id>.png` in `Automatic Stills`) from its
 own `preview` through ffmpeg: the first frame of a `.gif`, or the picture
 itself. A preset of a web wallpaper takes it from that wallpaper's preview
 (its own if that has none), since its settings aren't applied. It is made
-once and not re-judged against the display's size, since a preview is as large as it will ever be. An item that can't play gets
-no still at all.
+once and not re-judged against the display's size, since a preview is as
+large as it will ever be. An item that can't play gets no still at all.
 
 ### Reporting
 

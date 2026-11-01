@@ -55,11 +55,13 @@ job = os.fork()
 if job == 0:
     os.setpgid(0, 0)
     os.close(M)
+    os.close(go_w)  # a harness that dies before the go is an end of file here, not a wait
     for s in (signal.SIGTTOU, signal.SIGTTIN, signal.SIGTSTP):
         signal.signal(s, signal.SIG_DFL)  # as a shell's child has them
     if cfg.get("stderr_tty"):
         os.dup2(0, 2)
-    os.read(go_r, 1)
+    if not os.read(go_r, 1):
+        os._exit(1)
     from gi.repository import GLib
     import wall_in_one.ui.quit_countdown as qc
     if cfg.get("race"):
@@ -345,10 +347,11 @@ def _run(cfg: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = json.loads(results[0][len("RESULT ") :])
         return result
     finally:
+        if job_fd is not None:
+            # The job, whether or not the harness is still there to end it.
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(job_fd, signal.SIGKILL)
         if child.poll() is None:
-            if job_fd is not None:
-                with contextlib.suppress(ProcessLookupError):
-                    signal.pidfd_send_signal(job_fd, signal.SIGKILL)
             child.kill()
             child.wait(10)
         if job_fd is not None:

@@ -353,8 +353,10 @@ is sent to the background during the countdown (Ctrl-Z, then `bg`); the
 countdown goes on. The terminal is put back as it was when the countdown
 ends, is cancelled or is cut short, and if the app is ended by SIGTERM,
 SIGHUP or SIGQUIT meanwhile (SIGKILL can't be caught); while the app is in
-the background the terminal is the shell's, and is left as the shell has it,
-and put back if the app is in the foreground again by the time it exits. When
+the background the terminal is the shell's, and is left as the shell has it;
+it is put back if the app is in the foreground again when the countdown ends,
+or when the app exits normally (not when a signal ends it after the
+countdown). When
 standard error isn't a terminal, the line is written once, saying "in 5
 seconds…". Only your own changes are counted: the app's own work, such as
 taking in a scan's result, isn't. Turning **Allow web wallpapers** off is

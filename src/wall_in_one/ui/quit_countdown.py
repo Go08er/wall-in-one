@@ -12,7 +12,10 @@ each), the end of ``run()``, the process's exit (`_restore_all`), and a
 SIGTERM, SIGHUP or SIGQUIT during the countdown, which end the process as
 before once it is (`Countdown._hold_fatal_signals`). Not SIGKILL, which
 nothing can catch. A terminal left in cbreak mode would keep the next
-program from echoing what is typed.
+program from echoing what is typed. Sent to the background meanwhile
+(Ctrl-Z, then ``bg``), it stops watching for Esc and leaves the terminal as
+the shell has it; what to put back is kept, and put back from the
+foreground, if it is there again by one of those.
 """
 
 from __future__ import annotations
@@ -50,7 +53,8 @@ FATAL: Final = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 #: The line that says the quit was cancelled, by Esc.
 CANCELLED: Final = "Quitting cancelled."
 
-#: Each terminal put in cbreak mode here, by its descriptor: the attributes to put back.
+#: Each terminal put in cbreak mode here, by its descriptor: the attributes to put back,
+#: kept until they are put back from the foreground (`_restore`).
 _SAVED: dict[int, list[Any]] = {}
 
 
@@ -361,9 +365,11 @@ class Countdown:
         try:
             if not keys_usable(fd):
                 # Sent to the background since it started (Ctrl-Z, then ``bg``): a read now
-                # would stop the process (SIGTTIN), held changes and all (Codex R41-5). No
-                # more Esc from it; the countdown goes on, and the terminal is put back at its
-                # end only if the process is in the foreground again by then (`_restore`).
+                # would stop the process (SIGTTIN), held changes and all (Codex R41-5). A
+                # terminal that hung up comes here too. No more Esc from it; the countdown
+                # goes on, and the terminal is put back from the foreground, if the process is
+                # there again by then: at the countdown's end, by a fatal signal's handler
+                # during it, or at the exit (`_restore`).
                 self._watch = 0
                 return GLib.SOURCE_REMOVE
             pressed = b""

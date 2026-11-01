@@ -176,26 +176,32 @@ def saving(changes: int) -> str:
     )
 
 
-def _write(out: TextIO | None, text: str) -> None:
-    """Say ``text`` on ``out``, unless it is a terminal that can't take it now.
+def _write(out: TextIO | None, text: str) -> bool:
+    """Say ``text`` on ``out``; False when it is a terminal that can't take it now.
 
     A terminal whose output was stopped (Ctrl-S) takes nothing until Ctrl-Q,
     and a write would wait for that on GTK's thread, the whole application
-    with it, a key's cancel and a Ctrl-C included (R14V L3). The line is
-    left out then; the next second's says where the countdown is.
+    with it: a key's cancel, and a SIGINT sent with ``kill`` (R14V L3; a
+    Ctrl-C typed there starts the output again). The text is left out then,
+    and the caller says whether it is said later (`Countdown._finish`). A
+    stream with no descriptor of its own is written as before.
     """
     if not text or out is None:
-        return
+        return True
     try:
-        fd = out.fileno()
-        if os.isatty(fd):
+        try:
+            fd: int | None = out.fileno()
+        except OSError, ValueError:
+            fd = None
+        if fd is not None and os.isatty(fd):
             _, ready, _ = select.select([], [fd], [], 0)
             if not ready:
-                return
+                return False
         out.write(text)
         out.flush()
     except OSError, ValueError:
         pass  # standard error closed: nothing to say it on
+    return True
 
 
 class Countdown:
@@ -232,6 +238,10 @@ class Countdown:
         self._watch = 0
         #: The line as last written in place, while it isn't finished yet.
         self._shown = ""
+        #: The countdown's last words, while the terminal can't take them (`_finish`), and
+        #: the watch that says them once it can.
+        self._later = ""
+        self._later_watch = 0
         #: Each fatal signal handled while the terminal is held: its handler, and what it replaced.
         self._fatal: dict[int, tuple[Callable[[int, Any], None], Any]] = {}
 
@@ -285,7 +295,7 @@ class Countdown:
         self._let_fatal_signals_go()
         text = "\n" if self._shown else ""
         self._shown = ""
-        self._write(text + (f"{said}\n" if said else ""))
+        self._finish(text + (f"{said}\n" if said else ""))
 
     def _hold_fatal_signals(self) -> None:
         """While the terminal is in cbreak mode: SIGTERM, SIGHUP and SIGQUIT put it back first.
@@ -339,8 +349,9 @@ class Countdown:
         if not self._in_place:
             self._write(f"{line}\n")
             return
-        self._write(self._rewind() + line)
-        self._shown = line
+        # Left out while the terminal can't take it: the next one rewinds to the last shown.
+        if self._write(self._rewind() + line):
+            self._shown = line
 
     def _rewind(self) -> str:
         """Back to where the line began: ``\\r``, then up the rows it wrapped onto, if it did."""
@@ -353,8 +364,41 @@ class Countdown:
         rows = (len(self._shown) - 1) // columns if columns > 0 else 0
         return "\r" + (f"\x1b[{rows}A" if rows else "")
 
-    def _write(self, text: str) -> None:
-        _write(self._out, text)
+    def _write(self, text: str) -> bool:
+        return _write(self._out, text)
+
+    def _finish(self, text: str) -> None:
+        """Say ``text``, the countdown's last words; once the terminal takes them, if it can't now.
+
+        Unlike a second's line, these say how the countdown ended ("Quitting cancelled."),
+        and the application may go on running: after Ctrl-Q they are there (R14W L1). In
+        order: what comes while some wait waits behind them.
+        """
+        if not text:
+            return
+        if not self._later and self._write(text):
+            return
+        self._later += text
+        if self._later_watch:
+            return
+        try:
+            channel = GLib.IOChannel.unix_new(self._out.fileno())
+        except OSError, ValueError, AttributeError:
+            self._later = ""
+            return
+        self._later_watch = GLib.io_add_watch(
+            channel,
+            GLib.PRIORITY_DEFAULT,
+            GLib.IOCondition.OUT | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
+            self._said_later,
+        )
+
+    def _said_later(self, _channel: GLib.IOChannel, condition: GLib.IOCondition) -> bool:
+        if condition & GLib.IOCondition.OUT and not self._write(self._later):
+            return GLib.SOURCE_CONTINUE
+        self._later = ""
+        self._later_watch = 0
+        return GLib.SOURCE_REMOVE
 
     def _tick(self) -> bool:
         try:
@@ -412,5 +456,5 @@ class Countdown:
         self._watch = 0  # removed by returning
         self.stop()
         instead = self._cancelled()
-        self._write(f"{instead or CANCELLED}\n")
+        self._finish(f"{instead or CANCELLED}\n")
         return GLib.SOURCE_REMOVE

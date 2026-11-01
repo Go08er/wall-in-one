@@ -74,6 +74,19 @@ def keys_usable(fd: int) -> bool:
         return False
 
 
+def _in_the_background(fd: int) -> bool:
+    """Whether this process is in the background of ``fd``, its controlling terminal.
+
+    False when that can't be told (``fd`` hung up, or isn't this process's
+    controlling terminal): only a shell's job control hands a terminal to
+    another group, and then it knows.
+    """
+    try:
+        return os.tcgetpgrp(fd) != os.getpgrp()
+    except OSError:
+        return False
+
+
 def _cbreak(fd: int) -> bool:
     """Put the terminal ``fd`` in cbreak mode with echo off; whether it is.
 
@@ -106,13 +119,19 @@ def _restore(fd: int) -> None:
     signal's handler that runs meanwhile, whichever of the process's threads
     the signal came to, still finds them and sets them itself; setting them
     twice does no harm. (Blocking the signals here would hold them off this
-    thread only.) SIGTTOU is blocked while they are set: a process sent to
-    the background since (Ctrl-Z, then ``bg``) would otherwise be stopped by
-    it here. TCSANOW, never a wait for output to drain, which a terminal
-    held by Ctrl-S would make last for ever at the process's exit.
+    thread only.) A process sent to the background since (Ctrl-Z, then
+    ``bg``) only forgets them: the shell has the terminal now, in a mode of
+    its own, which is not this process's to set (Codex R41-5). SIGTTOU is
+    blocked while they are set, for one sent there in between, which would
+    otherwise be stopped by it here. TCSANOW, never a wait for output to
+    drain, which a terminal held by Ctrl-S would make last for ever at the
+    process's exit.
     """
     saved = _SAVED.get(fd)
     if saved is None:
+        return
+    if _in_the_background(fd):
+        _SAVED.pop(fd, None)
         return
     try:
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
@@ -338,6 +357,14 @@ class Countdown:
             self._watch = 0
             return GLib.SOURCE_REMOVE
         try:
+            if not keys_usable(fd):
+                # Sent to the background since it started (Ctrl-Z, then ``bg``): a read now
+                # would stop the process (SIGTTIN), held changes and all (Codex R41-5). No
+                # more Esc from it, and the terminal is the shell's; the countdown goes on.
+                self._watch = 0
+                _restore(fd)
+                self._fd = None
+                return GLib.SOURCE_REMOVE
             pressed = b""
             if condition & GLib.IOCondition.IN:
                 try:

@@ -348,16 +348,20 @@ either line), quits at once without what isn't being written yet, and says so:
 what is already being written still finishes. Esc cancels the quit, and they
 are saved as usual; unless `wall-in-one ctl quit` asked to quit meanwhile, and
 then that quit goes on, and Esc says so. Esc is offered only when the app
-reads that terminal and runs in its foreground; the terminal is put back as it
-was when the countdown ends, is cancelled or is cut short, and if the app is
-ended by SIGTERM, SIGHUP or SIGQUIT meanwhile (SIGKILL can't be caught). When
+reads that terminal and runs in its foreground, and stops working if the app
+is sent to the background during the countdown (Ctrl-Z, then `bg`); the
+countdown goes on. The terminal is put back as it was when the countdown
+ends, is cancelled or is cut short, and if the app is ended by SIGTERM,
+SIGHUP or SIGQUIT meanwhile (SIGKILL can't be caught), unless the app is in
+the background by then: the terminal is the shell's. When
 standard error isn't a terminal, the line is written once, saying "in 5
 seconds…". Only your own changes are counted: the app's own work, such as
 taking in a scan's result, isn't. Turning **Allow web wallpapers** off is
 never dropped: it is saved whichever Ctrl-C quits, and the end of the quit
 still makes sure no web wallpaper plays ([Wallpaper
 Engine](docs/wallpaper-engine.md)). Once the quit itself has begun, another
-Ctrl-C ends its waits, and one more ends the process at once.
+Ctrl-C ends its waits; one more, once the app's own shutdown is over and the
+process is exiting, ends the process at once.
 
 ## Video wallpapers
 

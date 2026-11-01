@@ -120,8 +120,11 @@ def _restore(fd: int) -> None:
     the signal came to, still finds them and sets them itself; setting them
     twice does no harm. (Blocking the signals here would hold them off this
     thread only.) A process sent to the background since (Ctrl-Z, then
-    ``bg``) only forgets them: the shell has the terminal now, in a mode of
-    its own, which is not this process's to set (Codex R41-5). SIGTTOU is
+    ``bg``) doesn't set them: the shell has the terminal now, in a mode of
+    its own, which is not this process's to set (Codex R41-5). It keeps them,
+    for a later call once it is in the foreground again (``fg``), at the
+    countdown's end or the process's exit: a shell that saves a stopped job's
+    mode gives cbreak back then (R14T T-L1). SIGTTOU is
     blocked while they are set, for one sent there in between, which would
     otherwise be stopped by it here. TCSANOW, never a wait for output to
     drain, which a terminal held by Ctrl-S would make last for ever at the
@@ -131,7 +134,6 @@ def _restore(fd: int) -> None:
     if saved is None:
         return
     if _in_the_background(fd):
-        _SAVED.pop(fd, None)
         return
     try:
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
@@ -360,10 +362,9 @@ class Countdown:
             if not keys_usable(fd):
                 # Sent to the background since it started (Ctrl-Z, then ``bg``): a read now
                 # would stop the process (SIGTTIN), held changes and all (Codex R41-5). No
-                # more Esc from it, and the terminal is the shell's; the countdown goes on.
+                # more Esc from it; the countdown goes on, and the terminal is put back at its
+                # end only if the process is in the foreground again by then (`_restore`).
                 self._watch = 0
-                _restore(fd)
-                self._fd = None
                 return GLib.SOURCE_REMOVE
             pressed = b""
             if condition & GLib.IOCondition.IN:

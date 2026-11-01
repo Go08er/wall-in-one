@@ -23,15 +23,19 @@ Noctalia plugin talks to it.
 
 ## Status
 
-Current version: **0.4.0**, paired with Noctalia companion **0.3.0**
+Current version: **0.4.1**, paired with Noctalia companion **0.3.0**
 (Noctalia 5.2; older Noctalia hosts keep companion 0.1.3).
+0.4.1 lists every Wallpaper Engine item, plays presets, never runs an
+executable one, keeps web wallpapers off until you allow them, and puts
+mpvpaper's and linux-wallpaperengine's settings in the app.
 0.4.0 runs on any compositor Noctalia 5 supports, no longer only niri, and
 leaves the wallpaper renderers to be installed separately: the flake's
 NixOS and home-manager modules install them, and the app says when one is
 missing. 0.3.0 makes the redesigned interface the default, with every page ported;
 the classic window stays one Settings choice (or `--ui=classic`) away. It
 builds on 0.2.x, which updated 0.1.4 directly and reads every 0.1.4 file as
-it is. See the release notes for [0.4.0](docs/releases/v0.4.0.md),
+it is. See the release notes for [0.4.1](docs/releases/v0.4.1.md),
+[0.4.0](docs/releases/v0.4.0.md),
 [0.3.2](docs/releases/v0.3.2.md),
 [0.3.1](docs/releases/v0.3.1.md),
 [0.3.0](docs/releases/v0.3.0.md),

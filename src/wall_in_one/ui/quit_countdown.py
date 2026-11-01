@@ -26,6 +26,7 @@ import atexit
 import contextlib
 import logging
 import os
+import select
 import signal
 import sys
 import termios
@@ -176,9 +177,21 @@ def saving(changes: int) -> str:
 
 
 def _write(out: TextIO | None, text: str) -> None:
+    """Say ``text`` on ``out``, unless it is a terminal that can't take it now.
+
+    A terminal whose output was stopped (Ctrl-S) takes nothing until Ctrl-Q,
+    and a write would wait for that on GTK's thread, the whole application
+    with it, a key's cancel and a Ctrl-C included (R14V L3). The line is
+    left out then; the next second's says where the countdown is.
+    """
     if not text or out is None:
         return
     try:
+        fd = out.fileno()
+        if os.isatty(fd):
+            _, ready, _ = select.select([], [fd], [], 0)
+            if not ready:
+                return
         out.write(text)
         out.flush()
     except OSError, ValueError:
@@ -237,7 +250,7 @@ class Countdown:
             if not held:
                 self._let_fatal_signals_go()
             else:
-                # What was typed before the Ctrl-C isn't a key pressed for the countdown.
+                # What was typed before the countdown started isn't a key pressed for it.
                 with contextlib.suppress(termios.error, OSError):
                     termios.tcflush(fd, termios.TCIFLUSH)
         if held and fd is not None:
@@ -385,6 +398,10 @@ class Countdown:
                 _restore(fd)
                 self._fd = None
                 return GLib.SOURCE_REMOVE
+            # The rest of what came with the key (a paste is one read of up to 64 bytes) is
+            # not for the shell to run once the application has exited (R14V).
+            with contextlib.suppress(termios.error, OSError):
+                termios.tcflush(fd, termios.TCIFLUSH)
         except Exception:
             # As in `_tick`: the countdown ends, toward saving.
             LOGGER.exception("reading a key failed; saving and quitting now")

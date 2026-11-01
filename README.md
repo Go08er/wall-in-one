@@ -345,7 +345,8 @@ counts down:
 Then it saves them and quits once they are saved, as `wall-in-one ctl quit`
 does. Ctrl-C again, during the countdown or while they are being saved (after
 either line), quits at once without what isn't being written yet, and says so:
-what is already being written still finishes. Any other key cancels the quit,
+what is already being written still finishes. Any other key cancels the quit
+(not Ctrl-Z, Ctrl-\\, or Ctrl-S and Ctrl-Q, which the terminal keeps for itself),
 and they are saved as usual; unless `wall-in-one ctl quit` asked to quit
 meanwhile, and then that quit goes on, and the key says so. What you typed
 before the countdown started isn't counted. The key is offered only when the
@@ -367,8 +368,8 @@ Engine](docs/wallpaper-engine.md)). Once the quit itself has begun, another
 Ctrl-C ends its waits; one more, once the app's own shutdown is over and the
 process is exiting, ends the process at once.
 
-Closing the window, `wall-in-one ctl quit` and Ctrl-C in its terminal save what
-is waiting. Any other way the app is stopped (a signal such as SIGTERM or
+Closing the window, `wall-in-one ctl quit` and Ctrl-C in its terminal (or any
+SIGINT, `kill -INT` included) save what is waiting. Any other way the app is stopped (a signal such as SIGTERM or
 SIGHUP, closing the terminal, logging out, the display going away) is taken as
 meant: what isn't saved yet isn't saved, and the app ends at once.
 

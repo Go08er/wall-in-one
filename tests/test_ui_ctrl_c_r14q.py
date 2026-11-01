@@ -54,7 +54,7 @@ from tests.test_ui_renderer_settle_shutdown import _LANES, _setup  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: What Esc says when ``ctl quit`` asked to quit during the countdown (the coordinator's words).
+#: What a key says when ``ctl quit`` asked to quit during the countdown (the coordinator's words).
 GOES_ON = "Quitting goes on: wall-in-one ctl quit asked for it."
 
 #: What a first Ctrl-C says while ``ctl quit`` saves one change (the owner's words), and what
@@ -80,7 +80,7 @@ def test_r14q_ctl_quit_then_a_first_ctrl_c_with_only_an_edit_waiting(
     """--service. A save in progress; behind it one playlist edit (no number, no Settings, so
     no settle drains the lane). ``ctl quit`` (request_quit) waits for it; the person presses
     Ctrl-C. The owner's "save first": that quit goes on saving the edit, and the press says so
-    once, with no countdown and no Esc; ``two-ctrl-c``: the next press then quits without it,
+    once, with no countdown and no key; ``two-ctrl-c``: the next press then quits without it,
     as Ctrl-C again does. Before (a2f4632, and 55f26e1): the press was ``quit()``, which
     dropped the edit, saying nothing. The controls: no press; and nothing waiting but the save
     in progress, where the press is ``quit()`` at once, saying nothing, as before."""
@@ -189,7 +189,7 @@ def test_r14q_ctl_quit_during_the_countdown_then_esc(
         _ctrl_c()
         yield "the countdown", lambda: _counting(application)
         counting = application._quit_countdown
-        assert counting is not None and counting.keys, "Esc isn't offered"
+        assert counting is not None and counting.keys, "no key is offered"
         if ctl_quit:
             application.request_quit()  # `ctl quit` during the countdown
             yield "a moment", _after(0.2)

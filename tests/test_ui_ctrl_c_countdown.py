@@ -1,11 +1,13 @@
-"""A first Ctrl-C saves what is waiting after a countdown; a second quits without it; any other key cancels.
+"""A first Ctrl-C saves what is waiting after a countdown; a second quits without it; any
+other key cancels.
 
 The owner's request (r14o): a first Ctrl-C quits as ``ctl quit`` does (`Application.request_quit`),
 but the changes accepted and not yet being written are held first, for a countdown said on
-standard error, so that a second Ctrl-C can quit without them and any other key in the terminal can
-cancel the quit. Before (55f26e1), a first Ctrl-C was PyGObject's fallback, ``quit()``, which handed on
-renderer numbers and coalesced Settings (R41-2) but dropped every other task queued behind a save
-in progress: a playlist, pairing or schedule edit (review R14, P3).
+standard error, so that a second Ctrl-C can quit without them and any other key in the
+terminal can cancel the quit. Before (55f26e1), a first Ctrl-C was PyGObject's fallback,
+``quit()``, which handed on renderer numbers and coalesced Settings (R41-2) but dropped every
+other task queued behind a save in progress: a playlist, pairing or schedule edit (review R14,
+P3).
 
 Never a real signal: each Ctrl-C calls the handler installed for SIGINT, as Python calls it when
 one lands (at 55f26e1 that is PyGObject's, which calls ``quit()``). The terminal is a pty of the
@@ -41,7 +43,7 @@ from gi.repository import GLib  # noqa: E402
 import wall_in_one.ui.app as app_module  # noqa: E402
 from tests.test_ui_next_window import Step, application_lanes, run_application  # noqa: E402
 from tests.test_ui_renderer_dials import _own, toolkit  # noqa: E402,F401
-from tests.test_ui_renderer_settle_quit import _after, _rows, _scanned  # noqa: E402
+from tests.test_ui_renderer_settle_quit import _rows, _scanned  # noqa: E402
 from tests.test_ui_renderer_settle_shutdown import (  # noqa: E402
     _LANES,
     GIVE_UP,
@@ -427,10 +429,11 @@ def test_a_key_during_the_countdown_cancels_the_quit_and_a_later_ctrl_c_is_a_fir
     terminal: tuple[int, int, ModuleType],
 ) -> None:
     """(f) A playlist edit behind a save in progress, a Ctrl-C, then an arrow key (an escape
-    sequence: it cancels, as Esc did, and as any key does now): the quit is cancelled, its timer and its watch are gone, the
-    terminal is as it was, nothing of the quit is left, and the edit is saved as if no Ctrl-C had
-    come. (g) Another edit behind another save, another Ctrl-C: a fresh countdown, which runs to
-    its end (shortened) and saves it, and the application quits."""
+    sequence: it cancels, as Esc did, and as any key does now): the quit is cancelled, its timer
+    and its watch are gone, the terminal is as it was, nothing of the quit is left, and the edit
+    is saved as if no Ctrl-C had come. (g) Another edit behind another save, another Ctrl-C: a
+    fresh countdown, which runs to its end (shortened) and saves it, and the application
+    quits."""
     master, slave, _countdown = terminal
     before = termios.tcgetattr(slave)
     application, clip, _slow, _spans = _setup(

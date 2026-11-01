@@ -8,8 +8,8 @@
   only). A child on a pty that is its controlling terminal runs the real countdown; where its
   signal lands is pinned by wrapping ``signal.pthread_sigmask``, ``signal.getsignal`` or
   ``termios.tcsetattr`` in the child, and R-N1's lands on another thread of it.
-* **Q-N2:** ``ctl quit`` during the countdown, then a key (Esc), said "Quitting cancelled." and quit all
-  the same. It says that the quit goes on, and why.
+* **Q-N2:** ``ctl quit`` during the countdown, then a key (Esc), said "Quitting cancelled." and
+  quit all the same. It says that the quit goes on, and why.
 * **Q-L1, the owner's "save first":** after ``ctl quit``, a first Ctrl-C with a lone playlist
   edit queued was ``quit()``, which dropped it, saying nothing. That quit now goes on saving
   it, the press says so once, and the next press quits without it.

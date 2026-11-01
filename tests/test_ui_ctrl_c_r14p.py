@@ -395,7 +395,7 @@ def test_r14p_nothing_waiting_quits_at_once(
     assert took < 1.0, f"a Ctrl-C with nothing waiting took {took:.2f}s to quit, saying nothing"
 
 
-# -- P7: Esc pressed twice, read at once (any key cancels since R14V) --------------------------------------------------------
+# -- P7: Esc pressed twice, read at once (any key cancels since R14V) ------------------------------
 
 
 @pytest.mark.parametrize("pressed", [b"\x1b\x1b", b"\x1b"])

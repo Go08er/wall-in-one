@@ -40,9 +40,11 @@ ESC: Final = b"\x1b"
 #: The signals that end the process at once, which a terminal in cbreak mode
 #: must not outlive: handled only while the countdown holds the terminal. One
 #: that lands in the instant its handler is put back (`_let_fatal_signals_go`)
-#: can be lost, and the process then carries on as if it hadn't come: CPython
-#: drops a signal whose handler changed while it was pending (bpo-43406).
-#: Accepted: nothing short of not handling them at all avoids it.
+#: can be lost: CPython drops a signal whose Python handler is put back to
+#: SIG_DFL while it is pending, and says so on standard error (bpo-43406); the
+#: process carries on. Accepted: only never handling them (a terminal left in
+#: cbreak) or never putting the handler back (a Python handler never runs while
+#: GTK's thread is wedged, R14Q Q-N4) avoids it.
 FATAL: Final = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
 #: The line that says the quit was cancelled, by Esc.

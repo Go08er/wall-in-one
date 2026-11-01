@@ -3,10 +3,11 @@
 * **Q-N1:** a fatal signal that lands as the countdown puts the terminal back (inside
   ``_restore``, between taking the saved attributes and setting them), or as it starts (after
   cbreak, before its handlers), left the terminal in cbreak mode. The handlers now come before
-  cbreak, the attributes are recorded before the terminal is changed, and ``_restore`` blocks the
-  fatal signals from before it takes them until they are set. A child on a pty that is its
-  controlling terminal runs the real countdown; where its signal lands is pinned by wrapping
-  ``signal.pthread_sigmask`` or ``signal.getsignal`` in the child.
+  cbreak, the attributes are recorded before the terminal is changed, and ``_restore`` forgets
+  them only once they are set (R14R R-N1: a block would hold the signals off its own thread
+  only). A child on a pty that is its controlling terminal runs the real countdown; where its
+  signal lands is pinned by wrapping ``signal.pthread_sigmask``, ``signal.getsignal`` or
+  ``termios.tcsetattr`` in the child, and R-N1's lands on another thread of it.
 * **Q-N2:** ``ctl quit`` during the countdown, then Esc, said "Quitting cancelled." and quit all
   the same. It says that the quit goes on, and why.
 * **Q-L1, the owner's "save first":** after ``ctl quit``, a first Ctrl-C with a lone playlist
@@ -340,17 +341,18 @@ def test_r14q_a_fatal_signal_landing_inside_restore(mode: str) -> None:
 # -- R14R R-N1: the same, with another thread to take the signal --------------------------------
 
 THREADED_RACE_CHILD = r"""
-import ctypes, fcntl, os, signal, sys, termios, time
+import ctypes, fcntl, os, signal, sys, termios, threading, time
 from concurrent.futures import ThreadPoolExecutor
 mode = sys.argv[1]
 ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE 0: never a core
 fcntl.ioctl(0, termios.TIOCSCTTY, 0)  # the pty is this new session's terminal
 from gi.repository import GLib
 from wall_in_one.ui import quit_countdown
+worker = None
 if mode.startswith("threaded"):
     # As the application's authoring lane: one worker, idle on its queue after a job.
     lane = ThreadPoolExecutor(max_workers=1, thread_name_prefix="control-authoring")
-    lane.submit(lambda: None).result()
+    worker = lane.submit(threading.get_ident).result()
 real = termios.tcsetattr
 calls = []
 def pinned(fd, when, attributes):
@@ -358,8 +360,12 @@ def pinned(fd, when, attributes):
     # The second tcsetattr is `_restore`'s (the first is `_cbreak`'s): the saved attributes
     # are taken, and not set yet.
     if len(calls) == 2:
-        os.kill(os.getpid(), signal.SIGHUP if "term-then-hup" in mode else signal.SIGTERM)
-        time.sleep(0.2)  # long enough for another thread to take it, if there is one
+        number = signal.SIGHUP if "term-then-hup" in mode else signal.SIGTERM
+        if worker is not None:
+            signal.pthread_kill(worker, number)  # it lands on the worker; Python runs it here
+        else:
+            os.kill(os.getpid(), number)
+        time.sleep(0.2)  # long enough for the main thread to notice a signal another took
     return real(fd, when, attributes)
 termios.tcsetattr = pinned
 loop = GLib.MainLoop()
@@ -382,10 +388,11 @@ print("loop ended", flush=True)
     ],
 )
 def test_r14r_a_fatal_signal_inside_restore_with_another_thread(mode: str) -> None:
-    """R14R R-N1: a signal sent to the process (as ``kill``, systemd and Ctrl-\\ send it) once
-    ``_restore`` has taken the saved attributes, before tcsetattr. The application always has
-    other threads while a countdown runs, and one of them may take it; its handler still runs
-    on the main thread, and must find the attributes. ``stop-then-term``: SIGTERM as the
+    """R14R R-N1: a signal once ``_restore`` has taken the saved attributes, before tcsetattr.
+    The application always has other threads while a countdown runs, and one of them may take a
+    signal sent to the process (as ``kill``, systemd and Ctrl-\\ send it); ``threaded-*`` puts
+    it on a worker thread (``pthread_kill``). Its handler still runs on the main thread, and must
+    find the attributes. ``stop-then-term``: SIGTERM as the
     countdown stops by itself. ``term-then-hup``: the test sends SIGTERM while it counts, and
     SIGHUP lands inside that handler's own restore. Controls: the same with no other thread."""
     master, slave = os.openpty()

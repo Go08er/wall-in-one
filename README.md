@@ -348,7 +348,8 @@ either line), quits at once without what isn't being written yet, and says so:
 what is already being written still finishes. Any other key cancels the quit,
 and they are saved as usual (keys the terminal acts on itself don't count:
 Ctrl-Z suspends the app, Ctrl-\\ ends it without saving, and Ctrl-S and Ctrl-Q
-pause and resume its output); unless `wall-in-one ctl quit` asked to quit
+pause and resume its output: the countdown goes on meanwhile, and what it says
+when it ends shows at Ctrl-Q if the app is still running then); unless `wall-in-one ctl quit` asked to quit
 meanwhile, and then that quit goes on, and the key says so. What you typed
 before the countdown started isn't counted. The key is offered only when the
 app reads that terminal and runs in its foreground, and stops working if the app

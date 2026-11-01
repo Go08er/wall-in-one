@@ -173,13 +173,14 @@ def test_r14w_the_last_words_wait_for_the_terminal_to_take_them() -> None:
         os.close(master)
     assert said is not None and said.startswith("cancelled"), said
     assert quit_countdown.CANCELLED.encode() not in stopped, stopped
-    assert quit_countdown.CANCELLED.encode() in resumed, resumed
+    # The countdown's line finished first, then the cancel on a row of its own.
+    assert f"\r\n{quit_countdown.CANCELLED}\r\n".encode() in resumed, resumed
 
 
 def test_r14w_a_stream_without_a_descriptor_is_written() -> None:
     """R14W N1: the terminal check doesn't leave out a stream that has no descriptor."""
     out = io.StringIO()
-    assert quit_countdown._write(out, "said\n")
+    quit_countdown._write(out, "said\n")
     assert out.getvalue() == "said\n"
 
 

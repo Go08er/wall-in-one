@@ -191,7 +191,7 @@ def _write(out: TextIO | None, text: str) -> bool:
     try:
         try:
             fd: int | None = out.fileno()
-        except OSError, ValueError:
+        except OSError, ValueError, AttributeError:
             fd = None
         if fd is not None and os.isatty(fd):
             _, ready, _ = select.select([], [fd], [], 0)
@@ -372,7 +372,9 @@ class Countdown:
 
         Unlike a second's line, these say how the countdown ended ("Quitting cancelled."),
         and the application may go on running: after Ctrl-Q they are there (R14W L1). In
-        order: what comes while some wait waits behind them.
+        order: what comes while some wait waits behind them. An application that quits
+        before Ctrl-Q doesn't wait for it: they are left unsaid then (R14X L1-a), as a
+        quit is never held for the terminal.
         """
         if not text:
             return
@@ -389,7 +391,10 @@ class Countdown:
         self._later_watch = GLib.io_add_watch(
             channel,
             GLib.PRIORITY_DEFAULT,
-            GLib.IOCondition.OUT | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
+            GLib.IOCondition.OUT
+            | GLib.IOCondition.HUP
+            | GLib.IOCondition.ERR
+            | GLib.IOCondition.NVAL,
             self._said_later,
         )
 

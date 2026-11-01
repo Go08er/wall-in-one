@@ -25,7 +25,7 @@ Noctalia plugin talks to it.
 
 Current version: **0.4.1**, paired with Noctalia companion **0.3.0**
 (Noctalia 5.2; older Noctalia hosts keep companion 0.1.3).
-0.4.1 lists every Wallpaper Engine item, plays presets, never runs an
+0.4.1 lists every kind of Wallpaper Engine item, plays presets, never runs an
 executable one, keeps web wallpapers off until you allow them, and puts
 mpvpaper's and linux-wallpaperengine's settings in the app.
 0.4.0 runs on any compositor Noctalia 5 supports, no longer only niri, and

@@ -213,10 +213,11 @@ def test_it_builds_the_latest_release_and_enables_the_service(setup: Setup) -> N
 
 
 def test_a_version_downloads_that_release(setup: Setup) -> None:
-    result = setup.run("--version", "v0.4.0")
+    tag = "v" + setup.pkgver_rel.split("-")[0]  # the release the served PKGBUILD is
+    result = setup.run("--version", tag)
     assert result.returncode == 0, result.stderr
     assert any(
-        call.endswith("/releases/download/v0.4.0/PKGBUILD")
+        call.endswith(f"/releases/download/{tag}/PKGBUILD")
         for call in setup.calls()
         if call.startswith("curl ")
     )

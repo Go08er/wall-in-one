@@ -1,7 +1,7 @@
 # Maintainer: goober <149829787+Go08er@users.noreply.github.com>
 
 pkgname=wall-in-one
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc='Wallpaper manager for Wayland with Noctalia palette sync'
 arch=(x86_64 aarch64)
@@ -41,7 +41,7 @@ optdepends=(
   'linux-wallpaperengine: Wallpaper Engine scenes (AUR: linux-wallpaperengine-git)'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# TODO(release): 'SKIP' only until v0.4.0 is tagged and GitHub serves its
+# TODO(release): 'SKIP' only until v0.4.1 is tagged and GitHub serves its
 # tarball. Right after tagging, run `updpkgsums` in this directory, regenerate
 # .SRCINFO (`makepkg --printsrcinfo > .SRCINFO`) and commit both. A published
 # package must never keep 'SKIP'.

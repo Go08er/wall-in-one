@@ -295,13 +295,13 @@ MAX_GUI_AUTHORING_QUEUE: Final = 32
 #: be saved, and published: as long as ``ctl`` gives one authoring change.
 SHUTDOWN_SETTLE_SECONDS: Final = client.AUTHORING_TIMEOUT
 #: How long a first Ctrl-C holds the changes still waiting to be saved before it
-#: saves them and quits, so that a second can quit without them, or Esc cancel
+#: saves them and quits, so that a second can quit without them, or any other key cancel
 #: (`Application._first_ctrl_c`); counted down in steps of `QUIT_COUNTDOWN_TICK_MS`.
 QUIT_COUNTDOWN_SECONDS: Final = 5
 QUIT_COUNTDOWN_TICK_MS: Final = 1000
 #: What a second Ctrl-C during that countdown says as it quits.
 QUIT_WITHOUT_THEM: Final = "Quitting immediately without them."
-#: What Esc during that countdown says when ``ctl quit`` asked to quit meanwhile.
+#: What a key during that countdown says when ``ctl quit`` asked to quit meanwhile.
 QUIT_GOES_ON: Final = "Quitting goes on: wall-in-one ctl quit asked for it."
 #: The longest a settings save can take, from the timeouts it can spend: the
 #: migration marker's lock it is written under (`legacy_migration.unattended_transaction`),
@@ -3021,7 +3021,7 @@ class Application(Adw.Application):
         Once the shutdown has begun, one ends its waits (`_on_sigint`), and
         once ``run()`` has returned, Python's own handler ends the process's
         exit: someone who keeps pressing it is out at the fourth at the most.
-        Esc during the countdown cancels the quit, and leaves nothing of it:
+        A key during the countdown cancels the quit, and leaves nothing of it:
         the next Ctrl-C is a first again.
         """
         if self._shutting_down:
@@ -3043,11 +3043,11 @@ class Application(Adw.Application):
         waiting and a careful quit already under way that this Ctrl-C didn't
         start (``ctl quit`` in ``--service``), that quit goes on saving them,
         which can't be cancelled from here: it says so once, with no countdown
-        and no Esc (`quit_countdown.saving`), and the next Ctrl-C quits without
+        and no key to cancel (`quit_countdown.saving`), and the next Ctrl-C quits without
         them (the owner's "save first"). Otherwise what is
         waiting is held for `QUIT_COUNTDOWN_SECONDS`, counted down on standard
         error (`quit_countdown`), so that the person can quit without it (a
-        second Ctrl-C) or not quit at all (Esc), and then saved and waited for
+        second Ctrl-C) or not quit at all (any other key), and then saved and waited for
         by `request_quit`. Held: the authoring lane starts nothing meanwhile,
         and admits only what a requested quit admits (`_admitted_during_quit`):
         a number whose timer fires, the Settings coalesced behind a batch that
@@ -3117,10 +3117,10 @@ class Application(Adw.Application):
         self.request_quit()
 
     def _quit_countdown_cancelled(self) -> str | None:
-        """Esc during the countdown: no quit, and what it held is saved as if it never ran.
+        """A key during the countdown: no quit, and what it held is saved as if it never ran.
 
         Unless ``ctl quit`` asked to quit meanwhile (``--service``): that quit
-        goes on, saving what was held as a careful quit does, and Esc says so
+        goes on, saving what was held as a careful quit does, and the key says so
         (`QUIT_GOES_ON`) instead of that the quit was cancelled.
         """
         self._quit_countdown = None

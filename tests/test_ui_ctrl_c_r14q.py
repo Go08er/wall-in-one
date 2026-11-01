@@ -8,7 +8,7 @@
   only). A child on a pty that is its controlling terminal runs the real countdown; where its
   signal lands is pinned by wrapping ``signal.pthread_sigmask``, ``signal.getsignal`` or
   ``termios.tcsetattr`` in the child, and R-N1's lands on another thread of it.
-* **Q-N2:** ``ctl quit`` during the countdown, then Esc, said "Quitting cancelled." and quit all
+* **Q-N2:** ``ctl quit`` during the countdown, then a key (Esc), said "Quitting cancelled." and quit all
   the same. It says that the quit goes on, and why.
 * **Q-L1, the owner's "save first":** after ``ctl quit``, a first Ctrl-C with a lone playlist
   edit queued was ``quit()``, which dropped it, saying nothing. That quit now goes on saving
@@ -167,7 +167,7 @@ def test_r14q_ctl_quit_during_the_countdown_then_esc(
     """--service, standard input a pty of the test's (the countdown tests' stub). A playlist edit
     behind a save in progress; a first Ctrl-C (countdown, 5 s); ``ctl quit`` arrives; Esc. The
     quit ``ctl quit`` asked for goes on, saving the edit, and Esc says so, never "Quitting
-    cancelled.". Before (5df4cf0) it said that, and quit all the same. The control: Esc alone
+    cancelled.". Before (5df4cf0) it said that, and quit all the same. The control: a key alone
     cancels, and the application is still running 1.5 s later."""
     countdown = importlib.import_module("wall_in_one.ui.quit_countdown")
     master, slave = os.openpty()

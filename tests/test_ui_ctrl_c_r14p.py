@@ -9,7 +9,7 @@
 * **L4:** SIGTERM during the countdown left the terminal in cbreak mode; SIGHUP and SIGQUIT too.
   A child of the test, on a pty that is its controlling terminal, runs the real countdown.
 * **N1:** an exception in the countdown's tick held the lane for ever.
-* **N2:** Esc pressed twice, read at once, wasn't Esc.
+* **N2:** Esc pressed twice, read at once, wasn't Esc (any key cancels now, R14V).
 * **N3:** a Ctrl-C after the countdown, while its careful quit saves, dropped what was queued
   without a word.
 * **N4:** a real first SIGINT, sent to this process as the terminal sends it, through the
@@ -395,7 +395,7 @@ def test_r14p_nothing_waiting_quits_at_once(
     assert took < 1.0, f"a Ctrl-C with nothing waiting took {took:.2f}s to quit, saying nothing"
 
 
-# -- P7: Esc pressed twice, read at once --------------------------------------------------------
+# -- P7: Esc pressed twice, read at once (any key cancels since R14V) --------------------------------------------------------
 
 
 @pytest.mark.parametrize("pressed", [b"\x1b\x1b", b"\x1b"])
@@ -482,7 +482,7 @@ def test_r14p_the_terminal_after_the_process_ends_during_the_countdown(ended_by:
     a session's end, ``systemctl --user stop``), SIGHUP (the terminal closed) or SIGQUIT
     (Ctrl-\\), and must still end by it; or, the controls, SIGINT (Python's exit runs, and
     atexit with it), or the countdown runs to its end; ``background``: another process group
-    has the terminal's foreground, so Esc must not be read."""
+    has the terminal's foreground, so a key must not be read."""
     master, slave = os.openpty()
     before = termios.tcgetattr(slave)
     env = {**os.environ, "PYTHONPATH": str(REPO / "src")}

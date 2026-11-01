@@ -1,6 +1,6 @@
 """Codex R41-5, adopted: a countdown that loses its terminal's foreground doesn't read it.
 
-The countdown starts in the foreground and watches for Esc. Sent to the background since
+The countdown starts in the foreground and watches for a key. Sent to the background since
 (Ctrl-Z, then ``bg``), a read of the terminal would stop the process (SIGTTIN), held
 changes and all, once a line is typed there. The harness is a shell-like session leader on a
 pty of the test's own; its countdown job is a separate, non-orphaned group, so a background

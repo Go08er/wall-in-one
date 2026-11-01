@@ -4,16 +4,18 @@
 are saved when it ends, and dropped at a second Ctrl-C), and this says so on
 standard error: rewritten in place once a second on a terminal, said once
 otherwise. When standard input is the terminal this process is in the
-foreground of, Esc there cancels the quit. The terminal is then put in cbreak
-mode, with echo off and Ctrl-C still a signal, for as long as the countdown
-runs, and put back as it was: at the countdown's end, a second Ctrl-C, Esc,
+foreground of, any other key there cancels the quit (what was typed before the
+countdown started is thrown away, so that it doesn't). The terminal is then put
+in cbreak mode, with echo off and Ctrl-C still a signal (so it is not a key
+here), for as long as the countdown runs, and put back as it was: at the
+countdown's end, a second Ctrl-C, a key,
 an exception in the countdown's own code (`Countdown.stop` comes first on
 each), the end of ``run()``, the process's exit (`_restore_all`), and a
 SIGTERM, SIGHUP or SIGQUIT during the countdown, which end the process as
 before once it is (`Countdown._hold_fatal_signals`). Not SIGKILL, which
 nothing can catch. A terminal left in cbreak mode would keep the next
 program from echoing what is typed. Sent to the background meanwhile
-(Ctrl-Z, then ``bg``), it stops watching for Esc and leaves the terminal as
+(Ctrl-Z, then ``bg``), it stops watching for a key and leaves the terminal as
 the shell has it; what to put back is kept, and put back from the
 foreground, if it is there again by one of those.
 """
@@ -35,11 +37,6 @@ from gi.repository import GLib
 
 LOGGER = logging.getLogger(__name__)
 
-#: What the terminal sends for Esc on its own. A key such as an arrow sends Esc
-#: and more in the same read (``\x1b[A``), and is not Esc; a read of Esc and
-#: nothing else, pressed twice while the loop was busy, is.
-ESC: Final = b"\x1b"
-
 #: The signals that end the process at once, which a terminal in cbreak mode
 #: must not outlive: handled only while the countdown holds the terminal. One
 #: that lands in the instant its handler is put back (`_let_fatal_signals_go`)
@@ -50,7 +47,7 @@ ESC: Final = b"\x1b"
 #: GTK's thread is wedged, R14Q Q-N4) avoids it.
 FATAL: Final = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 
-#: The line that says the quit was cancelled, by Esc.
+#: The line that says the quit was cancelled, by a key.
 CANCELLED: Final = "Quitting cancelled."
 
 #: Each terminal put in cbreak mode here, by its descriptor: the attributes to put back,
@@ -59,7 +56,7 @@ _SAVED: dict[int, list[Any]] = {}
 
 
 def keys_fd() -> int | None:
-    """Standard input's descriptor, where Esc is read; None when there is none."""
+    """Standard input's descriptor, where a key is read; None when there is none."""
     try:
         return sys.stdin.fileno() if sys.stdin is not None else None
     except OSError, ValueError, AttributeError:
@@ -192,7 +189,7 @@ class Countdown:
     """One countdown: its line, its timer, and, when there is one, its watch of the terminal.
 
     ``changes``: how many changes a second Ctrl-C would drop, said in the line.
-    ``done`` runs once the last second has passed, ``cancelled`` once Esc was
+    ``done`` runs once the last second has passed, ``cancelled`` once a key was
     pressed; the countdown has stopped (`stop`) before either runs. What
     ``cancelled`` returns is said in place of `CANCELLED`, when it isn't
     None. GTK's thread only.
@@ -227,7 +224,7 @@ class Countdown:
 
     @property
     def keys(self) -> bool:
-        """Whether Esc is being watched for: the line offers it only then."""
+        """Whether a key is being watched for: the line offers it only then."""
         return bool(self._watch)
 
     def start(self) -> None:
@@ -239,6 +236,10 @@ class Countdown:
             held = _cbreak(fd)
             if not held:
                 self._let_fatal_signals_go()
+            else:
+                # What was typed before the Ctrl-C isn't a key pressed for the countdown.
+                with contextlib.suppress(termios.error, OSError):
+                    termios.tcflush(fd, termios.TCIFLUSH)
         if held and fd is not None:
             self._fd = fd
             channel = GLib.IOChannel.unix_new(fd)
@@ -314,10 +315,10 @@ class Countdown:
         changes = _changes(self._changes)
         # In place it counts down; said once, the line says how long.
         when = f"{self._left}…" if self._in_place else f"{self._left} seconds…"
-        esc = ", or Esc to cancel quitting" if self.keys else ""
+        key = ", or any other key to cancel quitting" if self.keys else ""
         return (
             f"Saving {changes} before quitting in {when} press Ctrl-C again to quit "
-            f"immediately without them{esc}."
+            f"immediately without them{key}."
         )
 
     def _say(self) -> None:
@@ -366,7 +367,7 @@ class Countdown:
             if not keys_usable(fd):
                 # Sent to the background since it started (Ctrl-Z, then ``bg``): a read now
                 # would stop the process (SIGTTIN), held changes and all (Codex R41-5). A
-                # terminal that hung up comes here too. No more Esc from it; the countdown
+                # terminal that hung up comes here too. No more keys from it; the countdown
                 # goes on, and the terminal is put back from the foreground, if the process is
                 # there again by then: at the countdown's end, by a fatal signal's handler
                 # during it, or at the exit (`_restore`).
@@ -379,16 +380,14 @@ class Countdown:
                 except OSError:
                     pressed = b""
             if not pressed:
-                # The terminal hung up, or can't be read: no Esc from it, and back as it was.
+                # The terminal hung up, or can't be read: no key from it, and back as it was.
                 self._watch = 0
                 _restore(fd)
                 self._fd = None
                 return GLib.SOURCE_REMOVE
-            if pressed.strip(ESC):
-                return GLib.SOURCE_CONTINUE  # another key, or a sequence that starts with Esc
         except Exception:
             # As in `_tick`: the countdown ends, toward saving.
-            LOGGER.exception("reading Esc failed; saving and quitting now")
+            LOGGER.exception("reading a key failed; saving and quitting now")
             self._watch = 0  # removed by returning
             self.stop()
             self._done()

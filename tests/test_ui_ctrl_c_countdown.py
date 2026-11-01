@@ -1,9 +1,9 @@
-"""A first Ctrl-C saves what is waiting after a countdown; a second quits without it; Esc cancels.
+"""A first Ctrl-C saves what is waiting after a countdown; a second quits without it; any other key cancels.
 
 The owner's request (r14o): a first Ctrl-C quits as ``ctl quit`` does (`Application.request_quit`),
 but the changes accepted and not yet being written are held first, for a countdown said on
-standard error, so that a second Ctrl-C can quit without them and Esc in the terminal can cancel
-the quit. Before (55f26e1), a first Ctrl-C was PyGObject's fallback, ``quit()``, which handed on
+standard error, so that a second Ctrl-C can quit without them and any other key in the terminal can
+cancel the quit. Before (55f26e1), a first Ctrl-C was PyGObject's fallback, ``quit()``, which handed on
 renderer numbers and coalesced Settings (R41-2) but dropped every other task queued behind a save
 in progress: a playlist, pairing or schedule edit (review R14, P3).
 
@@ -55,17 +55,17 @@ from wall_in_one.library import pairings, playlists  # noqa: E402
 from wall_in_one.library.model import Kind  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 
-#: The line, said once (standard error isn't a terminal here), for ``changes``; ``esc`` when the
+#: The line, said once (standard error isn't a terminal here), for ``changes``; ``key`` when the
 #: terminal is standard input.
 ONCE = (
     "Saving {changes} before quitting in 5 seconds… press Ctrl-C again to quit immediately "
-    "without them{esc}."
+    "without them{key}."
 )
-ESC_PART = ", or Esc to cancel quitting"
+KEY_PART = ", or any other key to cancel quitting"
 
 
-def _line(changes: str, *, esc: bool = False) -> str:
-    return ONCE.format(changes=changes, esc=ESC_PART if esc else "")
+def _line(changes: str, *, key: bool = False) -> str:
+    return ONCE.format(changes=changes, key=KEY_PART if key else "")
 
 
 def _ctrl_c() -> None:
@@ -396,7 +396,7 @@ def test_a_third_ctrl_c_ends_the_settle_a_second_one_began(
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler, "handler not restored"
 
 
-# -- (f, g, h) the terminal: Esc, and its mode put back ------------------------------------------
+# -- (f, g, h) the terminal: a key, and its mode put back ------------------------------------------
 
 
 @pytest.fixture
@@ -420,14 +420,14 @@ def _cbreak_now(slave: int) -> bool:
     return not lflag & termios.ICANON and not lflag & termios.ECHO and bool(lflag & termios.ISIG)
 
 
-def test_esc_during_the_countdown_cancels_the_quit_and_a_later_ctrl_c_is_a_first_again(
+def test_a_key_during_the_countdown_cancels_the_quit_and_a_later_ctrl_c_is_a_first_again(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
     terminal: tuple[int, int, ModuleType],
 ) -> None:
-    """(f) A playlist edit behind a save in progress, a Ctrl-C, then an arrow key (not Esc: the
-    countdown goes on) and Esc: the quit is cancelled, its timer and its watch are gone, the
+    """(f) A playlist edit behind a save in progress, a Ctrl-C, then an arrow key (an escape
+    sequence: it cancels, as Esc did, and as any key does now): the quit is cancelled, its timer and its watch are gone, the
     terminal is as it was, nothing of the quit is left, and the edit is saved as if no Ctrl-C had
     come. (g) Another edit behind another save, another Ctrl-C: a fresh countdown, which runs to
     its end (shortened) and saves it, and the application quits."""
@@ -452,10 +452,7 @@ def test_esc_during_the_countdown_cancels_the_quit_and_a_later_ctrl_c_is_a_first
         assert counting._timer and counting._watch, "no timer, or no watch of the terminal"
         assert _cbreak_now(slave), termios.tcgetattr(slave)
         assert not _ready(application), "a new edit would be admitted while it is held"
-        os.write(master, b"\x1b[A")  # an arrow: not Esc
-        yield "a moment", _after(0.3)
-        assert application._quit_countdown is counting, "an arrow key cancelled the quit"
-        os.write(master, b"\x1b")
+        os.write(master, b"\x1b[A")  # an arrow: an escape sequence, a key like any other
         yield "the cancel", lambda: not _counting(application)
         marks["after the cancel"] = termios.tcgetattr(slave)
         assert not counting._timer and not counting._watch, "its timer or its watch is left"
@@ -488,9 +485,9 @@ def test_esc_during_the_countdown_cancels_the_quit_and_a_later_ctrl_c_is_a_first
     assert termios.tcgetattr(slave) == before, "the terminal wasn't put back at the end"
     assert _names() >= {"In flight", "Queued", "In flight again", "Queued again"}, _names()
     assert not interrupted
-    assert err.count(_line("1 change", esc=True)) == 2, err
+    assert err.count(_line("1 change", key=True)) == 2, err
     assert err.count("Quitting cancelled.") == 1, err
-    assert err.index("Quitting cancelled.") < err.rindex(_line("1 change", esc=True)), err
+    assert err.index("Quitting cancelled.") < err.rindex(_line("1 change", key=True)), err
 
 
 @pytest.mark.parametrize("ended_by", ["the-countdown", "a-second-ctrl-c"])
@@ -544,7 +541,7 @@ def test_on_a_terminal_the_line_counts_down_in_place(
     monkeypatch: pytest.MonkeyPatch, changes: int
 ) -> None:
     """Standard error a terminal (a pty), standard input not one: the line is rewritten over
-    itself once a step, 5 down to 1, with no Esc in it, then finished with a newline."""
+    itself once a step, 5 down to 1, with no key offered in it, then finished with a newline."""
     countdown = importlib.import_module("wall_in_one.ui.quit_countdown")
     master, slave = os.openpty()
     out = io.TextIOWrapper(io.FileIO(slave, "w", closefd=False), encoding="utf-8")
@@ -610,3 +607,58 @@ def test_the_process_exit_puts_back_a_terminal_left_in_cbreak_mode() -> None:
         countdown._restore(slave)
         os.close(slave)
         os.close(master)
+
+
+# -- any other key cancels (R14V) ------------------------------------------------------------------
+
+
+def _run_countdown_on_pty(
+    countdown: ModuleType, slave: int, between: Any = None, *, seconds: float = 1.5
+) -> list[str]:
+    """The real `Countdown` (1 change, 5 steps of 100 ms), its standard input the pty; how it
+    ended, as ["done"] or ["cancelled"], after ``between`` ran with the countdown started."""
+    ended: list[str] = []
+    context = GLib.MainContext.default()
+    running = countdown.Countdown(
+        1,
+        5,
+        100,
+        done=lambda: ended.append("done"),
+        cancelled=lambda: ended.append("cancelled"),
+    )
+    running.start()
+    assert running.keys
+    if between is not None:
+        between()
+    deadline = time.monotonic() + seconds
+    while not ended and time.monotonic() < deadline:
+        context.iteration(False)
+        time.sleep(0.005)
+    running.stop()
+    return ended
+
+
+@pytest.mark.parametrize("pressed", [b"x", b"\x1b[A", b"\r", b"\x04", b"abc"])
+def test_r14v_any_other_key_cancels_the_quit(
+    terminal: tuple[int, int, ModuleType], pressed: bytes
+) -> None:
+    """A plain letter, an arrow (an escape sequence), Enter, Ctrl-D (0x04, a byte in cbreak mode)
+    and several bytes at once each cancel the countdown, as Esc did. Before (f1c082f) only Esc
+    did: the letter and the arrow were ignored and the countdown ran out ("done")."""
+    master, slave, countdown = terminal
+    ended = _run_countdown_on_pty(countdown, slave, lambda: os.write(master, pressed))
+    assert ended == ["cancelled"], (pressed, ended)
+
+
+def test_r14v_what_was_typed_before_the_countdown_does_not_cancel_it(
+    terminal: tuple[int, int, ModuleType],
+) -> None:
+    """Typeahead on the terminal when the countdown starts is thrown away: the countdown runs
+    out. Control: a key pressed after it started does cancel (the test above). At f1c082f this
+    passes too (any typeahead was ignored there, as it was not Esc), so it is a control for
+    the flush; with Esc typed ahead it would have cancelled there."""
+    master, slave, countdown = terminal
+    os.write(master, b"typed before the Ctrl-C")
+    time.sleep(0.1)  # into the pty's input queue
+    ended = _run_countdown_on_pty(countdown, slave)
+    assert ended == ["done"], ended

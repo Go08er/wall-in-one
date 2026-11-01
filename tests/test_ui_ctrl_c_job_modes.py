@@ -9,7 +9,7 @@ stopped job's mode and gives it back at ``fg``). The job exits by ``sys.exit``, 
 backstop runs.
 
 * **T-L1:** a countdown sent to the background (Ctrl-Z, then ``bg``) that then saw input retired
-  its Esc watch and forgot what to put back, so under a fish-style shell, back in the
+  its key watch and forgot what to put back, so under a fish-style shell, back in the
   foreground, the countdown's end, a SIGTERM and the process's exit all left cbreak on.
 * **R41-5 and the shell's mode:** in the background nothing reads the terminal (no SIGTTIN), and
   nothing sets it: the shell's own mode stays.

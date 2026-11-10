@@ -57,6 +57,17 @@ APP_ID: Final = "431960"
 #: (`scan.WORKSHOP_PROVIDER`).
 WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
 
+
+def sidecar_trusted(item: MediaItem) -> bool:
+    """Whether ``item``'s `<video>.wall-in-one.json` may be read at all.
+
+    Never for a Workshop item, wherever Steam's tree sits (even inside a
+    configured root): a file in there was put there by the item's author.
+    Pass this as `pairing.find_still`'s ``trust_sidecar``.
+    """
+    return item.provider != WORKSHOP_PROVIDER
+
+
 #: Where linux-wallpaperengine looks for `--bg <id>`, under the home folder, in
 #: its own order: the service's `ENGINE_WORKSHOP_FOLDERS` (service/src/workshop.rs),
 #: Steam's two usual homes, the Flatpak's and the Snap's. Each is followed by `<id>`.

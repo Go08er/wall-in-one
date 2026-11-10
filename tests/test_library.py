@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import config
-from wall_in_one.library import pairing, pairings, scan, stills
+from wall_in_one.library import pairing, pairings, scan, stills, workshop
 from wall_in_one.library.model import (
     Kind,
     Library,
@@ -224,6 +224,19 @@ def test_sidecar_beside_a_workshop_video_is_not_trusted_even_naming_a_root_file(
     _sidecar(video, inside)
 
     assert pairing.find_still(video, roots=[root]) is None
+
+
+def test_workshop_item_sidecar_is_ignored_even_inside_a_root(tmp_path: Path) -> None:
+    """A root that contains the Steam tree does not make an author's sidecar ours."""
+    root = tmp_path / "library"
+    inside = _touch(root / "pic.png")
+    video = _touch(root / "steam" / "431960" / "111" / "clip.mp4")
+    _sidecar(video, inside)
+    item = _item(video, Kind.VIDEO, provider=workshop.WORKSHOP_PROVIDER)
+
+    assert pairings.synthesize(item, roots=[root]).still is None
+    local = _item(video, Kind.VIDEO)
+    assert pairings.synthesize(local, roots=[root]).still == inside
 
 
 def test_sidecar_dotdot_escape_is_refused(tmp_path: Path) -> None:

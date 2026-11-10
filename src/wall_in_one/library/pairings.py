@@ -841,7 +841,12 @@ def synthesize(
         )
     return Pairing(
         identity=identity,
-        still=pairing.find_still(item.path, roots=roots, adopted=adopted_still),
+        still=pairing.find_still(
+            item.path,
+            roots=roots,
+            adopted=adopted_still,
+            trust_sidecar=workshop.sidecar_trusted(item),
+        ),
         motion=item.path,
     )
 

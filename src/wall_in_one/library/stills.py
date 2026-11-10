@@ -2119,7 +2119,9 @@ def ensure(
         return None
     if item.paired_still is not None:
         return item.paired_still
-    existing = pairing.find_still(item.path, roots=(root,))
+    existing = pairing.find_still(
+        item.path, roots=(root,), trust_sidecar=workshop.sidecar_trusted(item)
+    )
     if existing is not None:
         return existing
     try:

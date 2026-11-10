@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1844,12 +1845,13 @@ def test_clear_still_resolves_default_off_gtk_and_immediate_read_is_pure(
 
     def observed_find(
         video: Path,
-        roots: object = (),
+        roots: Iterable[Path] = (),
         *,
         adopted: Path | None = None,
+        trust_sidecar: bool = True,
     ) -> Path | None:
         probe_threads.append(threading.get_ident())
-        return original_find(video, roots, adopted=adopted)  # type: ignore[arg-type]
+        return original_find(video, roots, adopted=adopted, trust_sidecar=trust_sidecar)
 
     monkeypatch.setattr(pairing, "find_still", observed_find)
     monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)

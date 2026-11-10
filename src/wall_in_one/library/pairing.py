@@ -564,10 +564,15 @@ def find_still(
     roots: Iterable[Path] = (),
     *,
     adopted: Path | None = None,
+    trust_sidecar: bool = True,
 ) -> Path | None:
-    """Best still for ``video``, or ``None`` if it has none."""
+    """Best still for ``video``, or ``None`` if it has none.
+
+    ``trust_sidecar=False`` (a Workshop item: `workshop.sidecar_trusted`)
+    skips the sidecar as if there were none.
+    """
     roots = tuple(roots)
-    from_sidecar = read_sidecar(video, roots)
+    from_sidecar = read_sidecar(video, roots) if trust_sidecar else None
     if from_sidecar is not None:
         return from_sidecar
     generated = _automatic_still(video, roots)

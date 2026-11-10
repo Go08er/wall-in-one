@@ -74,9 +74,8 @@ const TEST_SCENE_IDS: &[&str] = &[
 ];
 
 /// A home folder where linux-wallpaperengine finds each of `TEST_SCENE_IDS`,
-/// each a `scene`. While a document doesn't allow web wallpapers (every
-/// document here but the web tests'), the service reads an item's type there
-/// before it starts the engine (`workshop::refusal_without_web`), so these
+/// each a `scene`. Whatever a document allows, the service reads an item's
+/// type there before it starts the engine (`workshop::refusal`), so these
 /// tests' scenes start as a real scene does.
 fn scene_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
@@ -11713,6 +11712,161 @@ fn a_document_that_allows_web_starts_the_page_and_turning_it_off_stops_it() {
         }]),
         "{snapshot}"
     );
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// What the service does with the one scene entry of `document` when the item's `project.json`
+/// is `project` (None: no `project.json`; the folder is there), `Some` of a `Refusal` or None
+/// as `motion_refusal` asks before anything is shown, as `start_motion` then answers with
+/// `motion_refused`, and whether the engine really was started.
+fn type_check(
+    label: &str,
+    document: &str,
+    project: Option<&str>,
+) -> (
+    Option<wall_in_one_service::workshop::Refusal>,
+    Option<wall_in_one_service::workshop::Refusal>,
+    bool,
+) {
+    let root = directory(label);
+    let home = workshop_home_with(&format!("{label}-home"), &[(WEB_PAGE, "")]);
+    let item = home
+        .join(".local/share/Steam/steamapps/workshop/content/431960")
+        .join(WEB_PAGE);
+    match project {
+        Some(project) => fs::write(item.join("project.json"), project).unwrap(),
+        None => fs::remove_file(item.join("project.json")).unwrap(),
+    }
+    let (_, arguments, config_path) = p2_runtime(&root, document, &home);
+    let parsed = Config::load(&config_path).unwrap();
+    let entry = parsed.playlist("all-media").unwrap().entries[0].clone();
+    let (driver, _) = driver_with(parsed.renderer.clone(), vec![live("DP-1", None)]);
+    let mut driver = driver.with_workshop_home(Some(home.clone()));
+    let asked = driver.motion_refusal(&entry, &parsed.settings);
+    let started =
+        without_text_file_busy(|| driver.start_motion_only(&entry, "DP-1", &parsed.settings));
+    assert_eq!(started, Ok(()), "a refusal is not a failure");
+    let refused = driver.motion_refused("DP-1");
+    let launched = if refused.is_some() {
+        thread::sleep(Duration::from_millis(300));
+        arguments.exists()
+    } else {
+        engine_started(&arguments)
+    };
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(home).unwrap();
+    (asked, refused, launched)
+}
+
+#[test]
+fn with_web_on_a_scene_a_video_and_a_web_page_start_and_an_application_does_not() {
+    for (kind, starts) in [
+        ("scene", true),
+        ("Video", true),
+        ("web", true),
+        ("application", false),
+        ("Application", false),
+        ("preset", false),
+        ("", false),
+    ] {
+        let project = format!(r#"{{"type":"{kind}","file":"x"}}"#);
+        let (asked, refused, launched) = type_check("web-on-types", WITH_STILL_ON, Some(&project));
+        assert_eq!(launched, starts, "{kind:?}");
+        assert_eq!(refused.is_none(), starts, "{kind:?}: {refused:?}");
+        // The question the runtime asks first says what the start itself then does.
+        assert_eq!(asked, refused, "{kind:?}");
+        if let Some(refusal) = refused {
+            assert!(
+                !refusal.web_page,
+                "{kind:?} is not blamed on web wallpapers"
+            );
+            assert!(
+                !refusal.reason.contains("web wallpapers"),
+                "{kind:?}: {}",
+                refusal.reason
+            );
+            assert!(refusal.reason.contains(WEB_PAGE), "{}", refusal.reason);
+        }
+    }
+}
+
+#[test]
+fn with_web_off_the_same_types_are_checked_as_before_and_motion_refusal_agrees() {
+    for (kind, starts, web_page) in [
+        ("scene", true, false),
+        ("video", true, false),
+        ("web", false, true),
+        ("application", false, false),
+    ] {
+        let project = format!(r#"{{"type":"{kind}","file":"x"}}"#);
+        let (asked, refused, launched) = type_check(
+            "web-off-types",
+            &stepped_down(WITH_STILL_ON),
+            Some(&project),
+        );
+        assert_eq!(launched, starts, "{kind:?}");
+        assert_eq!(asked, refused, "{kind:?}");
+        assert_eq!(
+            refused.map(|refusal| refusal.web_page),
+            (!starts).then_some(web_page)
+        );
+    }
+}
+
+#[test]
+fn a_project_the_service_cant_read_is_refused_with_web_on_as_it_is_with_it_off() {
+    let too_big = format!(r#"{{"type":"scene","pad":"{}"}}"#, "x".repeat(300 * 1024));
+    for (what, project) in [
+        ("missing", None),
+        ("malformed", Some("{not json")),
+        ("typeless", Some(r#"{"file":"x"}"#)),
+        ("too big", Some(too_big.as_str())),
+    ] {
+        let mut answers = Vec::new();
+        for document in [WITH_STILL_ON.to_string(), stepped_down(WITH_STILL_ON)] {
+            let (asked, refused, launched) = type_check("unreadable", &document, project);
+            assert!(!launched, "{what}: the engine was started");
+            assert_eq!(asked, refused, "{what}");
+            let refusal = refused.unwrap_or_else(|| panic!("{what} was not refused"));
+            assert!(!refusal.web_page, "{what}");
+            // Each run has a home of its own; the words after it are what is compared.
+            let words = refusal.reason.split_once("/.local/").unwrap().1.to_string();
+            answers.push(words);
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "{what}: web on or off, the same words"
+        );
+    }
+}
+
+#[test]
+fn an_application_is_skipped_with_web_on_and_the_rest_of_the_playlist_plays() {
+    let root = directory("p2-app-web-on");
+    let home = workshop_home_with(
+        "p2-app-web-on-home",
+        &[(WEB_PAGE, r#"{"type":"application","file":"run.exe"}"#)],
+    );
+    let (mut runtime, arguments, _config) = p2_runtime(&root, WITH_STILL_ON, &home);
+    assert_eq!(runtime.apply_current().as_deref(), Ok("playing entry-2"));
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        !arguments.exists(),
+        "an application was handed to the engine"
+    );
+    let snapshot = status(&mut runtime, noon());
+    assert_eq!(snapshot["entry_id"], "entry-2");
+    assert_eq!(snapshot["last_error"], "", "a skip is not a fault");
+    assert_eq!(snapshot["motion_active"], false);
+    assert_eq!(snapshot["allow_web_wallpapers"], true);
+    assert_eq!(snapshot["refused"][0]["scene_id"], WEB_PAGE, "{snapshot}");
+    assert_eq!(snapshot["refused"][0]["web_page"], false, "{snapshot}");
+    let reason = snapshot["refused"][0]["reason"].as_str().unwrap();
+    assert!(reason.contains("application"), "{reason}");
+    assert!(!reason.contains("web wallpapers"), "{reason}");
     runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(home).unwrap();

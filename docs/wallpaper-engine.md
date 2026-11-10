@@ -302,17 +302,19 @@ plays the pages without a check, as 0.4.0 did.
 
 **The service checks too.** linux-wallpaperengine reads `project.json` again
 when it starts, so an item whose type changed to `web` after the compile (a
-Workshop update) would play as one. While the document doesn't allow web
-wallpapers (`allow_web_wallpapers`, written only while the setting is on),
-the service reads the item's type just before it starts the engine, in every
+Workshop update) would play as one, and one that became an `application`
+would rest on the engine's own parser alone. Whatever the document says, the
+service reads the item's type just before it starts the engine, in every
 place the engine looks for `--bg <id>` (above), bounded like the app's scan
 (256 KiB, a regular file, nested to any depth). For a preset it reads the
-base. Anything but `scene` or `video` is refused, and so is an item it can't
-find or read: a scene in a Steam library on another drive is one, since the
-engine never looks there. Each reason says what it is; only a web page is put
-down to web wallpapers ("this configuration doesn't allow web wallpapers",
-since a document can lack the key for other reasons than the setting being
-off). The engine isn't started, and the entry is skipped, as the owner put
+base. A `scene` or a `video` may start; a `web` page only while the document
+allows web wallpapers (`allow_web_wallpapers`, written only while the setting
+is on); anything else is refused, as is an item it can't find or read, with
+web wallpapers on or off: a scene in a Steam library on another drive is one,
+since the engine never looks there. Each reason says what it is; only a web
+page is put down to web wallpapers ("this configuration doesn't allow web
+wallpapers", since a document can lack the key for other reasons than the
+setting being off). The engine isn't started, and the entry is skipped, as the owner put
 it: "skip to next, if it's in a playlist alone, then use the default playlist
 in schedule". While motion can start, the service asks before anything of the
 entry is shown, so its still doesn't go up, and the next entry of the same

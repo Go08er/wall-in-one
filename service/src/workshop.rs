@@ -4,11 +4,13 @@
 //! and leaves a web page out while "Allow web wallpapers" is off. But the
 //! engine reads `project.json` again when it starts, so an item whose type
 //! became `web` after that compile (a Workshop update) would play as a web
-//! page whatever the setting says. While the document doesn't allow web
-//! wallpapers (`Settings::allow_web_wallpapers`), the service therefore reads
-//! the item's type itself, just before it starts the engine, and refuses a
-//! web page or an item it can't classify (docs/wallpaper-engine.md). The
-//! runtime skips a refused entry to the next one that can play.
+//! page whatever the setting says, and one that became an `application` would
+//! rest on the engine's own parser alone. The service therefore reads the
+//! item's type itself, just before it starts the engine, whatever the setting
+//! (`Settings::allow_web_wallpapers`): a `scene` or a `video` may start, a
+//! `web` page only while the document allows web wallpapers, and nothing else
+//! ever, nor an item it can't classify (docs/wallpaper-engine.md). The runtime
+//! skips a refused entry to the next one that can play.
 
 use crate::runtime::truncate_middle;
 use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -45,9 +47,9 @@ pub fn engine_home() -> Option<PathBuf> {
         .filter(|home| home.is_absolute())
 }
 
-/// Why the engine must not be started for one Workshop item while web
-/// wallpapers aren't allowed. Each reason says what it is about: only a web
-/// page is about web wallpapers.
+/// Why the engine must not be started for one Workshop item. Each reason says
+/// what it is about: only a web page is about web wallpapers, and only while
+/// they aren't allowed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     /// The item is a web page. Every other refusal is an item the service
@@ -63,16 +65,18 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// Why the engine must not be started for Workshop item `id` while web
-/// wallpapers aren't allowed, or None when it may.
+/// Why the engine must not be started for Workshop item `id`, or None when it
+/// may; `allow_web` is whether the document allows web wallpapers.
 ///
 /// Every place the engine could find the item is read, not only the first,
 /// so the answer doesn't depend on matching the engine's order exactly: the
-/// item may start only when each copy there is a `scene` or a `video`. A web
-/// page, a type the engine doesn't play, a missing or unreadable
-/// `project.json` (or one that is a link, not a regular file, or larger than
-/// the app's scan reads), and an item found in none of them are refused.
-pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<Refusal> {
+/// item may start only when each copy there is a `scene` or a `video`, or a
+/// `web` page while `allow_web`. A web page without `allow_web`, a type the
+/// engine doesn't play (an `application`, whatever `allow_web` says), a
+/// missing or unreadable `project.json` (or one that is a link, not a regular
+/// file, or larger than the app's scan reads), and an item found in none of
+/// them are refused.
+pub fn refusal(home: Option<&Path>, id: &str, allow_web: bool) -> Option<Refusal> {
     let why = match home {
         None => Why::Other(format!(
             "Workshop item {id} can't be checked: the service has no home folder"
@@ -80,7 +84,7 @@ pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<Refusal> {
         Some(_) if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) => Why::Other(
             format!("Workshop item {id:?} has no Workshop id the service can check"),
         ),
-        Some(home) => classify(home, id)?,
+        Some(home) => classify(home, id, allow_web)?,
     };
     Some(match why {
         Why::WebPage => Refusal {
@@ -97,13 +101,18 @@ pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<Refusal> {
     })
 }
 
+/// `refusal` while the document doesn't allow web wallpapers.
+pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<Refusal> {
+    refusal(home, id, false)
+}
+
 /// What `classify` found wrong with an item.
 enum Why {
     WebPage,
     Other(String),
 }
 
-fn classify(home: &Path, id: &str) -> Option<Why> {
+fn classify(home: &Path, id: &str, allow_web: bool) -> Option<Why> {
     let mut found = false;
     for folder in ENGINE_WORKSHOP_FOLDERS {
         let item = home.join(folder).join(id);
@@ -121,7 +130,8 @@ fn classify(home: &Path, id: &str) -> Option<Why> {
         }
         found = true;
         match project_type(&item.join("project.json")) {
-            Ok(kind) if kind == "web" => return Some(Why::WebPage),
+            Ok(kind) if kind == "web" && !allow_web => return Some(Why::WebPage),
+            Ok(kind) if kind == "web" => {}
             Ok(kind) if kind == "scene" || kind == "video" => {}
             Ok(kind) => {
                 let kind = truncate_middle(&kind, MAX_QUOTED_TYPE_BYTES);
@@ -317,6 +327,28 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("project.json"), project).unwrap();
         directory
+    }
+
+    #[test]
+    fn with_web_allowed_a_web_page_may_start_and_an_application_still_may_not() {
+        let home = home("allowed");
+        item(&home, 0, "1", r#"{"type":"scene","file":"scene.json"}"#);
+        item(&home, 0, "2", r#"{"type":"Video","file":"a.mp4"}"#);
+        item(&home, 0, "3", r#"{"type":"WEB","file":"index.html"}"#);
+        item(&home, 0, "4", r#"{"type":"application","file":"run.exe"}"#);
+        item(&home, 0, "5", "{not json");
+        for id in ["1", "2", "3"] {
+            assert_eq!(refusal(Some(&home), id, true), None, "{id}");
+        }
+        assert!(refusal(Some(&home), "3", false).unwrap().web_page);
+        for id in ["4", "5", "6"] {
+            let allowed = refusal(Some(&home), id, true).unwrap();
+            assert!(!allowed.web_page, "{id}");
+            assert!(!allowed.reason.contains("web wallpapers"), "{id}");
+            assert_eq!(Some(allowed), refusal(Some(&home), id, false), "{id}");
+        }
+        assert!(refusal(None, "1", true).is_some());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

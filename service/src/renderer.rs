@@ -309,9 +309,9 @@ pub trait WallpaperDriver: Send {
         None
     }
     /// Why `output`'s last motion start did not start its renderer although
-    /// it could have: a Wallpaper Engine item that is a web page, or that the
-    /// service can't find or read, while the document doesn't allow web
-    /// wallpapers (`crate::workshop`), and whether it is a web page. The
+    /// it could have: a Wallpaper Engine item that is a web page while the
+    /// document doesn't allow web wallpapers, or that the service can't find,
+    /// read or play (`crate::workshop`), and whether it is a web page. The
     /// runtime then skips the entry (`motion_refusal`). Gone once the output
     /// is stopped or applied again.
     fn motion_refused(&self, _output: &str) -> Option<workshop::Refusal> {
@@ -1211,7 +1211,7 @@ impl SystemDriver {
     }
 
     /// The same driver, reading Workshop items' types under `home` instead
-    /// of `HOME` (`workshop::refusal_without_web`). For tests.
+    /// of `HOME` (`workshop::refusal`). For tests.
     pub fn with_workshop_home(mut self, home: Option<PathBuf>) -> Self {
         self.workshop_home = home;
         self
@@ -1378,14 +1378,12 @@ impl SystemDriver {
         let scene = entry
             .rendered_scene()
             .ok_or_else(|| StartError::Failed("scene entry has no scene id".into()))?;
-        // The one place the engine is started: whatever asked for it, a web
-        // page doesn't start here unless the document allows web wallpapers.
-        // The runtime asks first (`motion_refusal`); this holds whatever
-        // changed on disk since.
-        if !allow_web
-            && let Some(refusal) =
-                workshop::refusal_without_web(self.workshop_home.as_deref(), scene)
-        {
+        // The one place the engine is started: whatever asked for it, only a
+        // scene or a video starts here, and a web page only if the document
+        // allows web wallpapers; an application never does. Read every time,
+        // whatever the setting says. The runtime asks first
+        // (`motion_refusal`); this holds whatever changed on disk since.
+        if let Some(refusal) = workshop::refusal(self.workshop_home.as_deref(), scene, allow_web) {
             return Err(StartError::Refused(refusal));
         }
         // Its own dials over the defaults (docs/renderer-settings.md).
@@ -1922,13 +1920,16 @@ impl WallpaperDriver for SystemDriver {
         // Exactly when `start_motion` would reach `start_scene`'s check.
         if !settings.dynamics_enabled
             || self.animations_inhibited
-            || settings.allow_web_wallpapers
             || entry.kind != EntryKind::Scene
             || !self.settings.own_scene_renderer
         {
             return None;
         }
-        workshop::refusal_without_web(self.workshop_home.as_deref(), entry.rendered_scene()?)
+        workshop::refusal(
+            self.workshop_home.as_deref(),
+            entry.rendered_scene()?,
+            settings.allow_web_wallpapers,
+        )
     }
 
     fn recheck_missing_renderers(&mut self) -> Vec<String> {

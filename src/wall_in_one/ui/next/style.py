@@ -7,6 +7,7 @@ APPLICATION priority, below it, once per display.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Final
 
 import gi
@@ -133,6 +134,10 @@ box.pill.success { background-color: alpha(#26a269, 0.18); color: #26a269; }
 .sidebar-count { font-size: 0.85em; opacity: 0.55; font-feature-settings: "tnum"; }
 """
 
+# Symbolic icons the app ships itself (wio-*), laid out as an icon theme's
+# root so GTK finds them as hicolor/scalable/actions/<name>.svg.
+ICON_DIR: Final = Path(__file__).resolve().parents[2] / "data" / "icons"
+
 _installed: set[int] = set()
 _providers: list[Gtk.CssProvider] = []
 
@@ -142,6 +147,7 @@ def install(display: Gdk.Display | None = None) -> None:
     target = display or Gdk.Display.get_default()
     if target is None or hash(target) in _installed:
         return
+    Gtk.IconTheme.get_for_display(target).add_search_path(str(ICON_DIR))
     provider = Gtk.CssProvider()
     provider.load_from_string(STYLE)
     Gtk.StyleContext.add_provider_for_display(

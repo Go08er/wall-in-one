@@ -343,3 +343,57 @@ def test_both_halves_of_the_package_are_built_as_one_install_kind() -> None:
     assert flake.count("bash tools/set-install-kind.sh ${installKind}") == 1
     # And the installed pair is checked to agree.
     assert flake.count("bash ${./tools/check-install-kind.sh} ${installKind}") == 1
+
+
+# --- the symbolic icons the window draws itself -------------------------------
+#
+# GTK only finds an icon name on its search path. A `wio-*-symbolic` name that
+# no stock theme has must ship in data/icons (which the app puts on that path
+# at startup); the Select pill once showed a blank square because its SVG lived
+# only in the design prototype.
+
+ICON_ROOT = DATA_DIR / "icons"
+ICON_ACTIONS = ICON_ROOT / "hicolor" / "scalable" / "actions"
+UI_DIR = ROOT / "src" / "wall_in_one" / "ui"
+
+
+def _own_icon_names() -> set[str]:
+    return {
+        name
+        for source in UI_DIR.rglob("*.py")
+        for name in re.findall(r"""["'](wio-[a-z0-9-]+-symbolic)["']""", source.read_text())
+    }
+
+
+def test_the_ui_uses_at_least_one_icon_of_its_own() -> None:
+    assert "wio-select-multiple-symbolic" in _own_icon_names()
+
+
+def test_every_wio_icon_the_ui_names_is_shipped() -> None:
+    missing = sorted(n for n in _own_icon_names() if not (ICON_ACTIONS / f"{n}.svg").is_file())
+    assert missing == []
+
+
+def test_the_shipped_icons_travel_in_the_wheel_but_not_as_the_app_icon() -> None:
+    patterns = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"][
+        "package-data"
+    ]["wall_in_one"]
+    icons = sorted(ICON_ACTIONS.glob("*.svg"))
+    assert icons
+    for svg in icons:
+        relative = svg.relative_to(DATA_DIR.parent)
+        assert any(relative.full_match(p) for p in patterns), relative
+        # full_match, like setuptools' glob, lets `*` stop at a slash: the flat
+        # data/*.svg that carries the app icon must not be what picks these up
+        assert not relative.full_match("data/*.svg"), relative
+
+
+def test_the_shipped_icons_recolour_with_the_theme() -> None:
+    # GTK recolours a -symbolic SVG by its fills; a stray stroke, gradient or
+    # opacity would keep a colour of its own.
+    for svg in ICON_ACTIONS.glob("*.svg"):
+        root = ElementTree.fromstring(svg.read_text())
+        assert root.get("viewBox") == "0 0 16 16"
+        for element in root.iter():
+            assert element.get("stroke") in (None, "none"), svg.name
+            assert element.get("fill") in (None, "#2e3436"), svg.name

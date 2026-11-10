@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import random
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -140,7 +141,7 @@ def test_sidecar_beats_the_naming_convention(tmp_path: Path) -> None:
     (tmp_path / ("clip.mp4" + pairing.SIDECAR_SUFFIX)).write_text(
         json.dumps({"still_path": str(chosen)}), encoding="utf-8"
     )
-    assert pairing.find_still(video) == chosen
+    assert pairing.find_still(video, roots=[tmp_path]) == chosen
 
 
 def test_a_scan_reads_each_pairing_sidecar_once(
@@ -155,9 +156,9 @@ def test_a_scan_reads_each_pairing_sidecar_once(
     reads: list[Path] = []
     read = pairing.read_sidecar
 
-    def counted(path: Path) -> Path | None:
+    def counted(path: Path, roots: Iterable[Path]) -> Path | None:
         reads.append(path)
-        return read(path)
+        return read(path, roots)
 
     monkeypatch.setattr(pairing, "read_sidecar", counted)
     found = scan.scan((tmp_path,), {}, adoption_candidates=()).find(video)
@@ -172,7 +173,7 @@ def test_sidecar_naming_a_missing_file_is_ignored(tmp_path: Path) -> None:
     (tmp_path / ("clip.mp4" + pairing.SIDECAR_SUFFIX)).write_text(
         json.dumps({"still_path": str(tmp_path / "gone.png")}), encoding="utf-8"
     )
-    assert pairing.find_still(video) == convention
+    assert pairing.find_still(video, roots=[tmp_path]) == convention
 
 
 @pytest.mark.parametrize("kind", ("symlink", "fifo"))
@@ -191,6 +192,76 @@ def test_pairing_sidecar_special_files_are_ignored_without_blocking(
 
     assert pairing.find_still(video) == convention
     assert outside.is_file()
+
+
+def _sidecar(video: Path, still: object) -> None:
+    video.with_name(video.name + pairing.SIDECAR_SUFFIX).write_text(
+        json.dumps({"still_path": str(still)}), encoding="utf-8"
+    )
+
+
+def test_workshop_sidecar_naming_a_file_elsewhere_is_not_trusted(tmp_path: Path) -> None:
+    """A sidecar beside a video outside every root (Steam's tree) was not written by us."""
+    root = tmp_path / "library"
+    root.mkdir()
+    video = _touch(tmp_path / "steam" / "431960" / "111" / "clip.mp4")
+    private = _touch(tmp_path / "private" / "elsewhere.png")
+    _sidecar(video, private)
+
+    assert pairing.find_still(video, roots=[root]) is None
+    assert pairings.synthesize(_item(video, Kind.VIDEO), roots=[root]).still is None
+    # As if there were no sidecar: the normal lookup still applies.
+    convention = _touch(video.with_name("clip-still.png"))
+    assert pairing.find_still(video, roots=[root]) == convention
+
+
+def test_sidecar_beside_a_workshop_video_is_not_trusted_even_naming_a_root_file(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "library"
+    inside = _touch(root / "pic.png")
+    video = _touch(tmp_path / "steam" / "111" / "clip.mp4")
+    _sidecar(video, inside)
+
+    assert pairing.find_still(video, roots=[root]) is None
+
+
+def test_sidecar_dotdot_escape_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    video = _touch(root / "videos" / "clip.mp4")
+    _touch(tmp_path / "private" / "elsewhere.png")
+    _sidecar(video, "../../private/elsewhere.png")
+
+    assert pairing.find_still(video, roots=[root]) is None
+
+
+def test_sidecar_symlink_escape_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    video = _touch(root / "clip.mp4")
+    outside = _touch(tmp_path / "private" / "elsewhere.png")
+    link = root / "innocent.png"
+    link.symlink_to(outside)
+    _sidecar(video, link)
+    assert pairing.find_still(video, roots=[root]) is None
+
+    # A symlinked directory is no way out either.
+    (root / "gate").symlink_to(outside.parent)
+    _sidecar(video, root / "gate" / "elsewhere.png")
+    assert pairing.find_still(video, roots=[root]) is None
+
+
+def test_app_written_sidecar_inside_a_root_is_trusted(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    video = _touch(root / "videos" / "clip.mp4")
+    still = _touch(pairing.still_directory(root) / f"{pairing.automatic_still_stem(video)}.png")
+    _sidecar(video, still)
+    other_root = tmp_path / "second"
+    other_root.mkdir()
+
+    assert pairing.find_still(video, roots=[root]) == still
+    assert pairing.find_still(video, roots=[other_root, root]) == still
+    assert pairing.read_sidecar(video, [root]) == still
+    assert pairing.read_sidecar(video, []) is None
 
 
 def test_automatic_stills_directory_is_searched(tmp_path: Path) -> None:

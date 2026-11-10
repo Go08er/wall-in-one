@@ -599,4 +599,4 @@ def test_the_settings_the_released_code_saved_are_this_versions_too(
     faults.scratch_profile(monkeypatch, job.base)
     assert config.load_strict(require_present=True).roots == (_root(job.base),)
     assert _capture(job.base).read_bytes() == OLD
-    assert pairing.read_sidecar(_source(job.base)) == _capture(job.base)
+    assert pairing.read_sidecar(_source(job.base), (_root(job.base),)) == _capture(job.base)

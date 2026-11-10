@@ -804,7 +804,7 @@ def test_rebuild_rebind_compile_and_purge_original(
     assert result == capture_upgrade.Result(migrated=1, reclaimed_bytes=len(before))
     assert len(cleanup_environment) == 1
     assert target.read_bytes() != before  # A fresh frame, not copied/renamed old bytes.
-    assert pairing.read_sidecar(fixture.source) == target
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == target
     assert str(fixture.capture) not in paths.runtime_config_path().read_text()
     assert not fixture.capture.exists()
     assert not fixture.authority.sidecar_path.exists()
@@ -824,7 +824,7 @@ def test_rebuild_failure_restores_old_binding_and_can_retry(
 
     monkeypatch.setattr(stills, "generate", fail)
     assert capture_upgrade.prepare().retained == 1
-    assert pairing.read_sidecar(fixture.source) == fixture.capture
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == fixture.capture
     assert fixture.capture.read_bytes() == before
     monkeypatch.setattr(stills, "generate", original)
     assert capture_upgrade.prepare().migrated == 1
@@ -839,7 +839,7 @@ def test_existing_unbound_current_capture_needs_no_render_or_new_selector(
     before = current.read_bytes()
     assert capture_upgrade.prepare().migrated == 1
     assert cleanup_environment == []
-    assert pairing.read_sidecar(fixture.source) is None
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) is None
     assert current.read_bytes() == before
 
 
@@ -1109,7 +1109,7 @@ def test_restart_after_selector_removal_completes_rebuild(
 ) -> None:
     fixture = _cleanup_fixture(tmp_path)
     # The original is still present but a prior process exited after unbinding.
-    assert pairing.read_sidecar(fixture.source) is None
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) is None
     assert capture_upgrade.prepare().migrated == 1
     assert len(cleanup_environment) == 1
 
@@ -1147,7 +1147,7 @@ def test_invalid_current_capture_cannot_replace_original(
 
     assert capture_upgrade.prepare().retained == 1
     assert fixture.capture.exists()
-    assert pairing.read_sidecar(fixture.source) == fixture.capture
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == fixture.capture
 
 
 def test_crash_after_image_deletion_resumes_metadata_cleanup(
@@ -1244,7 +1244,7 @@ def test_failed_output_validation_restores_original_binding(
     monkeypatch.setattr(stills, "_run", bad_render)
     assert capture_upgrade.prepare().retained == 1
     assert fixture.capture.exists()
-    assert pairing.read_sidecar(fixture.source) == fixture.capture
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == fixture.capture
 
 
 def test_manual_selector_created_during_failure_is_not_overwritten(
@@ -1262,7 +1262,7 @@ def test_manual_selector_created_during_failure_is_not_overwritten(
     monkeypatch.setattr(stills, "generate", fail)
     assert capture_upgrade.prepare().retained == 1
     assert fixture.capture.exists()
-    assert pairing.read_sidecar(fixture.source) == manual
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == manual
     assert manual.exists()
 
 
@@ -1328,7 +1328,7 @@ def test_cleanup_with_real_ffmpeg_rebuild(tmp_path: Path, monkeypatch: pytest.Mo
     assert capture_upgrade.prepare().migrated == 1
     target = stills.destination(fixture.source, fixture.root)
     assert target.stat().st_size > 100
-    assert pairing.read_sidecar(fixture.source) == target
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == target
     assert not fixture.capture.exists()
 
 
@@ -1372,7 +1372,7 @@ def test_a_slow_decoder_cannot_hold_startup_past_the_rebuild_budget(
     assert elapsed < 6.0, f"startup cleanup took {elapsed:.1f}s"
     assert result.retained == 1 and result.migrated == 0
     assert fixture.capture.read_bytes() == before
-    assert pairing.read_sidecar(fixture.source) == fixture.capture
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == fixture.capture
 
     monkeypatch.setattr(stills, "_run", fast_render)
     assert capture_upgrade.prepare().migrated == 1, "the next start finishes the rebuild"
@@ -1510,7 +1510,7 @@ def test_a_selector_that_cannot_be_read_does_not_let_its_capture_be_retired(
     assert result == capture_upgrade.Result(retained=1)
     assert fixture.capture.read_bytes() == original
     assert selector.read_bytes() == chosen
-    assert pairing.read_sidecar(fixture.source) == fixture.capture
+    assert pairing.read_sidecar(fixture.source, (fixture.root,)) == fixture.capture
     assert "Could not retire automatic capture" in caplog.text
     assert "Permission denied" in caplog.text
     assert cleanup_environment == []
@@ -1542,7 +1542,7 @@ def test_a_selector_read_strictly_tells_cannot_look_from_selects_nothing(tmp_pat
     for unseen, usual in ((stills_folder, 0o700), (selector, 0o600)):
         unseen.chmod(0o000)
         try:
-            assert pairing.read_sidecar(video) is None
+            assert pairing.read_sidecar(video, (tmp_path,)) is None
             with pytest.raises(OSError) as refused:
                 pairing.read_sidecar_strict(video)
         finally:

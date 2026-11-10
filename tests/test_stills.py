@@ -619,7 +619,7 @@ def test_generating_writes_a_sidecar_the_reader_understands(root: Path) -> None:
     """
     video = make_video(root / "clip.mp4")
     still = stills.generate(video, root)
-    assert pairing.read_sidecar(video) == still
+    assert pairing.read_sidecar(video, (root,)) == still
 
 
 def test_a_late_pairing_sidecar_wins_without_being_overwritten(
@@ -843,7 +843,7 @@ def test_video_parent_aba_cannot_redirect_sidecar_publication(
     target = stills.generate(video, root)
 
     assert raced
-    assert pairing.read_sidecar(video) == target
+    assert pairing.read_sidecar(video, (root,)) == target
     assert not (replacement_parent / sidecar.name).exists()
 
 
@@ -1034,7 +1034,7 @@ def test_legacy_predictable_sidecar_temporary_cannot_redirect_a_write(
 
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert legacy.is_symlink()
-    assert pairing.read_sidecar(video) == chosen
+    assert pairing.read_sidecar(video, (tmp_path,)) == chosen
 
 
 def test_generated_still_publication_syncs_its_directory(

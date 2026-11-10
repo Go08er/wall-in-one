@@ -362,14 +362,40 @@ def _still_extensions() -> tuple[str, ...]:
     return tuple(preferred + rest)
 
 
-def read_sidecar(video: Path) -> Path | None:
+def _trusted_location(video: Path, still: Path, roots: tuple[Path, ...]) -> bool:
+    """Whether a sidecar beside ``video`` may name ``still``, by where each lives.
+
+    The app writes these sidecars only inside a library root, and what they
+    name (an Automatic Stills capture) is under a root too. A sidecar beside a
+    video outside every root, such as one in Steam's Workshop tree, was put
+    there by someone else, and one that names a file outside every root
+    reaches for something it was never given. Symlinks and ``..`` are resolved
+    before comparing, so neither can lead out.
+    """
+    try:
+        resolved_roots = [root.resolve() for root in roots]
+        folder = video.parent.resolve()
+        target = still.resolve()
+    except OSError, ValueError, RuntimeError:
+        return False
+    if not any(folder.is_relative_to(root) for root in resolved_roots):
+        return False
+    return any(target.is_relative_to(root) for root in resolved_roots)
+
+
+def read_sidecar(video: Path, roots: Iterable[Path]) -> Path | None:
     """Read `<video>.wall-in-one.json` and return the still it names.
 
     For showing and playing: a selector that can't be read, or names a still
     that can't be looked at, reads as none, and the video falls back to its
-    other stills. Not for deciding what may be destroyed: `read_sidecar_strict`.
+    other stills. A selector that is not trusted by location (see
+    `_trusted_location`) reads exactly the same, as none. Not for deciding
+    what may be destroyed: `read_sidecar_strict`.
     """
-    return _selected_still(video, strict=False)
+    chosen = _selected_still(video, strict=False)
+    if chosen is None or not _trusted_location(video, chosen, tuple(roots)):
+        return None
+    return chosen
 
 
 def read_sidecar_strict(video: Path) -> Path | None:
@@ -541,7 +567,7 @@ def find_still(
 ) -> Path | None:
     """Best still for ``video``, or ``None`` if it has none."""
     roots = tuple(roots)
-    from_sidecar = read_sidecar(video)
+    from_sidecar = read_sidecar(video, roots)
     if from_sidecar is not None:
         return from_sidecar
     generated = _automatic_still(video, roots)

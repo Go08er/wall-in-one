@@ -397,7 +397,10 @@ battery, `dynamics_enabled = false`) nothing is started, so nothing is asked:
 a scene's still shows as before, and the next start of motion asks. An item
 whose type changes after that check is refused by the service's second check,
 just before it starts the engine; its still is up until the service moves on,
-at once. Both checks run before the engine is started: a change after the
+at once. Both checks read the item's type whether or not the document allows web
+wallpapers: a `scene` or a `video` may start, a web page only while it does,
+and an `application`, an unknown type or an item the service can't find or
+read never. Both checks run before the engine is started: a change after the
 second one, in the moment before the engine reads the file itself, isn't
 caught. When every entry of the playlist a display is on was refused (a taboo
 entry counts as unable to play too, but a playlist of taboo entries only keeps
@@ -452,7 +455,7 @@ removed, or a rule's boundary.
 | Field | Where | Meaning |
 |---|---|---|
 | `stand_in_for` | each display row; top level | The playlist the display asked for (its pick, rule, assignment or the default) while `playlist_id` stands in for it. Absent otherwise, never `null`. At the top level, only when every connected display plays the same stand-in for the same playlist. Added in 0.4.1. |
-| `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none (absent instead at the limit, 0 below). Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
+| `refused` | top level | The Wallpaper Engine items the service refused in the document it holds, in the order it found them: `{"scene_id": "<Workshop id>", "web_page": true/false, "reason": "..."}`. `scene_id` is the item an entry renders (a preset's base). `web_page` is true for a web page refused because the document doesn't allow web wallpapers; every other is an item it can't find, read or play, with web wallpapers allowed or not. The reason names the item and is at most 256 bytes. At most 16 rows; `[]` when none (absent instead at the limit, 0 below). Web pages are listed too: one that reaches the service is one the app's scan didn't call a page (its type changed after the compile), which the app's own web-off state doesn't explain. Added in 0.4.1. |
 | `refused_omitted` | top level | How many more items were refused than `refused` lists; absent instead of `0` at the limit. Added in 0.4.1. |
 | `stand_in_for_omitted` | top level | `true` when the reply left out at least one `stand_in_for`, a row's or the top level's, to fit its size limit (2 below). Absent otherwise, never `false`. A row without `stand_in_for` may then still play a stand-in. Added in 0.4.1. |
 | `schedule_rule_id_omitted` | top level | `true` when the reply left at least one row's `schedule_rule_id` `null` to fit at all (6 below). Absent otherwise. A row whose `route_source` is `schedule` and whose `schedule_rule_id` is `null` may then have had one; a row that names one names its own, and `schedules[].in_force` still says which rules are in force. Added in 0.4.1. |

@@ -199,7 +199,7 @@ app no longer knows, the app stops it. A service that reads 8 is then handed
 a document that plays nothing, which also replaces the file on disk; one that
 can't read it is told to quit, and its next start is guarded. A service that
 reads 8, holding a document that doesn't allow web wallpapers with none on
-disk that does, is left alone: it refuses every page itself (below), and the
+disk that does, is left alone: it refuses every page itself (below, where an `application` or an item it can't read is refused with the setting on too), and the
 app only says that the setting hasn't reached it yet. With no service
 running, nothing is stopped, but a file on disk that allows web wallpapers is
 replaced the same way, so that a start already past its check can't load it.

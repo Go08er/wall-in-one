@@ -472,18 +472,40 @@ def selector_is_foreign(video: Path, roots: Iterable[Path], *, sidecar: Path | N
             return False
     except OSError:
         return True
+    return owned_selector(video, roots, sidecar=sidecar) is None
+
+
+def owned_selector(
+    video: Path, roots: Iterable[Path], *, sidecar: Path | None = None
+) -> file_io.FileFingerprint | None:
+    """The generation of ``video``'s sidecar when this app wrote it; None when it is foreign.
+
+    `selector_is_foreign`'s judgement, of the one generation of the file it
+    read, pinned: that generation is returned, so that a removal takes it and
+    no other (`manage._companions`). A selector put at the name since, another
+    writer's, is not the one judged, and is left as it is (R42-11).
+    """
+    roots = tuple(roots)
+    if workshop.is_workshop_content(video, labelled=False, roots=roots):
+        return None
+    if sidecar is None:
+        sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
-        raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
-        document = json.loads(raw) if raw is not None else None
+        with file_io.pin_regular_path(sidecar) as pin:
+            generation = pin.fingerprint
+            raw = file_io.read_pinned_regular_bytes(
+                pin, MAX_SIDECAR_BYTES, expected_fingerprint=generation
+            )
+        document = json.loads(raw)
     except OSError, ValueError, RecursionError:
-        return True
+        return None
     recorded = document.get(SIDECAR_STILL_KEY) if isinstance(document, dict) else None
     if not isinstance(recorded, str) or not recorded:
-        return True
+        return None
     candidate = Path(recorded)
     if not candidate.is_absolute():
         candidate = video.parent / candidate
-    return not _trusted_location(video, candidate, roots)
+    return generation if _trusted_location(video, candidate, roots) else None
 
 
 def _present_or_raise(path: Path) -> bool:

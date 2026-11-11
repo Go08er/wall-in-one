@@ -929,13 +929,17 @@ def _companions(
                 candidate == item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
                 and not adopted_role
                 and candidate not in proven
-                and pairing.selector_is_foreign(item.path, roots, sidecar=access)
             ):
-                # A selector the reader ignores (not JSON, empty, oversize, naming no
-                # still or one outside every root) was not written by this app, which
-                # writes only inside a root, naming a still there: it may be the
-                # person's own, and is left byte for byte.
-                return
+                # Judged on the generation read, which is then the only one taken
+                # (R42-11): one written at the name since is another writer's, and
+                # is kept (`file_io.pin_regular_path`'s expected fingerprint).
+                expected_fingerprint = pairing.owned_selector(item.path, roots, sidecar=access)
+                if expected_fingerprint is None:
+                    # A selector the reader ignores (not JSON, empty, oversize, naming no
+                    # still or one outside every root) was not written by this app, which
+                    # writes only inside a root, naming a still there: it may be the
+                    # person's own, and is left byte for byte.
+                    return
             found.append(
                 _ArtifactCandidate(
                     candidate,
@@ -1409,7 +1413,9 @@ def prove_companions(
             return ()
         for candidate in candidates:
             try:
-                with file_io.pin_regular_path(candidate.access) as pin:
+                with file_io.pin_regular_path(
+                    candidate.access, expected_fingerprint=candidate.expected_fingerprint
+                ) as pin:
                     fingerprint = pin.fingerprint
                     if fingerprint[2] > MAX_COMPANION_PROOF_BYTES:
                         continue

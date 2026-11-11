@@ -69,8 +69,16 @@ CASES = [
     ("scene", False, True),
     ("video", True, True),
     ("video", False, True),
+    # Only the exact spelling `web` passes (review-f2 L1): the service reads
+    # the type as the engine does, nothing trimmed.
+    (" web ", True, False),
+    ("web\n", True, False),
+    ("Web\t", True, False),
+    ("web\u00a0", True, False),
+    (" web ", False, False),
+    ("WEB", True, True),
 ]
-IDS = [f"{kind}-web-{'on' if web else 'off'}" for kind, web, _ in CASES]
+IDS = [f"{kind!r}-web-{'on' if web else 'off'}" for kind, web, _ in CASES]
 
 
 @pytest.mark.parametrize(("kind", "allow_web", "starts"), CASES, ids=IDS)
@@ -83,7 +91,7 @@ def test_engine_refusal_reads_the_type_every_time(
     if refusal:
         # Only a web page's reason may name web wallpapers, and only while they are off.
         assert ("web wallpapers" in refusal) is False
-        assert ("web page" in refusal) is (kind == "web")
+        assert ("web page" in refusal) is (not allow_web and kind.strip().casefold() == "web")
 
 
 @pytest.mark.parametrize(("kind", "allow_web", "starts"), CASES, ids=IDS)

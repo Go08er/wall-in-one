@@ -1097,22 +1097,221 @@ def web_files_now(item: MediaItem) -> bool:
     )
 
 
+class EngineProjectError(Exception):
+    """A `project.json` the service's check would refuse, said as a sentence end."""
+
+
+#: serde_json's nesting limit (`service/src/workshop.rs`): at this many levels
+#: open, the service stops checking numbers and escapes beside the top level's
+#: `type` and only reads the text's structure (it still reads any depth).
+ENGINE_STRICT_DEPTH: Final = 128
+
+#: A string, whole, so a bracket or an escape inside one is not read as one.
+_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*+"', re.DOTALL)
+#: Every string, and every bracket outside one, in order.
+_STRUCTURE: Final = re.compile(_STRING.pattern + r"|[\[{]|[\]}]", re.DOTALL)
+#: What a JSON string holds that is not a plain character: a surrogate pair
+#: (fine), a lone surrogate escape (the service's parser refuses it), or any
+#: other escape (consumed, so `\\ud800` is a backslash and text).
+_ESCAPE: Final = re.compile(
+    r"\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}"
+    r"|(?P<lone>\\u[dD][89a-fA-F][0-9a-fA-F]{2})"
+    r"|\\u[0-9a-fA-F]{4}|\\."
+)
+#: JSON's tokens, for the one reader that has to run without recursion.
+_JSON_TOKEN: Final = re.compile(
+    r"""(?P<space>[ \t\n\r]+)
+    |(?P<string>"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")
+    |(?P<number>-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)
+    |(?P<literal>true|false|null)
+    |(?P<punctuation>[\[\]{},:])""",
+    re.VERBOSE,
+)
+
+
+def _engine_number(text: str) -> None:
+    """Refuse a number the service's parser can't hold (it has no infinities)."""
+    if math.isinf(float(text)):
+        raise EngineProjectError("has a number out of range")
+
+
+def _engine_unpaired(token: str) -> None:
+    """Refuse a string token that holds a lone surrogate escape."""
+    if "\\u" in token:
+        for escape in _ESCAPE.finditer(token):
+            if escape.group("lone"):
+                raise EngineProjectError("has a lone surrogate escape")
+
+
+def _engine_string(token: str) -> str:
+    """A JSON string token's text, refusing a lone surrogate escape."""
+    _engine_unpaired(token)
+    return str(json.loads(token))
+
+
+def _refuse_constant(name: str) -> object:
+    raise EngineProjectError(f"is not JSON ({name})")
+
+
+def _engine_whole(text: str) -> object:
+    """`text` as the service reads a project of fewer than `ENGINE_STRICT_DEPTH` levels."""
+
+    def number(token: str) -> int:
+        _engine_number(token)
+        return 0
+
+    try:
+        document = json.loads(
+            text, parse_constant=_refuse_constant, parse_int=number, parse_float=number
+        )
+    except (ValueError, RecursionError) as error:
+        raise EngineProjectError("is not JSON") from error
+    for token in _STRING.finditer(text):
+        _engine_unpaired(token.group())
+    return document
+
+
+def _engine_deep(text: str, strict_until: int) -> str | None:
+    """The top level's `type` of a project nested `ENGINE_STRICT_DEPTH` levels or more.
+
+    As the service reads it past serde_json's limit: the grammar all through,
+    every number and escape before the point the limit is reached
+    (``strict_until``, an offset in `text`), and after it only the top level's
+    own keys and its `type`. Iterative, so no depth is too deep.
+    """
+    stack: list[str] = []
+    state = "value"
+    kind: str | None = None
+    key: str | None = None
+    position = 0
+    while position < len(text):
+        match = _JSON_TOKEN.match(text, position)
+        if match is None:
+            raise EngineProjectError("is not JSON")
+        group, token = match.lastgroup, match.group()
+        strict = position < strict_until
+        position = match.end()
+        if group == "space":
+            continue
+        if state == "done":
+            raise EngineProjectError("is not JSON")
+        if state in ("value", "item"):
+            if state == "item" and token == "]":
+                stack.pop()
+                state = "after" if stack else "done"
+                continue
+            if not stack and token != "{":
+                raise EngineProjectError("is not an object")
+            top_type = len(stack) == 1 and stack[0] == "{" and key == "type"
+            if top_type:
+                kind = None
+            if group == "string":
+                if strict or top_type:
+                    value = _engine_string(token)
+                    kind = value if top_type else kind
+            elif group == "number":
+                if strict or top_type:
+                    _engine_number(token)
+            elif group == "punctuation" and token in "[{":
+                stack.append(token)
+                state = "item" if token == "[" else "name"
+                continue
+            elif group != "literal":
+                raise EngineProjectError("is not JSON")
+            state = "after"
+        elif state in ("name", "key"):
+            if token == "}" and state == "name":
+                stack.pop()
+                state = "after" if stack else "done"
+                continue
+            if group != "string":
+                raise EngineProjectError("is not JSON")
+            if strict or len(stack) == 1:
+                name = _engine_string(token)
+                key = name if len(stack) == 1 else key
+            state = "colon"
+        elif state == "colon":
+            if token != ":":
+                raise EngineProjectError("is not JSON")
+            state = "value"
+        else:  # after a value
+            if token == ",":
+                state = "key" if stack[-1] == "{" else "value"
+            elif token == ("}" if stack[-1] == "{" else "]"):
+                stack.pop()
+                state = "after" if stack else "done"
+            else:
+                raise EngineProjectError("is not JSON")
+    if state != "done":
+        raise EngineProjectError("is not JSON")
+    return kind
+
+
+def engine_project_type(directory: Path) -> str:
+    """The `type` the service's check reads from ``directory``'s `project.json`.
+
+    The service's `workshop::project_type` (service/src/workshop.rs), and as
+    strict: the file a regular file of at most `MAX_PROJECT_BYTES` (never a
+    link, a FIFO or a folder), UTF-8 with no replacement, JSON with no `NaN`
+    or infinity, no number that overflows and no lone surrogate escape, a
+    top-level object whose last `type` is a string, lower-cased in ASCII
+    only and nothing trimmed. It is not the scan's reader (`_read_project`),
+    which forgives all of that to list what it can. Raises `EngineProjectError`
+    for whatever the service would refuse.
+    """
+    path = directory / "project.json"
+    try:
+        raw = file_io.read_regular_bytes(path, MAX_PROJECT_BYTES)
+    except OSError as error:
+        raise EngineProjectError(f"can\u2019t be read ({error.strerror or error})") from error
+    if raw is None:
+        raise EngineProjectError("can\u2019t be read (it is missing)")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise EngineProjectError("is not UTF-8") from error
+    depth = 0
+    strict_until = -1
+    for token in _STRUCTURE.finditer(text):
+        if token.group() in ("[", "{"):
+            depth += 1
+            if depth >= ENGINE_STRICT_DEPTH:
+                strict_until = token.start()
+                break
+        elif token.group() in ("]", "}"):
+            depth -= 1
+    kind: object
+    if strict_until >= 0:
+        kind = _engine_deep(text, strict_until)
+    else:
+        document = _engine_whole(text)
+        kind = document.get("type") if isinstance(document, dict) else None
+    if not isinstance(kind, str):
+        raise EngineProjectError("is not a project with a type")
+    return kind.translate(_ASCII_LOWER)
+
+
 def engine_refusal(workshop_id: str, *, allow_web: bool) -> str:
     """Why linux-wallpaperengine must not be given ``workshop_id``.
 
-    Empty when it may. The service's `refusal` (service/src/workshop.rs), for
-    the engines this app starts itself: a scene's still, and the legacy
-    Python playback. It is read every time, web wallpapers allowed or not;
-    ``allow_web`` only lets a ``web`` page through. The engine finds
-    ``--bg <id>`` under the home folder, not where the scan found the item,
-    and reads its type again when it starts, so every folder of
-    `ENGINE_WORKSHOP_FOLDERS` that holds it is read now, as the scan reads a
-    `project.json` (`_read_project`). It may start only when each copy there
-    is a `scene` or a `video`, or a web page while ``allow_web``; any other
-    type, an `application` among them, is refused, and so is ``web`` in any
-    spelling `holds_web` counts while it is off. A copy that can't be looked
-    at or read, and an item found in none of them, are refused. The home folder is the caller's
-    current one, as in `default_steam_roots`.
+    Empty when it may. The service's `refusal` (service/src/workshop.rs), as
+    strict, for the engines this app starts itself: a scene's still, and the
+    legacy Python playback. The two must agree on every item
+    (service/tests/fixtures/engine-types/cases.json, run by both).
+
+    It is read every time, web wallpapers allowed or not; ``allow_web`` only
+    lets a ``web`` page through. The engine finds ``--bg <id>`` under the
+    home folder, not where the scan found the item, and reads its type again
+    when it starts, so every folder of `ENGINE_WORKSHOP_FOLDERS` that holds
+    it is read now, with `engine_project_type`, not the scan's forgiving
+    reader. It may start only when each copy there is a `scene` or a `video`,
+    or a web page while ``allow_web``: exactly the spelling ``web``, as the
+    service reads it. Any other type, an `application` among them, is
+    refused; so is a `project.json` the service would not read, and so is
+    ``web`` in any spelling `holds_web` counts while it is off (the lenient
+    reading only ever refuses). A copy that can't be looked at or read, and
+    an item found in none of them, are refused. The home folder is the
+    caller's current one, as in `default_steam_roots`.
     """
     if not is_workshop_id(workshop_id):
         return "its Workshop id can\u2019t be checked"
@@ -1136,16 +1335,19 @@ def engine_refusal(workshop_id: str, *, allow_web: bool) -> str:
         if not stat.S_ISDIR(info.st_mode):
             continue
         found = True
-        project = _read_project(directory)
-        if project is None:
-            return (
-                f"Workshop item {workshop_id}\u2019s project.json in {directory} can\u2019t be read"
-            )
-        if "web" in {project.kind, project.declared_type, project.lenient_type}:
+        try:
+            kind = engine_project_type(directory)
+        except EngineProjectError as error:
+            if not allow_web and _spelled_web(directory):
+                return f"Workshop item {workshop_id} is a web page"
+            return f"Workshop item {workshop_id}\u2019s project.json in {directory} {error}"
+        if kind == "web":
             if allow_web:
                 continue
             return f"Workshop item {workshop_id} is a web page"
-        if project.declared_type not in ("scene", "video"):
+        if kind not in ("scene", "video"):
+            if not allow_web and _spelled_web(directory):
+                return f"Workshop item {workshop_id} is a web page"
             return f"Workshop item {workshop_id} in {directory} is neither a scene nor a video"
     if not found:
         # A Steam library on another drive is one the scan lists and the
@@ -1155,6 +1357,19 @@ def engine_refusal(workshop_id: str, *, allow_web: bool) -> str:
             f"Steam\u2019s, the Flatpak\u2019s and the Snap\u2019s Workshop folders under {home}"
         )
     return ""
+
+
+def _spelled_web(directory: Path) -> bool:
+    """Whether the scan's forgiving reading of ``directory`` calls it a web page.
+
+    Only to word a refusal that is made anyway while web wallpapers are off.
+    """
+    project = _read_project(directory)
+    return project is not None and "web" in {
+        project.kind,
+        project.declared_type,
+        project.lenient_type,
+    }
 
 
 def web_among(ids: Iterable[str], give_up: Callable[[], bool] = lambda: False) -> tuple[bool, bool]:

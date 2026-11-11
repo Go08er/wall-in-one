@@ -103,6 +103,13 @@ class SceneError(Exception):
 ENGINE: Final = "linux-wallpaperengine"
 
 
+class SceneRefusedError(SceneError):
+    """The Workshop item's type says linux-wallpaperengine must not be given it.
+
+    Its message is the reason (`workshop.engine_refusal`), without the item.
+    """
+
+
 class SceneEngineUnavailableError(SceneError):
     """`linux-wallpaperengine` is not installed.
 
@@ -286,12 +293,26 @@ class SceneRenderer:
             arguments += ["--bg", scene]
         return arguments
 
-    def start(self, scene: str, properties: Sequence[tuple[str, str]] = ()) -> None:
-        """Render ``scene``, replacing whatever was rendering."""
+    def start(
+        self,
+        scene: str,
+        properties: Sequence[tuple[str, str]] = (),
+        *,
+        allow_web: bool,
+    ) -> None:
+        """Render ``scene``, replacing whatever was rendering.
+
+        Its type is read first, here, where the engine is started
+        (`workshop.engine_refusal`): an ``application`` is never run, and a
+        ``web`` page only with ``allow_web``.
+        """
         if not is_available():
             raise SceneEngineUnavailableError("linux-wallpaperengine is not installed")
         if not scene.strip():
             raise SceneError("no scene given")
+        refusal = workshop.engine_refusal(scene, allow_web=allow_web)
+        if refusal:
+            raise SceneRefusedError(refusal)
 
         self.stop()
         try:
@@ -345,6 +366,7 @@ def screenshot(
     size: tuple[int, int] | None = None,
     processes: worker_processes.Cancellation | None = None,
     prepared_output: bool = False,
+    allow_web: bool,
 ) -> Path:
     """Render ``scene`` until it has written one frame, then stop it.
 
@@ -355,9 +377,16 @@ def screenshot(
 
     Always renders in window mode, whatever the renderer is configured for:
     taking a still must not put a scene on the desktop.
+
+    Its type is read first, here, where the engine is started
+    (`workshop.engine_refusal`): an ``application`` is never run, and a
+    ``web`` page only with ``allow_web``.
     """
     if not is_available():
         raise SceneEngineUnavailableError("linux-wallpaperengine is not installed")
+    refusal = workshop.engine_refusal(scene, allow_web=allow_web)
+    if refusal:
+        raise SceneRefusedError(refusal)
 
     capture = SceneRenderer(
         layer=(renderer.layer if renderer else DEFAULT_LAYER),

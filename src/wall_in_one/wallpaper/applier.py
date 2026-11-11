@@ -18,7 +18,7 @@ import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from wall_in_one.library import pairings, workshop
+from wall_in_one.library import pairings
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.theme import noctalia
 from wall_in_one.wallpaper import renderer, scenes
@@ -192,15 +192,13 @@ class Applier:
                 f"linux-wallpaperengine is already running on {self.output or 'this screen'} "
                 f"(pid {held[0]}), so {item.name} was not started. Stop the other one first."
             )
-        # The engine reads the type again when it starts, under the home
-        # folder: an update since the scan can have made it a web page. So it
-        # is read there first, as the service does before it starts one.
-        refusal = workshop.engine_refusal(item.rendered_scene, allow_web=allow_web)
-        if refusal:
-            raise ApplyError(f"{item.name} can\u2019t play: {refusal}")
         try:
-            # A preset renders its base with its own values.
-            self._scenes.start(item.rendered_scene, item.scene_properties)
+            # A preset renders its base with its own values. The engine reads
+            # the type again when it starts, under the home folder, so
+            # `start` reads it there first, as the service does.
+            self._scenes.start(item.rendered_scene, item.scene_properties, allow_web=allow_web)
+        except scenes.SceneRefusedError as error:
+            raise ApplyError(f"{item.name} can\u2019t play: {error}") from error
         except scenes.SceneError as error:
             raise ApplyError(str(error)) from error
         return Applied(item=item, path=path, animated=True)

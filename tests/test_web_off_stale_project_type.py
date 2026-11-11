@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from tests.conftest import REAL_HOME
+from tests.test_engine_start_type_web_on import recording_engine
 from tests.test_scenes import _QuietRenderer
 from tests.web_previews import Fixture
 from wall_in_one import thumbnails
@@ -112,15 +113,8 @@ def test_a_legacy_scene_start_reads_the_type_again_before_the_engine_is_started(
 ) -> None:
     item = _item(web_folder, state, monkeypatch)
     monkeypatch.setattr(scenes, "running_elsewhere", lambda _output: ())
-    started: list[str] = []
-
-    class Engine:
-        def start(self, scene: str, properties: object = ()) -> None:
-            started.append(scene)
-
-        def stop(self) -> None: ...
-
-    applier = Applier(_QuietRenderer(), scene_renderer=Engine(), own_scene_renderer=True)  # type: ignore[arg-type]
+    engine, started = recording_engine(monkeypatch)
+    applier = Applier(_QuietRenderer(), scene_renderer=engine, own_scene_renderer=True)  # type: ignore[arg-type]
     if state == "scene-control":
         applier.apply(item, dynamics_enabled=True)
         assert started == [item.scene]

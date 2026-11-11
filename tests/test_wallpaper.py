@@ -912,7 +912,7 @@ class FakeScenes:
     def is_running(self) -> bool:
         return bool(self.started)
 
-    def start(self, scene: str, properties: object = ()) -> None:
+    def start(self, scene: str, properties: object = (), **_kwargs: object) -> None:
         if self._fail:
             raise scenes.SceneError("boom")
         self.started.append(scene)

@@ -207,12 +207,14 @@ def test_a_prepared_screenshot_output_is_kept_and_written_in_place(
     monkeypatch.setattr(scenes, "_wait_for", render)
     monkeypatch.setattr(scenes, "_end", lambda *args, **kwargs: None)
 
+    where_the_engine_looks("12345")
     assert (
         scenes.screenshot(
             "12345",
             destination,
             size=(2560, 1600),
             prepared_output=True,
+            allow_web=False,
         )
         == destination
     )
@@ -229,11 +231,12 @@ def test_a_prepared_screenshot_refuses_nonempty_or_nonregular_output(
     directory = tmp_path / "directory"
     directory.mkdir()
     monkeypatch.setattr(scenes, "is_available", lambda: True)
+    where_the_engine_looks("12345")
 
     with pytest.raises(scenes.SceneError, match="not an empty regular file"):
-        scenes.screenshot("12345", nonempty, prepared_output=True)
+        scenes.screenshot("12345", nonempty, prepared_output=True, allow_web=False)
     with pytest.raises(scenes.SceneError, match="not an empty regular file"):
-        scenes.screenshot("12345", directory, prepared_output=True)
+        scenes.screenshot("12345", directory, prepared_output=True, allow_web=False)
 
     assert nonempty.read_bytes() == b"do not truncate"
 
@@ -248,7 +251,7 @@ def test_the_layer_is_layer_shells_wallpaper_layer() -> None:
 
 def test_a_scene_with_no_id_is_refused() -> None:
     with pytest.raises(scenes.SceneError):
-        SceneRenderer().start("   ")
+        SceneRenderer().start("   ", allow_web=False)
 
 
 # -- somebody else's engine ----------------------------------------------
@@ -319,8 +322,9 @@ def test_an_unreadable_process_is_skipped_rather_than_fatal(tmp_path: Path) -> N
 def where_the_engine_looks(workshop_id: str, project: str = '{"type": "scene"}') -> Path:
     """Install ``workshop_id`` where linux-wallpaperengine finds it, under this test's own HOME.
 
-    While web wallpapers are off, nothing is handed to the engine that isn't a
-    scene or a video there (`workshop.engine_refusal`). The conftest gives every
+    Whatever the setting, nothing is handed to the engine that isn't a scene or
+    a video there, or a web page while web wallpapers are on
+    (`workshop.engine_refusal`). The conftest gives every
     test a HOME of its own; without it this would write over `project.json` in
     the account's real Steam folder, so it refuses to.
     """
@@ -461,7 +465,7 @@ def test_the_applier_hands_a_preset_to_the_engine_as_its_base(
         fps = 30
         output = ""
 
-        def start(self, scene: str, properties: object = ()) -> None:
+        def start(self, scene: str, properties: object = (), **_kwargs: object) -> None:
             started.append((scene, properties))
 
         def stop(self) -> None: ...
@@ -521,7 +525,7 @@ def test_the_applier_never_counts_its_own_engine_as_somebody_elses(
             self.running = False
             self.started: list[str] = []
 
-        def start(self, scene: str, properties: object = ()) -> None:
+        def start(self, scene: str, properties: object = (), **_kwargs: object) -> None:
             self.running = True
             self.started.append(scene)
 
@@ -597,12 +601,17 @@ def test_a_capture_leaves_no_engine_descendant_behind(
     subreaper(True)
     sleeper: int | None = None
     processes = worker_processes.Cancellation()
+    where_the_engine_looks("123")
     try:
         if frame == "frame":
-            assert scenes.screenshot("123", destination, timeout=10, processes=processes)
+            assert scenes.screenshot(
+                "123", destination, timeout=10, processes=processes, allow_web=False
+            )
         else:
             with pytest.raises(scenes.SceneError, match="stopped before writing"):
-                scenes.screenshot("123", destination, timeout=10, processes=processes)
+                scenes.screenshot(
+                    "123", destination, timeout=10, processes=processes, allow_web=False
+                )
         sleeper = int(handoff.read_text())
         status = reaped(sleeper, 3.0)
         assert status is not None, "the engine's child outlived the capture"
@@ -638,8 +647,9 @@ def test_the_legacy_renderer_stops_the_group_of_an_engine_that_already_exited(
     subreaper(True)
     sleeper: int | None = None
     renderer = SceneRenderer(output="DP-1")
+    where_the_engine_looks("123")
     try:
-        renderer.start("123")
+        renderer.start("123", allow_web=False)
         deadline = time.monotonic() + 5.0
         while renderer.is_running or not handoff.exists() or not handoff.read_text():
             assert time.monotonic() < deadline, "the stand-in engine never exited"

@@ -1944,6 +1944,7 @@ def capture_scene(
                 processes=processes,
                 source=source,
                 from_preview=True,
+                allow_web=allow_web,
             )
         finally:
             source.close()
@@ -1973,6 +1974,7 @@ def capture_scene(
             size=measured,
             processes=processes,
             source=source,
+            allow_web=allow_web,
         )
     finally:
         source.close()
@@ -1986,6 +1988,7 @@ def _capture_scene_from_source(
     size: tuple[int, int] | None,
     processes: worker_processes.Cancellation | None,
     source: _SourceSnapshot,
+    allow_web: bool,
     from_preview: bool = False,
 ) -> Path:
     """Render and publish a scene while retaining its opened directory identity.
@@ -2036,6 +2039,7 @@ def _capture_scene_from_source(
                 engine_output,
                 size=size,
                 prepared_output=True,
+                allow_web=allow_web,
             )
         else:
             scenes.screenshot(
@@ -2044,6 +2048,7 @@ def _capture_scene_from_source(
                 size=size,
                 processes=processes,
                 prepared_output=True,
+                allow_web=allow_web,
             )
         with _source_lifecycle_lock(item.path, Kind.SCENE, item.scene):
             _require_unchanged_source(item.path, Kind.SCENE, source)

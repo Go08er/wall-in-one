@@ -1483,6 +1483,7 @@ def test_an_engine_that_dies_mid_frame_publishes_nothing_torn(
         *,
         size: tuple[int, int],
         prepared_output: bool,
+        allow_web: bool,
     ) -> Path:
         del size, prepared_output
         destination.write_bytes(b"\x89PNG\r\n\x1a\nhalf a frame")
@@ -1516,6 +1517,7 @@ def test_scene_capture_replaces_the_managed_still_atomically(
         *,
         size: tuple[int, int],
         prepared_output: bool,
+        allow_web: bool,
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1547,6 +1549,7 @@ def test_scene_capture_never_overwrites_a_late_target(
         *,
         size: tuple[int, int],
         prepared_output: bool,
+        allow_web: bool,
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1581,6 +1584,7 @@ def test_scene_target_directory_replacement_cannot_redirect_publication(
         *,
         size: tuple[int, int],
         prepared_output: bool,
+        allow_web: bool,
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1617,6 +1621,7 @@ def test_scene_source_change_after_publication_restores_the_prior_still(
         *,
         size: tuple[int, int],
         prepared_output: bool,
+        allow_web: bool,
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1670,6 +1675,7 @@ def test_scene_capture_preserves_an_in_place_target_mutation(
         *,
         size: tuple[int, int],
         prepared_output: bool,
+        allow_web: bool,
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output

@@ -787,8 +787,8 @@ def scene_capture_required(
 ) -> bool:
     """Whether an automatic scene still is absent, undersized, or wrong-shaped.
 
-    ``previews`` is `config.Settings.preview_stills`. Without it a web page or a
-    preset has no automatic still, so none is ever required of it.
+    ``previews`` is `config.Settings.preview_stills`. Without it a web page (or a
+    preset of one) has no automatic still, so none is ever required of it.
 
     Only the managed automatic filename is eligible. A custom still selected
     from the library may intentionally have another shape and must never be
@@ -851,6 +851,20 @@ def automatic_destination(item: MediaItem, root: Path) -> Path | None:
         return destination(item.path, root)
     if item.kind is Kind.SCENE and item.scene:
         return pairing.still_directory(root) / f"{pairing.scene_still_stem(item)}{STILL_SUFFIX}"
+    return None
+
+
+def capture_destination(item: MediaItem, root: Path) -> Path | None:
+    """Where a preset's engine capture goes (`pairing.scene_still_stem`), whatever its kind is now.
+
+    By name alone, so the library keeps hiding it (and removal keeps deriving it)
+    when the preset's base goes missing and the preset reads as a web page's
+    (`MediaItem.preview_kind` fails closed), which changes `automatic_destination`.
+    """
+    if item.kind is Kind.SCENE and item.scene and item.scene_base:
+        return pairing.still_directory(root) / (
+            f"{item.scene}{pairing.PRESET_CAPTURE_SUFFIX}{STILL_SUFFIX}"
+        )
     return None
 
 
@@ -1846,7 +1860,11 @@ def _record_beside(
         try:
             file_io.read_regular_bytes(sidecar, pairing.MAX_SIDECAR_BYTES)
         except OSError:
-            pass  # one that can't be read is not known to be ignorable: the writer says why
+            # A symbolic link, a directory, one too large or unreadable: the
+            # readers ignore it too (`read_sidecar`), and it may be the person's
+            # own, so it is neither replaced nor removed, and it does not stop the
+            # still: before this it did, silently, for good.
+            return None
         else:
             if pairing.read_sidecar(video, (root,)) is None:
                 # A record is there that readers ignore (untrusted by location,

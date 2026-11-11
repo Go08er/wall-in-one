@@ -1017,7 +1017,10 @@ def pairing_artifact_paths(
     bounded = tuple(roots)
     found: list[Path] = []
     pairing_sidecar = item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
-    if _within(pairing_sidecar, bounded):
+    if _within(pairing_sidecar, bounded) and not pairing.selector_is_foreign(item.path, bounded):
+        # A selector the reader ignores for where it points was not written by
+        # this app (it only writes inside a root, naming a still there), so it is
+        # not ours to delete with the video.
         found.append(pairing_sidecar)
 
     for root in bounded:
@@ -1026,9 +1029,11 @@ def pairing_artifact_paths(
             break
         found.append(generated)
         found.append(generated.with_name(generated.name + pairing.SIDECAR_SUFFIX))
-        legacy = stills.preview_made_destination(item, root)
-        if legacy is not None and legacy != generated:
-            found.append(legacy)
+        # Only `<id>.png`: a removal rebuilds the item from its `removals.Intent`
+        # (path, kind, provider, scene), which carries neither the base nor the
+        # Workshop type, so a preset's `-capture` name and 0.4.1's preview-made
+        # file are not derivable here (and nothing deletes them: see
+        # `discard_pairing_artifacts`).
 
     # A schema-1 pairing sidecar records an association, not a file
     # generation. Keep that predecessor choice usable, but never turn its

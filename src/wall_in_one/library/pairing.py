@@ -444,6 +444,33 @@ def _selected_still(video: Path, *, strict: bool) -> Path | None:
     return candidate if present(candidate) else None
 
 
+def selector_is_foreign(video: Path, roots: Iterable[Path]) -> bool:
+    """Whether ``video``'s sidecar names a picture the reader ignores for where it is.
+
+    True for a readable selector that names a file outside every root (or beside
+    Workshop content): `read_sidecar` ignores it, and it may be the person's own, so
+    nothing here owns it. A selector that is absent, can't be read, or names no
+    still is not "foreign" (there is nothing it points at), and one the reader
+    trusts is the app's own. Used so that removing a video never deletes a
+    selector the app did not write (`manage.pairing_artifact_paths`).
+    """
+    if workshop.is_workshop_content(video, labelled=False):
+        return True
+    sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
+    try:
+        raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
+        document = json.loads(raw) if raw is not None else None
+    except OSError, ValueError, RecursionError:
+        return False
+    recorded = document.get(SIDECAR_STILL_KEY) if isinstance(document, dict) else None
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    candidate = Path(recorded)
+    if not candidate.is_absolute():
+        candidate = video.parent / candidate
+    return not _trusted_location(video, candidate, tuple(roots))
+
+
 def _present_or_raise(path: Path) -> bool:
     """`present`, but only a missing entry is absent: one that can't be looked at raises."""
     try:
@@ -502,6 +529,21 @@ def still_directory(root: Path) -> Path:
     """Where generated stills live under ``root``. Shared with `library.stills`,
     so the half that writes them and the half that finds them cannot drift."""
     return root / MANAGED_PARENT / AUTOMATIC_STILLS_DIRECTORY
+
+
+def names_preview_made_still(item: MediaItem, still: Path) -> bool:
+    """Whether ``still`` is the picture 0.4.1 drew from ``item``'s preview, wherever its root was.
+
+    By shape, not by the current roots: `<any root>/Wall-in-One/Automatic Stills/<id>.png`
+    for a web page or a preset (`MediaItem.workshop_detail`). A record made when
+    another library folder was in use still names it after that folder was removed.
+    """
+    return (
+        bool(item.scene and item.workshop_detail)
+        and still.name == f"{item.scene}.png"
+        and still.parent.name == AUTOMATIC_STILLS_DIRECTORY
+        and still.parent.parent.name == MANAGED_PARENT
+    )
 
 
 def automatic_still_stem(video: Path) -> str:

@@ -249,10 +249,16 @@ def _still_note(
     """Where a moving wallpaper's still comes from, in words."""
     if not item.is_moving:
         return ""
-    chosen = pairing.still if pairing is not None and pairing.customized else None
+    # The same filter playback and the compiler apply: a record naming 0.4.1's
+    # preview-made picture is no choice while previews are off.
+    chosen = (
+        pairings.effective_choice(item, pairing.still, previews)
+        if pairing is not None and pairing.customized
+        else None
+    )
     if chosen is not None and not missing:
         return f"Chosen by hand: {chosen.name}"
-    if workshop.no_automatic_still(item, previews):
+    if workshop.no_automatic_still(item, previews) and item.unplayable is None:
         return "No automatic still for this kind of wallpaper: choose one by hand"
     automatic = (
         "Taken from its Wallpaper Engine preview"
@@ -478,7 +484,12 @@ class RealAppState(GObject.Object):
         store = session.pairings
         identity = pairings.Identity.of(item)
         pairing = store.get(identity)
-        chosen = pairing.still if pairing is not None and pairing.customized else None
+        previews = session.library.previews  # the answer the scan and the compiler used
+        chosen = (
+            pairings.effective_choice(item, pairing.still, previews)
+            if pairing is not None and pairing.customized
+            else None
+        )
         missing = chosen is not None and chosen != item.paired_still and chosen not in indexed()
         # The compiler's own answer, from accepted memory (no file is read).
         can = runtime_config.entry_playability(item, session)
@@ -492,7 +503,7 @@ class RealAppState(GObject.Object):
             unplayable="" if can.compiles else can.reason,
             allow_web=session.settings.allow_web_wallpapers,
             refused_here=self._refused_reason(item),
-            previews=session.settings.preview_stills,
+            previews=previews,
         )
 
     def _refused_reason(self, item: MediaItem) -> str:

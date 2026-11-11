@@ -1346,7 +1346,7 @@ def test_a_committed_trash_reports_pairing_artifacts_it_could_not_clean(
     video = root / "clip.mp4"
     video.write_bytes(b"0" * 64)
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8")
     real_discard = file_io.discard_regular_if_same
 
     def discard(
@@ -1388,7 +1388,7 @@ def test_a_committed_remove_reports_pairing_artifacts_it_could_not_clean(
         provenance(video, "MotionBGS"), encoding="utf-8"
     )
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8")
     real_discard = file_io.discard_regular_if_same
 
     def discard(
@@ -1436,7 +1436,7 @@ def test_postcommit_source_sync_failure_still_consumes_pinned_pairing_artifacts(
         video = media.path
         media = item_for(video, Kind.VIDEO, Ownership.MANAGED, provider="Wallhaven")
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8")
     real_sync = paths.fsync_directory
     failed = False
     absent_source_syncs = 0
@@ -1478,7 +1478,7 @@ def test_an_artifact_that_vanishes_before_claim_is_an_idempotent_success(
     video = root / "clip.mp4"
     video.write_bytes(b"0" * 64)
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8")
     real_identity = file_io.path_identity
 
     def vanish(path: Path) -> file_io.PathIdentity:
@@ -1502,7 +1502,7 @@ def test_artifact_cleanup_never_unlinks_a_same_path_replacement(
     video = root / "clip.mp4"
     video.write_bytes(b"0" * 64)
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8")
     expected = _expected(sidecar)
     original = root / "prepared-pairing-sidecar"
     real_rename = file_io._rename_noreplace
@@ -1535,7 +1535,9 @@ def test_artifact_cleanup_never_unlinks_a_same_path_replacement(
 
     assert result.kept_artifacts == (sidecar,)
     assert sidecar.read_bytes() == b"late replacement"
-    assert json.loads(original.read_text(encoding="utf-8")) == {"still_path": "/nowhere"}
+    assert json.loads(original.read_text(encoding="utf-8")) == {
+        "still_path": str(root / "still.png")
+    }
 
 
 @pytest.mark.parametrize("trash", (False, True), ids=("managed-delete", "user-trash"))
@@ -1564,8 +1566,8 @@ def test_media_commit_does_not_remove_artifacts_from_a_new_same_path_lifecycle(
             provider_sidecar: provenance(path, "Wallhaven").encode(),
         }
     pairing_sidecar = path.with_name(path.name + pairing.SIDECAR_SUFFIX)
-    pairing_sidecar.write_text(json.dumps({"still_path": "/old"}), encoding="utf-8")
-    artifacts[pairing_sidecar] = json.dumps({"still_path": "/new"}).encode()
+    pairing_sidecar.write_text(json.dumps({"still_path": str(root / "old.png")}), encoding="utf-8")
+    artifacts[pairing_sidecar] = json.dumps({"still_path": str(root / "new.png")}).encode()
     backups: dict[Path, Path] = {}
     real_discard = manage._discard_pinned_artifacts
 
@@ -1611,7 +1613,7 @@ def test_artifact_cleanup_reports_a_replacement_preserved_after_restore_conflict
     video.write_bytes(b"0" * 64)
     media = item_for(video, Kind.VIDEO)
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text(json.dumps({"still_path": "/nowhere"}), encoding="utf-8")
+    sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8")
     original = root / "prepared-pairing-sidecar"
     real_rename = file_io._rename_noreplace
     preserved: Path | None = None
@@ -1638,7 +1640,9 @@ def test_artifact_cleanup_reports_a_replacement_preserved_after_restore_conflict
     assert len(kept) == 1
     assert sidecar.read_bytes() == b"replacement C"
     assert kept[0].read_bytes() == b"replacement B"
-    assert json.loads(original.read_text(encoding="utf-8")) == {"still_path": "/nowhere"}
+    assert json.loads(original.read_text(encoding="utf-8")) == {
+        "still_path": str(root / "still.png")
+    }
 
 
 def test_a_legacy_shared_still_is_not_deleted_with_one_video(root: Path) -> None:
@@ -2092,7 +2096,9 @@ def test_remove_syncs_the_media_and_artifact_directories(
 ) -> None:
     item = downloaded(root)
     pairing_sidecar = item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
-    pairing_sidecar.write_text('{"still_path": "/nowhere"}', encoding="utf-8")
+    pairing_sidecar.write_text(
+        json.dumps({"still_path": str(root / "still.png")}), encoding="utf-8"
+    )
     synced: list[Path] = []
     monkeypatch.setattr("wall_in_one.library.manage.paths.fsync_directory", synced.append)
 

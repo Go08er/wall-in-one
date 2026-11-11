@@ -128,9 +128,10 @@ class MediaItem:
     #: For a video: a still to show when dynamics are paused. See
     #: `wall_in_one.library.pairing`.
     paired_still: Path | None = None
-    #: A read-only source suitable for representing media that has no file of
-    #: its own. Workshop scenes use the author-supplied preview as a fallback
-    #: until their generated still exists.
+    #: The author-supplied preview of a Workshop item, a read-only picture of it
+    #: for its library card (the thumbnail's fallback). Never its still, nor the
+    #: source of its colours: `Settings.preview_stills` decides that, for a web
+    #: page and a preset of one only.
     preview: Path | None = None
     #: For a Wallpaper Engine item listed as a scene, Wallpaper Engine's own
     #: word for it (``scene``, ``web``, ``video``, ``preset``, ``application``,

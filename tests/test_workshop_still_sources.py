@@ -163,7 +163,9 @@ def test_the_old_document_is_rebuilt_without_the_entries_that_lost_their_still(
     assert str(tree.automatic / "400.png") not in document
     web = next(item for item in session.library.items if item.scene == "300")
     assert rc.entry_playability(web, session) == rc.Playability(
-        False, False, "it has no still for playback to show yet"
+        False,
+        False,
+        "it has no still, and gets none of its own while previews are off: pick one",
     )
 
 

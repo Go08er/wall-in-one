@@ -862,22 +862,19 @@ def synthesize(
     )
 
 
-def _chosen_still(
-    item: MediaItem, chosen: Path | None, roots: Sequence[Path], previews: bool
-) -> Path | None:
+def effective_choice(item: MediaItem, chosen: Path | None, previews: bool) -> Path | None:
     """A record's still, unless it is the preview-made one 0.4.1 left for ``item``.
 
     0.4.1 drew `<id>.png` in an `Automatic Stills` folder from the author's
-    preview, for every web page and every preset (`stills.preview_made_destination`).
-    A record naming it counts as no choice unless that file is the item's still
-    now (a web page or preset of one with previews on, `workshop.preview_still`);
-    the record and the file are left as they are.
+    preview, for every web page and every preset (`pairing.names_preview_made_still`,
+    which holds whichever library folder it was in, removed or not). A record
+    naming it counts as no choice unless that file is the item's still now (a web
+    page or preset of one with previews on, `workshop.preview_still`); the record
+    and the file are left as they are.
     """
     if chosen is None or workshop.preview_still(item, previews):
         return chosen
-    if any(chosen == stills.preview_made_destination(item, root) for root in roots):
-        return None
-    return chosen
+    return None if pairing.names_preview_made_still(item, chosen) else chosen
 
 
 def resolve(
@@ -919,7 +916,7 @@ def _resolve(
     if saved is None:
         return default
 
-    chosen = _chosen_still(item, saved.still, roots, previews)
+    chosen = effective_choice(item, saved.still, previews)
     missing = chosen is not None and not pairing.present(chosen)
     return replace(
         default,
@@ -985,14 +982,16 @@ def apply(
         if (destination := stills.automatic_destination(item, root)) is not None
     }
     # 0.4.1's preview-made pictures stay this app's, hidden, whether or not they
-    # are used now (`stills.preview_made_destination`).
-    generated.update(
-        destination
-        for item in materialised
-        if item.is_moving
-        for root in roots
-        if (destination := stills.preview_made_destination(item, root)) is not None
-    )
+    # are used now (`stills.preview_made_destination`), and so does a preset's
+    # capture whatever the preset reads as now (`stills.capture_destination`).
+    for derive in (stills.preview_made_destination, stills.capture_destination):
+        generated.update(
+            destination
+            for item in materialised
+            if item.is_moving
+            for root in roots
+            if (destination := derive(item, root)) is not None
+        )
     generated.update(adopted.values())
     kept: list[MediaItem] = []
     for item in materialised:
@@ -1132,7 +1131,7 @@ class Store:
             for candidate in (*library.items, *library.still_inventory)
             if candidate.kind is Kind.STILL
         }
-        chosen = _chosen_still(item, saved.still, library.roots, library.previews)
+        chosen = effective_choice(item, saved.still, library.previews)
         missing = (
             chosen is not None and chosen != item.paired_still and chosen not in indexed_stills
         )

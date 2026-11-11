@@ -156,10 +156,14 @@ def test_a_frame_that_cannot_be_captured_is_not_a_folder_that_refused(
         assert refusal(lambda: stills.generate(clip, root)).reason == "Permission denied"
 
 
-def test_a_pairing_record_that_cannot_be_read_is_not_its_folder_refusing(
+def test_a_pairing_record_that_cannot_be_read_does_not_stop_the_still_nor_get_touched(
     root: Path, rendered: list[Path]
 ) -> None:
-    """The same "Permission denied", from one file in a library that takes writes."""
+    """F9: it is ignored like the readers ignore it, left byte for byte, and the still is made.
+
+    Before, the writer refused ("Permission denied") and `ensure` swallowed it, so the
+    video never got a still, silently, and the person had to find a hidden file.
+    """
     clip = video(root)
     record = clip.with_name(clip.name + pairing.SIDECAR_SUFFIX)
     record.write_text("{}", encoding="utf-8")
@@ -167,12 +171,30 @@ def test_a_pairing_record_that_cannot_be_read_is_not_its_folder_refusing(
     try:
         if os.access(record, os.R_OK):
             pytest.skip("permission bits don't bind root")
-        with pytest.raises(stills.StillError, match="Permission denied") as raised:
-            stills.generate(clip, root)
+        made = stills.generate(clip, root)
     finally:
         record.chmod(0o600)
-    assert not isinstance(raised.value, stills.StillFolderError)
-    assert not stills.destination(clip, root).exists()
+    assert made == stills.destination(clip, root) and made.is_file()
+    assert record.read_text(encoding="utf-8") == "{}"
+
+
+@pytest.mark.parametrize("shape", ["symlink", "oversize", "directory"])
+def test_a_sidecar_the_writer_cannot_read_never_blocks_ensure(
+    root: Path, rendered: list[Path], shape: str
+) -> None:
+    clip = video(root)
+    record = clip.with_name(clip.name + pairing.SIDECAR_SUFFIX)
+    if shape == "symlink":
+        target = root / "elsewhere.json"
+        target.write_text("{}", encoding="utf-8")
+        record.symlink_to(target)
+    elif shape == "oversize":
+        record.write_bytes(b" " * (pairing.MAX_SIDECAR_BYTES + 1))
+    else:
+        record.mkdir()
+    found = stills.ensure(item(clip, Kind.VIDEO), root)
+    assert found == stills.destination(clip, root) and found.is_file()
+    assert record.is_symlink() or record.exists(), "left in place"
 
 
 def item(path: Path, kind: Kind, scene: str = "") -> MediaItem:

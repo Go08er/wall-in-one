@@ -47,7 +47,10 @@ from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import scan as scan_module  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
-from wall_in_one.ui.app import _RuntimeLibraryNotReadyError  # noqa: E402
+from wall_in_one.ui.app import (  # noqa: E402
+    _RuntimeInventoryInvalidError,
+    _RuntimeLibraryNotReadyError,
+)
 
 #: How long the service gets to hear of it while the scan is held.
 AT_ONCE = 15.0
@@ -663,6 +666,49 @@ def test_a_gesture_waiting_after_a_refused_compile_lets_web_off_out_first(
     _and_after_the_scan(application, service, scans)
     spin_until(lambda: not application._runtime_action_pending, 20, what="the gesture")
     assert application._runtime_web_off_owed == 0
+
+
+@previews_param
+def test_a_gesture_whose_compile_cant_land_before_the_scan_runs_the_guard_once_web_is_off(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    previews: bool,
+) -> None:
+    """R42-9: a gesture let go by web off whose compile still waits for the scan is deferred.
+
+    Its request can't be compiled before the scan ends (the inventory is being replaced),
+    so with web off owed it neither waits for the scan nor compiles again in a loop: the
+    web-off guard runs at once.
+    """
+    application = profiles().application
+    service = _web_on(application, previews, monkeypatch)
+    scans = HeldScans(monkeypatch, fails=False)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    _save(application, roots=(*application.settings.roots, extra))
+    spin_until(lambda: application._runtime_library_scan_pending, 10, what="the scan pending")
+    compiles: list[int] = []
+
+    def being_replaced(request: Any) -> bool:
+        compiles.append(request.generation)
+        raise _RuntimeInventoryInvalidError("the library is being scanned again")
+
+    monkeypatch.setattr(application, "_compile_runtime_request", being_replaced)
+    assert application.runtime_action_async("next")
+    _pump(0.5)  # the gesture's job now waits on the lane for the scan
+    service.sent.clear()
+    try:
+        _save(application, allow_web_wallpapers=False)
+        spin_until(lambda: "stop" in service.sent, AT_ONCE, what="the guard")
+        spin_until(lambda: not application._runtime_action_pending, AT_ONCE, what="the gesture")
+        _pump(1.0)
+        assert len(compiles) <= 4, f"compiled {len(compiles)} times while the scan was held"
+        assert not scans.gate.is_set()
+        _owed_clears(application)
+    finally:
+        scans.release()
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
 @pytest.mark.parametrize("web_off", [False, True], ids=["folders", "folders-and-web-off"])

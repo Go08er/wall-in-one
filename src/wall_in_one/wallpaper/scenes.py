@@ -102,6 +102,10 @@ class SceneError(Exception):
     """A scene could not be started or captured."""
 
 
+class SceneCancelledError(SceneError):
+    """The capture was cancelled (the window closing, web wallpapers turned off): not a failure."""
+
+
 #: The engine's program name, found by `programs.find_program`.
 ENGINE: Final = "linux-wallpaperengine"
 
@@ -445,7 +449,7 @@ def screenshot(
     owned = worker_processes.OwnedProcess(process)
     if processes is not None and not processes.register(owned):
         _end(owned, immediate=True)
-        raise SceneError(f"cancelled screenshot of the scene {scene}")
+        raise SceneCancelledError(f"cancelled screenshot of the scene {scene}")
 
     try:
         _wait_for(
@@ -509,7 +513,7 @@ def _wait_for(
     settled_at: int | None = None
     while time.monotonic() < deadline:
         if cancelled is not None and cancelled():
-            raise SceneError("scene screenshot was cancelled")
+            raise SceneCancelledError("scene screenshot was cancelled")
         try:
             size = destination.stat().st_size
         except OSError:

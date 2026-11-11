@@ -28,8 +28,8 @@ import pytest
 from tests.web_previews import PNG, Fixture, _Watch
 from tests.web_previews import both as _both
 from wall_in_one import thumbnails, worker_processes
-from wall_in_one.library import stills
-from wall_in_one.library.model import MediaItem
+from wall_in_one.library import stills, workshop
+from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
 
 # -- thumbnails ---------------------------------------------------------------------
@@ -331,6 +331,43 @@ def test_the_still_maker_drops_a_web_page_that_was_queued_before_web_went_off(
     web["on"] = True
     maker._run((web_folder.web,), web_folder.root, lambda made: None)
     assert ensured == [web_folder.web]
+    maker.shutdown()
+
+
+def test_a_capture_cancelled_by_web_going_off_is_no_failure_and_is_tried_again(
+    web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review f5 N2: the engine ended because web went off, not because it gave no still."""
+    from wall_in_one.ui.stills import StillMaker
+
+    web = {"on": True}
+    messages: list[str] = []
+    maker = StillMaker(web_allowed=lambda: web["on"], report=messages.append)
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments, **_keywords: callback(*arguments),
+    )
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_a: (1920, 1080))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    monkeypatch.setattr(workshop, "engine_refusal", lambda *_a, **_k: "")
+    asked: list[Path] = []
+
+    def cancelled(scene: object, *_a: object, **_k: object) -> None:
+        asked.append(folder)
+        web["on"] = False  # the gate turns false; the engine is ended, the wait gives up
+        raise scenes.SceneCancelledError("scene screenshot was cancelled")
+
+    monkeypatch.setattr(scenes, "screenshot", cancelled)
+    # A scene whose folder may hold a web page (`holds_web`) is captured with web on only.
+    folder = web_folder.root / "700"
+    folder.mkdir()
+    item = MediaItem(folder, Kind.SCENE, 1, 0, scene="700", web_files=True)
+    assert item.holds_web and not item.preview_kind
+    maker._attempted.add(item.path)
+    maker._run((item,), web_folder.root, lambda made: None)
+    assert asked, "the capture did not reach the engine"
+    assert messages == [], messages
+    assert item.path not in maker._attempted  # so turning web on makes it
     maker.shutdown()
 
 

@@ -338,6 +338,13 @@ class _ImageTemporary:
         (`file_io.discard_regular_if_same`). Only while that name, reached
         through the pinned folder, still holds this exact inode, empty and
         singly linked; anything else is withdrawn the retaining way.
+
+        Residual window: the check and the unlink are two calls by name, and Linux
+        cannot condition an unlink on an inode, so a same-user process that knew
+        this random hidden name could rename another file onto it between them and
+        have that file unlinked. `file_io.discard_regular_if_same` claims first but
+        keeps the inode as a retained claim, the 0-byte record this exists to avoid;
+        nothing here is worth a new scheme for a name only the process itself knows.
         """
         try:
             held = os.fstat(pin.descriptor)
@@ -2153,6 +2160,9 @@ def _capture_scene_from_source(
         return target
     except StillError:
         raise
+    except scenes.SceneCancelledError as error:
+        # Not the engine's failure: `ensure`'s ``failed`` is not told.
+        raise StillError(str(error)) from error
     except scenes.SceneError as error:
         raise CaptureFailedError(str(error)) from error
     except OSError as error:

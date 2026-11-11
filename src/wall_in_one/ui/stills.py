@@ -344,6 +344,10 @@ class StillMaker:
                 is not None
             ):
                 made += 1
+            elif processes.cancelled():
+                # Cancelled mid-capture (web turned off for a page, or closing): no
+                # failure to say, and not attempted, so turning web on makes it.
+                self._attempted.discard(item.path)
             elif not item.holds_web and workshop.web_files_now(item):
                 # Refused because its folder may be a web wallpaper's now, even
                 # with web on: only an item the scan knew as one is told the

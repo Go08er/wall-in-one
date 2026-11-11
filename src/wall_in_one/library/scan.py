@@ -648,6 +648,8 @@ def _scan(
         tuple[file_io.FileFingerprint, int, int],
     ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
+    # Per folder, which files the walk may list (`workshop.folder_gate`).
+    gates: dict[Path, frozenset[Path] | None] = {}
     # Folders whose files could be listed but not looked at, each said once.
     unseen_folders: set[Path] = set()
 
@@ -679,6 +681,14 @@ def _scan(
                 continue
             kind = classify(path)
             if kind is None:
+                continue
+            if path.parent not in gates:
+                gates[path.parent] = workshop.folder_gate(path.parent)
+            allowed = gates[path.parent]
+            if allowed is not None and path not in allowed:
+                # Workshop content, or an item folder: not local media
+                # (`workshop.folder_gate`). Left out of `seen`, so the
+                # Workshop scan still lists what it lists.
                 continue
             try:
                 info = path.stat()

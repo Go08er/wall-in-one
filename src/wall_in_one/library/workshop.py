@@ -93,6 +93,20 @@ def labelled_workshop(item: MediaItem) -> bool:
     return item.provider == WORKSHOP_PROVIDER
 
 
+def in_content_tree(path: Path) -> bool:
+    """Whether the resolved ``path`` lies under a ``steamapps/workshop/content/431960`` folder.
+
+    By path components, so it holds on any drive and with no Steam config. A
+    path that can't be resolved is treated as inside (not trusted).
+    """
+    try:
+        parts = path.resolve().parts
+    except OSError, ValueError, RuntimeError:
+        return True
+    width = len(_CONTENT_PARTS)
+    return any(parts[at : at + width] == _CONTENT_PARTS for at in range(len(parts) - width + 1))
+
+
 def is_workshop_content(path: Path, *, labelled: bool) -> bool:
     """Whether the file at ``path`` is Workshop content, which is the author's, not ours.
 
@@ -101,8 +115,8 @@ def is_workshop_content(path: Path, *, labelled: bool) -> bool:
 
     - ``labelled``: the scan called it a Workshop item (`labelled_workshop`);
     - its resolved path lies under a ``steamapps/workshop/content/431960``
-      directory, matched by path components, so it holds on any drive and
-      inside a configured library root too;
+      directory (`in_content_tree`), so it holds on any drive and inside a
+      configured library root too;
     - a ``project.json`` sits beside it: a Workshop item copied into the library
       by hand is still its author's content.
 
@@ -112,19 +126,41 @@ def is_workshop_content(path: Path, *, labelled: bool) -> bool:
     """
     if labelled:
         return True
+    if in_content_tree(path):
+        return True
     try:
-        resolved = path.resolve()
+        return (path.resolve().parent / "project.json").is_file()
     except OSError, ValueError, RuntimeError:
-        # Cannot place it: not trusted.
         return True
-    parts = resolved.parts
-    width = len(_CONTENT_PARTS)
-    if any(parts[at : at + width] == _CONTENT_PARTS for at in range(len(parts) - width + 1)):
-        return True
+
+
+def folder_gate(folder: Path) -> frozenset[Path] | None:
+    """Which files of ``folder`` the library walk may list as local media; ``None``: all.
+
+    The walk of a library root asks this once per folder, with the test every
+    other gate uses (`is_workshop_content`). Workshop content is untrusted, so a
+    root that holds Steam's tree, or an item copied in by hand, must not list an
+    item's own files (a web wallpaper's ``preview.gif`` is a video to the
+    classifier) as local media, where no web gate would hold:
+
+    - under `in_content_tree`: nothing. The Workshop scan lists those items itself.
+    - with a ``project.json``: an item folder, and it fails closed. A ``video``
+      lists at most its declared video file, so a hand-copied video still works;
+      a web page, an application, any other type, and a ``project.json`` that
+      can't be read, list nothing.
+    """
+    if in_content_tree(folder):
+        return frozenset()
     try:
-        return (resolved.parent / "project.json").is_file()
-    except OSError:
-        return True
+        present = (folder / "project.json").is_file() or (folder / "project.json").is_symlink()
+    except OSError, ValueError:
+        return frozenset()
+    if not present:
+        return None
+    project = _read_project(folder)
+    if project is None or not project.is_video or project.entry is None:
+        return frozenset()
+    return frozenset({project.entry})
 
 
 #: Where linux-wallpaperengine looks for `--bg <id>`, under the home folder, in

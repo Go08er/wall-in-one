@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from wall_in_one import file_io, paths, worker_processes
+from wall_in_one import decoding, file_io, paths, worker_processes
 from wall_in_one.library import workshop
 from wall_in_one.library.model import Kind, MediaItem
 
@@ -425,6 +425,7 @@ def _command(item: MediaItem, destination: Path) -> list[str]:
         # rather than decoding everything up to that point.
         command += ["-ss", str(VIDEO_SEEK_SECONDS)]
     command += [
+        *decoding.input_options(),
         "-i",
         str(_thumbnail_source(item)),
         "-vf",
@@ -567,6 +568,7 @@ def to_displayable(
             "ffmpeg",
             "-v",
             "error",
+            *decoding.input_options(pipe=True),
             "-i",
             "pipe:0",
             "-frames:v",

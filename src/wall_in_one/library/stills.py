@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal
 
-from wall_in_one import file_io, paths, worker_processes
+from wall_in_one import decoding, file_io, paths, worker_processes
 from wall_in_one.library import pairing, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
@@ -1569,6 +1569,7 @@ def _command(video: Path, target: Path, seek: float) -> list[str]:
         "error",
         "-ss",
         str(seek),
+        *decoding.input_options(),
         "-i",
         str(video),
         "-frames:v",
@@ -1597,10 +1598,10 @@ _PREVIEW_DEMUXERS: Final[dict[str, str]] = {
 
 
 def _preview_command(preview: Path, target: Path, demuxer: str) -> list[str]:
-    """`_command` for a preview: its format told, and nothing but local files opened."""
+    """`_command` for a preview: its format told (and nothing but local files opened)."""
     command = _command(preview, target, FALLBACK_SEEK_SECONDS)
     at = command.index("-i")
-    return [*command[:at], "-protocol_whitelist", "file", "-f", demuxer, *command[at:]]
+    return [*command[:at], "-f", demuxer, *command[at:]]
 
 
 def _run(

@@ -259,7 +259,8 @@ def test_a_workshop_item_copied_into_the_library_is_still_the_authors(tmp_path: 
 def test_a_real_scan_of_a_root_holding_steams_tree_does_not_read_the_authors_sidecar(
     tmp_path: Path, project_json: bool
 ) -> None:
-    """The root walk labels the file `local` and the Workshop pass skips it as seen."""
+    """The root walk no longer lists Steam's files as local media; the Workshop scan's item
+    (when it lists one) has no still from the author's sidecar either."""
     root = tmp_path / "library"
     private = _touch(root / "private-photo.png")
     item_folder = root / "SteamLibrary/steamapps/workshop/content/431960/111"
@@ -270,9 +271,21 @@ def test_a_real_scan_of_a_root_holding_steams_tree_does_not_read_the_authors_sid
         )
     _sidecar(video, private)
 
-    found = {item.path: item for item in scan.scan([root], records={}).items}
-    assert found[video].provider == "local", "the premise: the walk, not the Workshop pass"
-    assert found[video].paired_still is None
+    assert video not in {item.path for item in scan.scan([root], records={}).items}
+    found = {
+        item.path: item
+        for item in scan.scan(
+            [root],
+            records={},
+            include_workshop=True,
+            workshop_roots=(root / "SteamLibrary",),
+        ).items
+    }
+    if project_json:
+        assert found[video].provider == workshop.WORKSHOP_PROVIDER
+        assert found[video].paired_still is None
+    else:
+        assert video not in found
 
 
 def test_sidecar_dotdot_escape_is_refused(tmp_path: Path) -> None:

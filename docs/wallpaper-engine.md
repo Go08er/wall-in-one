@@ -384,9 +384,28 @@ page: a picture the scan paired with a Workshop video, beside it in its
 folder, is still that video's still until the next scan (the service shows it,
 as the legacy Python playback does, and its colours are made from it); a
 preset whose own `project.json` now names another base is judged by the base
-the scan found; and a library folder you add that covers Steam's Workshop
-folder lists a web wallpaper's pictures and videos as your own files, which
-are previewed like any others.
+the scan found. (A library folder you add that covers Steam's Workshop folder
+no longer lists an item's files as your own: see "Workshop files in a library
+folder" below.)
+
+### Workshop files in a library folder
+
+Workshop content is untrusted, so the walk of a library folder decides by place
+(`workshop.folder_gate`, the test every other gate uses, `workshop.is_workshop_content`):
+
+- a file under a `steamapps/workshop/content/431960` folder is not listed as
+  local media at all: the Workshop scan lists the items it lists;
+- a folder with a `project.json` is an item folder and fails closed: a `web`,
+  `application` or unknown type, or a `project.json` that can't be read, lists
+  nothing from it; a `video` lists at most its declared video file, so an item
+  copied in by hand still works, and never its preview or other files.
+
+Whatever ffmpeg opens that somebody else wrote (a still's frame, a thumbnail, a
+downloaded preview) is told what it may open (`decoding.input_options`):
+`-protocol_whitelist file` (plus `pipe` for stdin) and a `-format_whitelist` of
+picture and video containers. A playlist named like a picture or a video (an
+HLS playlist, an `ffconcat` script) is therefore refused, not followed to other
+files or the network.
 
 ### Executable wallpapers are never run
 

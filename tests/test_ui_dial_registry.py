@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -63,6 +63,21 @@ def _drain(milliseconds: int) -> None:
         time.sleep(0.002)
 
 
+def _drain_until(done: Callable[[], bool], *, seconds: float = 10.0) -> None:
+    """Drain until ``done`` holds (the bound is a failure, not the wait), then a moment more.
+
+    A fixed window for a GLib timer is wall-clock: under load the timer fires after it.
+    The moment more lets an extra, wrong call still show up.
+    """
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + seconds
+    while not done():
+        assert time.monotonic() < deadline, "the timers did not fire"
+        context.iteration(False)
+        time.sleep(0.002)
+    _drain(100)
+
+
 def _row(owner: object, key: str, calls: list[str], *, raises: bool = False) -> Any:
     settling = dial_rows.Settling(owner)
 
@@ -87,7 +102,7 @@ def test_fire_cancel_flush_each_leave_the_registry_empty() -> None:
     assert len(dial_rows._PENDING) == 3
     cancelled.cancel()
     flushed.settling.flush()
-    _drain(dial_rows.SETTLE_MS + 200)
+    _drain_until(lambda: len(calls) >= 2)
     assert calls == ["a/flush", "a/fire"], calls
     # Every exit again, on sources that are gone: no stale source_remove.
     for row in (fired, cancelled, flushed):

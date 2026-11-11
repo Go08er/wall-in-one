@@ -283,13 +283,21 @@ class StillMaker:
                 if item.holds_web
                 else self._processes
             )
-            if item.kind is Kind.SCENE and (
-                (display is None and _engine_capture(item, self._previews()))
-                or (
-                    item.paired_still is not None
-                    and not stills.scene_capture_required(
-                        item, root, size=display, automatic=True, previews=self._previews()
-                    )
+            if (
+                item.kind is Kind.SCENE
+                and display is None
+                and _engine_capture(item, self._previews())
+            ):
+                # No display can be measured now, so no engine capture: not counted as
+                # attempted, so a later request (the next scan, a display that has
+                # appeared) asks again instead of never in this process.
+                self._attempted.discard(item.path)
+                continue
+            if (
+                item.kind is Kind.SCENE
+                and item.paired_still is not None
+                and not stills.scene_capture_required(
+                    item, root, size=display, automatic=True, previews=self._previews()
                 )
             ):
                 # Kept as it is. Not counted: a rescan would change nothing.

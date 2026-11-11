@@ -187,6 +187,10 @@ class LibraryWallpaper:
     resolution: str = ""
     duration: str = ""
     still_note: str = ""
+    #: Whether the wallpaper has a still of its own (made or picked): the Still section
+    #: shows the card's picture only then. A web page without one has the author's
+    #: preview on its card, which is not its still.
+    still_shown: bool = True
     tags: tuple[str, ...] = ()
     unplayable: str = ""
     never_plays: bool = False
@@ -318,6 +322,7 @@ def wallpaper_view(
         problem=health.reason if health.is_borked else "",
         item=item,
         still_note=_still_note(item, pairing, still_missing, previews),
+        still_shown=not item.is_moving or item.paired_still is not None,
         unplayable="" if health.is_borked else unplayable,
         never_plays=bool(workshop.why_not_played(item, allow_web)),
         refused_here="" if health.is_borked else refused_here,

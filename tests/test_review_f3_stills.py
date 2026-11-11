@@ -156,3 +156,61 @@ def test_read_sidecar_itself_refuses_a_trusted_looking_sidecar_beside_workshop_c
         json.dumps({"still_path": str(picture)}), encoding="utf-8"
     )
     assert pairing.read_sidecar(own, (root,)) == picture
+
+
+# -- S3-N4: a preset asked for while no display can be measured is asked for again ---------------
+
+
+def test_a_preset_is_asked_for_again_when_a_display_becomes_measurable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_scene_preset_stills import PRESET, Tree
+    from wall_in_one.library import stills
+    from wall_in_one.ui.stills import StillMaker
+    from wall_in_one.wallpaper import outputs, scenes
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tree = Tree(tmp_path)
+    preset = tree.scan()[PRESET]
+    asked: list[str] = []
+    monkeypatch.setattr(stills, "ensure", lambda item, root, **kw: asked.append(item.scene))
+    monkeypatch.setattr(outputs, "discover", lambda *_a, **_k: ())
+    size: dict[str, tuple[int, int] | None] = {"v": None}
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_a: size["v"])
+    maker = StillMaker(previews=lambda: False, displays=lambda: ())
+    monkeypatch.setattr(maker, "_submit", lambda work, *a, context: work(*a))
+    maker.request((preset,), tree.root, lambda made: None)
+    assert asked == [] and preset.path not in maker._attempted
+    size["v"] = (1920, 1080)
+    maker.request((preset,), tree.root, lambda made: None)
+    assert asked == [PRESET]
+    maker.shutdown()
+
+
+# -- S3-N5: the Still section does not show the card's preview as the still -----------------------
+
+
+def test_a_web_page_without_a_still_is_not_shown_with_its_preview_as_the_still(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_review_f2_stills import _Tree
+    from wall_in_one.library import pairings
+    from wall_in_one.ui.next import real_state
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tree = _Tree(tmp_path)
+    web = next(i for i in tree.scan().items if i.scene == "300")
+    view = real_state.wallpaper_view(
+        web,
+        favourite=False,
+        pairing=None,
+        health=pairings.Health(),
+        previews=False,
+    )
+    assert view.still_shown is False
+    assert "choose one by hand" in view.still_note
+    scene = next(i for i in tree.scan().items if i.scene == "200")
+    shown = real_state.wallpaper_view(
+        scene, favourite=False, pairing=None, health=pairings.Health(), previews=False
+    )
+    assert shown.still_shown is False, "a scene with no capture yet has none either"

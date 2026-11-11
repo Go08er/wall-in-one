@@ -587,7 +587,14 @@ class Inspector(Gtk.Box):
     def _still(self, editing: LibraryEditing, wallpaper: WallpaperView) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         row = Gtk.Box(spacing=12)
-        row.append(widgets.thumbnail(wallpaper, 112, 63, 8))
+        if getattr(wallpaper, "still_shown", True):
+            row.append(widgets.thumbnail(wallpaper, 112, 63, 8))
+        else:
+            # The card shows the author's preview for such an item; that is not its still.
+            nothing = Gtk.Image.new_from_icon_name("image-missing-symbolic")
+            nothing.set_size_request(112, 63)
+            nothing.add_css_class("pl-missing")
+            row.append(nothing)
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=2)
         text.append(
             Gtk.Label(

@@ -390,6 +390,23 @@ loaded document allows:
 |---|---|---|
 | `allow_web_wallpapers` | top level | `true` when the document the service holds has `allow_web_wallpapers = true`, `false` otherwise (no key, or a document below 8). Status is only answered with a document loaded; after a refused reload it is the one kept. Absent instead of `false` from a reply at its size limit (0 below), never while `true`; the app then judges the document the service holds itself, as for a service that doesn't say. Added in 0.4.1. |
 
+**`[renderer] layer` is a closed list, a connector name is data.** The service
+accepts `layer = "background"` and nothing else: the value is one argument of
+both mpvpaper and linux-wallpaperengine, `background` is the only one the app
+has ever written (every release) and the one compositor wallpaper rules depend
+on, so a hand-edited document with another value (`bottom`, or text that would
+read as an option) is refused like any other invalid one. A connector (a
+display assignment, a schedule's, the theme source) is not checked for its
+spelling beyond being non-empty where required, without whitespace or control
+characters and at most 256 bytes: one that starts with `-`, which 0.4.1 wrote
+without a check, still loads. Only where a name would become a program's
+argument is it refused, and then for that display alone: the service starts
+nothing for it, says why in `refused` (never a taboo, never a failed renderer,
+so a reload isn't rolled back), and the other displays play on. mpvpaper gets
+its output and video after a `--`; linux-wallpaperengine, which has no `--` to
+rely on, is given only the other outputs; Noctalia is not asked to set a
+still on such a display.
+
 **An entry the service refuses is skipped.** Such an entry is never started.
 While motion can start, the service asks before its still goes up, so it isn't
 shown either, and moves on to the next entry of the same playlist. With motion

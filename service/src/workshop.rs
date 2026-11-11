@@ -233,7 +233,10 @@ fn project_type(path: &Path) -> Result<String, ProjectError> {
         // and the engine's parser go on. Only the top level's `type` matters,
         // so the rest is skipped, which serde_json does at any depth. That
         // skip reads the text and its structure, not each number's range or
-        // each escape's code point, so past 128 levels those go unchecked.
+        // each escape's code point, so from the point where the 128th bracket
+        // opens to the end of the file those go unchecked, shallow content
+        // after the deep part included (the app's reader stops checking at the
+        // same point; the engine's own parser rejects such text and exits).
         Err(error) if error.to_string().starts_with("recursion limit exceeded") => {
             let text = std::str::from_utf8(&bytes).map_err(|error| not_json(&error))?;
             serde_json::from_str::<TopLevelType>(text)

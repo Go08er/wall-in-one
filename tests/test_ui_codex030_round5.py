@@ -259,7 +259,7 @@ def cells(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[
         session = application.session
         session.update_settings(settings, rescan_library=False)
         session.refresh(mutate_removals=False)
-        application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+        application._accepted_library_sources = settings.library_sources
         evening = session.playlists.create("Evening")
         session.playlists.add(evening.id, forest)
         session.playlists.add(evening.id, keep)
@@ -665,7 +665,7 @@ def _configured(application: Application, root: Path) -> None:
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.refresh(mutate_removals=False)
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
 
 
 def test_the_headless_service_installs_nothing_between_a_removal_and_its_scan(

@@ -727,7 +727,7 @@ def test_delete_invalidates_an_inflight_compile_before_it_can_reload(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item, other)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     compile_started = threading.Event()
     release_compile = threading.Event()
     removed: list[bool] = []
@@ -832,7 +832,7 @@ def test_delete_waits_for_an_inflight_stale_reload_before_unlinking(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item, other)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     reload_started = threading.Event()
     release_reload = threading.Event()
     removed: list[bool] = []
@@ -898,7 +898,7 @@ def test_removal_fsync_keeps_gtk_responsive_and_publication_and_quit_held(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item,)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     storage_finished = _observe_removal_worker(monkeypatch)
     flush_entered = threading.Event()
     release_flush = threading.Event()
@@ -1025,7 +1025,7 @@ def test_explicit_quit_drains_committed_removal_scan_and_reconciliation(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item,)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     scan_started = threading.Event()
     release_scan = threading.Event()
     reconciled: list[bool] = []
@@ -1107,7 +1107,7 @@ def test_explicit_quit_drains_a_fully_committed_removals_own_scan(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item,)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     plans: list[bool] = []
     removed: list[bool] = []
     quits: list[bool] = []
@@ -1227,7 +1227,7 @@ def test_playlist_add_past_the_files_readable_size_is_refused_with_the_stores_re
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item,)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     monkeypatch.setattr(client, "send_runtime", lambda *_a, **_k: Response.success())
     target = playlists.state_path()
     monkeypatch.setattr(playlists, "MAX_STATE_BYTES", target.stat().st_size + 5)
@@ -1274,7 +1274,7 @@ def test_last_window_close_waits_for_committed_authoring_runtime_publication(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (item,)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
 
     def held_compile(request: object) -> bool:
         compile_started.set()
@@ -1505,7 +1505,7 @@ def test_source_settings_wait_for_an_active_runtime_publication(
     application._settings_requested = old_settings
     application.session.update_settings(old_settings, rescan_library=False)
     application.session.adopt_library(Library((old_root,), (old_item,)))
-    application._accepted_library_sources = (old_settings.roots, False)
+    application._accepted_library_sources = (old_settings.roots, False, False)
     compile_started = threading.Event()
     release_compile = threading.Event()
     settings_write_started = threading.Event()
@@ -2694,7 +2694,7 @@ def test_failed_new_source_scan_never_reloads_an_already_compiled_old_document(
     application._settings_requested = old_settings
     application.session.update_settings(old_settings, rescan_library=False)
     application.session.adopt_library(Library((old_root,), (old_item,)))
-    application._accepted_library_sources = (old_settings.roots, False)
+    application._accepted_library_sources = (old_settings.roots, False, False)
     compiled = threading.Event()
     release_compile = threading.Event()
     socket_calls: list[str] = []

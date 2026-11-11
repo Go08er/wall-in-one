@@ -79,7 +79,7 @@ def _with_workshop(application: Any, count: int) -> tuple[config.Settings, Path,
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.refresh(mutate_removals=False)
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     return settings, content, scenes
 
 

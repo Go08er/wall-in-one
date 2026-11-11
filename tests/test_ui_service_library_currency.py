@@ -181,7 +181,7 @@ def test_codexs_sequence_a_dropped_folder_whose_rescan_failed_is_not_current(
     """Through `update_settings_async`, the forwarded GUI's route. Before: guard empty, ctl ok."""
     service = services()
     application = service.application
-    assert application._accepted_library_sources == ((service.root, service.other), False)
+    assert application._accepted_library_sources == ((service.root, service.other), False, False)
     mine = application.session.playlists.create("Mine")
 
     service.fail_the_next_rescan()
@@ -192,11 +192,11 @@ def test_codexs_sequence_a_dropped_folder_whose_rescan_failed_is_not_current(
         what="the saved folder change",
     )
     assert config.load_strict().roots == (service.root,), "saved"
-    assert application._accepted_library_sources == ((service.root, service.other), False)
+    assert application._accepted_library_sources == ((service.root, service.other), False, False)
     stale_and_refused(service, mine)
 
     current_again(service, mine)
-    assert application._accepted_library_sources == ((service.root,), False)
+    assert application._accepted_library_sources == ((service.root,), False, False)
 
 
 def test_after_the_services_own_start_a_folder_dropped_elsewhere_and_a_failed_rescan(
@@ -205,7 +205,7 @@ def test_after_the_services_own_start_a_folder_dropped_elsewhere_and_a_failed_re
     """The service's real start scans and records; settings.toml changed by another process."""
     service = services(start=True)
     application = service.application
-    assert application._accepted_library_sources == ((service.root, service.other), False)
+    assert application._accepted_library_sources == ((service.root, service.other), False, False)
     mine = application.session.playlists.create("Mine")
 
     service.fail_the_next_rescan()
@@ -233,8 +233,8 @@ def test_turning_on_workshop_scanning_whose_rescan_failed_is_not_current(
         BOUND,
         what="the saved Workshop change",
     )
-    assert application._accepted_library_sources == ((service.root, service.other), False)
+    assert application._accepted_library_sources == ((service.root, service.other), False, False)
     stale_and_refused(service, mine)
 
     current_again(service, mine, dusk=True)  # its folder is still a library folder
-    assert application._accepted_library_sources == ((service.root, service.other), True)
+    assert application._accepted_library_sources == ((service.root, service.other), True, False)

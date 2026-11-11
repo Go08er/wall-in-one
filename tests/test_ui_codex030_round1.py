@@ -186,7 +186,7 @@ def _windowless(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), tuple(found)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     return application, window, (found[0], found[1])
 
 

@@ -172,7 +172,7 @@ def profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callab
         session = application.session
         session.update_settings(settings, rescan_library=False)
         session.refresh(mutate_removals=False)
-        application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+        application._accepted_library_sources = settings.library_sources
         profile = Profile(application, window, root, other, Scans(root / "dawn.png"))
         _publish(profile)
         profile.scans.install(monkeypatch)

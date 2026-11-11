@@ -105,7 +105,7 @@ def test_half_of_a_removals_own_scan_is_scanned_again(
 
     spin_until(lambda: _current(application), BOUND, what="the rescan after the removal")
     settings = application.settings
-    assert application._accepted_library_sources == (settings.roots, settings.scan_workshop)
+    assert application._accepted_library_sources == settings.library_sources
     assert application.session.library.find(profile.dawn) is None
     assert application.session.library.find(profile.noon) is not None
     settle(0.5)
@@ -121,9 +121,9 @@ def test_a_removals_own_scan_of_older_folders_is_replaced_by_a_rescan(
     application = profile.application
     profile.scans.postscan_used = True
     profile.scans.held_used = True
-    old = (application.settings.roots, application.settings.scan_workshop)
+    old = application.settings.library_sources
     roots = (profile.root,) if change == "dropped" else (profile.root, profile.other)
-    new = (roots, old[1])
+    new = (roots, old[1], old[2])
     refreshes = _count_refreshes(application, monkeypatch)
     adopt = application._adopt_item_removal
     seen: dict[str, Any] = {}
@@ -172,8 +172,8 @@ def test_the_service_replaces_a_removals_own_scan_of_older_folders(
     """
     service = services()
     application = service.application
-    old = ((service.root, service.other), False)
-    new = ((service.root,), False)
+    old = ((service.root, service.other), False, False)
+    new = ((service.root,), False, False)
     assert application._accepted_library_sources == old
     refreshes = _count_refreshes(application, monkeypatch)
     adopt = application._adopt_item_removal

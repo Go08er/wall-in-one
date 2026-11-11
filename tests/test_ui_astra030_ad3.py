@@ -85,7 +85,7 @@ def _caught_up(shown: Shown) -> None:  # noqa: F811
         workshop_roots=workshop.steam_roots(),
     )
     application.session.adopt_library(library, reconcile_workshop=False)
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
 
 
 def _published(shown: Shown) -> dict[str, Any]:  # noqa: F811

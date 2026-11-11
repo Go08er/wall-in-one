@@ -91,7 +91,7 @@ def _adopt_a_real_scan(application: Application, steam: Path | None = None) -> L
         adoption_candidates=(),
     )
     application.session.adopt_library(library, reconcile_workshop=False)
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     return library
 
 

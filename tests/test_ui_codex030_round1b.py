@@ -100,7 +100,7 @@ def profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
         application._settings_requested = settings
         application.session.update_settings(settings, rescan_library=False)
         application.session.adopt_library(Library((root,), (dawn, dusk, rain)))
-        application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+        application._accepted_library_sources = settings.library_sources
         return Profile(application, window, dawn, dusk, rain)
 
     yield make

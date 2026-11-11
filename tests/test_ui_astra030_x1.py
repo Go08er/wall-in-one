@@ -61,7 +61,7 @@ def opened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Opened]:
         reconcile_workshop=False,
     )
     settings = application.settings
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     state = shown.window.state
     assert isinstance(state, RealAppState)
     state.reload()

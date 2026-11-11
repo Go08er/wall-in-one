@@ -79,7 +79,7 @@ def _adopt_a_real_scan(application: Application) -> Library:
     settings = application.settings
     library = scan.scan(settings.roots, dict(application.session.pairings.records))
     application.session.adopt_library(library, reconcile_workshop=False)
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     return library
 
 

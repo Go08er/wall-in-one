@@ -427,8 +427,19 @@ class Settings:
     roots: tuple[Path, ...] = ()
 
     @property
+    def library_sources(self) -> tuple[tuple[Path, ...], bool, bool]:
+        """What a library scan is read from, and so what it is current for.
+
+        ``(roots, scan_workshop, preview_stills)``: the setting that decides whether
+        web wallpapers take their still from their preview is resolved *by the scan*
+        (`Library.previews`), so it is a source like the folders. Every check that a
+        library belongs to the settings compares these, never a shorter tuple.
+        """
+        return (self.roots, self.scan_workshop, self.preview_stills)
+
+    @property
     def preview_stills(self) -> bool:
-        """Whether web wallpapers and presets take their still from their own preview.
+        """Whether web wallpapers (and presets of them) take their still from their own preview.
 
         The effective value, and the only one to use: ``allow_web_wallpapers``
         AND ``web_wallpaper_previews``. Every decision about such a still (the

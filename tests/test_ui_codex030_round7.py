@@ -310,7 +310,7 @@ def worlds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable
         session = application.session
         session.update_settings(settings, rescan_library=False)
         session.refresh(mutate_removals=False)
-        application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+        application._accepted_library_sources = settings.library_sources
         playlist = session.playlists.create("Evening")
         for name in evening:
             session.playlists.add(playlist.id, files[name])

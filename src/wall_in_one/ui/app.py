@@ -571,7 +571,7 @@ COMPLETION_PRIORITY: Final = GLib.PRIORITY_DEFAULT
 SAVED_NOT_APPLIED: Final = "saved-not-applied"
 _RuntimeResult = TypeVar("_RuntimeResult")
 _AuthoringResult = TypeVar("_AuthoringResult")
-_LibrarySources = tuple[tuple[Path, ...], bool]
+_LibrarySources = tuple[tuple[Path, ...], bool, bool]
 PaletteReloadCallback = Callable[[source.ResolvedPalette | None, str], None]
 ThemeActionCallback = Callable[[str], None]
 _LegacyMigrationOperation = Literal["probe", "later", "fresh", "import"]
@@ -2496,7 +2496,7 @@ class Application(Adw.Application):
 
         So, when ``settings.toml`` says web wallpapers are off and the file on
         disk allows them (``allow_web_wallpapers = true``, compiled while they
-        were on, which turns the service's own check off), the file is
+        were on, which lets a web page through the service's own check), the file is
         replaced with the
         document that plays nothing (`runtime_config.nothing_to_play_document`),
         as `_web_off_not_running` replaces it when no service runs. Both are
@@ -4185,7 +4185,7 @@ class Application(Adw.Application):
 
     def _begin_runtime_library_scan(self, generation: int) -> None:
         """Make a source-changing scan an explicit publication barrier."""
-        sources = (self._settings.roots, self._settings.scan_workshop)
+        sources = self._settings.library_sources
         acquire_lifetime = False
         with self._runtime_config_lock:
             source_barrier = (
@@ -4379,6 +4379,7 @@ class Application(Adw.Application):
                 library_sources = (
                     self._session.library.roots,
                     self._settings.scan_workshop,
+                    self._settings.preview_stills,
                 )
             self._runtime_authoring_request = _RuntimeAuthoringRequest(
                 self._runtime_authoring_generation,
@@ -5243,6 +5244,7 @@ class Application(Adw.Application):
                     still_inventory=library.still_inventory,
                     adopted_stills=library.adopted_stills,
                     chosen_stills=chosen,
+                    previews=library.previews,
                 ),
                 reconcile_workshop=False,
             )
@@ -5273,7 +5275,7 @@ class Application(Adw.Application):
         # None only before any scan was accepted, by a worker or synchronously
         # (`_library_scanned`): the library is empty, so nothing in it can come
         # from older sources.
-        if sources is not None and sources != (self._settings.roots, self._settings.scan_workshop):
+        if sources is not None and sources != self._settings.library_sources:
             return (
                 "the library is being scanned for its changed folders, so wallpapers can\u2019t "
                 "be taken from it yet; wait for that scan to finish (refresh the library if it "
@@ -5530,7 +5532,7 @@ class Application(Adw.Application):
             runtime_config.compiler_lock(),
         ):
             settings = config.load_strict()
-            durable_sources = (settings.roots, settings.scan_workshop)
+            durable_sources = settings.library_sources
             if request.library_sources != durable_sources:
                 raise _RuntimeLibraryNotReadyError(
                     "the accepted library belongs to older source settings"
@@ -5711,7 +5713,7 @@ class Application(Adw.Application):
         it. Only what lets a page play is ended (review r13, L2):
 
         * a document that allows web wallpapers (`runtime_config.allows_web_wallpapers`),
-          whatever it names: it turns the service's own check off (L4);
+          whatever it names: the service's own check lets a web page through (L4);
         * for a service not confirmed to read schema 8, which has no such
           check, one that plays a web page or a Workshop item whose type
           can't be checked, or one that isn't known any more (past
@@ -7807,10 +7809,7 @@ class Application(Adw.Application):
         # the settings no longer name is no inventory, so it is not installed
         # and the rescan below replaces it, as one that failed would be.
         own_scan = result.own_scan
-        if own_scan is not None and own_scan[1] != (
-            self._settings.roots,
-            self._settings.scan_workshop,
-        ):
+        if own_scan is not None and own_scan[1] != self._settings.library_sources:
             own_scan = None
         refresh = self._refresh_after_removal or (
             result.committed and (partial or own_scan is None)
@@ -7898,10 +7897,7 @@ class Application(Adw.Application):
                 # after the commit replaces it, and ends the hold with it.
                 self._runtime_library_scan_hold_generation = self._library_scan_generation
             self._runtime_library_scan_generation = self._library_scan_generation
-            self._runtime_library_scan_sources = (
-                self._settings.roots,
-                self._settings.scan_workshop,
-            )
+            self._runtime_library_scan_sources = self._settings.library_sources
             self._runtime_library_scan_pending = True
             self._runtime_library_error = ""
             self._runtime_library_ready.clear()
@@ -8874,7 +8870,13 @@ class Application(Adw.Application):
                 return _SettingsResult(generation, published, changes, str(error))
             return _SettingsResult(generation, saved, changes)
 
-        source_change = any(key in {"roots", "scan_workshop"} for key, _gen, _value in changes)
+        # What a saved change to a library source is, for the barrier: the folders,
+        # Workshop scanning, and the settings that decide whether web wallpapers
+        # take their still from their preview (`Settings.library_sources`).
+        source_change = any(
+            key in {"roots", "scan_workshop", "allow_web_wallpapers", "web_wallpaper_previews"}
+            for key, _gen, _value in changes
+        )
         if source_change:
             # A compiler/reload owns this same lane for its entire snapshot to
             # Rust acknowledgement.  A new durable source set cannot land in
@@ -8987,10 +8989,7 @@ class Application(Adw.Application):
         is said not to be current, until a scan succeeds (Z-2).
         """
         if unapplied is not None:
-            sources_changed = (result.settings.roots, result.settings.scan_workshop) != (
-                previous.roots,
-                previous.scan_workshop,
-            )
+            sources_changed = result.settings.library_sources != previous.library_sources
             if sources_changed and not scanned and not self._service_start:
                 # Adoption stopped before the window's scan of the new folders
                 # began. (The service scans inside adoption, `Session.update_settings`.)

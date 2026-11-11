@@ -49,7 +49,7 @@ Scanner = Callable[[Sequence[Path] | None], Library]
 
 
 #: A library's sources: its roots, and whether Workshop items were scanned.
-LibrarySources = tuple[tuple[Path, ...], bool]
+LibrarySources = tuple[tuple[Path, ...], bool, bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,7 +448,7 @@ class RemovalPlan:
         return replace(
             result,
             rescanned=rescanned,
-            rescanned_sources=(self.settings.roots, self.settings.scan_workshop),
+            rescanned_sources=self.settings.library_sources,
         )
 
     def _rescan(self, pairing_store: pairings.Store) -> Library | None:
@@ -1057,6 +1057,7 @@ class Session:
         sources: LibrarySources = (
             tuple(roots) if roots is not None else self._settings.roots,
             self._settings.scan_workshop,
+            self._settings.preview_stills,
         )
         adopted = self.adopt_library(
             self.prepare_scan(roots).run(),
@@ -1070,7 +1071,7 @@ class Session:
     def on_scanned(self, observer: Callable[[LibrarySources], None] | None) -> None:
         """Tell ``observer`` the sources of every library `refresh` installs.
 
-        ``(roots, scan_workshop)``, as the settings the scan read had them, once
+        ``(roots, scan_workshop, preview_stills)``, as the settings the scan read had them, once
         the scan has succeeded and its library is installed; never for one that
         failed. The application keeps it as the evidence its library is current
         (`Application.library_currency_refusal`). A library a background worker
@@ -1261,12 +1262,12 @@ class Session:
         playlist in use?" of that view judges what the compiler will build,
         not what a window remembered from when it opened.
 
-        Its library is the accepted one while the saved folders and Wallpaper
-        Engine scanning are the ones this session holds, which is what that
-        library was scanned from, and the saved pairings choose the stills
-        its scan folded in (`_resolved_with`). When another program saved
-        other folders, the accepted library says nothing about them; when it
-        cleared or changed a wallpaper's chosen still, the accepted library
+        Its library is the accepted one while the saved folders, Wallpaper
+        Engine scanning and preview stills (`Settings.library_sources`) are the
+        ones this session holds, which is what that library was scanned from, and
+        the saved pairings choose the stills its scan folded in (`_resolved_with`).
+        When another program saved other folders, the accepted library says nothing
+        about them; when it cleared or changed a wallpaper's chosen still, the accepted library
         still plays that wallpaper through the old choice. Either way the
         view's library is scanned from disk here instead (`scanned_from_disk`).
 
@@ -1325,10 +1326,11 @@ class Session:
             # The accepted library answers for what is saved only while it
             # was scanned from the saved folders and resolved with the saved
             # still choices (`_resolved_with`). Otherwise it is scanned here.
-            scanned_for_these = (saved.roots, saved.scan_workshop) == (
-                accepted.roots,
-                accepted.scan_workshop,
-            ) and _resolved_with(library, view._pairings.records)
+            scanned_for_these = (
+                saved.library_sources == accepted.library_sources
+                and library.previews == saved.preview_stills
+                and _resolved_with(library, view._pairings.records)
+            )
             view._confirmable = scanned_for_these
             view.adopt_library(
                 library if scanned_for_these else view.scanned_from_disk(),

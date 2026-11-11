@@ -97,7 +97,7 @@ def shown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Shown]:
     )
     application.session.adopt_library(library, reconcile_workshop=False)
     settings = application.settings
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
 
     def found(path: Path) -> MediaItem:
         item = library.find(path)
@@ -398,7 +398,7 @@ def test_a_playlists_files_deleted_outside_the_app_are_reported_and_an_edit_reco
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (dawn, dusk)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     evening = application.session.playlists.create("Evening")
     application.session.playlists.add(evening.id, dawn.path)
     application.update_settings(active_playlist=evening.id)

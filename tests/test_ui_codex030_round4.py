@@ -115,7 +115,7 @@ class AppHarness(Harness):
         application._settings_requested = settings
         application.session.update_settings(settings, rescan_library=False)
         application.session.refresh(mutate_removals=False)
-        application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+        application._accepted_library_sources = settings.library_sources
 
     def close(self) -> None:
         for application in self.applications.values():
@@ -219,7 +219,7 @@ def test_s1_a_capture_finishing_while_its_removal_is_checked_is_never_published(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.refresh(mutate_removals=False)
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     installed = Installed(monkeypatch)
     capture = stills.destination(a, root)
     a_rendering = threading.Event()

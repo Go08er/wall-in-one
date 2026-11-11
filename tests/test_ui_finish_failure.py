@@ -363,7 +363,7 @@ def test_publishing_what_was_saved_that_raises_is_the_publication_problem(
     application._settings_requested = settings
     application.session.update_settings(settings, rescan_library=False)
     application.session.adopt_library(Library((root,), (dawn,)))
-    application._accepted_library_sources = (settings.roots, settings.scan_workshop)
+    application._accepted_library_sources = settings.library_sources
     evening = application.session.playlists.create("Evening")
     application.session.playlists.add(evening.id, dawn.path)
     application.update_settings(active_playlist=evening.id)

@@ -2704,5 +2704,25 @@
     "name": "depth 200, a type array of objects with a lone surrogate key",
     "web_off": "allowed",
     "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "nest": {
+            "after": ",\"x\":{\"\\ud800\":1},\"type\":\"scene\"}",
+            "before": "{\"a\":",
+            "close": "]",
+            "depth": 200,
+            "inner": "1",
+            "open": "["
+          }
+        }
+      }
+    ],
+    "name": "depth 200, a lone surrogate key in an object that isn't the type",
+    "web_off": "allowed",
+    "web_on": "allowed"
   }
 ]

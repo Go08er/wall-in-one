@@ -145,8 +145,15 @@ def _save(application: Any, **changes: Any) -> None:
     assert not any(isinstance(outcome, str) for outcome in done), done
 
 
-def _reaches_the_service_while_held(service: Service, scans: HeldScans) -> None:
+def _reaches_the_service_while_held(
+    application: Any, service: Service, scans: HeldScans, *, settles: bool = True
+) -> None:
     spin_until(lambda: "reload" in service.sent, AT_ONCE, what="web off reaching the service")
+    if settles:
+        # It settles as a publication of its own, not one deferred to the scan's.
+        spin_until(
+            lambda: not application._runtime_publication_held, AT_ONCE, what="web off settling"
+        )
     assert not scans.gate.is_set(), "the scan was still held"
     assert config.load_strict().allow_web_wallpapers is False
     assert not service.allows_web(), "the service loaded a document that allows web wallpapers"
@@ -187,7 +194,7 @@ def test_web_off_while_an_earlier_folder_scan_is_in_flight(
     service.sent.clear()
 
     _save(application, allow_web_wallpapers=False)
-    _reaches_the_service_while_held(service, scans)
+    _reaches_the_service_while_held(application, service, scans)
     _and_after_the_scan(service, scans)
 
 
@@ -208,9 +215,31 @@ def test_web_off_in_the_same_save_as_a_folder_change(
     extra.mkdir()
 
     _save(application, roots=(*application.settings.roots, extra), allow_web_wallpapers=False)
-    _reaches_the_service_while_held(service, scans)
+    _reaches_the_service_while_held(application, service, scans)
     assert application._runtime_library_scan_pending, "the folders' scan is what is held"
     _and_after_the_scan(service, scans)
+
+
+def test_a_publication_during_the_previews_rescan_survives_its_failure(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3-1's shape, upgraded profile: web off moves the previews option, so a rescan runs.
+
+    A publication made while it runs (any edit) waits for it. When it fails, the library
+    that publication was compiled from is still current for web off (`Settings.covers`):
+    it is no refusal "for older sources", and nothing is said to be unpublished.
+    """
+    application = profiles().application
+    service = _web_on(application, True, monkeypatch)
+    scans = HeldScans(monkeypatch, fails=True)
+    _save(application, allow_web_wallpapers=False)
+    _reaches_the_service_while_held(application, service, scans)
+    assert application._runtime_library_scan_pending, "the previews rescan is held"
+    application.runtime_config_changed()
+    _pump(1.0)
+    _and_after_the_scan(service, scans)
+    assert application.publication_problem == "", application.publication_problem
 
 
 @previews_param
@@ -233,7 +262,9 @@ def test_a_playback_gesture_waiting_for_a_scan_lets_web_off_out_first(
     service.sent.clear()
 
     _save(application, allow_web_wallpapers=False)
-    _reaches_the_service_while_held(service, scans)
+    # The gesture's job delivers it; the compile job queued behind it then finds nothing
+    # new and, with the scan still pending, settles with the scan's publication.
+    _reaches_the_service_while_held(application, service, scans, settles=False)
     _and_after_the_scan(service, scans)
 
 

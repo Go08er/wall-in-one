@@ -266,25 +266,25 @@ def folder_gate(folder: Path, roots: Sequence[Path] = ()) -> frozenset[str] | No
 
     - under `in_content_tree`: nothing. The Workshop scan lists those items itself.
     - in or below a folder with a ``project.json`` (`item_folders_of`): an item's,
-      and it fails closed. If any ``project.json`` from ``folder`` up to the
-      library root is not a ``video`` that names its file (a web page, an
-      application, any other type, one that can't be read), nothing is listed.
-      Otherwise only the file that ``folder``'s own ``project.json`` names, and
-      nothing in a folder below an item's (no ``project.json`` names a file
-      there), so a hand-copied video still works.
+      and it fails closed. Everything below an item folder is the item's, and no
+      ``project.json`` names a file in a subfolder, so a folder with any item
+      folder above it lists nothing, whatever ``project.json`` files say (one
+      nested in a web item can't choose what is listed). An item folder with
+      none above it lists only the file its ``project.json`` names, if it is a
+      readable ``video``, so a hand-copied video still works; a web page, an
+      application, any other type, or one that can't be read, lists nothing.
     """
     if in_content_tree(folder):
         return frozenset()
     items = item_folders_of(folder, roots)
     if not items:
         return None
-    projects = [_read_project(item) for item in items]
-    if any(project is None or not project.is_video for project in projects):
+    if len(items) > 1 or items[0] != _resolved(folder):
         return frozenset()
-    nearest = projects[0]
-    if len(items) > 1 or items[0] != _resolved(folder) or nearest is None or nearest.entry is None:
+    project = _read_project(items[0])
+    if project is None or not project.is_video or project.entry is None:
         return frozenset()
-    return frozenset({nearest.entry.name})
+    return frozenset({project.entry.name})
 
 
 #: Where linux-wallpaperengine looks for `--bg <id>`, under the home folder, in
@@ -1345,7 +1345,7 @@ def _engine_read(text: str) -> str | None:
                 raise EngineProjectError("is not JSON")
             # The top level's keys, and those of an object that is its `type`: the
             # service reads both as text at any depth (`TopLevelType`, `TypeText`).
-            if strict or len(stack) == 1 or (len(stack) == 2 and stack[1] == "{" and key == "type"):
+            if strict or len(stack) == 1 or (len(stack) == 2 and key == "type"):
                 name = _engine_string(token)
                 key = name if len(stack) == 1 else key
             state = "colon"

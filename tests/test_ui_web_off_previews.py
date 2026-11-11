@@ -100,6 +100,9 @@ def test_web_off_is_published_while_the_scan_is_held_or_failing(
     _pump(3.0)
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
     assert "quit" not in sent, "web-off was delivered, so nothing needs the guard's last resort"
+    # The library it was published from is current for web off (`Settings.covers`): a
+    # rescan that failed leaves nothing unpublished (review-f4 F4-2).
+    assert application.publication_problem == "", application.publication_problem
 
 
 def test_covers_ignores_the_preview_policy_only_while_web_is_off() -> None:

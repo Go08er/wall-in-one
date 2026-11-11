@@ -800,6 +800,10 @@ def scene_capture_required(
     """
     if item.kind is not Kind.SCENE or not item.scene or item.unplayable is not None:
         return False
+    if item.no_automatic_still:
+        # Nothing is made for it, so nothing is "required": a file under its
+        # id is a leftover of 0.4.1's preview-made stills, never used.
+        return False
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
     if item.paired_still is not None and item.paired_still != target:
         return False
@@ -808,10 +812,6 @@ def scene_capture_required(
         # Nothing to judge. Whether a capture can actually be made is
         # `capture_scene`'s question, and it writes nothing when it cannot.
         return True
-    if item.still_from_preview:
-        # Made from the item's preview, which is as large as it will ever be:
-        # judging it against the display would remake it after every scan.
-        return False
     wanted = size or scenes.measured_capture_size()
     if wanted is None:
         return False
@@ -1558,28 +1558,6 @@ def _command(video: Path, target: Path, seek: float) -> list[str]:
     ]
 
 
-#: The one demuxer a Wallpaper Engine preview is read with, by its suffix. A
-#: preview sits in a folder anyone can write to, and left to probe, ffmpeg
-#: would follow what the bytes say (an HLS playlist named ``.gif`` fetches
-#: its segments from the network); told the format, it decodes a picture or
-#: fails.
-_PREVIEW_DEMUXERS: Final[dict[str, str]] = {
-    ".gif": "gif",
-    ".png": "png_pipe",
-    ".jpg": "jpeg_pipe",
-    ".jpeg": "jpeg_pipe",
-    ".webp": "webp_pipe",
-    ".bmp": "bmp_pipe",
-}
-
-
-def _preview_command(preview: Path, target: Path, demuxer: str) -> list[str]:
-    """`_command` for a preview: its format told, and nothing but local files opened."""
-    command = _command(preview, target, FALLBACK_SEEK_SECONDS)
-    at = command.index("-i")
-    return [*command[:at], "-protocol_whitelist", "file", "-f", demuxer, *command[at:]]
-
-
 def _run(
     video: Path,
     target: Path,
@@ -1905,30 +1883,11 @@ def capture_scene(
     if item.unplayable is not None:
         # Never handed to the engine, and nothing to show a still for.
         raise StillError(f"{item.name} can\u2019t play: {item.unplayable_reason}")
+    if item.no_automatic_still:
+        # A web page or a preset: the engine's screenshot is not its look and
+        # its preview is the author's, so only a still a person picks.
+        raise StillError(f"{item.name} gets no automatic still: pick one by hand")
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
-    if item.still_from_preview:
-        # From the preview: no engine, and no display to size it for.
-        if not force and not scene_capture_required(item, root, automatic=True):
-            return target
-        if not allow_web and workshop.web_files_now(item):
-            # Steam may have made it a web page since the scan. Said without
-            # the setting: a caller passes False for anything not known web.
-            raise StillError(
-                f"{item.name}\u2019s folder may be a web wallpaper\u2019s now, "
-                "so no still was taken from its preview"
-            )
-        source = _snapshot_source(item.path, Kind.SCENE)
-        try:
-            return _capture_scene_from_source(
-                item,
-                root=root,
-                target=target,
-                size=None,
-                processes=processes,
-                source=source,
-            )
-        finally:
-            source.close()
     measured = size or scenes.measured_capture_size()
     if measured is None:
         # The 2560x1440 fallback is a guess, and a still captured at a guessed
@@ -1967,19 +1926,10 @@ def _capture_scene_from_source(
     processes: worker_processes.Cancellation | None,
     source: _SourceSnapshot,
 ) -> Path:
-    """Render and publish a scene while retaining its opened directory identity.
-
-    An item whose still comes from its preview (`MediaItem.still_from_preview`)
-    has it drawn by ffmpeg instead of the engine; ``size`` is then unused.
-    """
+    """Render and publish a scene while retaining its opened directory identity."""
     # Before any directory or temporary exists: a temporary made for a
     # renderer that is not there is still a file to clean up afterwards.
-    if item.still_from_preview:
-        if item.preview is None:
-            raise StillError(f"{item.name} has no preview to take a still from")
-        if not is_available():
-            raise StillError("ffmpeg is not installed, so no still can be taken")
-    elif not scenes.is_available():
+    if not scenes.is_available():
         raise StillError(f"linux-wallpaperengine is not installed, so no still for {item.name}")
     elif size is None:
         raise StillError(f"no display size was measured, so no still was taken for {item.name}")
@@ -2007,9 +1957,7 @@ def _capture_scene_from_source(
         ) from error
     try:
         engine_output = _engine_output_path(temporary, target_context)
-        if item.still_from_preview:
-            _still_from_preview(item, engine_output, processes)
-        elif processes is None:
+        if processes is None:
             scenes.screenshot(
                 item.scene,
                 engine_output,
@@ -2058,39 +2006,6 @@ def _capture_scene_from_source(
         target_context.close()
 
 
-def _still_from_preview(
-    item: MediaItem,
-    output: Path,
-    processes: worker_processes.Cancellation | None,
-) -> None:
-    """Draw the first frame of ``item``'s own preview into ``output``, as PNG.
-
-    The preview is opened once, refusing a symbolic link, and ffmpeg reads
-    that open file: it lives in a folder anyone can write in.
-    """
-    preview = item.preview
-    if preview is None:
-        raise StillError(f"{item.name} has no preview to take a still from")
-    demuxer = _PREVIEW_DEMUXERS.get(preview.suffix.lower())
-    if demuxer is None:
-        raise StillError(f"the preview of {item.name} is not a picture a still is taken from")
-    opened = _snapshot_source(preview, Kind.VIDEO)
-    try:
-        complaint = _run(
-            opened.writer_path,
-            output,
-            FALLBACK_SEEK_SECONDS,
-            processes=processes,
-            command=_preview_command(opened.writer_path, output, demuxer),
-        )
-    finally:
-        opened.close()
-    if complaint:
-        raise StillError(
-            f"ffmpeg could not take a still from the preview of {item.name}: {complaint}"
-        )
-
-
 def ensure(
     item: MediaItem,
     root: Path,
@@ -2117,6 +2032,8 @@ def ensure(
     if not item.is_moving or item.unplayable is not None:
         return None
     if workshop.previews_off(item, allow_web):
+        return None
+    if item.no_automatic_still:
         return None
     if item.kind is Kind.SCENE:
         if not scene_capture_required(item, root, size=size, automatic=True):

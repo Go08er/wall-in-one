@@ -115,12 +115,14 @@ A video finds its still in this order:
    `<each configured root>/Wall-in-One/Automatic Stills/`, searched in root
    order;
 3. a verified legacy capture recorded by the upgrade migration;
-4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
+4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`
+   (not for Wallpaper Engine content, below).
 
 Wallpaper Engine content is told by place, not by label: a file under a
 `steamapps/workshop/content/431960` folder (on any drive, even inside a library
 root), or with a `project.json` beside it (an item copied in by hand). Its author
-wrote the sidecar, so it is never read for such a file.
+supplied everything beside it, so neither its sidecar nor a sibling picture is
+used: its still is the frame Wall-in-One takes from the video, or one you pick.
 
 Until a video has a still, playback can't show it: the wallpaper service's
 compiler leaves it out, and every page counts it the same way. Its Library
@@ -174,11 +176,14 @@ directions is captured again, so an old low-resolution still is replaced. A
 still is never judged against a guessed size or by its shape, and nothing is
 written without the engine or a measured display.
 
-A web wallpaper or a preset gets the same `<id>.png` from its own preview
-instead (a preset of a web wallpaper, from that wallpaper's), through ffmpeg
-(the first frame of a `.gif`): the engine would capture a web page before it
-has drawn. It needs no display and is made once. A Wallpaper Engine item that
-can't play gets no still, and neither does a web wallpaper while they are off.
+A web wallpaper or a preset gets no automatic still: the engine would capture
+a web page before it has drawn, a preset's screenshot isn't its look, and the
+`preview` its author shipped is never used as a still or to make one (Workshop
+content is untrusted). It has a still only if you pick one by hand, and until
+then it can't be played. A `<id>.png` that 0.4.1 drew from a preview is left
+where it is and ignored. A Wallpaper Engine item that can't play gets no still,
+and neither does a web wallpaper while they are off. See
+[Wallpaper Engine](wallpaper-engine.md#stills).
 
 Generated filenames include a digest of the video's absolute path. Two files
 named `intro.mp4` in different folders therefore get different stills rather
@@ -281,7 +286,7 @@ beside.
   that wallpaper in Steam. linux-wallpaperengine doesn't pass settings to a
   web wallpaper's page, so a preset of a web wallpaper plays that wallpaper as
   it is, and says so ("plays as Electric Eye; its settings aren't applied");
-  its still and colours come from that wallpaper's preview.
+  like any preset it has no automatic still: pick one to play it.
 - **Executable Wallpaper Engine wallpapers** (the "application" type, and
   presets of them) are never run, for security: one is a program anyone can
   publish.

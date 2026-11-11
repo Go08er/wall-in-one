@@ -97,9 +97,9 @@ them. The owner's one preset (Y2K Matrix) is of a web wallpaper (Electric Eye).
 most 5 frames (`ApplicationContext.cpp:664-667`). A web page is painted by
 CEF asynchronously (`WebBrowser/CEF/RenderHandler.cpp:13-21`), so five frames
 after start is very likely a blank page that would still count as a
-successful capture, and then be somebody's wallpaper and palette. Stills for
-anything but a true `scene` therefore come from the item's own `preview`
-(see Stills below). CEF also makes a fresh cache directory in the system
+successful capture, and then be somebody's wallpaper and palette. Anything
+but a true `scene` therefore gets no automatic still at all (see Stills
+below). CEF also makes a fresh cache directory in the system
 temporary directory on every start (`WebBrowser/WebBrowserContext.cpp:78`).
 
 ## Design
@@ -454,7 +454,7 @@ a preset:
 [[playlists.entries]]
 id = "..."
 kind = "scene"
-still = "/.../Wall-in-One/Automatic Stills/2946165131.png"
+still = "/.../pictures/y2k.png"   # a preset has only a still you picked (Stills, below)
 scene_id = "2946165131"          # the preset's own id: identity, as before
 scene_base = "2777242023"        # new: what to render
 properties = { arcs = "true", arcsVisualsColor1 = "0.000000 0.501961 0.000000" }   # new
@@ -524,13 +524,55 @@ starts one from its JSON text (quoted), and a value set here replaces that.
 
 ### Stills
 
-A true `scene` keeps the engine capture. Every other item listed as a scene
-gets its automatic still (the same `<id>.png` in `Automatic Stills`) from its
-own `preview` through ffmpeg: the first frame of a `.gif`, or the picture
-itself. A preset of a web wallpaper takes it from that wallpaper's preview
-(its own if that has none), since its settings aren't applied. It is made
-once and not re-judged against the display's size, since a preview is as
-large as it will ever be. An item that can't play gets no still at all.
+Owner decision ("auto/manual previews, skipping the W-Engine conf-included
+preview"; stills only): a Workshop item's still, and with it the colours made
+from it, comes only from one of two places.
+
+- **An automatic still Wall-in-One makes from the item itself**, stored in
+  `Automatic Stills`: the engine's screenshot of a true `scene` (`<id>.png`), or
+  ffmpeg's frame of a Workshop video (named by the video's path, like any video's).
+- **A still you picked** in the app, saved in Wall-in-One's own pairing records.
+
+Never a file the Workshop item brought, because Workshop content is untrusted.
+So the `preview` named in `project.json` is never a still and never drawn into
+one by ffmpeg, a picture named like a Workshop video (`foo.png` beside
+`foo.mp4`) is not its still, and its `<video>.wall-in-one.json` sidecar is never
+read. Which files are Workshop content is decided by place, not by label
+(`workshop.is_workshop_content`): the resolved path under a
+`steamapps/workshop/content/431960` folder on any drive (even inside a library
+root), a `project.json` beside the file, or the scan's Workshop label. The
+preview still shows on the library card, which is a picture of the item and not
+its wallpaper.
+
+The cost: a **web wallpaper** and a **preset** get no automatic still (the
+engine can't screenshot a page, which is captured before it paints, and a
+preset's screenshot isn't its look). They have one only if you pick it by hand,
+and until then they play nothing (no still, so the compiler leaves them out, as
+with a video that has none) and the pairing page says "No automatic still for
+this kind of wallpaper: choose one by hand". There is no "Regenerate" for them.
+An item that can't play gets no still at all.
+
+**Upgrading from 0.4.1.** 0.4.1 drew `<id>.png` from the preview for those two
+kinds. Nothing deletes those files: they stay in `Automatic Stills`, hidden from
+the library as before, and are simply not looked for any more (a true scene's
+capture by the same name still is). A still you had picked for such an item is
+kept and used. Without one the item has no still until you pick one, and the
+next compile leaves its playlist entries out; a playlist left with nothing
+playable is left out whole and the default falls back, as for any item with no
+still. The Tidy-up page does not touch `Automatic Stills`, and nothing else
+deletes the old files: a Steam uninstall clears only Wall-in-One's records for
+the item, never files (`manage.discard_pairing_artifacts` has no caller), so
+the `<id>.png` stays, and once its item is gone it shows as an ordinary still in
+the library, as any orphaned capture does. A record that names such a file
+(a palette change saved with it, or a pick of it) counts as no choice for a web
+page or preset (`pairings._chosen_still`); the record is left as it is. Under
+the 0.4.1 service, which keeps its loaded `runtime.toml` until it is reloaded,
+the item plays as before until the app's next publication, which leaves it out;
+that publication leaves it out. A library whose only playable items were such
+compiles to "All media plays nothing"; while the service is not confirmed to
+read that (schema 8), the publication is refused with the existing "needs a
+newer wallpaper service" message and nothing is written. The wallpaper service itself reads only
+a Workshop item's `project.json` type, never a preview, so it needs no change.
 
 ### Reporting
 

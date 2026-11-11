@@ -1236,7 +1236,7 @@ def test_a_scene_capture_that_cannot_be_made_writes_nothing(
     assert not root.exists(), "not even the Automatic Stills directory"
 
 
-# -- Wallpaper Engine items whose still comes from their preview ---------------
+# -- Wallpaper Engine items that get no automatic still -----------------------
 
 
 def _preview(path: Path, size: str = "64x36") -> Path:
@@ -1263,77 +1263,72 @@ def _workshop_scene(root: Path, workshop_id: str, kind: str, preview: str) -> Me
 
 
 @pytest.mark.parametrize(("kind", "preview"), (("web", "preview.jpg"), ("preset", "preview.gif")))
-def test_a_still_comes_from_the_preview_with_no_engine_and_no_display(
+def test_a_web_page_or_preset_gets_no_automatic_still_and_its_preview_is_never_opened(
     monkeypatch: pytest.MonkeyPatch, root: Path, kind: str, preview: str
 ) -> None:
-    """The engine's screenshot of a web page is taken before the page paints."""
-    item = _workshop_scene(root, "2777242023", kind, preview)
-    monkeypatch.setattr(scenes, "is_available", lambda: False)
-    monkeypatch.setattr(scenes, "measured_capture_size", lambda: None)
+    """Its preview is the author's file: never a still, never drawn into one by ffmpeg.
 
-    def never(*_arguments: object, **_keywords: object) -> Path:
-        raise AssertionError("the engine was asked for a still that comes from the preview")
+    The engine's screenshot of a web page is taken before the page paints and a
+    preset's is not its look, so neither is taken. Only a picked still counts.
+    """
+    item = _workshop_scene(root, "2777242023", kind, preview)
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (2560, 1440))
+
+    def never(*_arguments: object, **_keywords: object) -> object:
+        raise AssertionError("something made a still of a web page or a preset")
 
     monkeypatch.setattr(scenes, "screenshot", never)
-    target = pairing.still_directory(root) / "2777242023.png"
-
-    assert item.still_from_preview
-    assert stills.scene_capture_required(item, root, automatic=True)
-    assert stills.ensure(item, root) == target
-    assert stills._png_size(target) == (64, 36)
-    assert not any(path.name.endswith(".tmp.png") for path in target.parent.iterdir())
-    # Made once: a preview is as large as it gets, so a big display never
-    # asks for it again.
-    made = replace(item, paired_still=target)
-    assert not stills.scene_capture_required(made, root, size=(3840, 2160), automatic=True)
-    assert not stills.scene_capture_required(made, root, size=(3840, 2160))
-    # Asked for by hand, it is drawn again.
-    target.unlink()
-    assert stills.capture_scene(made, root, force=True) == target
+    monkeypatch.setattr(subprocess, "run", never)
+    assert item.no_automatic_still
+    assert not stills.scene_capture_required(item, root, automatic=True)
+    assert stills.ensure(item, root) is None
+    for forced in (False, True):
+        with pytest.raises(stills.StillError, match="no automatic still"):
+            stills.capture_scene(item, root, force=forced)
+    assert not pairing.still_directory(root).exists()
 
 
-def test_a_preview_is_read_as_the_picture_its_name_says_and_nothing_is_fetched(
-    monkeypatch: pytest.MonkeyPatch, root: Path
-) -> None:
-    """An HLS playlist named .gif must not send ffmpeg to the network for its segments."""
-    item = _workshop_scene(root, "2777242023", "web", "preview.gif")
-    assert item.preview is not None
-    item.preview.write_text(
-        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:9/segment.ts\n"
-        "#EXT-X-ENDLIST\n"
-    )
-    ran: list[list[str]] = []
-    real = subprocess.run
+@pytest.mark.parametrize("kind", ("web", "preset"))
+def test_a_still_made_from_a_preview_by_0_4_1_is_not_the_items_still(root: Path, kind: str) -> None:
+    """0.4.1 left `<id>.png` in Automatic Stills for these; after the upgrade it is ignored.
 
-    def recorded(arguments: list[str], **keywords: object) -> object:
-        ran.append(list(arguments))
-        return real(arguments, **keywords)  # type: ignore[call-overload]
+    The file is left alone (nothing here deletes it), and a still the person
+    picked is what the item then resolves to.
+    """
+    from wall_in_one.library import pairings
 
-    monkeypatch.setattr(subprocess, "run", recorded)
+    item = _workshop_scene(root, "2777242023", kind, "preview.jpg")
+    old = pairing.still_directory(root) / "2777242023.png"
+    old.parent.mkdir(parents=True)
+    _preview(old)
+    picked = _preview(root / "mine.png")
 
-    with pytest.raises(stills.StillError):
-        stills.capture_scene(item, root)
-    assert ran, "ffmpeg was asked"
-    for arguments in ran:
-        before_input = arguments[: arguments.index("-i")]
-        assert before_input[-4:] == ["-protocol_whitelist", "file", "-f", "gif"], arguments
-    assert not (pairing.still_directory(root) / "2777242023.png").exists()
+    assert pairing.scene_still("2777242023", roots=(root,)) == old  # the file is there
+    assert pairings.synthesize(item, (root,)).still is None
+    (applied,) = pairings.apply([item], (root,), {})
+    assert applied.paired_still is None
+    assert stills.ensure(applied, root) is None
+    assert old.is_file(), "nothing deletes it"
 
-    other = replace(item, preview=item.preview.with_suffix(".m3u8"))
-    item.preview.rename(other.preview)  # type: ignore[arg-type]
-    with pytest.raises(stills.StillError, match="not a picture"):
-        stills.capture_scene(other, root)
+    identity = pairings.Identity.of(item)
+    records = {
+        identity.key: pairings.Pairing(identity=identity, still=picked, customized=True),
+    }
+    (chosen,) = pairings.apply([item], (root,), records)
+    assert chosen.paired_still == picked
+    assert pairings.resolve(item, (root,), records).still == picked
 
 
-def test_a_preview_link_is_never_followed(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
-    item = _workshop_scene(root, "2777242023", "web", "real.jpg")
-    assert item.preview is not None
-    link = item.preview.with_name("preview.jpg")
-    link.symlink_to(item.preview)
+def test_a_true_scenes_captured_still_is_still_found_by_its_id(root: Path) -> None:
+    from wall_in_one.library import pairings
 
-    with pytest.raises(stills.StillError):
-        stills.capture_scene(replace(item, preview=link), root)
-    assert not (pairing.still_directory(root) / "2777242023.png").exists()
+    item = _scene("2777242023")
+    captured = pairing.still_directory(root) / "2777242023.png"
+    captured.parent.mkdir(parents=True)
+    _preview(captured)
+    assert not item.no_automatic_still
+    assert pairings.synthesize(item, (root,)).still == captured
 
 
 def test_an_item_that_cant_play_gets_no_still(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:

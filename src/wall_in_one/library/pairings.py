@@ -834,9 +834,11 @@ def synthesize(
     if not item.is_moving:
         return Pairing(identity=identity, still=item.path, motion=None)
     if item.kind is Kind.SCENE:
+        # A web page or a preset has no automatic still. A `<id>.png` of
+        # 0.4.1's, drawn from its preview, is left on disk and not looked for.
         return Pairing(
             identity=identity,
-            still=pairing.scene_still(item.scene, roots=roots),
+            still=None if item.no_automatic_still else pairing.scene_still(item.scene, roots=roots),
             motion=item.path,
         )
     return Pairing(
@@ -849,6 +851,21 @@ def synthesize(
         ),
         motion=item.path,
     )
+
+
+def _chosen_still(item: MediaItem, chosen: Path | None, roots: Sequence[Path]) -> Path | None:
+    """A record's still, unless it is the preview-made one 0.4.1 left for ``item``.
+
+    A web page or a preset (`MediaItem.no_automatic_still`) has no automatic
+    still, but its record may name `<id>.png` in an `Automatic Stills` folder:
+    0.4.1 drew that from the author's preview. It counts as no choice, and the
+    record and the file are left as they are.
+    """
+    if chosen is None or not item.no_automatic_still:
+        return chosen
+    if any(chosen == stills.automatic_destination(item, root) for root in roots):
+        return None
+    return chosen
 
 
 def resolve(
@@ -888,7 +905,7 @@ def _resolve(
     if saved is None:
         return default
 
-    chosen = saved.still
+    chosen = _chosen_still(item, saved.still, roots)
     missing = chosen is not None and not pairing.present(chosen)
     return replace(
         default,
@@ -1088,7 +1105,7 @@ class Store:
             for candidate in (*library.items, *library.still_inventory)
             if candidate.kind is Kind.STILL
         }
-        chosen = saved.still
+        chosen = _chosen_still(item, saved.still, library.roots)
         missing = (
             chosen is not None and chosen != item.paired_still and chosen not in indexed_stills
         )

@@ -553,6 +553,10 @@ def preview_beside(video: Path) -> Path | None:
 def scene_still(scene: str, roots: Iterable[Path] = ()) -> Path | None:
     """The captured still for a Workshop scene, named by its id.
 
+    Only for a true scene: a web page or a preset (`MediaItem.no_automatic_still`)
+    may have a file of this name made from its preview by 0.4.1, which is not
+    its still. `pairings.synthesize` is the one caller and does not ask for those.
+
     By id rather than by directory, so a reinstall that moves the directory
     still finds the still that was taken before.
     """
@@ -577,7 +581,8 @@ def find_still(
     ``labelled_workshop`` is `workshop.labelled_workshop` of the item, required
     so no caller can forget it; the place test (`workshop.is_workshop_content`)
     runs here too, for a Workshop tree the scan labelled ``local``. For Workshop
-    content the sidecar is skipped as if there were none: it is the author's file.
+    content everything read from beside the video is skipped as if there were
+    none, the sidecar and a picture named like it: they are the author's files.
     """
     roots = tuple(roots)
     folder_trusted = not workshop.is_workshop_content(video, labelled=labelled_workshop)
@@ -592,4 +597,4 @@ def find_still(
         # exact relationship.  Never recreate the retired basename lookup
         # here: an accepted mapping is authority, a matching name is not.
         return adopted
-    return _sibling_still(video)
+    return _sibling_still(video) if folder_trusted else None

@@ -206,13 +206,17 @@ class MediaItem:
         return ""
 
     @property
-    def still_from_preview(self) -> bool:
-        """Whether its automatic still comes from its own preview, not the engine.
+    def no_automatic_still(self) -> bool:
+        """Whether it never gets a still of its own making: only one a person picks.
 
-        Everything listed as a scene but a true ``scene``: the engine's
-        screenshot of a web page is taken before the page has painted, and a
-        preset's preview is its author's picture of exactly that look
-        (docs/wallpaper-engine.md).
+        True for everything listed as a scene but a true ``scene`` (a web page,
+        a preset). The engine's screenshot of a web page is taken before the
+        page has painted, a preset's screenshot is not its look, and the only
+        other picture it has is its author's ``preview``, which is untrusted
+        Workshop content and is never a still nor a source of colours
+        (docs/wallpaper-engine.md). The one predicate for that rule: the
+        automatic-still code (`stills`, `pairing.scene_still`'s callers) and
+        the pages that describe it all ask this, not the type.
         """
         return bool(self.workshop_detail)
 

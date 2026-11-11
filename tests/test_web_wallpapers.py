@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 
+from tests import workshop_picks
 from wall_in_one import config, runtime_config
-from wall_in_one.library import scan, workshop
+from wall_in_one.library import pairings, scan, workshop
 from wall_in_one.library.model import MediaItem
 from wall_in_one.session import Session
 from wall_in_one.wallpaper.applier import ApplyError
@@ -38,20 +39,30 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "library"
     automatic = root / "Wall-in-One" / "Automatic Stills"
     automatic.mkdir(parents=True)
-    for workshop_id in ("100", "200", "300", "400"):
+    for workshop_id in ("100", "200"):
         # A still on record for each: what keeps one out is the setting alone.
         (automatic / f"{workshop_id}.png").write_bytes(b"\x89PNG")
     return steam, root
 
 
+def _picks(tmp_path: Path) -> dict[str, pairings.Pairing]:
+    """The web page and the preset have no automatic still: each has one the person picked."""
+    return {
+        **workshop_picks.pick("300", tmp_path / "picked-300.png"),
+        **workshop_picks.pick("400", tmp_path / "picked-400.png"),
+    }
+
+
 def _session(tmp_path: Path, *, allow: bool) -> tuple[config.Settings, Session]:
     steam, root = _fixture(tmp_path)
     settings = config.Settings(roots=(root,), allow_web_wallpapers=allow)
+    picks = _picks(tmp_path)
     session = Session(
         settings,
         scanner=lambda roots: scan.scan(
-            roots, include_workshop=True, workshop_roots=(steam,), records={}
+            roots, include_workshop=True, workshop_roots=(steam,), records=picks
         ),
+        pairing_store=pairings.Store(picks),
     )
     session.refresh()
     return settings, session

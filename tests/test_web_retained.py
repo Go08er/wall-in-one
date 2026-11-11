@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import workshop_picks
 from tests.test_web_off_nothing_to_play import _service
 from wall_in_one import cli, config, paths, runtime_config
 from wall_in_one.session import Session
@@ -36,7 +37,8 @@ def _web_profile(home: Path) -> Path:
     root = home / "Pictures/wallpapers"
     automatic = root / "Wall-in-One" / "Automatic Stills"
     automatic.mkdir(parents=True)
-    (automatic / f"{WEB}.png").write_bytes(b"\x89PNG")
+    # A web page has no automatic still: its one is a still the person picked.
+    workshop_picks.save(workshop_picks.pick(WEB, root / "Wall-in-One" / "picked-electric-eye.png"))
     return root
 
 

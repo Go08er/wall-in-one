@@ -325,10 +325,10 @@ def test_the_display_is_measured_on_the_worker_once_per_batch(
     assert set(maker.asked) == {Path("/w/1"), Path("/w/2"), Path("/w/3"), Path("/w/clip.mp4")}
 
 
-def test_a_preview_still_needs_no_display_and_what_cant_play_is_never_asked(
+def test_a_web_page_or_preset_and_what_cant_play_are_never_asked_for_a_still(
     maker: Recording, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A web or preset item's still is drawn from its own preview, not the engine."""
+    """A web or preset item gets no automatic still: not from the engine, not from its preview."""
     from dataclasses import replace
 
     from wall_in_one.library.model import Unplayable
@@ -348,7 +348,7 @@ def test_a_preview_still_needs_no_display_and_what_cant_play_is_never_asked(
     maker.request((web, made, unsupported), tmp_path, maker.batches.append)
     maker.drain()
 
-    assert maker.asked == [web.path], "a small preview still is never made again"
+    assert maker.asked == [], "only a still a person picks"
 
 
 def test_a_video_only_batch_asks_for_no_display(

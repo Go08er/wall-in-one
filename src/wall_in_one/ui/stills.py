@@ -57,7 +57,7 @@ def _never() -> bool:
 
 def _engine_capture(item: MediaItem) -> bool:
     """Whether ``item``'s still is the scene engine's capture, which needs a measured display."""
-    return item.kind is Kind.SCENE and not item.still_from_preview
+    return item.kind is Kind.SCENE
 
 
 def _refusal(folder: Path, count: int, reason: str) -> str:
@@ -126,6 +126,8 @@ class StillMaker:
             item
             for item in items
             if not workshop.previews_off(item, web)
+            # A web page or a preset gets no automatic still, only a picked one.
+            and not item.no_automatic_still
             # Every moving kind, not video alone. `stills.ensure` has always
             # known how to capture a Wallpaper Engine scene through the engine
             # itself, and this filter was the only reason it was never asked
@@ -333,6 +335,7 @@ class StillMaker:
         if (
             self._closed
             or item.kind is not Kind.SCENE
+            or item.no_automatic_still
             or workshop.previews_off(item, self._web_allowed())
         ):
             return

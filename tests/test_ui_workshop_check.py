@@ -27,6 +27,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
+from tests import workshop_picks  # noqa: E402
 from tests.gtk_helpers import destroy_window  # noqa: E402
 from tests.started import started  # noqa: E402
 from tests.test_ui_next_slice import finish, library_page, run  # noqa: E402
@@ -161,6 +162,9 @@ def test_web_wallpapers_are_off_until_allowed_and_then_play(
     )
     (web / "p.png").write_bytes(harness.tiny_png((40, 120, 200), size=8))
     _install(content, "210", {"title": "Y2K Matrix", "dependency": "200", "preset": {"a": 1}})
+    # A web page has no automatic still, and never its author's preview: the
+    # one it plays with is a still the person picked.
+    workshop_picks.save(workshop_picks.pick("200", tmp_path / "picked-electric-eye.png"))
     requested: list[set[str]] = []
     real_request = StillMaker.request
 
@@ -207,7 +211,7 @@ def test_web_wallpapers_are_off_until_allowed_and_then_play(
         window.navigate("library")
 
         # Turned on: compiled and reloaded through the ordinary settings path,
-        # its still made from its preview first.
+        # with the still that was picked for it.
         application.update_settings_async(allow_web_wallpapers=True)
         yield patient(
             (

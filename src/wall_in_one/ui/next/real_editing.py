@@ -538,7 +538,12 @@ class RealEditing:
         return Choices(
             customized=customized or identity.key in self._palette_intent,
             still=customized and record is not None and record.still is not None,
-            regenerate=item.kind is Kind.SCENE and bool(item.scene) and item.unplayable is None,
+            regenerate=(
+                item.kind is Kind.SCENE
+                and bool(item.scene)
+                and item.unplayable is None
+                and not item.no_automatic_still
+            ),
         )
 
     def pending_policy(self, item: MediaItem) -> pairings.PalettePolicy | None:
@@ -878,7 +883,12 @@ class RealEditing:
 
     def regenerate_still(self, wid: str) -> None:
         item = self._shown.item_of(wid)
-        if item is None or item.kind is not Kind.SCENE or item.unplayable is not None:
+        if (
+            item is None
+            or item.kind is not Kind.SCENE
+            or item.unplayable is not None
+            or item.no_automatic_still
+        ):
             return
         if self._refused():
             return

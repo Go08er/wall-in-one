@@ -7573,7 +7573,7 @@ class Application(Adw.Application):
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
         roots = self._session.library.roots
-        if not roots or not item.scene:
+        if not roots or not item.scene or item.no_automatic_still:
             return False
         if workshop.why_not_played(item, self._settings.allow_web_wallpapers):
             return False

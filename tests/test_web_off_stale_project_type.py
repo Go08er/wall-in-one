@@ -40,7 +40,7 @@ from wall_in_one.wallpaper.applier import Applier, ApplyError
 
 def _item(fixture: Fixture, state: str, monkeypatch: pytest.MonkeyPatch) -> MediaItem:
     old = fixture.scene
-    assert not old.holds_web and not old.still_from_preview
+    assert not old.holds_web and not old.no_automatic_still
     # The screenshot command names a Workshop id, not item.path. The fixture
     # is put at the engine's first usual place under HOME, so this is also
     # the folder an actual engine would find.
@@ -268,27 +268,32 @@ def test_a_preset_whose_base_steam_made_web_gets_no_ffmpeg_while_web_is_off(
 
 
 def _video(tree: _Tree, state: str) -> MediaItem:
-    """The Workshop video 210, paired by the scan with ``clip.png`` beside it."""
+    """The Workshop video 210, with the author's ``clip.png`` beside it, which is not its still."""
     item = tree.scan()["210"]
-    assert item.kind is Kind.VIDEO and item.paired_still == tree.content / "210" / "clip.png"
+    assert item.kind is Kind.VIDEO and item.paired_still is None
+    assert (tree.content / "210" / "clip.png").is_file()
     if state == "stale-web":
         tree.make_web("210")
     return item
 
 
 @pytest.mark.parametrize("state", ["video-control", "stale-web"])
-def test_a_workshop_videos_still_beside_it_is_not_used_once_its_folder_may_be_web(
+def test_a_workshop_videos_still_is_made_from_the_video_and_not_from_a_file_beside_it(
     tree: _Tree, monkeypatch: pytest.MonkeyPatch, state: str
 ) -> None:
-    """R14 P2: the scan's pairing is as old as the scan; the still is in the folder."""
+    """The scan's pairing is as old as the scan, and a picture beside the video is the author's.
+
+    With web off and the folder now a web page's, nothing is opened at all.
+    """
     item = _video(tree, state)
     asked = _decoder(monkeypatch)
     still = stills.ensure(item, tree.root)
-    assert not asked
+    assert still is None, "the author's clip.png was used, or a still came from nowhere"
     if state == "video-control":
-        assert still == item.paired_still
+        assert asked, "ffmpeg is asked for a frame of the video itself"
+        assert not any("clip.png" in part for command in asked for part in command)
     else:
-        assert still is None, "a now-web folder's still was used with web off"
+        assert not asked
 
 
 @pytest.mark.parametrize("state", ["scene-control", "stale-web"])
@@ -329,8 +334,10 @@ def test_with_web_on_a_scene_refused_as_web_is_asked_for_again_after_the_rescan(
     maker.shutdown()
     if state == "stale-web":
         assert engine == []
-        assert rescanned.holds_web and rescanned.still_from_preview
-        assert submitted == [(stale,), (rescanned,)], "the rescan's web item was never asked for"
+        assert rescanned.holds_web and rescanned.no_automatic_still
+        # No still is ever made for a web page (the owner's rule), so there is
+        # nothing to ask for again after the rescan.
+        assert submitted == [(stale,)]
     else:
         assert engine == ["200"]
         assert submitted == [(stale,)]

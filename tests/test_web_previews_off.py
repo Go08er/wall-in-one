@@ -100,19 +100,17 @@ def test_no_still_is_taken_for_a_web_page_while_web_is_off(
     assert list((web_folder.root / "Wall-in-One" / "Automatic Stills").iterdir()) == []
 
 
-def test_a_still_is_taken_when_web_is_on(
+def test_no_still_is_taken_for_a_web_page_or_preset_even_when_web_is_on(
     web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    taken: list[MediaItem] = []
+    def never(*_arguments: object, **_options: object) -> None:
+        raise AssertionError("a still was made for a web page or a preset")
 
-    def fake(item: MediaItem, output: Path, processes: object) -> None:
-        taken.append(item)
-        output.write_bytes(PNG)
-
-    monkeypatch.setattr(stills, "_still_from_preview", fake)
-    made = stills.ensure(web_folder.web, web_folder.root, allow_web=True)
-    assert made is not None and made.is_file()
-    assert taken == [web_folder.web]
+    monkeypatch.setattr(scenes, "screenshot", never)
+    monkeypatch.setattr(subprocess, "run", never)
+    assert stills.ensure(web_folder.web, web_folder.root, allow_web=True) is None
+    with pytest.raises(stills.StillError):
+        stills.capture_scene(web_folder.web, web_folder.root, force=True, allow_web=True)
 
 
 # -- colours ------------------------------------------------------------------------
@@ -287,7 +285,7 @@ def test_the_loader_makes_a_web_pages_thumbnail_when_web_is_on(
     assert asked == [(web_folder.web, True)]
 
 
-def test_the_still_maker_queues_nothing_for_a_web_page_while_web_is_off_and_does_when_on(
+def test_the_still_maker_queues_nothing_for_a_web_page_or_preset_whether_web_is_off_or_on(
     web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from wall_in_one.ui.stills import StillMaker
@@ -303,7 +301,9 @@ def test_the_still_maker_queues_nothing_for_a_web_page_while_web_is_off_and_does
     assert submitted == []
     web["on"] = True
     maker.request(_both(web_folder), web_folder.root, lambda made: None)
-    assert submitted == [_both(web_folder)]  # not remembered as attempted while off
+    # Nothing to make for either: a web page and a preset get no automatic
+    # still, with web on or off.
+    assert submitted == []
     maker.shutdown()
 
 

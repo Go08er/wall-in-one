@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import workshop_picks
 from wall_in_one import cli, config, paths, runtime_config, update_status
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
@@ -50,8 +51,9 @@ def _profile(home: Path) -> tuple[config.Settings, MediaItem]:
     root = home / "Pictures/wallpapers"
     automatic = root / "Wall-in-One" / "Automatic Stills"
     automatic.mkdir(parents=True)
-    for workshop_id in (SCENE, PRESET):
-        (automatic / f"{workshop_id}.png").write_bytes(b"\x89PNG")
+    (automatic / f"{SCENE}.png").write_bytes(b"\x89PNG")
+    # A preset has no automatic still: its one is a still the person picked.
+    workshop_picks.save(workshop_picks.pick(PRESET, home / "picked-bloom.png"))
     picture = root / "still.png"
     picture.write_bytes(b"\x89PNG\r\n\x1a\n")
     settings = config.Settings(roots=(root,))

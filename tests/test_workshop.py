@@ -311,7 +311,7 @@ def test_a_web_wallpaper_is_listed_as_a_scene_the_engine_plays(tmp_path: Path) -
     assert item.title == "Electric Eye" and item.workshop_type == "web"
     assert item.preview == web / "preview.jpg"
     assert item.unplayable is None and item.rendered_scene == "2777242023"
-    assert item.scene_properties == () and item.still_from_preview
+    assert item.scene_properties == () and item.no_automatic_still
     assert item.provider == scan.WORKSHOP_PROVIDER
 
 

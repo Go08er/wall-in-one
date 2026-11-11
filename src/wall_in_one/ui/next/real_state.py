@@ -250,10 +250,10 @@ def _still_note(item: MediaItem, pairing: pairings.Pairing | None, missing: bool
     chosen = pairing.still if pairing is not None and pairing.customized else None
     if chosen is not None and not missing:
         return f"Chosen by hand: {chosen.name}"
+    if item.no_automatic_still:
+        return "No automatic still for this kind of wallpaper: choose one by hand"
     automatic = (
-        "Taken from its Wallpaper Engine preview"
-        if item.still_from_preview
-        else "Captured from the scene"
+        "Captured from the scene"
         if item.kind is Kind.SCENE
         else "Taken from the video automatically"
     )

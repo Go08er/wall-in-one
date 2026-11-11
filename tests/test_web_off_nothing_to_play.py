@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from tests import workshop_picks
 from wall_in_one import cli, config, paths, runtime_config, update_status
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
@@ -51,7 +52,8 @@ def _library(home: Path, *, still_beside: bool) -> Path:
     root = home / "Pictures/wallpapers"
     automatic = root / "Wall-in-One" / "Automatic Stills"
     automatic.mkdir(parents=True)
-    (automatic / f"{WEB}.png").write_bytes(b"\x89PNG")
+    # A web page has no automatic still: its one is a still the person picked.
+    workshop_picks.save(workshop_picks.pick(WEB, home / "picked-electric-eye.png"))
     if still_beside:
         (root / "dawn.png").write_bytes(b"\x89PNG")
     return root
@@ -414,5 +416,11 @@ def test_the_service_fixtures_are_what_the_compiler_writes(
     generation = re.compile(r'^config_generation = ".*"$', re.MULTILINE)
     for name, text in made.items():
         recorded = (FIXTURES / name).read_text(encoding="utf-8")
-        # The generation hashes the paths of the run that made it.
+        # The generation hashes the paths of the run that made it. The page's
+        # still is a pick now; the service's fixtures keep the path they always
+        # named, which to the service is only a path.
+        text = text.replace(
+            "/home/user/picked-electric-eye.png",
+            f"/home/user/Pictures/wallpapers/Wall-in-One/Automatic Stills/{WEB}.png",
+        )
         assert generation.sub("", recorded) == generation.sub("", text), name

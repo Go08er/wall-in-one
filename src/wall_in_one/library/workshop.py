@@ -12,10 +12,9 @@ was written, and the survey changed the design:
   full-resolution representative still without writing into Steam's tree.
 - `type` is spelled both `video` and `Video`, so it is compared case-folded.
   Trusting the casing would have silently hidden eight wallpapers.
-- The preview is a `.gif` for 46 of them. A gif is *not* a still -- this app
-  plays gifs as video -- so a preview is a good source for a still rather than
-  a still itself. It is also 900 KB against a 100 MB video, and it is the frame
-  the author chose.
+- The preview is a `.gif` for 46 of them. It shows on the library card only:
+  it is the author's file, so it is never a still or the source of colours
+  (`MediaItem.no_automatic_still`).
 
 Later the owner added a `web` wallpaper and a preset, and both vanished: only
 the two kinds above were kept. Every item is now listed. What the engine can
@@ -147,10 +146,6 @@ MAX_INDEX_BYTES: Final = 1024 * 1024
 #: rather than properly: the file is Valve's own format, the only field wanted
 #: is this one, and a real parser would be a dependency for one line.
 _PATH_LINE: Final = re.compile(r'"path"\s*"([^"]+)"')
-
-#: Directly usable as a still. Anything else -- a gif, above all -- is a source
-#: for one instead.
-_STILL_SUFFIXES: Final[frozenset[str]] = frozenset({".jpg", ".jpeg", ".png", ".webp", ".bmp"})
 
 #: The item types linux-wallpaperengine runs: its project parser knows these
 #: three and exits on any other (ProjectParser.cpp:49-63 in the version
@@ -304,18 +299,6 @@ class WorkshopItem:
     def is_video_type(self) -> bool:
         """It says `video` (leniently, `declared_video`) and isn't a preset."""
         return (self.lenient_type == "video" or self.kind == "video") and self.kind != PRESET
-
-    @property
-    def still_preview(self) -> Path | None:
-        """The preview when it is directly usable as a still, else ``None``.
-
-        A `.gif` preview is not a still -- this app plays gifs -- so it comes
-        back as ``None`` here and is used as a *source* for a generated still
-        instead.
-        """
-        if self.preview is None:
-            return None
-        return self.preview if self.preview.suffix.lower() in _STILL_SUFFIXES else None
 
 
 def _is_folder(path: Path, *, follow: bool, on_unseen: OnUnseen | None) -> bool:
@@ -839,7 +822,7 @@ class Playback:
     #: What it plays, when that isn't what it shows: a preset of a web
     #: wallpaper plays its base's look ("plays as Electric Eye; ...").
     note: str = ""
-    #: The picture its still and colours come from, when not its own preview.
+    #: The picture its library card shows, when not its own preview (never its still).
     preview: Path | None = None
     #: It is, or would play, a program (`NEVER_RUN`): never run.
     program: bool = False
@@ -957,8 +940,8 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
     if base.kind == "web":
         # linux-wallpaperengine hands a page no properties (nothing calls into
         # it: CWeb.cpp only loads the URL), so the screen shows the base as it
-        # is. Say so, pass nothing, and take the still and colours from the
-        # base's own preview so they match what is on screen.
+        # is. Say so and pass nothing. Its preview shows on the card only; it
+        # is never its still or its colours (`MediaItem.no_automatic_still`).
         return Playback(
             base=base.id,
             note=f"plays as {base.title}; its settings aren\u2019t applied",

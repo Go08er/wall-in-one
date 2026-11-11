@@ -16,6 +16,7 @@ from typing import Literal
 
 import pytest
 
+from tests import workshop_picks
 from wall_in_one import config, runtime_config
 from wall_in_one.library import displays, favourites, pairings, playlists, removals, schedules
 from wall_in_one.library.model import Kind, Library, MediaItem
@@ -1489,23 +1490,29 @@ def test_executable_wallpaper_engine_items_never_reach_a_renderer(tmp_path: Path
         (content / workshop_id).mkdir(parents=True)
         (content / workshop_id / "project.json").write_text(json.dumps(project))
     root = tmp_path / "library"
-    automatic = root / "Wall-in-One" / "Automatic Stills"
-    automatic.mkdir(parents=True)
-    for workshop_id in ("100", "200", "300"):
-        (automatic / f"{workshop_id}.png").write_bytes(b"\x89PNG")
+    root.mkdir()
+    # None of these has an automatic still: each has one the person picked.
+    picks = {
+        key: record
+        for workshop_id in ("100", "200", "300")
+        for key, record in workshop_picks.pick(
+            workshop_id, tmp_path / f"picked-{workshop_id}.png"
+        ).items()
+    }
     # Web wallpapers on, so the web item stands for what does reach a renderer.
     settings = config.Settings(roots=(root,), allow_web_wallpapers=True)
     session = Session(
         settings,
         scanner=lambda roots: scan.scan(
-            roots, include_workshop=True, workshop_roots=(tmp_path / "steam",), records={}
+            roots, include_workshop=True, workshop_roots=(tmp_path / "steam",), records=picks
         ),
+        pairing_store=pairings.Store(picks),
     )
     session.refresh()
     listed = {item.scene: item for item in session.library.items}
     assert listed["100"].unplayable is Unplayable.RUNTIME
     assert listed["200"].unplayable is Unplayable.RUNTIME
-    assert listed["100"].paired_still == automatic / "100.png"
+    assert listed["100"].paired_still == tmp_path / "picked-100.png"
 
     entries = _entries(runtime_config.render(settings, session))
 

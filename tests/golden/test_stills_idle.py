@@ -136,14 +136,15 @@ def assert_one_tombstone(changes: list[harness.Change]) -> None:
     assert tombstones[0].after is not None and tombstones[0].after.size == 0
 
 
-def test_a_due_scene_whose_engine_cannot_be_started_leaves_only_an_empty_tombstone(
+def test_a_due_scene_whose_engine_cannot_be_started_leaves_nothing(
     golden: Golden, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Accepted for now: engine installed and display measured, process refused.
+    """Engine installed and display measured, process refused: nothing changes, the still is kept.
 
     The engine needs a named ``.png`` path, so the temporary exists before the
-    process is started, and withdrawing it leaves one empty tombstone (its
-    claim directory is removed). Nothing else may change: the still is kept.
+    process is started. Nothing was written to it, so it is unlinked; withdrawing
+    it through `file_io` left one empty tombstone for every failed attempt
+    (review-f4 U5).
     """
     monkeypatch.setattr(scenes, "is_available", lambda: True)
     monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: DISPLAY)
@@ -160,4 +161,4 @@ def test_a_due_scene_whose_engine_cannot_be_started_leaves_only_an_empty_tombsto
     assert stills.ensure(scene, root, size=DISPLAY) is None
     changes = harness.diff(before, harness.snapshot(golden.profile.home))
     assert len(started) == 1, "the engine really was asked"
-    assert_one_tombstone(changes)
+    assert [change.describe() for change in changes] == []

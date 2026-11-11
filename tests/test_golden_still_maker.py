@@ -148,8 +148,8 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
         monkeypatch.setattr(subprocess, "Popen", capturing_engine)
     else:
         # The engine is installed and the panel was measured, so the 2x2
-        # golden still is due; but the engine's process is refused. Its named
-        # temporary then leaves one empty tombstone, and nothing else may change.
+        # golden still is due; but the engine's process is refused. Nothing was
+        # written to its named temporary, which is unlinked: nothing may change.
         monkeypatch.setattr(scenes, "is_available", lambda: True)
         monkeypatch.setattr(scenes, "measured_capture_size", lambda *_arguments: (2560, 1600))
         sealed: Callable[..., object] = subprocess.Popen
@@ -203,10 +203,11 @@ def test_idling_with_the_still_maker_writes_only_the_whitelist(
     # Exactly one: the rescan a capture causes must not ask for the same scene again.
     assert len(engine_started) == (machine != "nix-check"), "one capture was tried"
     changes = harness.diff(before, harness.snapshot(profile.home))
-    if machine != "nix-check":
-        # The named temporary (refused engine) or the replaced still (capture)
-        # is withdrawn through file_io's claim-and-retain, which leaves one
-        # empty tombstone; the emptied claim directory is removed.
+    if machine == "engine-captures":
+        # The replaced still is withdrawn through file_io's claim-and-retain,
+        # which leaves one empty tombstone; the emptied claim directory is
+        # removed. A refused engine's temporary, never written, leaves nothing
+        # (review-f4 U5).
         assert_one_tombstone([c for c in changes if c.path.startswith(RETAINED)])
         changes = [c for c in changes if not c.path.startswith(RETAINED)]
     allowed = [

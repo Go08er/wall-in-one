@@ -249,3 +249,20 @@ def test_startup_repair_leaves_out_a_dangling_default_that_unknown_keys_keep(
     again = Application._repair_dangling_playlist_references()
     assert again.failures == ()
     assert runtime_config.compiled(config.load_strict(), app.session).left_out == ()
+
+
+def test_the_previews_sub_option_stays_insensitive_while_settings_are_read_only(
+    tmp_path: Path, make_application: Callable[[], Application]
+) -> None:
+    """F3: with web on, `_load` once switched the row back on after `_refresh_read_only`."""
+    _settings_with_unknown_key(tmp_path, allow_web_wallpapers=True, web_wallpaper_previews=True)
+    app = make_application()
+    page = PreferencesPage(app)
+    assert page._web.get_active() and app.settings_unknown_keys
+    assert not page._web_previews.get_sensitive()
+
+    page.apply_settings(config.Settings(allow_web_wallpapers=True, web_wallpaper_previews=True))
+    assert not page._web_previews.get_sensitive()
+    page._web.set_active(False)
+    page._web.set_active(True)  # reaches `_on_changed`
+    assert not page._web_previews.get_sensitive()

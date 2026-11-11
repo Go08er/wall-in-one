@@ -850,6 +850,10 @@ class PreferencesPage(Adw.PreferencesPage):
         # Simple application doubles predate read-only settings.
         return tuple(getattr(self._app, "settings_unknown_keys", ()))
 
+    def _sync_previews_sensitivity(self, web_allowed: bool) -> None:
+        """The previews sub-option applies only with web on, and never while read-only."""
+        self._web_previews.set_sensitive(web_allowed and not self._read_only_keys())
+
     def _refresh_read_only(self) -> None:
         """Show why settings cannot change, and stop offering to change them."""
         keys = self._read_only_keys()
@@ -863,7 +867,7 @@ class PreferencesPage(Adw.PreferencesPage):
         for control in self._settings_controls:
             control.set_sensitive(not keys)
         if not keys:
-            self._web_previews.set_sensitive(self._web.get_active())
+            self._sync_previews_sensitivity(self._web.get_active())
 
     # -- state -----------------------------------------------------------
 
@@ -892,7 +896,7 @@ class PreferencesPage(Adw.PreferencesPage):
             self._workshop.set_active(settings.scan_workshop)
             self._web.set_active(settings.allow_web_wallpapers)
             self._web_previews.set_active(settings.web_wallpaper_previews)
-            self._web_previews.set_sensitive(settings.allow_web_wallpapers)
+            self._sync_previews_sensitivity(settings.allow_web_wallpapers)
             self._favourites_only.set_active(settings.cycle_favourites_only)
             self._display_mode.set_selected(
                 1 if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT else 0
@@ -928,7 +932,7 @@ class PreferencesPage(Adw.PreferencesPage):
         if self._loading:
             return
         # A sub-option: greyed out while web wallpapers are off.
-        self._web_previews.set_sensitive(self._web.get_active())
+        self._sync_previews_sensitivity(self._web.get_active())
         scheme_index = self._scheme.get_selected()
         hidden_index = self._when_hidden.get_selected()
         interpolation_index = self._interpolation.get_selected()

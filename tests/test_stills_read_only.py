@@ -136,7 +136,7 @@ def test_the_videos_own_folder_read_only_and_the_stills_folder_not(
     assert "could not write" in str(error) and str(error).endswith(": Permission denied")
     assert len(rendered) == 1
     assert not stills.destination(clip, root).exists(), "no still without its record"
-    assert pairing.find_still(clip, roots=(root,)) is None
+    assert pairing.find_still(clip, roots=(root,), labelled_workshop=False) is None
 
 
 def test_a_frame_that_cannot_be_captured_is_not_a_folder_that_refused(

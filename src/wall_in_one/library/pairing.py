@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Final
 
 from wall_in_one import file_io
+from wall_in_one.library import workshop
 from wall_in_one.library.model import IMAGE_EXTENSIONS
 
 #: Written by us next to a video to record which still represents it.
@@ -388,10 +389,15 @@ def read_sidecar(video: Path, roots: Iterable[Path]) -> Path | None:
 
     For showing and playing: a selector that can't be read, or names a still
     that can't be looked at, reads as none, and the video falls back to its
-    other stills. A selector that is not trusted by location (see
-    `_trusted_location`) reads exactly the same, as none. Not for deciding
-    what may be destroyed: `read_sidecar_strict`.
+    other stills. A selector that is not trusted reads exactly the same, as none:
+    one beside Workshop content (`workshop.is_workshop_content`, decided by
+    place here, whatever the caller labelled it) is the author's, and one is
+    trusted by location (see `_trusted_location`) only when the video's folder
+    and the named still are both inside a root. Not for deciding what may be
+    destroyed: `read_sidecar_strict`.
     """
+    if workshop.is_workshop_content(video, labelled=False):
+        return None
     chosen = _selected_still(video, strict=False)
     if chosen is None or not _trusted_location(video, chosen, tuple(roots)):
         return None
@@ -564,15 +570,18 @@ def find_still(
     roots: Iterable[Path] = (),
     *,
     adopted: Path | None = None,
-    trust_sidecar: bool = True,
+    labelled_workshop: bool,
 ) -> Path | None:
     """Best still for ``video``, or ``None`` if it has none.
 
-    ``trust_sidecar=False`` (a Workshop item: `workshop.sidecar_trusted`)
-    skips the sidecar as if there were none.
+    ``labelled_workshop`` is `workshop.labelled_workshop` of the item, required
+    so no caller can forget it; the place test (`workshop.is_workshop_content`)
+    runs here too, for a Workshop tree the scan labelled ``local``. For Workshop
+    content the sidecar is skipped as if there were none: it is the author's file.
     """
     roots = tuple(roots)
-    from_sidecar = read_sidecar(video, roots) if trust_sidecar else None
+    folder_trusted = not workshop.is_workshop_content(video, labelled=labelled_workshop)
+    from_sidecar = read_sidecar(video, roots) if folder_trusted else None
     if from_sidecar is not None:
         return from_sidecar
     generated = _automatic_still(video, roots)

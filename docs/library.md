@@ -106,12 +106,21 @@ video looks like rather than whatever was up before it.
 
 A video finds its still in this order:
 
-1. a `<video>.wall-in-one.json` sidecar naming one;
+1. a `<video>.wall-in-one.json` sidecar naming one. It counts only when the
+   video's folder and the still it names are both inside a configured library
+   root, and never beside Wallpaper Engine content (see below). One that
+   doesn't count is ignored: it is not read, replaced or deleted, and it does not
+   stop Wall-in-One making the video's own still (found by its name, step 2);
 2. its deterministic path-keyed file under
    `<each configured root>/Wall-in-One/Automatic Stills/`, searched in root
    order;
 3. a verified legacy capture recorded by the upgrade migration;
 4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`.
+
+Wallpaper Engine content is told by place, not by label: a file under a
+`steamapps/workshop/content/431960` folder (on any drive, even inside a library
+root), or with a `project.json` beside it (an item copied in by hand). Its author
+wrote the sidecar, so it is never read for such a file.
 
 Until a video has a still, playback can't show it: the wallpaper service's
 compiler leaves it out, and every page counts it the same way. Its Library

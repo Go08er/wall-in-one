@@ -845,7 +845,7 @@ def synthesize(
             item.path,
             roots=roots,
             adopted=adopted_still,
-            trust_sidecar=workshop.sidecar_trusted(item),
+            labelled_workshop=workshop.labelled_workshop(item),
         ),
         motion=item.path,
     )

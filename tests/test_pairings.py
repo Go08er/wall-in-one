@@ -247,7 +247,7 @@ def test_accepted_resolver_uses_scan_truth_without_filesystem_probes(
     monkeypatch.setattr(
         pairing,
         "read_sidecar",
-        lambda _path: (_ for _ in ()).throw(AssertionError("GTK resolver read a sidecar")),
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("GTK resolver read a sidecar")),
     )
 
     bundle = store.resolve_accepted(moving, library)

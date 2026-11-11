@@ -1813,6 +1813,24 @@ def _record_beside(
         inside = False
     if not inside:
         return None
+    if workshop.is_workshop_content(video, labelled=False):
+        # Steam's tree inside a library root, or a Workshop item copied in: the
+        # author's folder either way, so no litter in it.
+        return None
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    if os.path.lexists(sidecar):
+        try:
+            file_io.read_regular_bytes(sidecar, pairing.MAX_SIDECAR_BYTES)
+        except OSError:
+            pass  # one that can't be read is not known to be ignorable: the writer says why
+        else:
+            if pairing.read_sidecar(video, (root,)) is None:
+                # A record is there that readers ignore (untrusted by location,
+                # or naming a file that is not there). It may be the person's
+                # own, so it is neither replaced nor removed, and it must not
+                # stop the still being published: `pairing` finds that by its
+                # name regardless.
+                return None
     return _write_sidecar_publication(video, still, source=source)
 
 
@@ -2120,7 +2138,7 @@ def ensure(
     if item.paired_still is not None:
         return item.paired_still
     existing = pairing.find_still(
-        item.path, roots=(root,), trust_sidecar=workshop.sidecar_trusted(item)
+        item.path, roots=(root,), labelled_workshop=workshop.labelled_workshop(item)
     )
     if existing is not None:
         return existing

@@ -58,14 +58,54 @@ APP_ID: Final = "431960"
 WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
 
 
-def sidecar_trusted(item: MediaItem) -> bool:
-    """Whether ``item``'s `<video>.wall-in-one.json` may be read at all.
+#: The directory components every Workshop item's folder sits under, wherever
+#: Steam is (any drive, any library folder): `.../steamapps/workshop/content/431960/<id>`.
+_CONTENT_PARTS: Final = ("steamapps", "workshop", "content", APP_ID)
 
-    Never for a Workshop item, wherever Steam's tree sits (even inside a
-    configured root): a file in there was put there by the item's author.
-    Pass this as `pairing.find_still`'s ``trust_sidecar``.
+
+def labelled_workshop(item: MediaItem) -> bool:
+    """Whether the scan labelled ``item`` a Workshop item (`WORKSHOP_PROVIDER`).
+
+    Only the label, which the scan does not apply to Steam's tree when a library
+    root contains it (the root walk reaches the file first and calls it
+    ``local``). Never ask this alone: `is_workshop_content` is the test, and
+    this is what a caller hands it as ``labelled``.
     """
-    return item.provider != WORKSHOP_PROVIDER
+    return item.provider == WORKSHOP_PROVIDER
+
+
+def is_workshop_content(path: Path, *, labelled: bool) -> bool:
+    """Whether the file at ``path`` is Workshop content, which is the author's, not ours.
+
+    The one test for "may what sits beside this file be trusted?", decided by
+    place and not only by label. True when any of these holds:
+
+    - ``labelled``: the scan called it a Workshop item (`labelled_workshop`);
+    - its resolved path lies under a ``steamapps/workshop/content/431960``
+      directory, matched by path components, so it holds on any drive and
+      inside a configured library root too;
+    - a ``project.json`` sits beside it: a Workshop item copied into the library
+      by hand is still its author's content.
+
+    Nothing from beside such a file is a still of ours: not its sidecar, not a
+    picture named like it, and not its preview. Its still is only what
+    Wall-in-One makes from the item itself or what a person picked.
+    """
+    if labelled:
+        return True
+    try:
+        resolved = path.resolve()
+    except OSError, ValueError, RuntimeError:
+        # Cannot place it: not trusted.
+        return True
+    parts = resolved.parts
+    width = len(_CONTENT_PARTS)
+    if any(parts[at : at + width] == _CONTENT_PARTS for at in range(len(parts) - width + 1)):
+        return True
+    try:
+        return (resolved.parent / "project.json").is_file()
+    except OSError:
+        return True
 
 
 #: Where linux-wallpaperengine looks for `--bg <id>`, under the home folder, in

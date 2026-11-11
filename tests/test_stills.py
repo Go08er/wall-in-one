@@ -11,6 +11,7 @@ Nothing here touches the user's library. Every path is under `tmp_path`.
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import random
@@ -102,8 +103,8 @@ def test_same_stem_videos_get_distinct_generated_stills(root: Path, tmp_path: Pa
     assert first_still != second_still
     assert first_still.is_file()
     assert second_still.is_file()
-    assert pairing.find_still(first, (root,)) == first_still
-    assert pairing.find_still(second, (root,)) == second_still
+    assert pairing.find_still(first, (root,), labelled_workshop=False) == first_still
+    assert pairing.find_still(second, (root,), labelled_workshop=False) == second_still
 
 
 def test_the_still_is_a_png_whatever_the_video_was(root: Path, tmp_path: Path) -> None:
@@ -991,7 +992,7 @@ def test_the_still_is_found_by_the_managed_directory_alone(root: Path) -> None:
     video = make_video(root / "clip.mp4")
     still = stills.generate(video, root)
     video.with_name(video.name + pairing.SIDECAR_SUFFIX).unlink()
-    assert pairing.find_still(video, roots=(root,)) == still
+    assert pairing.find_still(video, roots=(root,), labelled_workshop=False) == still
 
 
 def test_a_generated_still_does_not_become_a_wallpaper_of_its_own(
@@ -1830,7 +1831,7 @@ def test_a_still_for_an_outside_video_is_still_found_afterwards(root: Path, tmp_
     managed directory and the convention finds it there by name."""
     video = make_video(tmp_path / "steam" / "clip.mp4")
     still = stills.generate(video, root)
-    assert pairing.find_still(video, roots=(root,)) == still
+    assert pairing.find_still(video, roots=(root,), labelled_workshop=False) == still
 
 
 def test_a_still_is_taken_at_the_wallpapers_own_resolution(root: Path) -> None:
@@ -2450,3 +2451,46 @@ def test_a_still_moved_back_after_an_unverified_publication_is_retired_intact(
     assert edited and not target.exists()
     # Failed on a4fa2f0: discarded by its current metadata, leaving an emptied inode.
     assert [entry.read_bytes() for entry in _retained(target.parent)] == edited
+
+
+# -- an untrusted sidecar never blocks the app's own still -----------------------
+
+
+def _retained_entries(root: Path) -> list[Path]:
+    folder = pairing.still_directory(root) / ".wall-in-one-retained"
+    return sorted(folder.iterdir()) if folder.is_dir() else []
+
+
+def test_a_sidecar_naming_a_file_outside_every_root_does_not_block_the_automatic_still(
+    root: Path, tmp_path: Path
+) -> None:
+    """The reader ignores it; the writer must not treat it as authority either.
+
+    It may be the person's own file, so it is left as it is, byte for byte, and
+    nothing piles up in the retained folder however often this is asked.
+    """
+    video = make_video(root / "clip.mp4")
+    elsewhere = make_video(tmp_path / "elsewhere.mp4")
+    outside = stills.generate(elsewhere, tmp_path / "other-root")
+    sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    sidecar.write_text(json.dumps({"still_path": str(outside)}), encoding="utf-8")
+    before = sidecar.read_bytes()
+    assert pairing.find_still(video, (root,), labelled_workshop=False) is None
+
+    for _ in range(3):
+        made = stills.ensure(item(video, Kind.VIDEO), root)
+        assert made == stills.destination(video, root) and made.is_file()
+    assert sidecar.read_bytes() == before
+    assert _retained_entries(root) == []
+    assert pairing.find_still(video, (root,), labelled_workshop=False) == made
+
+
+def test_no_sidecar_is_written_beside_workshop_content_inside_a_root(root: Path) -> None:
+    """A Workshop item copied into the library, with its `project.json` beside it."""
+    video = make_video(root / "copied" / "clip.mp4")
+    (video.parent / "project.json").write_text("{}", encoding="utf-8")
+
+    made = stills.generate(video, root)
+
+    assert made.is_file()
+    assert not video.with_name(video.name + pairing.SIDECAR_SUFFIX).exists()

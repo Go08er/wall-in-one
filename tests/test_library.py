@@ -119,19 +119,19 @@ def test_representative_still_must_be_a_first_class_indexed_still(tmp_path: Path
 def test_sibling_still_suffix_pairs(tmp_path: Path) -> None:
     video = _touch(tmp_path / "snowy-village.mp4")
     still = _touch(tmp_path / "snowy-village-still.png")
-    assert pairing.find_still(video) == still
+    assert pairing.find_still(video, labelled_workshop=False) == still
 
 
 def test_plain_sibling_name_pairs(tmp_path: Path) -> None:
     video = _touch(tmp_path / "cabin.mp4")
     still = _touch(tmp_path / "cabin.png")
-    assert pairing.find_still(video) == still
+    assert pairing.find_still(video, labelled_workshop=False) == still
 
 
 def test_gif_is_never_chosen_as_a_still(tmp_path: Path) -> None:
     video = _touch(tmp_path / "loop.mp4")
     _touch(tmp_path / "loop.gif")
-    assert pairing.find_still(video) is None
+    assert pairing.find_still(video, labelled_workshop=False) is None
 
 
 def test_sidecar_beats_the_naming_convention(tmp_path: Path) -> None:
@@ -141,7 +141,7 @@ def test_sidecar_beats_the_naming_convention(tmp_path: Path) -> None:
     (tmp_path / ("clip.mp4" + pairing.SIDECAR_SUFFIX)).write_text(
         json.dumps({"still_path": str(chosen)}), encoding="utf-8"
     )
-    assert pairing.find_still(video, roots=[tmp_path]) == chosen
+    assert pairing.find_still(video, roots=[tmp_path], labelled_workshop=False) == chosen
 
 
 def test_a_scan_reads_each_pairing_sidecar_once(
@@ -173,7 +173,7 @@ def test_sidecar_naming_a_missing_file_is_ignored(tmp_path: Path) -> None:
     (tmp_path / ("clip.mp4" + pairing.SIDECAR_SUFFIX)).write_text(
         json.dumps({"still_path": str(tmp_path / "gone.png")}), encoding="utf-8"
     )
-    assert pairing.find_still(video, roots=[tmp_path]) == convention
+    assert pairing.find_still(video, roots=[tmp_path], labelled_workshop=False) == convention
 
 
 @pytest.mark.parametrize("kind", ("symlink", "fifo"))
@@ -183,14 +183,15 @@ def test_pairing_sidecar_special_files_are_ignored_without_blocking(
     video = _touch(tmp_path / "clip.mp4")
     convention = _touch(tmp_path / "clip-still.png")
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    chosen = _touch(tmp_path / "chosen.png")  # present and inside the root: it would be used
     outside = tmp_path / "outside.json"
-    outside.write_text(json.dumps({"still_path": "/not/chosen.png"}), encoding="utf-8")
+    outside.write_text(json.dumps({"still_path": str(chosen)}), encoding="utf-8")
     if kind == "symlink":
         sidecar.symlink_to(outside)
     else:
         os.mkfifo(sidecar)
 
-    assert pairing.find_still(video) == convention
+    assert pairing.find_still(video, roots=[tmp_path], labelled_workshop=False) == convention
     assert outside.is_file()
 
 
@@ -208,11 +209,11 @@ def test_workshop_sidecar_naming_a_file_elsewhere_is_not_trusted(tmp_path: Path)
     private = _touch(tmp_path / "private" / "elsewhere.png")
     _sidecar(video, private)
 
-    assert pairing.find_still(video, roots=[root]) is None
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) is None
     assert pairings.synthesize(_item(video, Kind.VIDEO), roots=[root]).still is None
     # As if there were no sidecar: the normal lookup still applies.
     convention = _touch(video.with_name("clip-still.png"))
-    assert pairing.find_still(video, roots=[root]) == convention
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) == convention
 
 
 def test_sidecar_beside_a_workshop_video_is_not_trusted_even_naming_a_root_file(
@@ -223,20 +224,55 @@ def test_sidecar_beside_a_workshop_video_is_not_trusted_even_naming_a_root_file(
     video = _touch(tmp_path / "steam" / "111" / "clip.mp4")
     _sidecar(video, inside)
 
-    assert pairing.find_still(video, roots=[root]) is None
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) is None
 
 
 def test_workshop_item_sidecar_is_ignored_even_inside_a_root(tmp_path: Path) -> None:
-    """A root that contains the Steam tree does not make an author's sidecar ours."""
+    """A root that contains the Steam tree does not make an author's sidecar ours.
+
+    Whatever the scan called the item: the place decides (`is_workshop_content`).
+    """
     root = tmp_path / "library"
     inside = _touch(root / "pic.png")
-    video = _touch(root / "steam" / "431960" / "111" / "clip.mp4")
+    video = _touch(root / "SteamLibrary/steamapps/workshop/content/431960/111/clip.mp4")
     _sidecar(video, inside)
-    item = _item(video, Kind.VIDEO, provider=workshop.WORKSHOP_PROVIDER)
 
-    assert pairings.synthesize(item, roots=[root]).still is None
-    local = _item(video, Kind.VIDEO)
-    assert pairings.synthesize(local, roots=[root]).still == inside
+    for provider in (workshop.WORKSHOP_PROVIDER, "local"):
+        item = _item(video, Kind.VIDEO, provider=provider)
+        assert pairings.synthesize(item, roots=[root]).still is None
+    assert pairing.read_sidecar(video, [root]) is None
+
+
+def test_a_workshop_item_copied_into_the_library_is_still_the_authors(tmp_path: Path) -> None:
+    """A `project.json` beside the video marks it: the sidecar is not read."""
+    root = tmp_path / "library"
+    inside = _touch(root / "pic.png")
+    video = _touch(root / "copied" / "clip.mp4")
+    _sidecar(video, inside)
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) == inside
+    (root / "copied" / "project.json").write_text("{}", encoding="utf-8")
+
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) is None
+
+
+@pytest.mark.parametrize("project_json", (True, False))
+def test_a_real_scan_of_a_root_holding_steams_tree_does_not_read_the_authors_sidecar(
+    tmp_path: Path, project_json: bool
+) -> None:
+    """The root walk labels the file `local` and the Workshop pass skips it as seen."""
+    root = tmp_path / "library"
+    private = _touch(root / "private-photo.png")
+    item_folder = root / "SteamLibrary/steamapps/workshop/content/431960/111"
+    video = _touch(item_folder / "clip.mp4")
+    if project_json:  # without it, only the place says so
+        (item_folder / "project.json").write_text(
+            json.dumps({"type": "video", "title": "V", "file": "clip.mp4"}), encoding="utf-8"
+        )
+    _sidecar(video, private)
+
+    found = {item.path: item for item in scan.scan([root], records={}).items}
+    assert found[video].provider == "local", "the premise: the walk, not the Workshop pass"
+    assert found[video].paired_still is None
 
 
 def test_sidecar_dotdot_escape_is_refused(tmp_path: Path) -> None:
@@ -245,7 +281,7 @@ def test_sidecar_dotdot_escape_is_refused(tmp_path: Path) -> None:
     _touch(tmp_path / "private" / "elsewhere.png")
     _sidecar(video, "../../private/elsewhere.png")
 
-    assert pairing.find_still(video, roots=[root]) is None
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) is None
 
 
 def test_sidecar_symlink_escape_is_refused(tmp_path: Path) -> None:
@@ -255,12 +291,12 @@ def test_sidecar_symlink_escape_is_refused(tmp_path: Path) -> None:
     link = root / "innocent.png"
     link.symlink_to(outside)
     _sidecar(video, link)
-    assert pairing.find_still(video, roots=[root]) is None
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) is None
 
     # A symlinked directory is no way out either.
     (root / "gate").symlink_to(outside.parent)
     _sidecar(video, root / "gate" / "elsewhere.png")
-    assert pairing.find_still(video, roots=[root]) is None
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) is None
 
 
 def test_app_written_sidecar_inside_a_root_is_trusted(tmp_path: Path) -> None:
@@ -271,8 +307,8 @@ def test_app_written_sidecar_inside_a_root_is_trusted(tmp_path: Path) -> None:
     other_root = tmp_path / "second"
     other_root.mkdir()
 
-    assert pairing.find_still(video, roots=[root]) == still
-    assert pairing.find_still(video, roots=[other_root, root]) == still
+    assert pairing.find_still(video, roots=[root], labelled_workshop=False) == still
+    assert pairing.find_still(video, roots=[other_root, root], labelled_workshop=False) == still
     assert pairing.read_sidecar(video, [root]) == still
     assert pairing.read_sidecar(video, []) is None
 
@@ -282,7 +318,7 @@ def test_automatic_stills_directory_is_searched(tmp_path: Path) -> None:
     generated = _touch(
         pairing.still_directory(tmp_path) / f"{pairing.automatic_still_stem(video)}.png"
     )
-    assert pairing.find_still(video, roots=[tmp_path]) == generated
+    assert pairing.find_still(video, roots=[tmp_path], labelled_workshop=False) == generated
 
 
 def test_apply_keeps_a_user_provided_still_that_represents_a_video(tmp_path: Path) -> None:

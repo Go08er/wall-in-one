@@ -998,7 +998,7 @@ def apply(
         bundle = resolved[item.path]
         if bundle.is_moving:
             kept.append(item.with_still(bundle.still))
-        elif item.path not in generated:
+        elif item.path not in generated and not pairing.is_generated_still(item.path):
             kept.append(item)
     return tuple(kept)
 

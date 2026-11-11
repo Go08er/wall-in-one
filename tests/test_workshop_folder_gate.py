@@ -191,3 +191,145 @@ def test_every_ffmpeg_command_in_the_app_carries_the_options() -> None:
     ):
         before_input = command[: command.index("-i")]
         assert "-protocol_whitelist" in before_input and "-format_whitelist" in before_input
+
+
+# -- S3-3: the gate is inherited by everything below an item folder ----------------------------
+
+
+@pytest.mark.parametrize(
+    "project",
+    [
+        {"type": "web", "title": "W", "file": "index.html", "preview": "preview.gif"},
+        {"type": "application", "title": "A", "file": "run.exe"},
+        {"type": "scene", "title": "S", "file": "scene.json"},
+        "{ not json",
+    ],
+)
+def test_the_subfolders_of_a_copied_in_item_list_nothing(tmp_path: Path, project: object) -> None:
+    root = tmp_path / "library"
+    folder = _folder(root, "item", project, ("index.html", "preview.gif"))
+    for nested in ("assets/loop.mp4", "assets/deep/bg.gif", "img/bg.png", "a/b/c/d.mp4"):
+        (folder / nested).parent.mkdir(parents=True, exist_ok=True)
+        (folder / nested).write_bytes(b"x")
+    assert _listed(root) == set()
+
+
+def test_a_copied_in_video_item_lists_only_its_declared_file_and_nothing_below(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "library"
+    folder = _folder(
+        root,
+        "v",
+        {"type": "video", "title": "V", "file": "clip.mp4", "preview": "preview.gif"},
+        ("clip.mp4", "preview.gif", "other.mp4"),
+    )
+    for nested in ("media/clip.mp4", "media/other.mp4", "bonus/b.mp4", "media/cover.png"):
+        (folder / nested).parent.mkdir(parents=True, exist_ok=True)
+        (folder / nested).write_bytes(b"x")
+    assert _listed(root) == {"v/clip.mp4"}
+
+
+def test_a_project_json_above_the_library_root_makes_nothing_workshop(tmp_path: Path) -> None:
+    (tmp_path / "project.json").write_text(json.dumps({"type": "web"}), encoding="utf-8")
+    root = tmp_path / "library"
+    _folder(root, "plain", None, ("a.mp4", "b.png"))
+    assert _listed(root) == {"plain/a.mp4", "plain/b.png"}
+    assert workshop.item_folder_of(root / "plain", (root,)) is None
+
+
+def test_the_content_tree_is_matched_case_insensitively(tmp_path: Path) -> None:
+    path = tmp_path / "x" / "SteamApps" / "Workshop" / "CONTENT" / "431960" / "5" / "sub" / "a.gif"
+    path.parent.mkdir(parents=True)
+    assert workshop.in_content_tree(path)
+    assert workshop.folder_gate(path.parent) == frozenset()
+    assert workshop.is_workshop_content(path, labelled=False)
+    assert _listed(tmp_path / "x") == set()
+
+
+def test_a_sidecar_and_a_sibling_below_an_item_folder_are_not_trusted(tmp_path: Path) -> None:
+    from wall_in_one.library import pairing
+
+    root = tmp_path / "library"
+    folder = _folder(root, "web", {"type": "web", "file": "index.html"}, ("index.html",))
+    private = root / "private.png"
+    private.write_bytes(b"x")
+    for where in (folder, folder / "assets" / "deep"):
+        where.mkdir(parents=True, exist_ok=True)
+        video = where / "loop.mp4"
+        video.write_bytes(b"x")
+        (where / "loop-still.png").write_bytes(b"x")
+        video.with_name(video.name + pairing.SIDECAR_SUFFIX).write_text(
+            json.dumps({"still_path": str(private)}), encoding="utf-8"
+        )
+        assert pairing.find_still(video, (root,), labelled_workshop=False) is None, where
+        assert pairing.read_sidecar(video, (root,)) is None, where
+
+
+# -- S3-6: stills this app made are never loose wallpapers ---------------------------------------
+
+
+def test_a_still_0_4_1_drew_from_a_steam_file_inside_a_root_is_not_a_loose_wallpaper(
+    tmp_path: Path,
+) -> None:
+    from wall_in_one.library import pairing
+
+    root = tmp_path / "library"
+    item = root / "Games/steam/steamapps/workshop/content/431960/111"
+    _folder(
+        root,
+        "Games/steam/steamapps/workshop/content/431960/111",
+        {"type": "web", "file": "index.html", "preview": "preview.gif"},
+        ("preview.gif",),
+    )
+    automatic = pairing.still_directory(root)
+    automatic.mkdir(parents=True)
+    drawn = automatic / f"{pairing.automatic_still_stem(item / 'preview.gif')}.png"
+    drawn.write_bytes(b"\x89PNG")
+    mine = automatic / "my-own-picture.png"  # a name this app does not make
+    mine.write_bytes(b"\x89PNG")
+    (root / "kept.png").write_bytes(b"\x89PNG")
+
+    library = scan.scan([root], records={})
+
+    paths = {i.path for i in library.items}
+    assert drawn not in paths, "a still made from Steam's file is not a wallpaper"
+    assert mine in paths and root / "kept.png" in paths
+
+
+def test_every_name_this_app_makes_is_recognised_and_no_other() -> None:
+    from wall_in_one.library import pairing
+
+    base = Path("/lib/Wall-in-One/Automatic Stills")
+    for name in ("video-0123456789abcdef01234567.png", "123.png", "123-capture.png"):
+        assert pairing.is_generated_still(base / name), name
+    for name in ("photo.png", "123.jpg", "video-xyz.png", "123-other.png"):
+        assert not pairing.is_generated_still(base / name), name
+    assert not pairing.is_generated_still(Path("/lib/Other/123.png"))
+
+
+# -- S3-7: a folder left out for this is said once ---------------------------------------------
+
+
+def test_a_gated_folder_is_said_once_and_not_when_the_workshop_scan_lists_it(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "library"
+    _folder(root, "mine", {"name": "site"}, ("a.png", "b.mp4"))
+    library = scan.scan([root], records={})
+    said = [u for u in library.unseen if u.path == root / "mine"]
+    assert len(said) == 1 and said[0].kind.value == "not a wallpaper"
+    assert library.skipped == (), "looked at, not couldn't-look: it blocks nothing"
+
+    steam = tmp_path / "x"
+    content = steam / "steamapps/workshop/content/431960"
+    _folder(
+        content,
+        "9",
+        {"type": "video", "title": "V", "file": "clip.mp4"},
+        ("clip.mp4", "preview.gif"),
+    )
+    off = scan.scan([content], records={})
+    assert [u for u in off.unseen if u.path == content / "9"], "scanning off: said"
+    on = scan.scan([content], records={}, include_workshop=True, workshop_roots=(steam,))
+    assert not [u for u in on.unseen if u.path == content / "9"], "the Workshop scan lists it"

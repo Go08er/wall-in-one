@@ -389,12 +389,10 @@ wallpaper without one. So while the setting is off, a Workshop item's
 just before ffmpeg is given one of its files (`workshop.web_files_now`), and
 the copies under the home folder, where linux-wallpaperengine looks, just
 before it is given the item's id (`workshop.engine_refusal`). One that reads
-`web`, or can't be read, gets nothing. Known gaps, none of which opens a web
-page: a picture the scan paired with a Workshop video, beside it in its
-folder, is still that video's still until the next scan (the service shows it,
-as the legacy Python playback does, and its colours are made from it); a
-preset whose own `project.json` now names another base is judged by the base
-the scan found. (A library folder you add that covers Steam's Workshop folder
+`web`, or can't be read, gets nothing. Known gap, which does not open a web
+page: a preset whose own `project.json` now names another base is judged by the
+base the scan found. (A Workshop video's still is never a picture beside it, so
+a scan has none to keep.) (A library folder you add that covers Steam's Workshop folder
 no longer lists an item's files as your own: see "Workshop files in a library
 folder" below.)
 

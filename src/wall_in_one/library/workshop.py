@@ -60,7 +60,7 @@ WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
 
 #: The directory components every Workshop item's folder sits under, wherever
 #: Steam is (any drive, any library folder): `.../steamapps/workshop/content/431960/<id>`.
-_CONTENT_PARTS: Final = ("steamapps", "workshop", "content", APP_ID)
+_CONTENT_PARTS: Final = ("steamapps", "workshop", "content", APP_ID.casefold())
 
 
 def preview_still(item: MediaItem, previews: bool) -> bool:
@@ -97,18 +97,47 @@ def labelled_workshop(item: MediaItem) -> bool:
 def in_content_tree(path: Path) -> bool:
     """Whether the resolved ``path`` lies under a ``steamapps/workshop/content/431960`` folder.
 
-    By path components, so it holds on any drive and with no Steam config. A
-    path that can't be resolved is treated as inside (not trusted).
+    By path components, compared case-insensitively (a case-insensitive mount
+    spells the same folder any way), so it holds on any drive and with no Steam
+    config. A path that can't be resolved is treated as inside (not trusted).
     """
     try:
-        parts = path.resolve().parts
+        parts = tuple(part.casefold() for part in path.resolve().parts)
     except OSError, ValueError, RuntimeError:
         return True
     width = len(_CONTENT_PARTS)
     return any(parts[at : at + width] == _CONTENT_PARTS for at in range(len(parts) - width + 1))
 
 
-def is_workshop_content(path: Path, *, labelled: bool) -> bool:
+def item_folder_of(folder: Path, roots: Sequence[Path] = ()) -> Path | None:
+    """The nearest folder, ``folder`` first, that holds a ``project.json``; ``None`` if none.
+
+    An item copied in by hand has subfolders (``assets/``, ``img/``) that belong
+    to it as much as the files beside its ``project.json``. The search goes up
+    from ``folder`` to the library root that contains it, never above (a
+    ``project.json`` in somebody's home folder makes nothing of what is below it
+    Workshop content). With no ``roots`` only ``folder`` itself is looked at.
+    A folder that can't be looked at counts as an item folder (fails closed).
+    """
+    try:
+        current = folder.resolve()
+        bounds = [root.resolve() for root in roots]
+    except OSError, ValueError, RuntimeError:
+        return folder
+    ceiling = next((root for root in bounds if current.is_relative_to(root)), None)
+    while True:
+        try:
+            candidate = current / "project.json"
+            if candidate.is_file() or candidate.is_symlink():
+                return current
+        except OSError, ValueError:
+            return current
+        if ceiling is None or current == ceiling or current.parent == current:
+            return None
+        current = current.parent
+
+
+def is_workshop_content(path: Path, *, labelled: bool, roots: Sequence[Path] = ()) -> bool:
     """Whether the file at ``path`` is Workshop content, which is the author's, not ours.
 
     The one test for "may what sits beside this file be trusted?", decided by
@@ -118,8 +147,9 @@ def is_workshop_content(path: Path, *, labelled: bool) -> bool:
     - its resolved path lies under a ``steamapps/workshop/content/431960``
       directory (`in_content_tree`), so it holds on any drive and inside a
       configured library root too;
-    - a ``project.json`` sits beside it: a Workshop item copied into the library
-      by hand is still its author's content.
+    - a ``project.json`` sits in its folder, or in one above it up to the library
+      root it is in (``roots``, `item_folder_of`): a Workshop item copied into
+      the library by hand is still its author's content, subfolders included.
 
     Nothing from beside such a file is a still of ours: not its sidecar, not a
     picture named like it, and not its preview. Its still is only what
@@ -129,36 +159,30 @@ def is_workshop_content(path: Path, *, labelled: bool) -> bool:
         return True
     if in_content_tree(path):
         return True
-    try:
-        return (path.resolve().parent / "project.json").is_file()
-    except OSError, ValueError, RuntimeError:
-        return True
+    return item_folder_of(path.parent, roots) is not None
 
 
-def folder_gate(folder: Path) -> frozenset[Path] | None:
+def folder_gate(folder: Path, roots: Sequence[Path] = ()) -> frozenset[Path] | None:
     """Which files of ``folder`` the library walk may list as local media; ``None``: all.
 
     The walk of a library root asks this once per folder, with the test every
     other gate uses (`is_workshop_content`). Workshop content is untrusted, so a
     root that holds Steam's tree, or an item copied in by hand, must not list an
-    item's own files (a web wallpaper's ``preview.gif`` is a video to the
-    classifier) as local media, where no web gate would hold:
+    item's files (a web wallpaper's ``preview.gif`` is a video to the
+    classifier), at any depth, as local media, where no web gate would hold:
 
     - under `in_content_tree`: nothing. The Workshop scan lists those items itself.
-    - with a ``project.json``: an item folder, and it fails closed. A ``video``
-      lists at most its declared video file, so a hand-copied video still works;
-      a web page, an application, any other type, and a ``project.json`` that
-      can't be read, list nothing.
+    - below a ``project.json`` (`item_folder_of`): an item, and it fails closed.
+      A ``video`` lists at most its declared video file, wherever below its folder
+      that is, so a hand-copied video still works; a web page, an application, any
+      other type, and a ``project.json`` that can't be read, list nothing.
     """
     if in_content_tree(folder):
         return frozenset()
-    try:
-        present = (folder / "project.json").is_file() or (folder / "project.json").is_symlink()
-    except OSError, ValueError:
-        return frozenset()
-    if not present:
+    item = item_folder_of(folder, roots)
+    if item is None:
         return None
-    project = _read_project(folder)
+    project = _read_project(item)
     if project is None or not project.is_video or project.entry is None:
         return frozenset()
     return frozenset({project.entry})
@@ -1070,9 +1094,9 @@ def web_files_now(item: MediaItem) -> bool:
 
     `previews_off` asks the scan, which is as old as it is: a Steam update can
     turn a scene (or a video, or a preset's base) into a web page, and nothing
-    rescans for it. So whatever hands one of a Workshop item's files to ffmpeg,
-    or a still beside a Workshop video on to be shown (`stills.ensure`), while
-    web wallpapers are off asks this just before. Its `project.json` is
+    rescans for it. So whatever hands one of a Workshop item's files to ffmpeg
+    (`stills.ensure`'s frame of a video included) while web wallpapers are off
+    asks this just before. Its `project.json` is
     read as the scan reads it (`_read_project`), and so is a preset's base's,
     where the scan found it (`MediaItem.scene_base_directory`, which may be
     another Steam library's). Both fail closed as `holds_web` does: a type

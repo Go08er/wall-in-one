@@ -650,6 +650,8 @@ def _scan(
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
     # Per folder, which files the walk may list (`workshop.folder_gate`).
     gates: dict[Path, frozenset[Path] | None] = {}
+    # Gated folders already said once.
+    gated_said: set[Path] = set()
     # Folders whose files could be listed but not looked at, each said once.
     unseen_folders: set[Path] = set()
 
@@ -683,12 +685,25 @@ def _scan(
             if kind is None:
                 continue
             if path.parent not in gates:
-                gates[path.parent] = workshop.folder_gate(path.parent)
+                gates[path.parent] = workshop.folder_gate(path.parent, (root,))
             allowed = gates[path.parent]
             if allowed is not None and path not in allowed:
                 # Workshop content, or an item folder: not local media
                 # (`workshop.folder_gate`). Left out of `seen`, so the
                 # Workshop scan still lists what it lists.
+                if path.parent not in gated_said:
+                    gated_said.add(path.parent)
+                    if not (include_workshop and workshop.in_content_tree(path.parent)):
+                        # Nobody else will list it: say so, once (unseen only: it was
+                        # looked at, like any folder that is not a wallpaper).
+                        _not_looked(
+                            skipped,
+                            unseen,
+                            path.parent,
+                            UnseenKind.NOT_A_WALLPAPER,
+                            "a Wallpaper Engine item's folder (it holds a project.json), "
+                            "not local media",
+                        )
                 continue
             try:
                 info = path.stat()

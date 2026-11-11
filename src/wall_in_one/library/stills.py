@@ -1851,7 +1851,7 @@ def _record_beside(
         inside = False
     if not inside:
         return None
-    if workshop.is_workshop_content(video, labelled=False):
+    if workshop.is_workshop_content(video, labelled=False, roots=(root,)):
         # Steam's tree inside a library root, or a Workshop item copied in: the
         # author's folder either way, so no litter in it.
         return None
@@ -2212,7 +2212,7 @@ def ensure(
             return None
     if not allow_web and workshop.web_files_now(item):
         # A video whose folder Steam has made a web wallpaper's since the
-        # scan: the still paired with it may be one of that page's files.
+        # scan: ffmpeg would be given one of that page's files for its frame.
         return None
     if item.paired_still is not None:
         return item.paired_still

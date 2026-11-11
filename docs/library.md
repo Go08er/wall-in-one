@@ -15,6 +15,18 @@ items, followed by the storage and recovery guarantees behind those actions.
 mpvpaper animates it while a still wallpaper of an animated gif shows only the
 first frame.
 
+**A Wallpaper Engine item's files are not local media.** Workshop content is
+untrusted, so the walk of a library folder lists nothing under a
+`steamapps/workshop/content/431960` folder (the Workshop scan lists those items,
+when it is on), and nothing below a folder that holds a `project.json` (any
+depth, up to the library folder): an item copied in by hand is an item folder, a
+`web`, `application`, unknown or unreadable one lists nothing, and a `video` lists
+only the file its `project.json` names. A folder left out for this is recorded
+once as "not a wallpaper" (the new interface's count tooltip says so, the classic
+subtitle does not count it), unless the Workshop scan lists it. A folder of your
+own that happens to hold an unrelated `project.json` (a web or .NET project)
+is left out the same way.
+
 A scan is bounded: at most 4096 wallpapers, 65536 directory entries examined,
 and 8 directories deep. Anything past that is left out and counted as skipped
 rather than silently dropped: the Library's count says `· 5 skipped`, and

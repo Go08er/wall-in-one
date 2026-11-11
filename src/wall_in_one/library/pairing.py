@@ -26,6 +26,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -396,10 +397,11 @@ def read_sidecar(video: Path, roots: Iterable[Path]) -> Path | None:
     and the named still are both inside a root. Not for deciding what may be
     destroyed: `read_sidecar_strict`.
     """
-    if workshop.is_workshop_content(video, labelled=False):
+    roots = tuple(roots)
+    if workshop.is_workshop_content(video, labelled=False, roots=roots):
         return None
     chosen = _selected_still(video, strict=False)
-    if chosen is None or not _trusted_location(video, chosen, tuple(roots)):
+    if chosen is None or not _trusted_location(video, chosen, roots):
         return None
     return chosen
 
@@ -454,7 +456,8 @@ def selector_is_foreign(video: Path, roots: Iterable[Path]) -> bool:
     trusts is the app's own. Used so that removing a video never deletes a
     selector the app did not write (`manage.pairing_artifact_paths`).
     """
-    if workshop.is_workshop_content(video, labelled=False):
+    roots = tuple(roots)
+    if workshop.is_workshop_content(video, labelled=False, roots=roots):
         return True
     sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
@@ -529,6 +532,28 @@ def still_directory(root: Path) -> Path:
     """Where generated stills live under ``root``. Shared with `library.stills`,
     so the half that writes them and the half that finds them cannot drift."""
     return root / MANAGED_PARENT / AUTOMATIC_STILLS_DIRECTORY
+
+
+#: What this app names the stills it makes in `Automatic Stills`: a video's
+#: (`automatic_still_stem`), a scene's or web page's (`<id>`), a preset's capture.
+_GENERATED_NAME: Final = re.compile(r"video-[0-9a-f]{24}\.png|[0-9]+(?:-capture)?\.png")
+
+
+def is_generated_still(path: Path) -> bool:
+    """Whether ``path`` is a still this app made, by where it is and what it is called.
+
+    `Automatic Stills` under a `Wall-in-One` folder, with a name only
+    `automatic_still_stem` / `scene_still_stem` produce. Such a file is never a
+    loose picture wallpaper, whether or not the wallpaper it came from is in the
+    scan now (a root no longer scanned, an item the Workshop gate no longer lists
+    as local media): a name this app doesn't make is a person's own file and stays
+    one.
+    """
+    return (
+        path.parent.name == AUTOMATIC_STILLS_DIRECTORY
+        and path.parent.parent.name == MANAGED_PARENT
+        and _GENERATED_NAME.fullmatch(path.name) is not None
+    )
 
 
 def names_preview_made_still(item: MediaItem, still: Path) -> bool:
@@ -645,7 +670,9 @@ def find_still(
     none, the sidecar and a picture named like it: they are the author's files.
     """
     roots = tuple(roots)
-    folder_trusted = not workshop.is_workshop_content(video, labelled=labelled_workshop)
+    folder_trusted = not workshop.is_workshop_content(
+        video, labelled=labelled_workshop, roots=roots
+    )
     from_sidecar = read_sidecar(video, roots) if folder_trusted else None
     if from_sidecar is not None:
         return from_sidecar

@@ -30,6 +30,9 @@ $ nix profile install github:Go08er/wall-in-one
 $ nix profile install .                           # from a checkout
 ```
 
+To update it later, `nix profile upgrade --refresh wall-in-one` (the name
+`nix profile list` shows for it), then follow [updating](updating.md).
+
 A profile install is what puts the launcher entry somewhere a desktop shell
 looks: `~/.local/state/nix/profile/share` is on `XDG_DATA_DIRS` in a normal Nix
 session, and `share/applications` beneath it is scanned. On NixOS, the

@@ -407,6 +407,8 @@ def test_an_update_reloads_the_units_and_restarts_the_running_service(setup: Set
     )
     assert "systemctl --user enable wall-in-one.service" in calls
     assert not any("--now" in call for call in calls)
+    # review-f4 U6: the restart alone does not make the stills the app makes.
+    assert "updated from 0.3.0-1: open Wall-in-One once now" in result.stdout
 
 
 def test_an_up_to_date_install_is_not_rebuilt_but_still_set_up(setup: Setup) -> None:
@@ -415,6 +417,7 @@ def test_an_up_to_date_install_is_not_rebuilt_but_still_set_up(setup: Setup) -> 
     assert result.returncode == 0, result.stderr
     assert not setup.made("makepkg ")
     assert "which is this release" in result.stdout
+    assert "open Wall-in-One once now" not in result.stdout
     calls = setup.calls()
     assert "systemctl --user enable wall-in-one.service" in calls
     assert "systemctl --user start wall-in-one.service" in calls

@@ -89,6 +89,9 @@ moving a renderer later
    your media too.
 4. Update the app and companion through their existing installation method.
    For NixOS or Home Manager, update the declaration and activate it normally.
+   For a `nix profile` install, `nix profile upgrade --refresh <name>`, where
+   `<name>` is the entry `nix profile list` shows for Wall-in-One
+   (`wall-in-one`, unless you named it otherwise).
    For manually installed units, refresh only the links owned by that install.
    Installing a package does not update a copied unit pointing at an old store
    path. Preserve intentional unit overrides. Update an explicit companion
@@ -137,7 +140,12 @@ mean stays the same. The bytes of a few files can change, and it writes only:
 - `runtime.toml`, when the document compiled on this machine differs from the
   one on disk, for example on the first start after an update or on another
   machine (the renderer paths are this machine's). What it plays stays the
-  same.
+  same, except where a release changes what an item needs to play. After 0.4.2,
+  a preset of a Wallpaper Engine scene, and a video whose still was named by a
+  sidecar 0.4.2 no longer reads, play only once Wall-in-One has made their new
+  stills, which the app does after its first library scan, not the service's
+  own start: open the app once after updating
+  ([0.4.2 notes](releases/v0.4.2.md#updating)).
 - `pairings.json`, when the wallpaper service reported a wallpaper that failed
   to play: the health sync records that one marker on that wallpaper.
 - The copies 0.2.x kept before a format change, when there are any:

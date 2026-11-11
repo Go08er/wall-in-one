@@ -99,7 +99,8 @@ branch setting in its config, so it takes the repository's default branch
 (`main`). It shows what changed in the repository for review when it fetches
 it, at `paru -Sy --pkgbuilds` (and at the first `paru -S`); `SkipReview` in the
 section turns that off for this repository. After an update, restart the
-running service: `systemctl --user restart wall-in-one.service`.
+running service (`systemctl --user restart wall-in-one.service`) and open
+Wall-in-One once, so it can make stills for new or changed items.
 
 **With the setup script.** It does the above for you, and the rest of the
 set-up, and works without paru too. Download it, then run it from a terminal
@@ -133,7 +134,9 @@ The script:
 - gives your user manager the session's `WAYLAND_DISPLAY` if it lacks it, and
   enables the user unit, starting it when the manager has a display and the app
   has its settings (on a first install it says to open Wall-in-One and choose
-  your library folder first), then ends with `wall-in-one --setup-status`.
+  your library folder first), then runs `wall-in-one --setup-status`, points
+  you to the companion plugin and, after an update, says to open Wall-in-One
+  once.
 
 To update, run the script again (download the newest copy first; if you
 installed through paru, `paru -Syu` does it too). It builds the latest release

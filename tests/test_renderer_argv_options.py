@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -114,7 +115,7 @@ def test_a_connector_that_starts_with_a_dash_is_data_to_the_compiler(tmp_path: P
     from wall_in_one import config
     from wall_in_one.ui.next import displays_settings
 
-    cases = [
+    cases: list[tuple[str, dict[str, str], dict[str, Any]]] = [
         ("assignment", {"DP-1": "evening", "-X": "evening"}, {"theme_source_connector": "DP-1"}),
         ("theme", {"DP-1": "evening"}, {"theme_source_connector": "-X"}),
         ("output", {"DP-1": "evening"}, {"theme_source_connector": "DP-1", "output": "-X"}),

@@ -7,7 +7,8 @@ use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response, escaped_len, success_excess, success_fits, success_room};
 use crate::renderer::{
-    MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver, option_like_name,
+    MAX_OUTPUT_NAME_BYTES, MissingRenderer, NO_USABLE_OUTPUTS, RendererFailure, WallpaperDriver,
+    option_like_name,
 };
 use crate::schedule;
 use crate::workshop::Refusal;
@@ -2398,6 +2399,13 @@ impl<D: WallpaperDriver> Runtime<D> {
                 self.last_cycle = now;
                 self.pending_automatic = None;
             }
+            Err(error) if error.starts_with(NO_USABLE_OUTPUTS) => {
+                // Nowhere to play (`apply_current_in_batch`): not the entry's failure, so
+                // none is marked taboo, and none is retried. The candidate stays selected;
+                // the next move waits for its interval, and a usable head re-applies.
+                self.last_cycle = now;
+                self.pending_automatic = None;
+            }
             Err(error) => {
                 let mut failures = self.last_apply_failures.clone();
                 if failures.is_empty() {
@@ -3598,6 +3606,20 @@ impl<D: WallpaperDriver> Runtime<D> {
         discovered: Result<Vec<String>, String>,
     ) -> Result<String, String> {
         let independent = self.is_independent();
+        if !independent
+            && let Err(error) = &discovered
+            && error.starts_with(NO_USABLE_OUTPUTS)
+        {
+            // The compositor answered, and every enabled head it reported is named with a
+            // '-': there is nowhere to play. Not a discovery failure, whose fallbacks below
+            // (every output, the assignments) would play on no usable head and call it
+            // success, so startup would not wait for one (R42-14). No entry failed
+            // (`attempt_automatic` marks none taboo for it), and nothing live is known, so
+            // a usable head is played on when `tick`'s probe finds it, by its old name too.
+            self.output_discovery_error = truncate_middle(error, MAX_OUTPUT_DISCOVERY_ERROR_BYTES);
+            self.live_outputs = None;
+            return self.fail(error.clone());
+        }
         let previous_outputs: HashSet<String> = self.target_outputs.iter().cloned().collect();
         self.target_outputs = match discovered {
             Ok(outputs) => {

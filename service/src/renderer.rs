@@ -21,6 +21,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const MAX_OUTPUT_NAME_BYTES: usize = 256;
+/// How `SystemDriver::query_outputs`'s answer begins when the compositor reported enabled
+/// heads and every one is named with a '-' (`option_like_name`): there is nowhere to play.
+/// Startup waits for a usable one (main.rs), and the runtime applies no fallback for it.
+pub const NO_USABLE_OUTPUTS: &str = "no usable outputs";
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(3);
 const HELPER_STOP_GRACE: Duration = Duration::from_millis(250);
@@ -1355,7 +1359,7 @@ impl SystemDriver {
             // that succeeded, as status documents.
             if !self.ignored_outputs.is_empty() {
                 return Err(format!(
-                    "no usable outputs: ignored {}, a name that starts with '-'; \
+                    "{NO_USABLE_OUTPUTS}: ignored {}, a name that starts with '-'; \
                      paired still remains applied",
                     self.ignored_outputs.join(", ")
                 ));

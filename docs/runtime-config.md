@@ -405,8 +405,12 @@ compositor's list, says so once in its journal ("ignored a display named
 ..."), and never makes it a target, so mpvpaper, linux-wallpaperengine and
 Noctalia are never given the name and nothing is refused or failed for it; an
 assignment to it is one to a display that isn't connected (its status row says
-`connected = false`), and every other display plays as usual. The app's own
-display lists leave it out the same way. mpvpaper gets its output and video
+`connected = false`), and every other display plays as usual. When every
+display the compositor reports is named so, a mirrored document has nowhere to
+play: the service plays nothing, says "no usable outputs", naming them, and at
+startup waits for a display it can use, as for a compositor that isn't ready
+yet; no entry is held against it. The app's own display lists leave it out the
+same way. mpvpaper gets its output and video
 after a `--` all the same.
 
 **An entry the service refuses is skipped.** Such an entry is never started.

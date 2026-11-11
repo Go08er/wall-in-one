@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use wall_in_one_service::config::{Config, ConfigError, overrides_path};
 use wall_in_one_service::power::PowerObserver;
 use wall_in_one_service::protocol::{Request, Response, read_request_until, write_response_until};
-use wall_in_one_service::renderer::{SystemDriver, connect_until};
+use wall_in_one_service::renderer::{NO_USABLE_OUTPUTS, SystemDriver, connect_until};
 use wall_in_one_service::runtime::Runtime;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
@@ -446,7 +446,7 @@ fn startup_readiness_error(error: &str) -> bool {
         "the Wayland connection failed",
         "the Wayland compositor did not answer",
         "the compositor reported no enabled outputs",
-        "no usable outputs",
+        NO_USABLE_OUTPUTS,
     ]
     .iter()
     .any(|marker| error.contains(marker))

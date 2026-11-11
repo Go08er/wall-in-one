@@ -1158,6 +1158,139 @@ fn when_every_output_has_a_dash_name_none_is_present_and_no_window_opens() {
 }
 
 #[test]
+fn when_every_output_has_a_dash_name_no_entry_plays_and_none_is_marked_taboo() {
+    // R42-14: mirrored without assignments, a still or a video played on every output
+    // (Noctalia's default, mpvpaper's ALL) and the apply said so, so startup never waited
+    // for a usable output ("no usable outputs" is a readiness error, main.rs); with an
+    // assignment it played on that display, which isn't there. Every kind now fails with
+    // the driver's reason, nothing is given to a program, and a cycle that meets it marks
+    // no entry taboo. A usable head plays each.
+    use std::os::unix::fs::PermissionsExt;
+    let modes: [(&str, &[(&str, &str)]); 2] = [("mirrored", &[]), ("mirrored", &[("DP-1", "p1")])];
+    for (mode, displays) in modes {
+        for entries in [["still", "still"], ["video", "video"], ["12345", "12346"]] {
+            for connector in ["-X", "DP-1"] {
+                let label = format!(
+                    "dash-only-{mode}-{}-{}-{connector}",
+                    displays.len(),
+                    entries[0]
+                );
+                let root = directory(&label);
+                let noctalia = root.join("noctalia");
+                let asked = root.join("noctalia-arguments");
+                fs::write(
+                    &noctalia,
+                    format!(
+                        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> {asked:?}\n"
+                    ),
+                )
+                .unwrap();
+                fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+                let (mpvpaper, video_arguments) = argument_recorder(&root, "mpvpaper");
+                let (engine, scene_arguments) = argument_recorder(&root, "engine");
+                let document = dash_document(mode, displays, &entries)
+                    .replace("cycle_enabled = false", "cycle_enabled = true")
+                    .replace(
+                        "noctalia_program = \"/bin/true\"",
+                        &format!("noctalia_program = {noctalia:?}"),
+                    )
+                    .replace(
+                        "mpvpaper_program = \"/bin/true\"",
+                        &format!("mpvpaper_program = {mpvpaper:?}"),
+                    )
+                    .replace(
+                        "linux_wallpaperengine_program = \"/bin/true\"",
+                        &format!("linux_wallpaperengine_program = {engine:?}"),
+                    );
+                let config_path = root.join("runtime.toml");
+                fs::write(&config_path, document).unwrap();
+                let parsed = Config::load(&config_path).unwrap();
+                let (driver, _) = driver_with(parsed.renderer.clone(), vec![live(connector, None)]);
+                let mut runtime = Runtime::new(config_path, parsed, driver, noon()).unwrap();
+                let applied = without_text_file_busy(|| runtime.apply_current());
+                if connector == "DP-1" {
+                    assert!(applied.is_ok(), "{label}: {applied:?}");
+                } else {
+                    let error = applied.expect_err(&label);
+                    assert!(error.contains("no usable outputs"), "{label}: {error}");
+                    assert!(
+                        error.contains("-X"),
+                        "{label}: names the ignored head: {error}"
+                    );
+                    let base = Instant::now();
+                    for after in [301, 304, 307, 310] {
+                        runtime.tick(noon(), base + Duration::from_secs(after));
+                    }
+                    let status = status(&mut runtime, noon());
+                    assert_eq!(
+                        status["taboo_entries"],
+                        serde_json::json!([]),
+                        "{label}: {status}"
+                    );
+                    assert!(
+                        !fs::read_to_string(&asked)
+                            .unwrap_or_default()
+                            .contains("wallpaper-set"),
+                        "{label}: a still was set"
+                    );
+                    assert!(!video_arguments.exists(), "{label}: mpvpaper was started");
+                    assert!(!scene_arguments.exists(), "{label}: the engine was started");
+                }
+                runtime.shutdown();
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn a_head_usable_again_is_played_on_at_the_next_probe() {
+    // R42-14's other half: once no head is usable nothing live is known, so the one that
+    // comes back, under the name it had before too, is played on when `tick` next looks.
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("dash-comes-back");
+    let noctalia = root.join("noctalia");
+    let asked = root.join("noctalia-arguments");
+    fs::write(
+        &noctalia,
+        format!("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> {asked:?}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let document = dash_document("mirrored", &[], &["still"]).replace(
+        "noctalia_program = \"/bin/true\"",
+        &format!("noctalia_program = {noctalia:?}"),
+    );
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, document).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let heads = SwitchableOutputs::default();
+    heads.set(vec![live("DP-1", None)]);
+    let driver = SystemDriver::with_output_source(
+        parsed.renderer.clone(),
+        Path::new("/wall-in-one-runtime.sock"),
+        Box::new(heads.clone()),
+    );
+    let mut runtime = Runtime::new(config_path, parsed, driver, noon()).unwrap();
+    runtime.apply_current().unwrap();
+    heads.set(vec![live("-X", None)]);
+    let error = runtime.apply_current().unwrap_err();
+    assert!(error.contains("no usable outputs"), "{error}");
+    fs::remove_file(&asked).unwrap();
+    heads.set(vec![live("DP-1", None)]);
+    runtime.tick(noon(), Instant::now() + Duration::from_secs(6));
+    assert!(
+        fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .contains("wallpaper-set"),
+        "the head back under its old name was not played on"
+    );
+    assert_eq!(status(&mut runtime, noon())["output_discovery_error"], "");
+    runtime.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-dials");

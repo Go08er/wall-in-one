@@ -64,9 +64,10 @@ class _Tree:
         store: pairings.Store | None = None,
         *,
         playlist: playlists.Playlist | None = None,
+        settings: config.Settings | None = None,
     ) -> tuple[config.Settings, Session]:
         store = store or pairings.Store({})
-        settings = config.Settings(
+        settings = settings or config.Settings(
             roots=(self.root,),
             allow_web_wallpapers=True,
             active_playlist=playlist.id if playlist else "",
@@ -77,7 +78,11 @@ class _Tree:
             # The session keeps its own copy of the store: read that one.
             records = held[0].pairings.records if held else store.records
             return scan.scan(
-                [self.root], records, include_workshop=True, workshop_roots=(self.steam,)
+                [self.root],
+                records,
+                include_workshop=True,
+                workshop_roots=(self.steam,),
+                previews=settings.preview_stills,
             )
 
         session = Session(

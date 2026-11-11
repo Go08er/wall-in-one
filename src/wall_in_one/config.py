@@ -401,6 +401,15 @@ class Settings:
     #: own older Chromium with web security and site isolation off
     #: (docs/wallpaper-engine.md). Off, they are listed and never played or previewed.
     allow_web_wallpapers: bool = False
+    #: Use a web wallpaper's or a preset's own built-in preview as its still,
+    #: and as the source of its colours: a sub-option of ``allow_web_wallpapers``
+    #: (it only applies while that is on; its saved value is kept while it is
+    #: off). Off, such an item has only a still a person picked, because the
+    #: preview is the author's file (docs/wallpaper-engine.md, "Stills").
+    #: Read with `preview_stills`, never bare. A document without the key means
+    #: ``allow_web_wallpapers``, so a 0.4.1 profile that allowed web pages
+    #: keeps their preview stills; see `from_mapping` and `to_toml`.
+    web_wallpaper_previews: bool = False
 
     #: Default named playlist when no schedule rule matches. Empty selects the
     #: built-in all-media playlist. On-demand choices are runtime overrides and
@@ -416,6 +425,17 @@ class Settings:
     #: wallpaper directory is offered as an explicit first-run choice rather
     #: than silently becoming a write destination.
     roots: tuple[Path, ...] = ()
+
+    @property
+    def preview_stills(self) -> bool:
+        """Whether web wallpapers and presets take their still from their own preview.
+
+        The effective value, and the only one to use: ``allow_web_wallpapers``
+        AND ``web_wallpaper_previews``. Every decision about such a still (the
+        scan, `stills.ensure`, the queue, the pages, the compiler) takes this
+        bool and asks `workshop.preview_still` / `workshop.no_automatic_still`.
+        """
+        return self.allow_web_wallpapers and self.web_wallpaper_previews
 
     def validated(self) -> Self:
         """Clamp and correct anything out of range rather than failing.
@@ -523,6 +543,12 @@ class Settings:
             active_playlist=text("active_playlist", ""),
             scan_workshop=boolean("scan_workshop", True),
             allow_web_wallpapers=boolean("allow_web_wallpapers", False),
+            # Upgrade rule: a document from before this key (0.4.1) that allowed
+            # web wallpapers keeps their preview stills; every other absence
+            # (web off, a new profile) is off. An explicit value is always kept.
+            web_wallpaper_previews=boolean(
+                "web_wallpaper_previews", boolean("allow_web_wallpapers", False)
+            ),
             own_scene_renderer=boolean("own_scene_renderer", True),
             output=text("output", ""),
             roots=directories("roots"),
@@ -566,6 +592,13 @@ class Settings:
         # never turns it on keeps exactly the bytes it had.
         if self.allow_web_wallpapers:
             lines += ("allow_web_wallpapers = true",)
+        # The inverse of the rule `from_mapping` reads it by: written only when
+        # it differs from what its absence would mean (the web setting), so a
+        # profile that never moves it keeps its bytes and a 0.4.1 build, which
+        # reads a key it lacks as a reason to make settings read-only, is not
+        # troubled until somebody chooses the less usual combination.
+        if self.web_wallpaper_previews != self.allow_web_wallpapers:
+            lines += (f"web_wallpaper_previews = {str(self.web_wallpaper_previews).lower()}",)
         # The dials too: an untouched profile keeps its bytes, and an older
         # build sees a key it lacks only once somebody turned one.
         for dial in DIAL_SETTINGS:
@@ -780,6 +813,7 @@ def _validate_strict_mapping(raw: dict[str, Any], target: Path) -> None:
         "cycle_favourites_only",
         "scan_workshop",
         "allow_web_wallpapers",
+        "web_wallpaper_previews",
         "own_scene_renderer",
     )
     for key in booleans:

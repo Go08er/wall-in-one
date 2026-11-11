@@ -1771,6 +1771,7 @@ def _render_prepared_runtime(
             include_workshop=target_settings.scan_workshop,
             workshop_content_directories=workshop_roots,
             adoption_candidates=authorities,
+            previews=target_settings.preview_stills,
         )
 
     session = Session(

@@ -243,17 +243,21 @@ def _source(item: MediaItem) -> str:
     return "Local"
 
 
-def _still_note(item: MediaItem, pairing: pairings.Pairing | None, missing: bool) -> str:
+def _still_note(
+    item: MediaItem, pairing: pairings.Pairing | None, missing: bool, previews: bool = False
+) -> str:
     """Where a moving wallpaper's still comes from, in words."""
     if not item.is_moving:
         return ""
     chosen = pairing.still if pairing is not None and pairing.customized else None
     if chosen is not None and not missing:
         return f"Chosen by hand: {chosen.name}"
-    if item.no_automatic_still:
+    if workshop.no_automatic_still(item, previews):
         return "No automatic still for this kind of wallpaper: choose one by hand"
     automatic = (
-        "Captured from the scene"
+        "Taken from its Wallpaper Engine preview"
+        if workshop.preview_still(item, previews)
+        else "Captured from the scene"
         if item.kind is Kind.SCENE
         else "Taken from the video automatically"
     )
@@ -274,6 +278,7 @@ def wallpaper_view(
     unplayable: str = "",
     allow_web: bool = False,
     refused_here: str = "",
+    previews: bool = False,
 ) -> LibraryWallpaper:
     """What the new interface shows of ``item``, from the stores alone.
 
@@ -306,7 +311,7 @@ def wallpaper_view(
         theme_mode=policy.mode.value,
         problem=health.reason if health.is_borked else "",
         item=item,
-        still_note=_still_note(item, pairing, still_missing),
+        still_note=_still_note(item, pairing, still_missing, previews),
         unplayable="" if health.is_borked else unplayable,
         never_plays=bool(workshop.why_not_played(item, allow_web)),
         refused_here="" if health.is_borked else refused_here,
@@ -487,6 +492,7 @@ class RealAppState(GObject.Object):
             unplayable="" if can.compiles else can.reason,
             allow_web=session.settings.allow_web_wallpapers,
             refused_here=self._refused_reason(item),
+            previews=session.settings.preview_stills,
         )
 
     def _refused_reason(self, item: MediaItem) -> str:

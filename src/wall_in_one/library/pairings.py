@@ -822,8 +822,12 @@ def synthesize(
     roots: Sequence[Path] = (),
     *,
     adopted_still: Path | None = None,
+    previews: bool = False,
 ) -> Pairing:
     """The bundle an item has when nobody has chosen anything for it.
+
+    ``previews`` is `config.Settings.preview_stills`: without it a web page or a
+    preset has no default still (`workshop.no_automatic_still`).
 
     A still is its own representative. A video's default comes from
     `library.pairing`'s ordered conventions: our video sidecar, the current
@@ -834,11 +838,16 @@ def synthesize(
     if not item.is_moving:
         return Pairing(identity=identity, still=item.path, motion=None)
     if item.kind is Kind.SCENE:
-        # A web page or a preset has no automatic still. A `<id>.png` of
-        # 0.4.1's, drawn from its preview, is left on disk and not looked for.
+        # A web page or a preset has no automatic still while previews are off:
+        # a `<id>.png` of 0.4.1's, drawn from its preview, is left on disk and
+        # not looked for. With them on it is the still, as it was in 0.4.1.
         return Pairing(
             identity=identity,
-            still=None if item.no_automatic_still else pairing.scene_still(item.scene, roots=roots),
+            still=(
+                None
+                if workshop.no_automatic_still(item, previews)
+                else pairing.scene_still(item.scene, roots=roots)
+            ),
             motion=item.path,
         )
     return Pairing(
@@ -853,15 +862,17 @@ def synthesize(
     )
 
 
-def _chosen_still(item: MediaItem, chosen: Path | None, roots: Sequence[Path]) -> Path | None:
+def _chosen_still(
+    item: MediaItem, chosen: Path | None, roots: Sequence[Path], previews: bool
+) -> Path | None:
     """A record's still, unless it is the preview-made one 0.4.1 left for ``item``.
 
-    A web page or a preset (`MediaItem.no_automatic_still`) has no automatic
-    still, but its record may name `<id>.png` in an `Automatic Stills` folder:
-    0.4.1 drew that from the author's preview. It counts as no choice, and the
-    record and the file are left as they are.
+    A web page or a preset has no automatic still while ``previews`` is off
+    (`workshop.no_automatic_still`), but its record may name `<id>.png` in an
+    `Automatic Stills` folder: 0.4.1 drew that from the author's preview. It
+    counts as no choice, and the record and the file are left as they are.
     """
-    if chosen is None or not item.no_automatic_still:
+    if chosen is None or not workshop.no_automatic_still(item, previews):
         return chosen
     if any(chosen == stills.automatic_destination(item, root) for root in roots):
         return None
@@ -874,12 +885,13 @@ def resolve(
     records: Mapping[str, Pairing] | None = None,
     *,
     adopted_still: Path | None = None,
+    previews: bool = False,
 ) -> Pairing:
     """`_resolve`, saying (when a scan is collecting, `pairing.recording_unseen`) that
     ``item`` has no still not for want of one but because a place it looks in
     could not be looked at: "no still yet" must not read as "nothing there"."""
     with pairing.collecting_lookup_failures(item.path):
-        bundle = _resolve(item, roots, records, adopted_still=adopted_still)
+        bundle = _resolve(item, roots, records, adopted_still=adopted_still, previews=previews)
         failures = pairing.lookup_failures()
     if bundle.still is None and failures:
         pairing.note_unseen_still(item.path, failures[0])
@@ -892,6 +904,7 @@ def _resolve(
     records: Mapping[str, Pairing] | None = None,
     *,
     adopted_still: Path | None = None,
+    previews: bool = False,
 ) -> Pairing:
     """The bundle to actually use for ``item``.
 
@@ -900,12 +913,12 @@ def _resolve(
     `override_missing`. The choice itself is untouched: a drive that is not
     mounted this morning is not somebody changing their mind.
     """
-    default = synthesize(item, roots, adopted_still=adopted_still)
+    default = synthesize(item, roots, adopted_still=adopted_still, previews=previews)
     saved = (records or {}).get(default.identity.key)
     if saved is None:
         return default
 
-    chosen = _chosen_still(item, saved.still, roots)
+    chosen = _chosen_still(item, saved.still, roots, previews)
     missing = chosen is not None and not pairing.present(chosen)
     return replace(
         default,
@@ -937,6 +950,7 @@ def apply(
     records: Mapping[str, Pairing] | None = None,
     *,
     adopted_stills: Mapping[Path, Path] | None = None,
+    previews: bool = False,
 ) -> tuple[MediaItem, ...]:
     """Attach representative stills and hide only app-generated children.
 
@@ -957,6 +971,7 @@ def apply(
             roots,
             records,
             adopted_still=adopted.get(item.path),
+            previews=previews,
         )
         for item in materialised
     }
@@ -1072,12 +1087,14 @@ class Store:
         roots: Sequence[Path] = (),
         *,
         adopted_still: Path | None = None,
+        previews: bool = False,
     ) -> Pairing:
         return resolve(
             item,
             roots,
             self._records,
             adopted_still=adopted_still,
+            previews=previews,
         )
 
     def resolve_accepted(self, item: MediaItem, library: Library) -> Pairing:
@@ -1105,7 +1122,7 @@ class Store:
             for candidate in (*library.items, *library.still_inventory)
             if candidate.kind is Kind.STILL
         }
-        chosen = _chosen_still(item, saved.still, library.roots)
+        chosen = _chosen_still(item, saved.still, library.roots, library.previews)
         missing = (
             chosen is not None and chosen != item.paired_still and chosen not in indexed_stills
         )
@@ -1125,12 +1142,14 @@ class Store:
         roots: Sequence[Path] = (),
         *,
         adopted_stills: Mapping[Path, Path] | None = None,
+        previews: bool = False,
     ) -> tuple[MediaItem, ...]:
         return apply(
             items,
             roots,
             self._records,
             adopted_stills=adopted_stills,
+            previews=previews,
         )
 
     def choose_still(self, item: MediaItem, still: Path | None) -> Pairing:

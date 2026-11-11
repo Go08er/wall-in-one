@@ -55,9 +55,12 @@ def _never() -> bool:
     return False
 
 
-def _engine_capture(item: MediaItem) -> bool:
-    """Whether ``item``'s still is the scene engine's capture, which needs a measured display."""
-    return item.kind is Kind.SCENE
+def _engine_capture(item: MediaItem, previews: bool) -> bool:
+    """Whether ``item``'s still is the scene engine's capture, which needs a measured display.
+
+    Not for one drawn from its own preview (`workshop.preview_still`).
+    """
+    return item.kind is Kind.SCENE and not workshop.preview_still(item, previews)
 
 
 def _refusal(folder: Path, count: int, reason: str) -> str:
@@ -80,6 +83,7 @@ class StillMaker:
         note: FailureCallback | None = None,
         displays: Callable[[], tuple[outputs.Output, ...]] | None = None,
         web_allowed: Callable[[], bool] | None = None,
+        previews: Callable[[], bool] | None = None,
     ) -> None:
         """``report`` tells a person now (the window); ``note`` only keeps a record (the log).
 
@@ -92,8 +96,13 @@ class StillMaker:
         at every step. Without it web wallpapers are off: no still is made for
         one and none of its files is opened. While they are off a web page is not
         remembered as attempted, so turning them on makes theirs.
+
+        ``previews`` says whether `config.Settings.preview_stills` is on, asked
+        afresh at every step: a web page or a preset gets an automatic still only
+        then (`workshop.preview_still`), drawn from its own preview. Without it, none.
         """
         self._web_allowed = web_allowed if web_allowed is not None else _never
+        self._previews = previews if previews is not None else _never
         self._displays = displays
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="still")
         self._closed = False
@@ -126,8 +135,9 @@ class StillMaker:
             item
             for item in items
             if not workshop.previews_off(item, web)
-            # A web page or a preset gets no automatic still, only a picked one.
-            and not item.no_automatic_still
+            # A web page or a preset gets an automatic still only from its own
+            # preview, and only with that setting on (`workshop.no_automatic_still`).
+            and not workshop.no_automatic_still(item, self._previews())
             # Every moving kind, not video alone. `stills.ensure` has always
             # known how to capture a Wallpaper Engine scene through the engine
             # itself, and this filter was the only reason it was never asked
@@ -163,7 +173,11 @@ class StillMaker:
         wanted.sort(key=lambda item: item.kind is Kind.SCENE)
         # GTK's monitors can only be read here, on the main thread. A still
         # made from a preview needs no display.
-        fallback = self._local_displays() if any(_engine_capture(item) for item in wanted) else ()
+        fallback = (
+            self._local_displays()
+            if any(_engine_capture(item, self._previews()) for item in wanted)
+            else ()
+        )
         self._submit(
             self._run,
             tuple(wanted),
@@ -246,7 +260,7 @@ class StillMaker:
         # an existing one is never judged against a guess.
         display = (
             scenes.measured_capture_size("", outputs.discover(fallback))
-            if any(_engine_capture(i) for i in items)
+            if any(_engine_capture(i, self._previews()) for i in items)
             else None
         )
         for item in items:
@@ -264,10 +278,12 @@ class StillMaker:
                 else self._processes
             )
             if item.kind is Kind.SCENE and (
-                (display is None and _engine_capture(item))
+                (display is None and _engine_capture(item, self._previews()))
                 or (
                     item.paired_still is not None
-                    and not stills.scene_capture_required(item, root, size=display, automatic=True)
+                    and not stills.scene_capture_required(
+                        item, root, size=display, automatic=True, previews=self._previews()
+                    )
                 )
             ):
                 # Kept as it is. Not counted: a rescan would change nothing.
@@ -285,6 +301,7 @@ class StillMaker:
                     refused=folder_refused,
                     # Only a web page is told: for it alone is it ever true, and
                     # `stills.ensure` has the safe default.
+                    previews=self._previews(),
                     **({"allow_web": True} if item.holds_web else {}),
                 )
                 is not None
@@ -335,7 +352,7 @@ class StillMaker:
         if (
             self._closed
             or item.kind is not Kind.SCENE
-            or item.no_automatic_still
+            or workshop.no_automatic_still(item, self._previews())
             or workshop.previews_off(item, self._web_allowed())
         ):
             return
@@ -360,6 +377,7 @@ class StillMaker:
                 force=True,
                 processes=processes,
                 size=size,
+                previews=self._previews(),
                 **({"allow_web": True} if item.holds_web else {}),
             )
             if not self._processes.cancelled():

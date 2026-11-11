@@ -140,7 +140,13 @@ def test_preferences_for_known_settings_has_no_banner(
 
     assert app.settings_unknown_keys == ()
     assert not page._read_only_banner.get_revealed()
-    assert all(control.get_sensitive() for control in page._settings_controls)
+    # The previews option is a sub-option: greyed out while web wallpapers are off.
+    assert not page._web.get_active() and not page._web_previews.get_sensitive()
+    assert all(
+        control.get_sensitive()
+        for control in page._settings_controls
+        if control is not page._web_previews
+    )
 
 
 def test_deleting_the_saved_default_playlist_is_refused_whole(

@@ -56,6 +56,8 @@ from wall_in_one.programs import SCENE_ENGINE_MISSING
 from wall_in_one.ui.next import widgets
 from wall_in_one.ui.next.catalog import (
     CLASSIC_HINT,
+    WEB_PREVIEWS_EXPLAINED,
+    WEB_PREVIEWS_TITLE,
     WEB_WALLPAPERS_EXPLAINED,
     WEB_WALLPAPERS_TITLE,
 )
@@ -172,6 +174,10 @@ class _Binding:
     row: Adw.PreferencesRow
     #: Values of the setting's own type (a dial's rotation is a number), with labels.
     choices: tuple[tuple[Any, str], ...] = ()
+
+
+#: Settings that only apply while another is on: the row is insensitive otherwise.
+_SUB_OPTIONS: Final = {"web_wallpaper_previews": "allow_web_wallpapers"}
 
 
 def _row_text(row: Gtk.Widget) -> str:
@@ -516,6 +522,17 @@ class SettingsPage(Page):
             web,
             "web wallpapers wallpaper engine javascript browser chromium security",
             target="library.web",
+        )
+        # A sub-option of the one above: greyed out while web wallpapers are off
+        # (`_SUB_OPTIONS`), its saved value kept.
+        previews = self._switch(
+            WEB_PREVIEWS_TITLE, WEB_PREVIEWS_EXPLAINED, "web_wallpaper_previews"
+        )
+        self._add(
+            more,
+            previews,
+            "web wallpapers preset preview still colours picture wallpaper engine",
+            target="library.web-previews",
         )
 
     def _rebuild_folders(self, access: SettingsAccess, blocked: bool) -> None:
@@ -1502,6 +1519,11 @@ class SettingsPage(Page):
             if needed is not None and not blocked:
                 other, allowed = needed
                 binding.row.set_sensitive(access.setting(other) in allowed)
+        for binding in self._bindings:
+            # A sub-option does nothing while the setting it belongs to is off.
+            parent = _SUB_OPTIONS.get(binding.key)
+            if parent is not None and not blocked:
+                binding.row.set_sensitive(bool(access.setting(parent)))
         self._rebuild_folders(access, bool(blocked))
         note = access.battery_note()
         self._battery_note.set_subtitle(note)

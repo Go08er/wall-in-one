@@ -96,8 +96,9 @@ def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
         processes: object | None = None,
         size: object | None = None,
         refused: object | None = None,
+        previews: bool = False,
     ) -> Path | None:
-        del processes, size, refused
+        del processes, size, refused, previews
         made.asked.append(target.path)
         return None
 
@@ -115,8 +116,9 @@ def maker(monkeypatch: pytest.MonkeyPatch) -> Recording:
         processes: object | None = None,
         size: object | None = None,
         refused: object | None = None,
+        previews: bool = False,
     ) -> Path | None:
-        del processes, size, refused
+        del processes, size, refused, previews
         made.asked.append(target.path)
         return root / f"{target.path.stem}.png" if made._succeeds else None
 
@@ -252,7 +254,9 @@ def test_a_stale_automatic_scene_still_is_queued_again(
     maker.drain()
 
     assert maker.asked == [scene.path]
-    assert judged == [{"size": DISPLAY, "automatic": True}], "the unattended rule"
+    assert judged == [{"size": DISPLAY, "automatic": True, "previews": False}], (
+        "the unattended rule"
+    )
 
 
 def _png_header(path: Path, width: int, height: int) -> None:
@@ -378,8 +382,9 @@ def _sizes_asked(monkeypatch: pytest.MonkeyPatch) -> list[object]:
         processes: object | None = None,
         size: object | None = None,
         refused: object | None = None,
+        previews: bool = False,
     ) -> Path | None:
-        del target, processes, refused
+        del target, processes, refused, previews
         sizes.append(size)
         return None
 
@@ -548,8 +553,9 @@ def test_shutdown_terminates_the_active_still_child_within_budget(
         processes: worker_processes.Cancellation | None = None,
         size: object | None = None,
         refused: object | None = None,
+        previews: bool = False,
     ) -> Path | None:
-        del size, refused
+        del size, refused, previews
         assert processes is not None
         try:
             processes.run(

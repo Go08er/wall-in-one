@@ -294,6 +294,7 @@ def _scan(
         include_workshop=include_workshop,
         workshop_roots=workshop.steam_roots() if include_workshop else (),
         excluded=excluded,
+        previews=settings.preview_stills,
     )
 
 

@@ -25,7 +25,12 @@ from wall_in_one.theme.noctalia import ALL_SCHEMES
 from wall_in_one.theme.palette import Palette
 from wall_in_one.ui import dial_rows, runtime_truth
 from wall_in_one.ui.launch_rows import LaunchRows
-from wall_in_one.ui.next.catalog import WEB_WALLPAPERS_EXPLAINED, WEB_WALLPAPERS_TITLE
+from wall_in_one.ui.next.catalog import (
+    WEB_PREVIEWS_EXPLAINED,
+    WEB_PREVIEWS_TITLE,
+    WEB_WALLPAPERS_EXPLAINED,
+    WEB_WALLPAPERS_TITLE,
+)
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.ui.plain_text import plain
@@ -133,6 +138,7 @@ class PreferencesPage(Adw.PreferencesPage):
             self._add_root,
             self._workshop,
             self._web,
+            self._web_previews,
             self._shuffle,
             self._cycle,
             self._interval,
@@ -198,6 +204,12 @@ class PreferencesPage(Adw.PreferencesPage):
         )
         self._web.connect("notify::active", self._on_changed)
         group.add(self._web)
+        # Its sub-option: insensitive while web wallpapers are off (`_load`).
+        self._web_previews = plain(
+            Adw.SwitchRow, title=WEB_PREVIEWS_TITLE, subtitle=WEB_PREVIEWS_EXPLAINED
+        )
+        self._web_previews.connect("notify::active", self._on_changed)
+        group.add(self._web_previews)
         return group
 
     def _refresh_roots(self) -> None:
@@ -850,6 +862,8 @@ class PreferencesPage(Adw.PreferencesPage):
         self._read_only_banner.set_revealed(bool(keys))
         for control in self._settings_controls:
             control.set_sensitive(not keys)
+        if not keys:
+            self._web_previews.set_sensitive(self._web.get_active())
 
     # -- state -----------------------------------------------------------
 
@@ -877,6 +891,8 @@ class PreferencesPage(Adw.PreferencesPage):
             self._own_scenes.set_active(settings.own_scene_renderer)
             self._workshop.set_active(settings.scan_workshop)
             self._web.set_active(settings.allow_web_wallpapers)
+            self._web_previews.set_active(settings.web_wallpaper_previews)
+            self._web_previews.set_sensitive(settings.allow_web_wallpapers)
             self._favourites_only.set_active(settings.cycle_favourites_only)
             self._display_mode.set_selected(
                 1 if settings.display_mode == config.DISPLAY_MODE_INDEPENDENT else 0
@@ -911,6 +927,8 @@ class PreferencesPage(Adw.PreferencesPage):
     def _on_changed(self, *_arguments: object) -> None:
         if self._loading:
             return
+        # A sub-option: greyed out while web wallpapers are off.
+        self._web_previews.set_sensitive(self._web.get_active())
         scheme_index = self._scheme.get_selected()
         hidden_index = self._when_hidden.get_selected()
         interpolation_index = self._interpolation.get_selected()
@@ -956,6 +974,7 @@ class PreferencesPage(Adw.PreferencesPage):
             "own_scene_renderer": self._own_scenes.get_active(),
             "scan_workshop": self._workshop.get_active(),
             "allow_web_wallpapers": self._web.get_active(),
+            "web_wallpaper_previews": self._web_previews.get_active(),
             "cycle_favourites_only": self._favourites_only.get_active(),
             "display_mode": (
                 config.DISPLAY_MODE_INDEPENDENT if independent else config.DISPLAY_MODE_MIRRORED

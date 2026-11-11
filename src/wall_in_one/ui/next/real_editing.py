@@ -542,7 +542,7 @@ class RealEditing:
                 item.kind is Kind.SCENE
                 and bool(item.scene)
                 and item.unplayable is None
-                and not item.no_automatic_still
+                and not workshop.no_automatic_still(item, self._session.settings.preview_stills)
             ),
         )
 
@@ -887,7 +887,7 @@ class RealEditing:
             item is None
             or item.kind is not Kind.SCENE
             or item.unplayable is not None
-            or item.no_automatic_still
+            or workshop.no_automatic_still(item, self._session.settings.preview_stills)
         ):
             return
         if self._refused():

@@ -783,8 +783,12 @@ def scene_capture_required(
     *,
     size: tuple[int, int] | None = None,
     automatic: bool = False,
+    previews: bool = False,
 ) -> bool:
     """Whether an automatic scene still is absent, undersized, or wrong-shaped.
+
+    ``previews`` is `config.Settings.preview_stills`. Without it a web page or a
+    preset has no automatic still, so none is ever required of it.
 
     Only the managed automatic filename is eligible. A custom still selected
     from the library may intentionally have another shape and must never be
@@ -800,9 +804,9 @@ def scene_capture_required(
     """
     if item.kind is not Kind.SCENE or not item.scene or item.unplayable is not None:
         return False
-    if item.no_automatic_still:
+    if workshop.no_automatic_still(item, previews):
         # Nothing is made for it, so nothing is "required": a file under its
-        # id is a leftover of 0.4.1's preview-made stills, never used.
+        # id is a leftover of a preview-made still, not used while previews are off.
         return False
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
     if item.paired_still is not None and item.paired_still != target:
@@ -812,6 +816,10 @@ def scene_capture_required(
         # Nothing to judge. Whether a capture can actually be made is
         # `capture_scene`'s question, and it writes nothing when it cannot.
         return True
+    if workshop.preview_still(item, previews):
+        # Made from the item's preview, which is as large as it will ever be:
+        # judging it against the display would remake it after every scan.
+        return False
     wanted = size or scenes.measured_capture_size()
     if wanted is None:
         return False
@@ -1558,6 +1566,28 @@ def _command(video: Path, target: Path, seek: float) -> list[str]:
     ]
 
 
+#: The one demuxer a Wallpaper Engine preview is read with, by its suffix. A
+#: preview sits in a folder anyone can write to, and left to probe, ffmpeg
+#: would follow what the bytes say (an HLS playlist named ``.gif`` fetches
+#: its segments from the network); told the format, it decodes a picture or
+#: fails.
+_PREVIEW_DEMUXERS: Final[dict[str, str]] = {
+    ".gif": "gif",
+    ".png": "png_pipe",
+    ".jpg": "jpeg_pipe",
+    ".jpeg": "jpeg_pipe",
+    ".webp": "webp_pipe",
+    ".bmp": "bmp_pipe",
+}
+
+
+def _preview_command(preview: Path, target: Path, demuxer: str) -> list[str]:
+    """`_command` for a preview: its format told, and nothing but local files opened."""
+    command = _command(preview, target, FALLBACK_SEEK_SECONDS)
+    at = command.index("-i")
+    return [*command[:at], "-protocol_whitelist", "file", "-f", demuxer, *command[at:]]
+
+
 def _run(
     video: Path,
     target: Path,
@@ -1854,6 +1884,7 @@ def capture_scene(
     processes: worker_processes.Cancellation | None = None,
     size: tuple[int, int] | None = None,
     allow_web: bool = False,
+    previews: bool = False,
 ) -> Path:
     """Take a still from a Wallpaper Engine scene, through the engine itself.
 
@@ -1870,6 +1901,10 @@ def capture_scene(
     wallpaper service is asked. Nothing is written -- no directory, no
     temporary -- unless a display was measured and the engine is installed.
 
+    ``previews`` is `config.Settings.preview_stills`: a web page or a preset is
+    drawn from its own preview with it on (`workshop.preview_still`), and refused
+    with it off (`workshop.no_automatic_still`).
+
     ``allow_web`` is ``allow_web_wallpapers``. A web page while they are off is
     refused before anything of it is opened: no preview read, no engine. So is
     one Steam has made a web page since the scan: its type is read again just
@@ -1883,11 +1918,35 @@ def capture_scene(
     if item.unplayable is not None:
         # Never handed to the engine, and nothing to show a still for.
         raise StillError(f"{item.name} can\u2019t play: {item.unplayable_reason}")
-    if item.no_automatic_still:
-        # A web page or a preset: the engine's screenshot is not its look and
-        # its preview is the author's, so only a still a person picks.
+    if workshop.no_automatic_still(item, previews):
+        # A web page or a preset with previews off: the engine's screenshot is
+        # not its look and its preview is the author's, so only a picked still.
         raise StillError(f"{item.name} gets no automatic still: pick one by hand")
     target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    if workshop.preview_still(item, previews):
+        # From the preview: no engine, and no display to size it for.
+        if not force and not scene_capture_required(item, root, automatic=True, previews=previews):
+            return target
+        if not allow_web and workshop.web_files_now(item):
+            # Steam may have made it a web page since the scan. Said without
+            # the setting: a caller passes False for anything not known web.
+            raise StillError(
+                f"{item.name}\u2019s folder may be a web wallpaper\u2019s now, "
+                "so no still was taken from its preview"
+            )
+        source = _snapshot_source(item.path, Kind.SCENE)
+        try:
+            return _capture_scene_from_source(
+                item,
+                root=root,
+                target=target,
+                size=None,
+                processes=processes,
+                source=source,
+                from_preview=True,
+            )
+        finally:
+            source.close()
     measured = size or scenes.measured_capture_size()
     if measured is None:
         # The 2560x1440 fallback is a guess, and a still captured at a guessed
@@ -1895,7 +1954,9 @@ def capture_scene(
         raise StillError(
             f"no display size could be measured, so no still was taken for {item.name}"
         )
-    if not force and not scene_capture_required(item, root, size=measured, automatic=True):
+    if not force and not scene_capture_required(
+        item, root, size=measured, automatic=True, previews=previews
+    ):
         return target
     # The engine finds the id under the home folder, wherever the scan found
     # it, and reads its type again there: so it is read there first, and the
@@ -1925,11 +1986,21 @@ def _capture_scene_from_source(
     size: tuple[int, int] | None,
     processes: worker_processes.Cancellation | None,
     source: _SourceSnapshot,
+    from_preview: bool = False,
 ) -> Path:
-    """Render and publish a scene while retaining its opened directory identity."""
+    """Render and publish a scene while retaining its opened directory identity.
+
+    With ``from_preview`` (`workshop.preview_still`) the still is drawn by ffmpeg
+    from the item's own preview instead of by the engine; ``size`` is then unused.
+    """
     # Before any directory or temporary exists: a temporary made for a
     # renderer that is not there is still a file to clean up afterwards.
-    if not scenes.is_available():
+    if from_preview:
+        if item.preview is None:
+            raise StillError(f"{item.name} has no preview to take a still from")
+        if not is_available():
+            raise StillError("ffmpeg is not installed, so no still can be taken")
+    elif not scenes.is_available():
         raise StillError(f"linux-wallpaperengine is not installed, so no still for {item.name}")
     elif size is None:
         raise StillError(f"no display size was measured, so no still was taken for {item.name}")
@@ -1957,7 +2028,9 @@ def _capture_scene_from_source(
         ) from error
     try:
         engine_output = _engine_output_path(temporary, target_context)
-        if processes is None:
+        if from_preview:
+            _still_from_preview(item, engine_output, processes)
+        elif processes is None:
             scenes.screenshot(
                 item.scene,
                 engine_output,
@@ -2006,6 +2079,39 @@ def _capture_scene_from_source(
         target_context.close()
 
 
+def _still_from_preview(
+    item: MediaItem,
+    output: Path,
+    processes: worker_processes.Cancellation | None,
+) -> None:
+    """Draw the first frame of ``item``'s own preview into ``output``, as PNG.
+
+    The preview is opened once, refusing a symbolic link, and ffmpeg reads
+    that open file: it lives in a folder anyone can write in.
+    """
+    preview = item.preview
+    if preview is None:
+        raise StillError(f"{item.name} has no preview to take a still from")
+    demuxer = _PREVIEW_DEMUXERS.get(preview.suffix.lower())
+    if demuxer is None:
+        raise StillError(f"the preview of {item.name} is not a picture a still is taken from")
+    opened = _snapshot_source(preview, Kind.VIDEO)
+    try:
+        complaint = _run(
+            opened.writer_path,
+            output,
+            FALLBACK_SEEK_SECONDS,
+            processes=processes,
+            command=_preview_command(opened.writer_path, output, demuxer),
+        )
+    finally:
+        opened.close()
+    if complaint:
+        raise StillError(
+            f"ffmpeg could not take a still from the preview of {item.name}: {complaint}"
+        )
+
+
 def ensure(
     item: MediaItem,
     root: Path,
@@ -2014,6 +2120,7 @@ def ensure(
     size: tuple[int, int] | None = None,
     refused: Callable[[StillFolderError], None] | None = None,
     allow_web: bool = False,
+    previews: bool = False,
 ) -> Path | None:
     """The still for ``item``, making one if it has none. ``None`` if it needs none.
 
@@ -2027,21 +2134,30 @@ def ensure(
     like the rest; a caller that can tell a person gives this.
 
     ``allow_web`` is ``allow_web_wallpapers``: a web page while they are off
-    gets none, and nothing of it is opened.
+    gets none, and nothing of it is opened. ``previews`` is
+    `config.Settings.preview_stills`: without it a web page or a preset gets
+    none either (`workshop.no_automatic_still`).
     """
     if not item.is_moving or item.unplayable is not None:
         return None
     if workshop.previews_off(item, allow_web):
         return None
-    if item.no_automatic_still:
+    if workshop.no_automatic_still(item, previews):
         return None
     if item.kind is Kind.SCENE:
-        if not scene_capture_required(item, root, size=size, automatic=True):
+        if not scene_capture_required(item, root, size=size, automatic=True, previews=previews):
             return item.paired_still or (
                 pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
             )
         try:
-            return capture_scene(item, root, processes=processes, size=size, allow_web=allow_web)
+            return capture_scene(
+                item,
+                root,
+                processes=processes,
+                size=size,
+                allow_web=allow_web,
+                previews=previews,
+            )
         except StillFolderError as error:
             if refused is not None:
                 refused(error)

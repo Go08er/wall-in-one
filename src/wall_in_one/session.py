@@ -72,6 +72,8 @@ class LibraryScan:
     workshop_roots: tuple[Path, ...]
     scanner: Scanner | None = None
     cancelled: Callable[[], bool] | None = None
+    #: `config.Settings.preview_stills`, as the settings read when this was prepared.
+    previews: bool = False
 
     def run(self) -> Library:
         if self.cancelled is not None and self.cancelled():
@@ -87,6 +89,7 @@ class LibraryScan:
             include_workshop=self.include_workshop,
             workshop_roots=self.workshop_roots,
             cancelled=self.cancelled,
+            previews=self.previews,
         )
 
 
@@ -459,6 +462,7 @@ class RemovalPlan:
                 dict(pairing_store.worker_copy(rebase=True).records),
                 include_workshop=include_workshop,
                 workshop_roots=workshop.steam_roots() if include_workshop else (),
+                previews=self.settings.preview_stills,
             )
         except Exception:  # the app scans again instead (`refresh_library`)
             return None
@@ -1101,6 +1105,7 @@ class Session:
             workshop_roots=workshop.steam_roots() if include_workshop else (),
             scanner=self._scanner,
             cancelled=cancelled,
+            previews=self._settings.preview_stills,
         )
 
     def prepare_library_refresh(self) -> LibraryRefreshPlan:
@@ -2284,9 +2289,10 @@ class Session:
         ):
             self._rebuild_playlist()
 
-        if (settings.roots, settings.scan_workshop) != (
+        if (settings.roots, settings.scan_workshop, settings.preview_stills) != (
             previous.roots,
             previous.scan_workshop,
+            previous.preview_stills,
         ) and rescan_library:
             # Nothing else notices: the library is only re-read when something
             # asks, and a root or Workshop source the user just changed would

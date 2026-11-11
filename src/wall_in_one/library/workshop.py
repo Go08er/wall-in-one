@@ -14,7 +14,7 @@ was written, and the survey changed the design:
   Trusting the casing would have silently hidden eight wallpapers.
 - The preview is a `.gif` for 46 of them. It shows on the library card only:
   it is the author's file, so it is never a still or the source of colours
-  (`MediaItem.no_automatic_still`).
+  (`preview_still`).
 
 Later the owner added a `web` wallpaper and a preset, and both vanished: only
 the two kinds above were kept. Every item is now listed. What the engine can
@@ -60,6 +60,26 @@ WORKSHOP_PROVIDER: Final = "Wallpaper Engine"
 #: The directory components every Workshop item's folder sits under, wherever
 #: Steam is (any drive, any library folder): `.../steamapps/workshop/content/431960/<id>`.
 _CONTENT_PARTS: Final = ("steamapps", "workshop", "content", APP_ID)
+
+
+def preview_still(item: MediaItem, previews: bool) -> bool:
+    """Whether ``item``'s automatic still is drawn from its own preview.
+
+    The one decision, with `no_automatic_still`: ``previews`` is
+    `config.Settings.preview_stills` (web wallpapers on and "use the wallpaper's
+    own preview as its still" on). Only a web page or a preset (`MediaItem.preview_kind`)
+    is ever drawn from a preview, and only then: the preview is the author's file.
+    """
+    return item.preview_kind and previews
+
+
+def no_automatic_still(item: MediaItem, previews: bool) -> bool:
+    """Whether ``item`` gets no automatic still at all, only one a person picks.
+
+    A web page or a preset while ``previews`` (`preview_still`) is off. A
+    `<id>.png` of 0.4.1's, drawn from a preview, is then left on disk and unused.
+    """
+    return item.preview_kind and not previews
 
 
 def labelled_workshop(item: MediaItem) -> bool:
@@ -941,7 +961,7 @@ def playback(item: WorkshopItem, installed: Mapping[str, WorkshopItem]) -> Playb
         # linux-wallpaperengine hands a page no properties (nothing calls into
         # it: CWeb.cpp only loads the URL), so the screen shows the base as it
         # is. Say so and pass nothing. Its preview shows on the card only; it
-        # is never its still or its colours (`MediaItem.no_automatic_still`).
+        # is never its still or its colours (`preview_still`).
         return Playback(
             base=base.id,
             note=f"plays as {base.title}; its settings aren\u2019t applied",

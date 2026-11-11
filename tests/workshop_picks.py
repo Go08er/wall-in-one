@@ -1,6 +1,6 @@
 """A still a person picked for a Workshop scene, for tests that need one to play.
 
-A web page or a preset gets no automatic still (`MediaItem.no_automatic_still`),
+A web page or a preset gets no automatic still (`config.Settings.preview_stills` off),
 so a test of what compiles for one gives it the only kind it can have: a record
 in the pairings file naming a picture. The picture sits outside the library
 root on purpose, so it adds no still item to All media.

@@ -1234,6 +1234,7 @@ class Application(Adw.Application):
             report=self.window_report,
             note=lambda message: self.activity_log.record("app", message),
             web_allowed=lambda: self._settings.allow_web_wallpapers,
+            previews=lambda: self._settings.preview_stills,
         )
 
     # -- lifecycle -------------------------------------------------------
@@ -3797,9 +3798,16 @@ class Application(Adw.Application):
         )
 
     def _on_settings_changed(self, settings: config.Settings) -> None:
-        library_sources_changed = (settings.roots, settings.scan_workshop) != (
+        # Web wallpapers' preview stills are part of what a scan resolves, so a
+        # move of `Settings.preview_stills` is a library source like the rest.
+        library_sources_changed = (
+            settings.roots,
+            settings.scan_workshop,
+            settings.preview_stills,
+        ) != (
             self._settings.roots,
             self._settings.scan_workshop,
+            self._settings.preview_stills,
         )
         palette_source_changed = (
             settings.preview_scheme,
@@ -5143,7 +5151,9 @@ class Application(Adw.Application):
         def work() -> _StillPairingMutationResult:
             effective = still
             if effective is None:
-                effective = pairings.synthesize(current, roots).still
+                effective = pairings.synthesize(
+                    current, roots, previews=self._settings.preview_stills
+                ).still
             if stale and (still is not None or effective is None):
                 raise runtime_config.LibraryNotCurrentError(
                     f"{current.name}\u2019s still was not changed: {stale}"
@@ -5179,7 +5189,9 @@ class Application(Adw.Application):
         stale = self.pairing_currency_refusal(current)
 
         def work() -> _PairingResetMutationResult:
-            effective = pairings.synthesize(current, roots).still
+            effective = pairings.synthesize(
+                current, roots, previews=self._settings.preview_stills
+            ).still
             if effective is None and stale:
                 raise runtime_config.LibraryNotCurrentError(
                     f"{current.name} was not reset: {stale}"
@@ -7573,7 +7585,11 @@ class Application(Adw.Application):
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
         roots = self._session.library.roots
-        if not roots or not item.scene or item.no_automatic_still:
+        if (
+            not roots
+            or not item.scene
+            or workshop.no_automatic_still(item, self._settings.preview_stills)
+        ):
             return False
         if workshop.why_not_played(item, self._settings.allow_web_wallpapers):
             return False
@@ -9139,9 +9155,14 @@ class Application(Adw.Application):
         candidate: config.Settings,
     ) -> None:
         """Reconcile one already-durable immutable snapshot on GTK."""
-        library_sources_changed = (candidate.roots, candidate.scan_workshop) != (
+        library_sources_changed = (
+            candidate.roots,
+            candidate.scan_workshop,
+            candidate.preview_stills,
+        ) != (
             previous.roots,
             previous.scan_workshop,
+            previous.preview_stills,
         )
         async_scan = library_sources_changed and not self._service_start
         # Persist before adoption. A failed write must leave the application,

@@ -567,8 +567,13 @@ def scan(
     adoption_candidates: Sequence[adopted.Authority] | None = None,
     cancelled: Callable[[], bool] | None = None,
     excluded: pairing.Exclusion | None = None,
+    previews: bool = False,
 ) -> Library:
     """Build a `Library` from ``roots`` (or the default roots).
+
+    ``previews`` is `config.Settings.preview_stills`: whether a web page or a
+    preset takes its still from its own preview. Every caller that has settings
+    passes it; it is kept on the library (`Library.previews`).
 
     ``records`` are the stored pairing customizations. Passed in rather than
     read here, because a scan should not have opinions about whose choices it
@@ -595,6 +600,7 @@ def scan(
             workshop_content_directories=workshop_content_directories,
             adoption_candidates=adoption_candidates,
             cancelled=cancelled,
+            previews=previews,
         )
 
 
@@ -607,6 +613,7 @@ def _scan(
     workshop_content_directories: Sequence[Path] | None,
     adoption_candidates: Sequence[adopted.Authority] | None,
     cancelled: Callable[[], bool] | None,
+    previews: bool,
 ) -> Library:
     resolved_roots = tuple(roots) if roots is not None else default_roots()
     candidate_internal_captures: tuple[tuple[Path, file_io.FileFingerprint], ...] = ()
@@ -782,6 +789,7 @@ def _scan(
             resolved_roots,
             records,
             adopted_stills=adopted_mapping,
+            previews=previews,
         )
     for video, why in stillless:
         # No still for want of looking: the video's own path, so a playlist
@@ -820,4 +828,5 @@ def _scan(
         still_inventory=still_inventory,
         adopted_stills=adopted_pairs,
         chosen_stills=pairings.chosen_stills(records or {}),
+        previews=previews,
     )

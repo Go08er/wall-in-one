@@ -40,7 +40,7 @@ from wall_in_one.wallpaper.applier import Applier, ApplyError
 
 def _item(fixture: Fixture, state: str, monkeypatch: pytest.MonkeyPatch) -> MediaItem:
     old = fixture.scene
-    assert not old.holds_web and not old.no_automatic_still
+    assert not old.holds_web and not old.preview_kind
     # The screenshot command names a Workshop id, not item.path. The fixture
     # is put at the engine's first usual place under HOME, so this is also
     # the folder an actual engine would find.
@@ -334,7 +334,7 @@ def test_with_web_on_a_scene_refused_as_web_is_asked_for_again_after_the_rescan(
     maker.shutdown()
     if state == "stale-web":
         assert engine == []
-        assert rescanned.holds_web and rescanned.no_automatic_still
+        assert rescanned.holds_web and rescanned.preview_kind
         # No still is ever made for a web page (the owner's rule), so there is
         # nothing to ask for again after the rescan.
         assert submitted == [(stale,)]

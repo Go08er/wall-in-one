@@ -1280,7 +1280,7 @@ def test_a_web_page_or_preset_gets_no_automatic_still_and_its_preview_is_never_o
 
     monkeypatch.setattr(scenes, "screenshot", never)
     monkeypatch.setattr(subprocess, "run", never)
-    assert item.no_automatic_still
+    assert item.preview_kind
     assert not stills.scene_capture_required(item, root, automatic=True)
     assert stills.ensure(item, root) is None
     for forced in (False, True):
@@ -1327,7 +1327,7 @@ def test_a_true_scenes_captured_still_is_still_found_by_its_id(root: Path) -> No
     captured = pairing.still_directory(root) / "2777242023.png"
     captured.parent.mkdir(parents=True)
     _preview(captured)
-    assert not item.no_automatic_still
+    assert not item.preview_kind
     assert pairings.synthesize(item, (root,)).still == captured
 
 

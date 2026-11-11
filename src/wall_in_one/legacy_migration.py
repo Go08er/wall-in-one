@@ -1194,6 +1194,7 @@ def _find_nothing_to_play(
         include_workshop=include_workshop,
         workshop_roots=workshop.steam_roots() if include_workshop else (),
         adoption_candidates=(),
+        previews=settings.preview_stills,
     )
     view = Session(
         settings,

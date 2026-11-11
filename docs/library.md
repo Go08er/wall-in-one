@@ -176,12 +176,13 @@ directions is captured again, so an old low-resolution still is replaced. A
 still is never judged against a guessed size or by its shape, and nothing is
 written without the engine or a measured display.
 
-A web wallpaper or a preset gets no automatic still: the engine would capture
-a web page before it has drawn, a preset's screenshot isn't its look, and the
-`preview` its author shipped is never used as a still or to make one (Workshop
-content is untrusted). It has a still only if you pick one by hand, and until
-then it can't be played. A `<id>.png` that 0.4.1 drew from a preview is left
-where it is and ignored. A Wallpaper Engine item that can't play gets no still,
+A web wallpaper or a preset gets no engine still: the engine would capture a web
+page before it has drawn and a preset's screenshot isn't its look. Its still is
+one you pick, or, with **Use the wallpaper's own preview as its still** on
+(Settings → Library, under Allow web wallpapers; on for a profile from 0.4.1 that
+allowed web wallpapers), `<id>.png` drawn through ffmpeg from the preview its
+author shipped. Without either it can't be played. With that setting off, a `<id>.png` that 0.4.1 drew from a
+preview is left where it is and ignored. A Wallpaper Engine item that can't play gets no still,
 and neither does a web wallpaper while they are off. See
 [Wallpaper Engine](wallpaper-engine.md#stills).
 
@@ -286,7 +287,8 @@ beside.
   that wallpaper in Steam. linux-wallpaperengine doesn't pass settings to a
   web wallpaper's page, so a preset of a web wallpaper plays that wallpaper as
   it is, and says so ("plays as Electric Eye; its settings aren't applied");
-  like any preset it has no automatic still: pick one to play it.
+  its still and colours come from that wallpaper's preview when previews are on
+  (above), otherwise from a still you pick.
 - **Executable Wallpaper Engine wallpapers** (the "application" type, and
   presets of them) are never run, for security: one is a program anyone can
   publish.

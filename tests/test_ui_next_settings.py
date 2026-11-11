@@ -67,6 +67,7 @@ CLASSIC_KEYS = frozenset(
         "opacity",
         "scan_workshop",
         "allow_web_wallpapers",
+        "web_wallpaper_previews",
         "video_muted",
         "video_volume",
         "video_hardware_decode",
@@ -822,3 +823,38 @@ def test_the_classic_browser_suggests_a_free_name_and_never_writes_over_one(
             editor.force_close()
         dialog.force_close()
         root.destroy()
+
+
+def test_the_previews_sub_option_is_greyed_out_while_web_wallpapers_are_off(
+    opened: Opened,
+) -> None:
+    """A sub-option of "Allow web wallpapers": its saved value is kept while it doesn't apply."""
+    web = opened.row("allow_web_wallpapers")
+    sub = opened.row("web_wallpaper_previews")
+    assert not web.get_active() and not sub.get_sensitive()
+
+    web.set_active(True)
+    opened.wait("web on", lambda: sub.get_sensitive())
+    assert opened.application.settings.allow_web_wallpapers
+    sub.set_active(True)
+    opened.wait("sub-option on", lambda: opened.application.settings.web_wallpaper_previews)
+    assert opened.application.settings.preview_stills
+
+    web.set_active(False)
+    opened.wait("web off", lambda: not sub.get_sensitive())
+    assert sub.get_active(), "its saved value is kept"
+    assert opened.application.settings.web_wallpaper_previews
+    assert not opened.application.settings.preview_stills, "and does not apply"
+
+
+def test_the_classic_previews_sub_option_follows_web_wallpapers(
+    opened: Opened,
+) -> None:
+    from wall_in_one.ui import preferences
+
+    classic = preferences.PreferencesPage(opened.application)
+    assert not classic._web.get_active() and not classic._web_previews.get_sensitive()
+    classic.apply_settings(config.Settings(allow_web_wallpapers=True, web_wallpaper_previews=True))
+    assert classic._web_previews.get_sensitive() and classic._web_previews.get_active()
+    classic.apply_settings(config.Settings(allow_web_wallpapers=False, web_wallpaper_previews=True))
+    assert not classic._web_previews.get_sensitive() and classic._web_previews.get_active()

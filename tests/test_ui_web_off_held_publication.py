@@ -161,9 +161,17 @@ def _reaches_the_service_while_held(
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
-def _and_after_the_scan(service: Service, scans: HeldScans) -> None:
+def _owed_clears(application: Any) -> None:
+    """Nothing is owed on the lane once web off has landed or been guarded (`_publish_web_off`)."""
+    spin_until(
+        lambda: application._runtime_web_off_owed == 0, AT_ONCE, what="web off no longer owed"
+    )
+
+
+def _and_after_the_scan(application: Any, service: Service, scans: HeldScans) -> None:
     scans.release()
     _pump(4.0)
+    assert application._runtime_web_off_owed == 0
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
     assert not service.allows_web()
     assert "stop" not in service.sent and "quit" not in service.sent, service.sent
@@ -196,7 +204,7 @@ def test_web_off_while_an_earlier_folder_scan_is_in_flight(
 
     _save(application, allow_web_wallpapers=False)
     _reaches_the_service_while_held(application, service, scans)
-    _and_after_the_scan(service, scans)
+    _and_after_the_scan(application, service, scans)
 
 
 @previews_param
@@ -218,7 +226,7 @@ def test_web_off_in_the_same_save_as_a_folder_change(
     _save(application, roots=(*application.settings.roots, extra), allow_web_wallpapers=False)
     _reaches_the_service_while_held(application, service, scans)
     assert application._runtime_library_scan_pending, "the folders' scan is what is held"
-    _and_after_the_scan(service, scans)
+    _and_after_the_scan(application, service, scans)
 
 
 def test_a_publication_during_the_previews_rescan_survives_its_failure(
@@ -239,7 +247,7 @@ def test_a_publication_during_the_previews_rescan_survives_its_failure(
     assert application._runtime_library_scan_pending, "the previews rescan is held"
     application.runtime_config_changed()
     _pump(1.0)
-    _and_after_the_scan(service, scans)
+    _and_after_the_scan(application, service, scans)
     assert application.publication_problem == "", application.publication_problem
 
 
@@ -280,7 +288,7 @@ def test_a_publication_made_while_web_off_compiles_still_sends_it(
     go_on.set()
     _reaches_the_service_while_held(application, service, scans, settles=False)
     assert len(compiled) >= 2, compiled
-    _and_after_the_scan(service, scans)
+    _and_after_the_scan(application, service, scans)
 
 
 @previews_param
@@ -324,7 +332,7 @@ def test_web_off_after_dropping_a_folder_a_playlist_names(
     assert "stop" not in service.sent, "published, not guarded"
     assert application.publication_problem == "", application.publication_problem
     assert "aside.png" in service.loaded, "published from the library held, older folders and all"
-    _and_after_the_scan(service, scans)
+    _and_after_the_scan(application, service, scans)
     assert "aside.png" not in service.loaded, "the scan for the new folders published after it"
 
 
@@ -351,7 +359,7 @@ def test_a_playback_gesture_waiting_for_a_scan_lets_web_off_out_first(
     # The gesture's job delivers it; the compile job queued behind it then finds nothing
     # new and, with the scan still pending, settles with the scan's publication.
     _reaches_the_service_while_held(application, service, scans, settles=False)
-    _and_after_the_scan(service, scans)
+    _and_after_the_scan(application, service, scans)
 
 
 @previews_param
@@ -370,6 +378,7 @@ def test_web_off_during_a_removal_runs_the_guard_at_once(
         _pump(0.5)
         assert not service.allows_web(), service.sent
         assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+        assert application._runtime_web_off_owed == 0
     finally:
         application._restore_runtime_after_uncommitted_removal()
 
@@ -401,6 +410,7 @@ def test_service_publishes_web_off_before_its_rescan(
     assert config.load_strict().allow_web_wallpapers is False
     assert not recorder.allows_web()
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+    assert application._runtime_web_off_owed == 0
 
 
 @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
@@ -432,6 +442,7 @@ def test_service_publishes_web_off_before_the_rescan_of_a_dropped_folder(
     assert "dusk.png" not in loaded[-1]
     assert not any(runtime_config.allows_web_wallpapers(text=text) for text in loaded)
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+    assert application._runtime_web_off_owed == 0
 
 
 def test_a_scan_begun_after_web_off_in_an_upgraded_profile_is_not_a_barrier(
@@ -451,3 +462,125 @@ def test_a_scan_begun_after_web_off_in_an_upgraded_profile_is_not_a_barrier(
         assert not application._runtime_library_scan_held
     finally:
         application._finish_runtime_library_scan(7)
+
+
+# -- the owed flag's lifecycle (review f5, N1) ----------------------------------------------------
+
+
+def _hold_the_first_compile(application: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
+    """The first compile on the lane waits for `go_on`; returns (compiling, go_on)."""
+    compiling = threading.Event()
+    go_on = threading.Event()
+    real_compile = application._compile_runtime_request
+    compiled: list[int] = []
+
+    def slow(request: Any) -> bool:
+        compiled.append(request.generation)
+        changed = bool(real_compile(request))
+        if len(compiled) == 1:
+            compiling.set()
+            go_on.wait(30)
+        return changed
+
+    monkeypatch.setattr(application, "_compile_runtime_request", slow)
+    return compiling, go_on
+
+
+@previews_param
+def test_web_off_then_quickly_on_owes_nothing_while_the_compile_is_held(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    previews: bool,
+) -> None:
+    """Web on ends what web off owed at once, not when its compile ends (`_adopt_settings`)."""
+    application = profiles().application
+    _web_on(application, previews, monkeypatch)
+    compiling, go_on = _hold_the_first_compile(application, monkeypatch)
+    try:
+        _save(application, allow_web_wallpapers=False)
+        spin_until(compiling.is_set, AT_ONCE, what="web off's own compile")
+        assert application._runtime_web_off_owed != 0, "owed while its compile is held"
+        _save(application, allow_web_wallpapers=True)
+        assert application._runtime_web_off_owed == 0, "web on: nothing is owed"
+    finally:
+        go_on.set()
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publications")
+    assert application._runtime_web_off_owed == 0
+    assert config.load_strict().allow_web_wallpapers is True
+
+
+@previews_param
+def test_web_on_off_on_owes_only_between_the_off_and_the_next_on(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    previews: bool,
+) -> None:
+    application = profiles().application
+    service = _web_on(application, previews, monkeypatch)
+    compiling, go_on = _hold_the_first_compile(application, monkeypatch)
+    try:
+        _save(application, allow_web_wallpapers=False)
+        spin_until(compiling.is_set, AT_ONCE, what="the first compile")
+        assert application._runtime_web_off_owed != 0
+        _save(application, allow_web_wallpapers=True)
+        assert application._runtime_web_off_owed == 0
+        _save(application, allow_web_wallpapers=False)
+        assert application._runtime_web_off_owed != 0, "the second off owes again"
+    finally:
+        go_on.set()
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publications")
+    assert config.load_strict().allow_web_wallpapers is False
+    assert not service.allows_web()
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+    _save(application, allow_web_wallpapers=True)
+    assert application._runtime_web_off_owed == 0
+
+
+@previews_param
+def test_a_failing_compile_while_web_off_is_owed_runs_the_guard_and_clears_it(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    previews: bool,
+) -> None:
+    application = profiles().application
+    service = _web_on(application, previews, monkeypatch)
+
+    def failing(_request: object) -> bool:
+        raise runtime_config.RuntimeConfigError("a library folder can't be read")
+
+    monkeypatch.setattr(application, "_compile_runtime_request", failing)
+    _save(application, allow_web_wallpapers=False)
+    spin_until(lambda: "stop" in service.sent, AT_ONCE, what="the guard")
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publication")
+    assert application._runtime_web_off_owed == 0
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+
+
+@previews_param
+def test_a_folder_change_after_web_off_landed_waits_for_its_scan_again(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    previews: bool,
+) -> None:
+    """With nothing owed, a publication is held by its scan as before: no old library goes out."""
+    application = profiles().application
+    service = _web_on(application, previews, monkeypatch)
+    _save(application, allow_web_wallpapers=False)
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="web off settling")
+    scans = HeldScans(monkeypatch, fails=False)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    spin_until(lambda: not application._runtime_library_scan_pending, 10, what="no scan")
+    service.sent.clear()
+    _save(application, roots=(*application.settings.roots, extra))
+    spin_until(lambda: application._runtime_library_scan_pending, 10, what="the scan pending")
+    _pump(2.0)
+    assert application._runtime_web_off_owed == 0
+    assert "reload" not in service.sent, "the old library went out while the scan was held"
+    scans.release()
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publication")
+    assert application._runtime_web_off_owed == 0

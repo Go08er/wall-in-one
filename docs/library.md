@@ -20,10 +20,9 @@ untrusted, so the walk of a library folder lists nothing under a
 `steamapps/workshop/content/431960` folder (the Workshop scan lists those items,
 when it is on), and nothing below a folder that holds a `project.json` (any
 depth, up to the library folder): an item copied in by hand is an item folder,
-and if any `project.json` from a file's folder up to the library folder is a
-`web`, `application`, unknown or unreadable one, nothing there is listed;
-otherwise a `video` lists only the file its own `project.json` names, and nothing
-in its subfolders. A folder left out for this is recorded once in the scan's
+nothing in its subfolders is listed (whatever `project.json` files they hold),
+and the item folder itself lists only the file its `project.json` names when it
+is a `video`; a `web`, `application`, unknown or unreadable one lists nothing. A folder left out for this is recorded once in the scan's
 record of places it left out, as "not a wallpaper", unless the Workshop scan
 lists it; neither interface shows that record or counts it, so a library folder
 that is (or is inside) an item's folder simply shows no wallpapers from it. A

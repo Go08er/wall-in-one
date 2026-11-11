@@ -405,13 +405,13 @@ Workshop content is untrusted, so the walk of a library folder decides by place
 - a file under a `steamapps/workshop/content/431960` folder is not listed as
   local media at all: the Workshop scan lists the items it lists;
 - a folder with a `project.json` is an item folder, and everything below it, at
-  any depth up to the library folder, is the item's too; it fails closed. If any
-  `project.json` from a file's folder up to the library folder is a `web`,
-  `application` or unknown type, or can't be read, nothing there is listed, so a
-  `project.json` nested inside a web item can't choose what is. Otherwise (every
-  one a `video`) only the file the item folder's own `project.json` names is
-  listed, so an item copied in by hand still works, and never its preview, its
-  other files, or anything in its subfolders.
+  any depth up to the library folder, is the item's too; it fails closed.
+  Nothing in a subfolder of an item folder is listed, whatever `project.json`
+  files sit there (one nested inside a web item can't choose what is listed).
+  An item folder with no item folder above it lists only the file its
+  `project.json` names, if it is a `video`, so an item copied in by hand still
+  works, and never its preview or other files; a `web`, `application` or
+  unknown type, or a `project.json` that can't be read, lists nothing.
 
 Whatever ffmpeg opens that somebody else wrote (a still's frame, a thumbnail, a
 downloaded preview) is told what it may open (`decoding.input_options`):

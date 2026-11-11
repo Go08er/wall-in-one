@@ -446,9 +446,7 @@ def _selected_still(video: Path, *, strict: bool) -> Path | None:
     return candidate if present(candidate) else None
 
 
-def selector_is_foreign(
-    video: Path, roots: Iterable[Path], *, sidecar: Path | None = None
-) -> bool:
+def selector_is_foreign(video: Path, roots: Iterable[Path], *, sidecar: Path | None = None) -> bool:
     """Whether ``video``'s sidecar is one this app did not write, and so is not its to delete.
 
     This app writes a selector only inside a root, naming a still there. So the

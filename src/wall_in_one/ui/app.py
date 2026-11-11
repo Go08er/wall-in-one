@@ -6355,9 +6355,13 @@ class Application(Adw.Application):
                 authoring_generation = self._runtime_authoring_generation
             if latest is not None and latest.generation > completed:
                 continue
-            if scan_pending and latest is not None and latest.generation <= urgent_generation:
-                if self._settings.covers(latest.library_sources):
-                    return publication  # web-off went out; the scan's publication follows
+            if (
+                scan_pending
+                and latest is not None
+                and latest.generation <= urgent_generation
+                and self._settings.covers(latest.library_sources)
+            ):
+                return publication  # web-off went out; the scan's publication follows
             if scan_pending or authoring_generation > completed:
                 if not wait_for_library or removal_pending or not scan_pending:
                     return _RuntimePublication(
@@ -9206,7 +9210,8 @@ class Application(Adw.Application):
         # pending, which runs the web-off guard (`_stopping_web_after_failure`).
         web_turned_off = previous.allow_web_wallpapers and not candidate.allow_web_wallpapers
         if not async_scan or web_turned_off:
-            if self._publish_runtime_for_context() and web_turned_off:
+            published = self._publish_runtime_for_context()
+            if published and web_turned_off:
                 with self._runtime_config_lock:
                     self._runtime_urgent_generation = self._runtime_authoring_generation
         self.sync_cycle_timer()

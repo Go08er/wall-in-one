@@ -313,7 +313,9 @@ def test_the_still_maker_drops_a_web_page_that_was_queued_before_web_went_off(
     from wall_in_one.ui.stills import StillMaker
 
     web = {"on": True}
-    maker = StillMaker(web_allowed=lambda: web["on"])
+    # Previews on: a web page gets an automatic still only from its preview, so
+    # the web setting is what this is about.
+    maker = StillMaker(web_allowed=lambda: web["on"], previews=lambda: True)
     ensured: list[MediaItem] = []
 
     def ensure(item: MediaItem, root: Path, **options: object) -> None:

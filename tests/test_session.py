@@ -1382,7 +1382,9 @@ def test_committed_trash_sync_error_keeps_precommit_artifact_cleanup_outcome(
     video = root / "clip.mp4"
     video.write_bytes(b"video")
     sidecar = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
-    sidecar.write_text('{"still_path":"/nowhere"}', encoding="utf-8")
+    # A selector naming a still inside the root is the app's own; one naming a place
+    # outside every root is left by Move to Trash (decision 1).
+    sidecar.write_text(json.dumps({"still_path": str(root / "clip-still.png")}), encoding="utf-8")
     item = MediaItem(video, Kind.VIDEO, 5, 1)
     journal_path = tmp_path / "pending-removals.json"
     session = Session(

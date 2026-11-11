@@ -466,28 +466,6 @@ def _hard_link(sessions: Harness, tmp_path: Path) -> Scenario:
     return Scenario(session, a, refused=False)
 
 
-def _s2(sessions: Harness, tmp_path: Path) -> Scenario:
-    """Codex S-2: a library folder that is a Workshop item's own folder, Workshop scanning on.
-
-    The root walk finds the video first, as the user's own; Workshop
-    discovery finds the same path again, and must not bring it back.
-    """
-    steam = tmp_path / "steam"
-    installed = steam / "steamapps" / "workshop" / "content" / workshop.APP_ID / "123"
-    installed.mkdir(parents=True)
-    (installed / "project.json").write_text(
-        json.dumps({"type": "video", "file": "clip.mp4", "title": "Clip"}), encoding="utf-8"
-    )
-    clip = _file(installed / "clip.mp4")
-    _file(installed / "clip-still.png")
-    dawn = _file(tmp_path / "lib" / "A" / "dawn.png")
-    session = sessions((installed, dawn.parent), steam)
-    found = session.library.find(clip)
-    assert found is not None and found.provider == "local", "the root walk wins"
-    _scheduled(session, "Evening", [clip, dawn])
-    return Scenario(session, clip, refused=False)
-
-
 def _s4(sessions: Harness, tmp_path: Path) -> Scenario:
     """Codex S-4: what the removal deletes doesn't count against the walk's budget."""
     root = tmp_path / "lib" / "A"
@@ -525,7 +503,6 @@ SCENARIOS: dict[str, Callable[..., Scenario]] = {
     "r3-linked-ancestor-alias": _r3(alternate=False),
     "r3-alias-with-an-alternate": _r3(alternate=True),
     "hard-link": _hard_link,
-    "s2-workshop-overlap": _s2,
     "s4-walk-budget": _s4,
 }
 

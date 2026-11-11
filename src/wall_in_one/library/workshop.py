@@ -1061,19 +1061,21 @@ def web_files_now(item: MediaItem) -> bool:
     )
 
 
-def engine_refusal(workshop_id: str) -> str:
-    """Why linux-wallpaperengine must not be given ``workshop_id`` while web wallpapers are off.
+def engine_refusal(workshop_id: str, *, allow_web: bool) -> str:
+    """Why linux-wallpaperengine must not be given ``workshop_id``.
 
-    Empty when it may. The service's `refusal_without_web`
-    (service/src/workshop.rs), for the engines this app starts itself: a
-    scene's still, and the legacy Python playback. The engine finds
+    Empty when it may. The service's `refusal` (service/src/workshop.rs), for
+    the engines this app starts itself: a scene's still, and the legacy
+    Python playback. It is read every time, web wallpapers allowed or not;
+    ``allow_web`` only lets a ``web`` page through. The engine finds
     ``--bg <id>`` under the home folder, not where the scan found the item,
     and reads its type again when it starts, so every folder of
     `ENGINE_WORKSHOP_FOLDERS` that holds it is read now, as the scan reads a
     `project.json` (`_read_project`). It may start only when each copy there
-    is a `scene` or a `video` and none reads ``web`` in any spelling
-    `holds_web` counts. A copy that can't be looked at or read, and an item
-    found in none of them, are refused. The home folder is the caller's
+    is a `scene` or a `video`, or a web page while ``allow_web``; any other
+    type, an `application` among them, is refused, and so is ``web`` in any
+    spelling `holds_web` counts while it is off. A copy that can't be looked
+    at or read, and an item found in none of them, are refused. The home folder is the caller's
     current one, as in `default_steam_roots`.
     """
     if not is_workshop_id(workshop_id):
@@ -1104,6 +1106,8 @@ def engine_refusal(workshop_id: str) -> str:
                 f"Workshop item {workshop_id}\u2019s project.json in {directory} can\u2019t be read"
             )
         if "web" in {project.kind, project.declared_type, project.lenient_type}:
+            if allow_web:
+                continue
             return f"Workshop item {workshop_id} is a web page"
         if project.declared_type not in ("scene", "video"):
             return f"Workshop item {workshop_id} in {directory} is neither a scene nor a video"

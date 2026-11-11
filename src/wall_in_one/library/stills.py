@@ -1961,7 +1961,7 @@ def capture_scene(
     # The engine finds the id under the home folder, wherever the scan found
     # it, and reads its type again there: so it is read there first, and the
     # refusal is said without the setting, as the preview's is above.
-    refusal = "" if allow_web else workshop.engine_refusal(item.scene)
+    refusal = workshop.engine_refusal(item.scene, allow_web=allow_web)
     if refusal:
         raise StillError(f"{refusal}, so no still was taken for {item.name}")
     source = _snapshot_source(item.path, Kind.SCENE)

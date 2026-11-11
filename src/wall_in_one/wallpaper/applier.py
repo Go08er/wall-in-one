@@ -195,9 +195,9 @@ class Applier:
         # The engine reads the type again when it starts, under the home
         # folder: an update since the scan can have made it a web page. So it
         # is read there first, as the service does before it starts one.
-        refusal = "" if allow_web else workshop.engine_refusal(item.rendered_scene)
+        refusal = workshop.engine_refusal(item.rendered_scene, allow_web=allow_web)
         if refusal:
-            raise ApplyError(f"{item.name} can\u2019t play while web wallpapers are off: {refusal}")
+            raise ApplyError(f"{item.name} can\u2019t play: {refusal}")
         try:
             # A preset renders its base with its own values.
             self._scenes.start(item.rendered_scene, item.scene_properties)

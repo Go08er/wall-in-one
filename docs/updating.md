@@ -111,8 +111,8 @@ moving a renderer later
 6. Open the app and check your folders. Re-enable the companion or your usual
    launcher; the companion prepares and starts a direct runtime when needed.
    Check playback, then apply any temporary playback choices you want again.
-   (The Arch setup script restarts the service itself, so there this is the
-   step it leaves for you.)
+   (Unless run with `--no-enable`, the Arch setup script restarts the service
+   itself, so there opening the app is the step it leaves for you.)
 
 After an update, the app may show a **Tidy up** card at the top of its window,
 in either interface, when older versions left things behind: leftover claim

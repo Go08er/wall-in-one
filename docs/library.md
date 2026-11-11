@@ -25,12 +25,11 @@ and the item folder itself lists only the file its `project.json` names when it
 is a `video`; a `web`, `application`, unknown or unreadable one lists nothing. A
 folder left out for this is recorded once in the scan's record of places it left
 out, as "not a wallpaper", unless the Workshop scan lists it; neither interface
-shows that record or counts it, so a library folder that is (or is inside) an
-item's folder simply shows no wallpapers from it. A folder of your own that
-happens to hold an unrelated `project.json` (a web or .NET project) is left out
-the same way. To list such videos, add a subfolder that holds no `project.json`
-as a library folder of its own (it lists its files), or move the videos out of
-the item folder.
+shows that record or counts it, so videos left out this way simply don't appear.
+A folder of your own that happens to hold an unrelated `project.json` (a web or
+.NET project) is left out the same way. To list such videos, add a subfolder
+that holds no `project.json` as a library folder of its own (it lists its
+files), or move the videos out of the item folder.
 
 A scan is bounded: at most 4096 wallpapers, 65536 directory entries examined,
 and 8 directories deep. Anything past that is left out and counted as skipped

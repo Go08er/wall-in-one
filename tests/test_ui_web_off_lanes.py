@@ -78,6 +78,10 @@ def _turn_off(
     reports: list[str] = []
 
     def send(verb: str, *_a: object, **_k: object) -> Response:
+        if "quit" in sent:
+            # A service told to quit is gone: whatever asks next finds none (``--service``
+            # publishes web off before its rescan and again after it, F4-2).
+            raise client.NotRunningError("the service quit")
         sent.append(verb)
         if verb == "status" and schemas is not None:
             return Response.success(

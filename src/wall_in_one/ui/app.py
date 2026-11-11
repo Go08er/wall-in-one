@@ -1156,9 +1156,11 @@ class Application(Adw.Application):
         self._runtime_library_scan_generation = 0
         self._runtime_library_scan_sources: _LibrarySources | None = None
         self._runtime_library_scan_pending = False
-        #: Requests up to this generation are the publication of web wallpapers going off:
-        #: they do not wait for a library scan in flight (`_runtime_publication`).
-        self._runtime_urgent_generation = 0
+        #: The publication of web wallpapers going off is owed from this authoring
+        #: generation on (`_publish_web_off`), 0 when none is: until one at or past it
+        #: lands, no scan, barrier or library freshness holds a publication, and one
+        #: that is held anyway runs the web-off guard (`_stopping_web_after_failure`).
+        self._runtime_web_off_owed = 0
         self._runtime_library_error = ""
         # A source-changing Settings write is not publishable until its
         # Library scan settles. The settings actor can finish before a runtime
@@ -4399,6 +4401,31 @@ class Application(Adw.Application):
         self._ensure_runtime_compile_queued()
         return True
 
+    def _publish_web_off(self) -> None:
+        """Publish web wallpapers going off now, from the library held, whatever its freshness.
+
+        The one path for it, whichever lane publishes (`_publish_runtime_for_context`).
+        While web wallpapers are off every web page, and all that a preview could
+        have drawn a still for, is left out (`workshop.web_off`), so a library
+        scanned for older folders, or under the other preview setting, is safe to
+        publish from. Until that publication lands nothing holds one: not a scan in
+        flight, one that failed, the save barrier, nor the library's sources
+        (`_compile_runtime_request`, `_compile_runtime_until_current_locked`), and
+        one held anyway runs the web-off guard (`_stopping_web_after_failure`), as
+        one that fails does. A rescan for new sources then publishes again.
+        """
+        with self._runtime_config_lock:
+            # What the lane's next request is numbered (`_publish_runtime_async`).
+            self._runtime_web_off_owed = self._runtime_authoring_generation + 1
+        try:
+            self._publish_runtime_for_context()
+        finally:
+            with self._runtime_config_lock:
+                if self._runtime_authoring_generation < self._runtime_web_off_owed:
+                    # Published synchronously (``--service``), or not queued at all:
+                    # nothing is owed on the lane.
+                    self._runtime_web_off_owed = 0
+
     def _publish_runtime_for_context(self) -> bool:
         """The GUI's bounded asynchronous path, window or not; synchronous only for ``--service``.
 
@@ -5536,7 +5563,16 @@ class Application(Adw.Application):
             runtime_config.compiler_lock(),
         ):
             settings = config.load_strict()
-            if not settings.covers(request.library_sources):
+            with self._runtime_config_lock:
+                web_off_owed = self._runtime_web_off_owed != 0
+            # Web wallpapers going off are published from the library held, whatever
+            # sources it was scanned for: while they are off every web page, and all
+            # that a preview could have drawn a still for, is left out
+            # (`workshop.web_off`), so no library can bring one back. The rescan's own
+            # publication follows (`_publish_web_off`).
+            if not settings.covers(request.library_sources) and not (
+                web_off_owed and not settings.allow_web_wallpapers
+            ):
                 raise _RuntimeLibraryNotReadyError(
                     "the accepted library belongs to older source settings"
                 )
@@ -5638,7 +5674,12 @@ class Application(Adw.Application):
             publication = self._compile_runtime_until_current_locked(
                 wait_for_library=wait_for_library,
             )
-        return self._stopping_web_after_failure(publication)
+        publication = self._stopping_web_after_failure(publication)
+        with self._runtime_config_lock:
+            if 0 < self._runtime_web_off_owed <= publication.generation:
+                # It landed, or what held it ran the guard: nothing is owed now.
+                self._runtime_web_off_owed = 0
+        return publication
 
     def _stopping_web_after_failure(self, publication: _RuntimePublication) -> _RuntimePublication:
         """A failed publication or a refused reload, while web wallpapers are off, ends any page.
@@ -5686,8 +5727,17 @@ class Application(Adw.Application):
         (`_web_off_on_disk_at_exit`; one for a service older than schema 8
         is left to that service's next start).
         """
-        if publication.deferred or self._runtime_shutdown:
+        if self._runtime_shutdown:
             return publication
+        if publication.deferred:
+            with self._runtime_config_lock:
+                owed = self._runtime_web_off_owed != 0
+            if not owed:
+                return publication
+            # Web wallpapers went off and their publication is held after all (a
+            # removal in its way): the page ends now, and the publication follows.
+            done = self._web_off_guard()
+            return replace(publication, error=done) if done else publication
         if publication.unavailable or (publication.error == "" and publication.response is None):
             if publication.unavailable:
                 self._service_holds_what_is_on_disk()
@@ -6109,7 +6159,7 @@ class Application(Adw.Application):
                 authoring_generation = self._runtime_authoring_generation
                 inventory_valid = self._inventory_valid
                 inventory_problem = self._inventory_problem
-                urgent_generation = self._runtime_urgent_generation
+                web_off_owed = self._runtime_web_off_owed != 0
             if shutting_down:
                 return _RuntimePublication(max(completed, compiled), changed=changed_any)
             if not inventory_valid and not scan_pending and not removal_pending:
@@ -6121,12 +6171,7 @@ class Application(Adw.Application):
                     changed=changed_any,
                     error=scan_error or inventory_problem or "the library needs a fresh scan",
                 )
-            urgent = (
-                request is not None
-                and request.generation <= urgent_generation
-                and self._settings.covers(request.library_sources)
-            )
-            if scan_pending and (request is None or wait_for_library) and not urgent:
+            if scan_pending and (request is None or wait_for_library) and not web_off_owed:
                 # Delete/Trash deliberately removes the old immutable Library
                 # before its physical worker starts.  With no replacement
                 # request, falling through here would reload the stale runtime
@@ -6153,6 +6198,8 @@ class Application(Adw.Application):
                                 changed=changed_any,
                                 deferred=True,
                             )
+                        if self._runtime_web_off_owed:
+                            break  # web wallpapers went off: that goes out first
                 with self._runtime_config_lock:
                     scan_error = self._runtime_library_error
                 if scan_error:
@@ -6278,18 +6325,13 @@ class Application(Adw.Application):
                 scan_sources = self._runtime_library_scan_sources
                 removal_pending = self._removal_runtime_invalidated
                 authoring_generation = self._runtime_authoring_generation
-                urgent_generation = self._runtime_urgent_generation
+                web_off_owed = self._runtime_web_off_owed != 0
             if latest is not None and latest.generation > completed:
                 continue
-            # The publication of web wallpapers going off, for a library that is
-            # current for the settings, is not held by a scan in flight, nor by one
-            # that failed: it is sent now, and the scan's own publication follows.
-            urgent = (
-                latest is not None
-                and latest.generation <= urgent_generation
-                and self._settings.covers(latest.library_sources)
-            )
-            if urgent:
+            # The publication of web wallpapers going off is not held by a scan in
+            # flight, nor by one that failed: it is sent now, and the scan's own
+            # publication follows.
+            if web_off_owed:
                 scan_pending = False
                 scan_error = ""
             if (
@@ -6297,6 +6339,7 @@ class Application(Adw.Application):
                 and latest is not None
                 and scan_sources is not None
                 and latest.library_sources != scan_sources
+                and not self._settings.covers(latest.library_sources)
             ):
                 # The preceding compile may already have written a document
                 # for the last accepted Library before a new-root scan failed.
@@ -6355,12 +6398,7 @@ class Application(Adw.Application):
                 authoring_generation = self._runtime_authoring_generation
             if latest is not None and latest.generation > completed:
                 continue
-            if (
-                scan_pending
-                and latest is not None
-                and latest.generation <= urgent_generation
-                and self._settings.covers(latest.library_sources)
-            ):
+            if web_off_owed:
                 return publication  # web-off went out; the scan's publication follows
             if scan_pending or authoring_generation > completed:
                 if not wait_for_library or removal_pending or not scan_pending:
@@ -9191,29 +9229,32 @@ class Application(Adw.Application):
             previous.preview_stills,
         )
         async_scan = library_sources_changed and not self._service_start
+        # ``--service`` rescans synchronously, here.
+        rescan_now = library_sources_changed and not async_scan
+        web_turned_off = previous.allow_web_wallpapers and not candidate.allow_web_wallpapers
         # Persist before adoption. A failed write must leave the application,
         # Session, runtime document and visible controls on the same last-known
         # durable snapshot.
         self._settings = candidate
-        self._session.update_settings(candidate, rescan_library=not async_scan)
-        if library_sources_changed and not async_scan:
+        if candidate.allow_web_wallpapers:
+            with self._runtime_config_lock:
+                self._runtime_web_off_owed = 0
+        self._session.update_settings(candidate, rescan_library=rescan_now and not web_turned_off)
+        if web_turned_off:
+            # Web wallpapers going off reach the service first, whatever else this
+            # save changed and whatever a scan then does (owner contract since 0.4.0):
+            # before the synchronous rescan, and never held by one in flight.
+            self._publish_web_off()
+            if rescan_now:
+                self._session.refresh()
+        if rescan_now:
             self._session.sync_with_noctalia()
-        # Do not publish a temporary document which combines new roots with an
-        # old library. The completed async scan publishes the coherent pair.
-        #
-        # Except for web wallpapers going off: that reaches the service at once,
-        # whatever else this save changed and whatever the scan then does (owner
-        # contract since 0.4.0). A library resolved under the other preview policy
-        # is as good as any while web is off (`Settings.covers`), so a move of
-        # `preview_stills` that only the web setting caused publishes now; a save
-        # that also changed the folders is refused here, before any scan is
-        # pending, which runs the web-off guard (`_stopping_web_after_failure`).
-        web_turned_off = previous.allow_web_wallpapers and not candidate.allow_web_wallpapers
-        if not async_scan or web_turned_off:
-            published = self._publish_runtime_for_context()
-            if published and web_turned_off:
-                with self._runtime_config_lock:
-                    self._runtime_urgent_generation = self._runtime_authoring_generation
+        # A save that scans nothing on the side publishes now (web off already has,
+        # unless a rescan followed). Otherwise, do not publish a temporary document
+        # which combines new roots with an old library: the completed async scan
+        # publishes the coherent pair.
+        if not async_scan and (rescan_now or not web_turned_off):
+            self._publish_runtime_for_context()
         self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)

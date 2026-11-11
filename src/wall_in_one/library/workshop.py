@@ -1101,15 +1101,13 @@ class EngineProjectError(Exception):
     """A `project.json` the service's check would refuse, said as a sentence end."""
 
 
-#: serde_json's nesting limit (`service/src/workshop.rs`): at this many levels
-#: open, the service stops checking numbers and escapes beside the top level's
-#: `type` and only reads the text's structure (it still reads any depth).
+#: serde_json's nesting limit (`service/src/workshop.rs`): once the 128th
+#: bracket opens, the service stops checking numbers and escapes anywhere
+#: after that point in the file (shallow content that follows the deep part
+#: included) and only reads the text's structure and the top level. It still
+#: reads any depth.
 ENGINE_STRICT_DEPTH: Final = 128
 
-#: A string, whole, so a bracket or an escape inside one is not read as one.
-_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*+"', re.DOTALL)
-#: Every string, and every bracket outside one, in order.
-_STRUCTURE: Final = re.compile(_STRING.pattern + r"|[\[{]|[\]}]", re.DOTALL)
 #: What a JSON string holds that is not a plain character: a surrogate pair
 #: (fine), a lone surrogate escape (the service's parser refuses it), or any
 #: other escape (consumed, so `\\ud800` is a backslash and text).
@@ -1118,7 +1116,10 @@ _ESCAPE: Final = re.compile(
     r"|(?P<lone>\\u[dD][89a-fA-F][0-9a-fA-F]{2})"
     r"|\\u[0-9a-fA-F]{4}|\\."
 )
-#: JSON's tokens, for the one reader that has to run without recursion.
+#: JSON's tokens, matched one at a time at the reader's position (`match`,
+#: never a search), so a text that is not JSON fails at once instead of being
+#: rescanned from every later position, and the string is possessive, so it
+#: is not backtracked into: the whole read is linear in the file.
 _JSON_TOKEN: Final = re.compile(
     r"""(?P<space>[ \t\n\r]+)
     |(?P<string>"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+")
@@ -1149,47 +1150,28 @@ def _engine_string(token: str) -> str:
     return str(json.loads(token))
 
 
-def _refuse_constant(name: str) -> object:
-    raise EngineProjectError(f"is not JSON ({name})")
+def _engine_read(text: str) -> str | None:
+    """The top level's `type` of ``text``, read as the service reads a project.
 
-
-def _engine_whole(text: str) -> object:
-    """`text` as the service reads a project of fewer than `ENGINE_STRICT_DEPTH` levels."""
-
-    def number(token: str) -> int:
-        _engine_number(token)
-        return 0
-
-    try:
-        document = json.loads(
-            text, parse_constant=_refuse_constant, parse_int=number, parse_float=number
-        )
-    except (ValueError, RecursionError) as error:
-        raise EngineProjectError("is not JSON") from error
-    for token in _STRING.finditer(text):
-        _engine_unpaired(token.group())
-    return document
-
-
-def _engine_deep(text: str, strict_until: int) -> str | None:
-    """The top level's `type` of a project nested `ENGINE_STRICT_DEPTH` levels or more.
-
-    As the service reads it past serde_json's limit: the grammar all through,
-    every number and escape before the point the limit is reached
-    (``strict_until``, an offset in `text`), and after it only the top level's
-    own keys and its `type`. Iterative, so no depth is too deep.
+    The grammar all through (no `NaN` or infinity), and, until the 128th
+    bracket opens (`ENGINE_STRICT_DEPTH`), every number and escape; after it
+    only the top level's own keys and its `type`. The last `type` wins, and
+    is None unless it is a string. Iterative and linear, so no depth and no
+    hostile text is too much for it.
     """
     stack: list[str] = []
     state = "value"
     kind: str | None = None
     key: str | None = None
+    strict = True
+    match_at = _JSON_TOKEN.match
     position = 0
-    while position < len(text):
-        match = _JSON_TOKEN.match(text, position)
+    end = len(text)
+    while position < end:
+        match = match_at(text, position)
         if match is None:
             raise EngineProjectError("is not JSON")
         group, token = match.lastgroup, match.group()
-        strict = position < strict_until
         position = match.end()
         if group == "space":
             continue
@@ -1214,6 +1196,8 @@ def _engine_deep(text: str, strict_until: int) -> str | None:
                     _engine_number(token)
             elif group == "punctuation" and token in "[{":
                 stack.append(token)
+                if len(stack) >= ENGINE_STRICT_DEPTH:
+                    strict = False
                 state = "item" if token == "[" else "name"
                 continue
             elif group != "literal":
@@ -1258,6 +1242,9 @@ def engine_project_type(directory: Path) -> str:
     only and nothing trimmed. It is not the scan's reader (`_read_project`),
     which forgives all of that to list what it can. Raises `EngineProjectError`
     for whatever the service would refuse.
+
+    Linear in the file, whatever it holds (`_engine_read`): this runs on the
+    GUI's stills thread, and a Workshop item's author wrote the file.
     """
     path = directory / "project.json"
     try:
@@ -1270,22 +1257,7 @@ def engine_project_type(directory: Path) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise EngineProjectError("is not UTF-8") from error
-    depth = 0
-    strict_until = -1
-    for token in _STRUCTURE.finditer(text):
-        if token.group() in ("[", "{"):
-            depth += 1
-            if depth >= ENGINE_STRICT_DEPTH:
-                strict_until = token.start()
-                break
-        elif token.group() in ("]", "}"):
-            depth -= 1
-    kind: object
-    if strict_until >= 0:
-        kind = _engine_deep(text, strict_until)
-    else:
-        document = _engine_whole(text)
-        kind = document.get("type") if isinstance(document, dict) else None
+    kind = _engine_read(text)
     if not isinstance(kind, str):
         raise EngineProjectError("is not a project with a type")
     return kind.translate(_ASCII_LOWER)

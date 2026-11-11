@@ -919,6 +919,16 @@ def _companions(
             kept.append(candidate)
             return
         if stat.S_ISREG(status.st_mode):
+            if (
+                candidate == item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
+                and not adopted_role
+                and pairing.selector_is_foreign(item.path, roots, sidecar=access)
+            ):
+                # A selector the reader ignores (not JSON, empty, oversize, naming no
+                # still or one outside every root) was not written by this app, which
+                # writes only inside a root, naming a still there: it may be the
+                # person's own, and is left byte for byte.
+                return
             found.append(
                 _ArtifactCandidate(
                     candidate,
@@ -1017,10 +1027,9 @@ def pairing_artifact_paths(
     bounded = tuple(roots)
     found: list[Path] = []
     pairing_sidecar = item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
-    if _within(pairing_sidecar, bounded) and not pairing.selector_is_foreign(item.path, bounded):
-        # A selector the reader ignores for where it points was not written by
-        # this app (it only writes inside a root, naming a still there), so it is
-        # not ours to delete with the video.
+    if _within(pairing_sidecar, bounded):
+        # Whether it is ours to delete is decided where it is read, through the
+        # pinned folder (`_companions`'s `retain_candidate`), not here.
         found.append(pairing_sidecar)
 
     for root in bounded:

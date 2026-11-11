@@ -446,7 +446,9 @@ def _selected_still(video: Path, *, strict: bool) -> Path | None:
     return candidate if present(candidate) else None
 
 
-def selector_is_foreign(video: Path, roots: Iterable[Path]) -> bool:
+def selector_is_foreign(
+    video: Path, roots: Iterable[Path], *, sidecar: Path | None = None
+) -> bool:
     """Whether ``video``'s sidecar is one this app did not write, and so is not its to delete.
 
     This app writes a selector only inside a root, naming a still there. So the
@@ -456,12 +458,17 @@ def selector_is_foreign(video: Path, roots: Iterable[Path]) -> bool:
     every root, beside Workshop content) may be the person's own: it is left, byte
     for byte, as `stills._record_beside` leaves it. An absent sidecar is nobody's.
     Used so that removing a video deletes only the selectors it owns
-    (`manage.pairing_artifact_paths`).
+    (`manage.retain_candidate`).
+
+    ``sidecar``: where the file is read from, when that isn't beside ``video`` by
+    name: a removal reads it through the folder it pinned, and the decision is
+    about that file, not about whatever the logical name reaches now.
     """
     roots = tuple(roots)
     if workshop.is_workshop_content(video, labelled=False, roots=roots):
         return True
-    sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
+    if sidecar is None:
+        sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
         if not sidecar.is_symlink() and not sidecar.exists():
             return False

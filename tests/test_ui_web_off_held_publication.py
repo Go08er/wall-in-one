@@ -46,6 +46,7 @@ from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import scan as scan_module  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 
 #: How long the service gets to hear of it while the scan is held.
 AT_ONCE = 15.0
@@ -243,6 +244,91 @@ def test_a_publication_during_the_previews_rescan_survives_its_failure(
 
 
 @previews_param
+def test_a_publication_made_while_web_off_compiles_still_sends_it(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    previews: bool,
+) -> None:
+    """The review's "later" probe: any publication while web off's own compile runs.
+
+    It supersedes the web-off request after that one wrote its document, and compiles the
+    same document, so nothing changed on its own account: the reload must still go out.
+    """
+    application = profiles().application
+    service = _web_on(application, previews, monkeypatch)
+    scans = HeldScans(monkeypatch, fails=False)
+    compiling = threading.Event()
+    go_on = threading.Event()
+    real_compile = application._compile_runtime_request
+    compiled: list[int] = []
+
+    def slow(request: Any) -> bool:
+        compiled.append(request.generation)
+        changed = bool(real_compile(request))
+        if len(compiled) == 1:
+            compiling.set()
+            go_on.wait(30)
+        return changed
+
+    monkeypatch.setattr(application, "_compile_runtime_request", slow)
+    _save(application, allow_web_wallpapers=False)
+    spin_until(compiling.is_set, AT_ONCE, what="web off's own compile")
+    if not previews:
+        application.refresh_library()  # a scan for it to be held by, as with previews on
+    spin_until(lambda: application._runtime_library_scan_pending, 10, what="a scan pending")
+    application.runtime_config_changed()  # any later publication request
+    go_on.set()
+    _reaches_the_service_while_held(application, service, scans, settles=False)
+    assert len(compiled) >= 2, compiled
+    _and_after_the_scan(service, scans)
+
+
+@previews_param
+@pytest.mark.parametrize("same_save", [False, True], ids=["earlier-save", "same-save"])
+def test_web_off_after_dropping_a_folder_a_playlist_names(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    previews: bool,
+    same_save: bool,
+) -> None:
+    """The library held may hold a wallpaper from a folder the settings no longer name.
+
+    A playlist names it. Web off is published from that library all the same (it
+    names no web page), and the scan for the new folders publishes after it.
+    """
+    profile = profiles()
+    application = profile.application
+    root = application.settings.roots[0]
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "aside.png").write_bytes(b"media")
+    aside = MediaItem(second / "aside.png", Kind.STILL, 5, 1)
+    application._settings = replace(application.settings, roots=(root, second))
+    service = _web_on(application, previews, monkeypatch)
+    application.session.adopt_library(
+        Library((root, second), (profile.dawn, profile.dusk, profile.rain, aside))
+    )
+    mine = application.session.playlists.create("Mine")
+    application.session.playlists.add(mine.id, profile.dawn.path)
+    application.session.playlists.add(mine.id, aside.path)
+    scans = HeldScans(monkeypatch, fails=False)
+    if same_save:
+        _save(application, roots=(root,), allow_web_wallpapers=False)
+    else:
+        _save(application, roots=(root,))
+        spin_until(lambda: application._runtime_library_scan_pending, 10, what="the scan")
+        service.sent.clear()
+        _save(application, allow_web_wallpapers=False)
+    _reaches_the_service_while_held(application, service, scans)
+    assert "stop" not in service.sent, "published, not guarded"
+    assert application.publication_problem == "", application.publication_problem
+    assert "aside.png" in service.loaded, "published from the library held, older folders and all"
+    _and_after_the_scan(service, scans)
+    assert "aside.png" not in service.loaded, "the scan for the new folders published after it"
+
+
+@previews_param
 def test_a_playback_gesture_waiting_for_a_scan_lets_web_off_out_first(
     profiles: Callable[..., Any],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -314,6 +400,37 @@ def test_service_publishes_web_off_before_its_rescan(
     assert "reload" in recorder.sent
     assert config.load_strict().allow_web_wallpapers is False
     assert not recorder.allows_web()
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+
+
+@pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
+def test_service_publishes_web_off_before_the_rescan_of_a_dropped_folder(
+    services: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    previews: bool,
+) -> None:
+    """``--service``, one save: drop a folder a playlist names, and turn web off."""
+    service = services(start=True)
+    application = service.application
+    recorder = _web_on(application, previews, monkeypatch)
+    mine = application.session.playlists.create("Mine")
+    application.session.playlists.add(mine.id, service.noon)
+    application.session.playlists.add(mine.id, service.dusk)
+    loaded: list[str] = []
+    reload = recorder.send
+
+    def send(verb: str, *arguments: object, **keywords: object) -> Response:
+        answer = reload(verb, *arguments, **keywords)
+        if verb == "reload":
+            loaded.append(recorder.loaded)
+        return answer
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    application.update_settings(roots=(service.root,), allow_web_wallpapers=False)
+    assert len(loaded) >= 2, "web off first, then the rescan's publication"
+    assert "dusk.png" in loaded[0], "published from the library held, before the rescan"
+    assert "dusk.png" not in loaded[-1]
+    assert not any(runtime_config.allows_web_wallpapers(text=text) for text in loaded)
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 

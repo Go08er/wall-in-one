@@ -6247,12 +6247,21 @@ class Application(Adw.Application):
                     current_generation = self._runtime_authoring_generation
                     invalidated = current_generation > request.generation
                     latest = self._runtime_authoring_request
+                    removal_invalidated = self._removal_runtime_invalidated
                 if invalidated:
                     # A Delete/Trash prepare invalidates the immutable Library
                     # before waiting for this compiler lock. The old compile
                     # may finish, but it is never eligible to reload Rust; a
                     # post-delete scan will replace it with a newer request.
                     if latest is not None and latest.generation > request.generation:
+                        if changed and not removal_invalidated:
+                            # Merely superseded: what it wrote is on disk, and the
+                            # newer request may compile the same document, finding
+                            # nothing changed. Counted, so that one's reload sends it
+                            # (review-f4: web off was written and never reloaded).
+                            changed_any = True
+                            with self._runtime_config_lock:
+                                self._runtime_document_generation += 1
                         continue
                     return _RuntimePublication(
                         current_generation,

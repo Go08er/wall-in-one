@@ -190,7 +190,7 @@ def item_folders_of(folder: Path, roots: Sequence[Path] = ()) -> tuple[Path, ...
 
     An item copied in by hand has subfolders (``assets/``, ``img/``) that belong
     to it as much as the files beside its ``project.json``. The search goes up
-    from ``folder`` to the library root that contains it, never above (a
+    from ``folder`` to the nearest library root that contains it, never above (a
     ``project.json`` in somebody's home folder makes nothing of what is below it
     Workshop content). With no ``roots`` only ``folder`` itself is looked at.
     A folder that can't be looked at counts as an item folder (fails closed), and
@@ -212,7 +212,14 @@ def _item_folders_of(folder: Path, roots: Sequence[Path]) -> tuple[Path, ...]:
     bounds = [_resolved(root) for root in roots]
     if current is None or None in bounds:
         return (folder,)
-    ceiling = next((root for root in bounds if root and current.is_relative_to(root)), None)
+    # The nearest root that holds it, whatever the order of the roots: the one whose walk
+    # lists its files (`folder_gate`, asked for each root), so that a library folder of
+    # someone's own inside an item folder pairs what it lists (R42-12).
+    ceiling = max(
+        (root for root in bounds if root and current.is_relative_to(root)),
+        key=lambda root: len(root.parts),
+        default=None,
+    )
     found: list[Path] = []
     while True:
         if _holds_project(current):
@@ -238,9 +245,9 @@ def is_workshop_content(path: Path, *, labelled: bool, roots: Sequence[Path] = (
     - its resolved path lies under a ``steamapps/workshop/content/431960``
       directory (`in_content_tree`), so it holds on any drive and inside a
       configured library root too;
-    - a ``project.json`` sits in its folder, or in one above it up to the library
-      root it is in (``roots``, `item_folder_of`): a Workshop item copied into
-      the library by hand is still its author's content, subfolders included.
+    - a ``project.json`` sits in its folder, or in one above it up to the nearest
+      library root it is in (``roots``, `item_folder_of`): a Workshop item copied
+      into the library by hand is still its author's content, subfolders included.
 
     Nothing from beside such a file is a still of ours: not its sidecar, not a
     picture named like it, and not its preview. Its still is only what

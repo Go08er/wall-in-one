@@ -29,7 +29,8 @@ shows that record or counts it, so videos left out this way simply don't appear.
 A folder of your own that happens to hold an unrelated `project.json` (a web or
 .NET project) is left out the same way. To list such videos, add a subfolder
 that holds no `project.json` as a library folder of its own (it lists its
-files), or move the videos out of the item folder.
+files, and their stills pair as in any library folder, whatever the order of
+the folders), or move the videos out of the item folder.
 
 A scan is bounded: at most 4096 wallpapers, 65536 directory entries examined,
 and 8 directories deep. Anything past that is left out and counted as skipped

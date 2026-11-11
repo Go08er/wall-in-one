@@ -402,6 +402,70 @@ def test_steams_content_tree_lists_nothing_under_any_root(tmp_path: Path) -> Non
         assert scan.scan(roots, records={}).items == (), roots
 
 
+def _selected(video: Path, still: Path) -> None:
+    selector = video.with_name(video.name + pairing.SIDECAR_SUFFIX)
+    selector.write_text(json.dumps({"still_path": str(still)}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("order", ["outer-first", "inner-first", "inner-only"])
+def test_an_explicit_root_inside_an_item_folder_pairs_what_it_lists(
+    tmp_path: Path, order: str
+) -> None:
+    """R42-12: pairing asks the nearest root, as the walk that listed the video did.
+
+    The first root holding it, with the outer one first, went up to the item's
+    ``project.json`` and ignored the selector beside the video it had just listed.
+    """
+    outer = tmp_path / "library"
+    item = _folder(outer, "web1", {"type": "web", "file": "index.html"}, ("index.html",))
+    inner = _folder(item, "my-videos", None, ("clip.mp4", "chosen.png"))
+    _selected(inner / "clip.mp4", inner / "chosen.png")
+    roots = {"outer-first": [outer, inner], "inner-first": [inner, outer], "inner-only": [inner]}
+
+    found = scan.scan(roots[order], records={})
+    clip = next(entry for entry in found.items if entry.path == inner / "clip.mp4")
+
+    assert clip.provider == "local" and clip.paired_still == inner / "chosen.png"
+    assert not pairing.selector_is_foreign(clip.path, roots[order])
+
+
+@pytest.mark.parametrize("order", ["outer-first", "inner-first"])
+def test_an_item_folders_own_video_stays_untrusted_beside_a_nested_root(
+    tmp_path: Path, order: str
+) -> None:
+    """The video an item declares is listed, and what is beside it is still the author's."""
+    outer = tmp_path / "library"
+    item = _folder(outer, "video1", {"type": "video", "file": "clip.mp4"}, ("clip.mp4",))
+    (outer / "chosen.png").write_bytes(b"x")
+    _selected(item / "clip.mp4", outer / "chosen.png")
+    (item / "clip-still.png").write_bytes(b"x")
+    inner = _folder(item, "my-videos", None, ("own.mp4",))
+    roots = [outer, inner] if order == "outer-first" else [inner, outer]
+
+    found = scan.scan(roots, records={})
+    clip = next(entry for entry in found.items if entry.path == item / "clip.mp4")
+
+    assert clip.paired_still is None
+    assert pairing.read_sidecar(clip.path, roots) is None
+    assert pairing.selector_is_foreign(clip.path, roots)
+
+
+@pytest.mark.parametrize("order", ["outer-first", "inner-first", "inner-only"])
+def test_steams_content_tree_stays_untrusted_under_any_root_order(
+    tmp_path: Path, order: str
+) -> None:
+    """A root inside a Workshop item in Steam's tree lists nothing, nor pairs anything."""
+    outer = tmp_path / "steam/steamapps/workshop/content/431960"
+    item = _folder(outer, "9", {"type": "web", "file": "index.html"}, ("index.html",))
+    inner = _folder(item, "my-videos", None, ("clip.mp4", "chosen.png"))
+    _selected(inner / "clip.mp4", inner / "chosen.png")
+    roots = {"outer-first": [outer, inner], "inner-first": [inner, outer], "inner-only": [inner]}
+
+    assert scan.scan(roots[order], records={}).items == ()
+    assert pairing.read_sidecar(inner / "clip.mp4", roots[order]) is None
+    assert pairing.selector_is_foreign(inner / "clip.mp4", roots[order])
+
+
 def test_a_video_project_nested_in_a_video_item_lists_only_the_outer_ones_file(
     tmp_path: Path,
 ) -> None:

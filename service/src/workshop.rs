@@ -47,9 +47,13 @@ const MAX_QUOTED_TYPE_BYTES: usize = 64;
 /// own `HOME`, which its renderer children inherit. None when unset or not
 /// absolute; then no item's type can be read.
 pub fn engine_home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
+    home_from(std::env::var_os("HOME"))
+}
+
+/// `engine_home` for a given `HOME`: the app's `workshop.engine_refusal` reads
+/// `HOME` the same way (set, and absolute), not `Path.home()`'s fallbacks.
+pub fn home_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|home| home.is_absolute())
 }
 
 /// Why the engine must not be started for one Workshop item. Each reason says
@@ -110,11 +114,6 @@ pub fn refusal(home: Option<&Path>, id: &str, allow_web: bool) -> Option<Refusal
             reason: format!("{why}, so linux-wallpaperengine was not started for it"),
         },
     })
-}
-
-/// `refusal` while the document doesn't allow web wallpapers.
-pub fn refusal_without_web(home: Option<&Path>, id: &str) -> Option<Refusal> {
-    refusal(home, id, false)
 }
 
 /// What `classify` found wrong with an item.
@@ -377,10 +376,10 @@ mod tests {
         item(&home, 0, "2", r#"{"type":"Video","file":"a.mp4"}"#);
         item(&home, 0, "3", r#"{"type":"web","file":"index.html"}"#);
         item(&home, 0, "4", r#"{"type":"WEB","file":"index.html"}"#);
-        assert_eq!(refusal_without_web(Some(&home), "1"), None);
-        assert_eq!(refusal_without_web(Some(&home), "2"), None);
+        assert_eq!(refusal(Some(&home), "1", false), None);
+        assert_eq!(refusal(Some(&home), "2", false), None);
         for id in ["3", "4"] {
-            let refused = refusal_without_web(Some(&home), id).unwrap();
+            let refused = refusal(Some(&home), id, false).unwrap();
             assert!(refused.web_page);
             assert_eq!(
                 refused.reason,
@@ -414,11 +413,11 @@ mod tests {
         fs::remove_file(missing.join("project.json")).unwrap();
         for id in ["10", "11", "12", "13", "14", "15", "16", "17", "x1", ""] {
             assert!(
-                refusal_without_web(Some(&home), id).is_some(),
+                refusal(Some(&home), id, false).is_some(),
                 "{id} must be refused"
             );
         }
-        assert!(refusal_without_web(None, "1").is_some());
+        assert!(refusal(None, "1", false).is_some());
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -434,7 +433,7 @@ mod tests {
         let unreadable = item(&home, 0, "44", r#"{"type":"scene"}"#);
         fs::remove_file(unreadable.join("project.json")).unwrap();
         let said = |home: Option<&Path>, id: &str| {
-            refusal_without_web(home, id)
+            refusal(home, id, false)
                 .map(|refusal| refusal.to_string())
                 .unwrap_or_default()
         };
@@ -515,7 +514,7 @@ mod tests {
         item(&home, 0, "50", r#"{"type":"scene","file":"scene.json"}"#);
         item(&home, 0, "51", r#"{"type":"video","file":"a.mp4"}"#);
         for id in ["50", "51"] {
-            let said = refusal_without_web(Some(&home), id).map(|refusal| refusal.to_string());
+            let said = refusal(Some(&home), id, false).map(|refusal| refusal.to_string());
             assert_eq!(said, None, "{id}");
         }
         fs::remove_dir_all(home).unwrap();
@@ -549,12 +548,12 @@ mod tests {
                 "]".repeat(200)
             ),
         );
-        assert_eq!(refusal_without_web(Some(&home), "60"), None);
-        assert!(refusal_without_web(Some(&home), "61").unwrap().web_page);
+        assert_eq!(refusal(Some(&home), "60", false), None);
+        assert!(refusal(Some(&home), "61", false).unwrap().web_page);
         // The last `type` wins, as it does below the limit.
-        assert!(refusal_without_web(Some(&home), "62").unwrap().web_page);
+        assert!(refusal(Some(&home), "62", false).unwrap().web_page);
         for (id, said) in [("63", "is not JSON"), ("64", "names no type")] {
-            let refused = refusal_without_web(Some(&home), id).unwrap();
+            let refused = refusal(Some(&home), id, false).unwrap();
             assert!(!refused.web_page);
             assert!(refused.reason.contains(said), "{id}: {refused}");
         }
@@ -566,8 +565,8 @@ mod tests {
         let home = home("shallow");
         item(&home, 0, "65", &nested("scene", 100, ""));
         item(&home, 0, "66", &nested("web", 100, ""));
-        assert_eq!(refusal_without_web(Some(&home), "65"), None);
-        assert!(refusal_without_web(Some(&home), "66").is_some());
+        assert_eq!(refusal(Some(&home), "65", false), None);
+        assert!(refusal(Some(&home), "66", false).is_some());
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -576,12 +575,12 @@ mod tests {
         let home = home("places");
         item(&home, 0, "20", r#"{"type":"scene"}"#);
         item(&home, 2, "20", r#"{"type":"web"}"#);
-        assert!(refusal_without_web(Some(&home), "20").is_some());
+        assert!(refusal(Some(&home), "20", false).is_some());
         // Found only in the Snap's folder: still read.
         item(&home, 3, "21", r#"{"type":"web"}"#);
-        assert!(refusal_without_web(Some(&home), "21").is_some());
+        assert!(refusal(Some(&home), "21", false).is_some());
         item(&home, 1, "22", r#"{"type":"scene"}"#);
-        assert_eq!(refusal_without_web(Some(&home), "22"), None);
+        assert_eq!(refusal(Some(&home), "22", false), None);
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -624,13 +623,26 @@ mod tests {
         let steam = home.join(".local/share/Steam/steamapps/workshop/content");
         item(&home, 0, "30", r#"{"type":"scene"}"#);
         fs::set_permissions(&steam, fs::Permissions::from_mode(0o000)).unwrap();
-        let refused = refusal_without_web(Some(&home), "30");
+        let refused = refusal(Some(&home), "30", false);
         fs::set_permissions(&steam, fs::Permissions::from_mode(0o755)).unwrap();
         // Root can look into anything; the refusal only holds for a user.
         if unsafe { libc::geteuid() } != 0 {
             assert!(refused.is_some());
         }
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn home_is_the_environments_and_must_be_absolute() {
+        use std::ffi::OsString;
+        assert_eq!(
+            home_from(Some(OsString::from("/home/x"))),
+            Some(PathBuf::from("/home/x"))
+        );
+        for bad in ["", "home/x", "./x", "~"] {
+            assert_eq!(home_from(Some(OsString::from(bad))), None, "{bad:?}");
+        }
+        assert_eq!(home_from(None), None);
     }
 
     #[test]
@@ -673,10 +685,10 @@ mod tests {
         let long = "\u{e9}".repeat(100_000);
         item(&home, 0, "50", &format!(r#"{{"type":"{long}"}}"#));
         item(&home, 0, "51", r#"{"type":"application"}"#);
-        let reason = refusal_without_web(Some(&home), "50").unwrap().reason;
+        let reason = refusal(Some(&home), "50", false).unwrap().reason;
         assert!(reason.len() < 1024, "{} bytes", reason.len());
         assert!(reason.contains("[truncated]"));
-        let reason = refusal_without_web(Some(&home), "51").unwrap().reason;
+        let reason = refusal(Some(&home), "51", false).unwrap().reason;
         assert!(reason.contains("(\"application\")"));
         fs::remove_dir_all(home).unwrap();
     }

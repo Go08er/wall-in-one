@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import stat
 import string
@@ -1287,10 +1288,13 @@ def engine_refusal(workshop_id: str, *, allow_web: bool) -> str:
     """
     if not is_workshop_id(workshop_id):
         return "its Workshop id can\u2019t be checked"
-    try:
-        home = Path.home()
-    except RuntimeError:
+    # The service's own reading of `HOME` (`workshop::engine_home`): set and
+    # absolute. Not `Path.home()`, which would take "" for "/", a relative
+    # value as it stands, and the password database when it is unset.
+    home_text = os.environ.get("HOME")
+    if not home_text or not os.path.isabs(home_text):
         return f"Workshop item {workshop_id} can\u2019t be checked: there is no home folder"
+    home = Path(home_text)
     found = False
     for folder in ENGINE_WORKSHOP_FOLDERS:
         directory = home / folder / workshop_id

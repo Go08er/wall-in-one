@@ -132,3 +132,25 @@ def test_every_case_is_named_once() -> None:
     names = [case["name"] for case in CASES]
     assert len(names) == len(set(names))
     assert len(CASES) >= 150
+
+
+@pytest.mark.parametrize("home", [None, "", "relative/home", "."], ids=repr)
+def test_a_home_the_service_would_not_use_is_no_home_here_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home: str | None
+) -> None:
+    """The service reads `HOME` as set and absolute (`workshop::home_from`); so does the app.
+
+    `Path.home()` would have read "" as "/", used a relative value, or asked the
+    password database. Under systemd's user manager `HOME` is set and absolute,
+    so the two agree there, and the cases above run on absolute homes.
+    """
+    case = CASES[0]
+    identifier = _build(tmp_path, 0, case)
+    monkeypatch.chdir(tmp_path)
+    if home is None:
+        monkeypatch.delenv("HOME", raising=False)
+    else:
+        monkeypatch.setenv("HOME", home)
+    assert "no home folder" in workshop.engine_refusal(identifier, allow_web=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert workshop.engine_refusal(identifier, allow_web=True) == ""

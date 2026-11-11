@@ -47,6 +47,7 @@ from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import scan as scan_module  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
+from wall_in_one.ui.app import _RuntimeLibraryNotReadyError  # noqa: E402
 
 #: How long the service gets to hear of it while the scan is held.
 AT_ONCE = 15.0
@@ -583,4 +584,82 @@ def test_a_folder_change_after_web_off_landed_waits_for_its_scan_again(
     assert "reload" not in service.sent, "the old library went out while the scan was held"
     scans.release()
     spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publication")
+    assert application._runtime_web_off_owed == 0
+
+
+# -- a gesture waiting after its compile was refused for the scan (R42-9) -------------------------
+
+
+@previews_param
+@scan_param
+def test_a_gesture_waiting_after_a_refused_compile_lets_web_off_out_first(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    previews: bool,
+    fails: bool,
+) -> None:
+    """R42-9: the wait after a compile the scan's library was refused for yields to web off too.
+
+    Ordinary FIFO on the lane: a gesture queued first, then a publication. The gesture's
+    compile reads the settings after a preview-policy save began its rescan, so the library
+    it holds is refused (`Settings.covers`) and it waits for that scan: on 534a9da it waited
+    for nothing else, holding the lane, and web off went out only when the scan ended.
+    """
+    application = profiles().application
+    service = _web_on(application, previews, monkeypatch)
+    monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+    scans = HeldScans(monkeypatch, fails=fails)
+    lane_held, release_lane = threading.Event(), threading.Event()
+    compiling, read_settings = threading.Event(), threading.Event()
+    refused, waiting_after_refusal = threading.Event(), threading.Event()
+    real_compile = application._compile_runtime_request
+    real_wait = application._runtime_library_ready.wait
+
+    def compile_after_the_save(request: Any) -> bool:
+        if not compiling.is_set():
+            compiling.set()
+            assert read_settings.wait(30), "the settings read was never released"
+        try:
+            return bool(real_compile(request))
+        except _RuntimeLibraryNotReadyError:
+            refused.set()
+            raise
+
+    def wait(timeout: float | None = None) -> bool:
+        if refused.is_set():
+            waiting_after_refusal.set()
+        return bool(real_wait(timeout))
+
+    monkeypatch.setattr(application, "_compile_runtime_request", compile_after_the_save)
+    monkeypatch.setattr(application._runtime_library_ready, "wait", wait)
+
+    def hold_the_lane() -> None:
+        lane_held.set()
+        assert release_lane.wait(30), "the lane was never released"
+
+    blocker = application._runtime_pool().submit(hold_the_lane)
+    try:
+        spin_until(lane_held.is_set, AT_ONCE, what="the lane held")
+        assert application.runtime_action_async("next")
+        application.runtime_config_changed()
+        release_lane.set()
+        spin_until(compiling.is_set, AT_ONCE, what="the gesture's compile")
+        # The other preview setting is a library source while web wallpapers are on.
+        _save(application, web_wallpaper_previews=not previews)
+        spin_until(lambda: application._runtime_library_scan_pending, 10, what="the rescan")
+        read_settings.set()
+        spin_until(refused.is_set, AT_ONCE, what="the compile refused for the rescan")
+        spin_until(waiting_after_refusal.is_set, AT_ONCE, what="the gesture waiting for it")
+        service.sent.clear()
+
+        _save(application, allow_web_wallpapers=False)
+        _reaches_the_service_while_held(application, service, scans, settles=False)
+        _owed_clears(application)
+    finally:
+        release_lane.set()
+        read_settings.set()
+        scans.release()
+        blocker.result(timeout=15)
+    _and_after_the_scan(application, service, scans)
+    spin_until(lambda: not application._runtime_action_pending, 20, what="the gesture")
     assert application._runtime_web_off_owed == 0

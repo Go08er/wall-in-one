@@ -6093,6 +6093,31 @@ class Application(Adw.Application):
             return f"{said}; it also plays {', '.join(titles)}" if titles else said
         return "may hold a document that plays a web wallpaper"
 
+    def _wait_for_library_scan(self, generation: int, changed: bool) -> _RuntimePublication | None:
+        """Wait on the runtime lane for the source-changing scan in flight; None: loop again.
+
+        Both of `_compile_runtime_until_current_locked`'s waits are this one: a
+        playback gesture's before it compiles, and after a compile the scan's
+        library was refused for. Neither holds the lane against what can't wait
+        for a scan: web wallpapers going off returns None at once, so the
+        caller's loop publishes that, or its guard runs (`_publish_web_off`, R42-9);
+        a removal defers to its own outcome, which publishes again; a shutdown
+        ends it. A scan that ended in an error is the result, as ``generation``.
+        """
+        while not self._runtime_library_ready.wait(0.05):
+            with self._runtime_config_lock:
+                if self._runtime_shutdown:
+                    return _RuntimePublication(generation, changed=changed)
+                if self._removal_runtime_invalidated:
+                    return _RuntimePublication(generation, changed=changed, deferred=True)
+                if self._runtime_web_off_owed:
+                    break  # web wallpapers went off: that goes out first
+        with self._runtime_config_lock:
+            scan_error = self._runtime_library_error
+        if scan_error:
+            return _RuntimePublication(generation, changed=changed, error=scan_error)
+        return None
+
     def _compile_runtime_until_current_locked(
         self,
         *,
@@ -6144,29 +6169,9 @@ class Application(Adw.Application):
                         changed=changed_any,
                         deferred=True,
                     )
-                while not self._runtime_library_ready.wait(0.05):
-                    with self._runtime_config_lock:
-                        if self._runtime_shutdown:
-                            return _RuntimePublication(
-                                generation,
-                                changed=changed_any,
-                            )
-                        if self._removal_runtime_invalidated:
-                            return _RuntimePublication(
-                                generation,
-                                changed=changed_any,
-                                deferred=True,
-                            )
-                        if self._runtime_web_off_owed:
-                            break  # web wallpapers went off: that goes out first
-                with self._runtime_config_lock:
-                    scan_error = self._runtime_library_error
-                if scan_error:
-                    return _RuntimePublication(
-                        generation,
-                        changed=changed_any,
-                        error=scan_error,
-                    )
+                waited = self._wait_for_library_scan(generation, changed_any)
+                if waited is not None:
+                    return waited
                 continue
             if request is not None and request.generation > compiled:
                 try:
@@ -6177,6 +6182,7 @@ class Application(Adw.Application):
                         scan_pending = self._runtime_library_scan_pending
                         scan_error = self._runtime_library_error
                         removal_pending = self._removal_runtime_invalidated
+                        web_off_owed = self._runtime_web_off_owed != 0
                     if latest is not None and latest.generation > request.generation:
                         continue
                     if removal_pending:
@@ -6201,27 +6207,19 @@ class Application(Adw.Application):
                                 )
                             ),
                         )
-                    if not wait_for_library:
+                    if not wait_for_library or web_off_owed:
+                        # With web wallpapers off and owed, this request can't be
+                        # compiled before the scan ends, and the scan isn't waited
+                        # for: deferred, so the web-off guard runs now
+                        # (`_stopping_web_after_failure`) and the scan publishes.
                         return _RuntimePublication(
                             request.generation,
                             changed=changed_any,
                             deferred=True,
                         )
-                    while not self._runtime_library_ready.wait(0.05):
-                        with self._runtime_config_lock:
-                            if self._runtime_shutdown:
-                                return _RuntimePublication(
-                                    max(completed, compiled),
-                                    changed=changed_any,
-                                )
-                    with self._runtime_config_lock:
-                        scan_error = self._runtime_library_error
-                    if scan_error:
-                        return _RuntimePublication(
-                            request.generation,
-                            changed=changed_any,
-                            error=scan_error,
-                        )
+                    waited = self._wait_for_library_scan(request.generation, changed_any)
+                    if waited is not None:
+                        return waited
                     continue
                 except (config.ConfigError, runtime_config.RuntimeConfigError) as error:
                     with self._runtime_config_lock:

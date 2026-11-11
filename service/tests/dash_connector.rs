@@ -4,7 +4,9 @@
 //! 0.4.1 wrote such a name without a check. Refusing the document made
 //! `--check-config` exit 78, and `RestartPreventExitStatus=78` then kept the
 //! unit down for every display. The name is data; only where it would become
-//! a program's argument is it refused (`renderer.rs`, per display).
+//! a program's argument does it matter: such a display is not present, left out
+//! where the compositor's list is read (`renderer.rs`, `option_like_name`), and an
+//! assignment to it is one to a display that is not connected.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};

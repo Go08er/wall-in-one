@@ -30,6 +30,7 @@ See ``docs/display-discovery.md``.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final
@@ -47,6 +48,11 @@ MAX_OUTPUTS: Final = 64
 MAX_REFRESH_MILLIHZ: Final = 1_000_000
 #: The longest connector name any renderer is handed (the service's bound).
 MAX_NAME_BYTES: Final = 256
+
+LOGGER = logging.getLogger(__name__)
+
+#: Names `_as_connector` has said it ignores, each once (bounded like a status).
+_IGNORED: set[str] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +126,12 @@ def _as_connector(value: object) -> str:
     """A connector name a renderer can be given, or ``""``.
 
     The service's own rule: bounded, and nothing a command line or a
-    tab-separated listing could misread.
+    tab-separated listing could misread. A name that starts with ``-`` is
+    one every renderer would read as an option; no real compositor names a
+    connector so. Such a display is not present, as the service leaves it out
+    (its `option_like_name`): it is said once and never a target. A name in
+    the settings or the document is data, so an assignment to it is one to a
+    display that isn't connected.
     """
     if not isinstance(value, str):
         return ""
@@ -130,6 +141,15 @@ def _as_connector(value: object) -> str:
         or len(name.encode()) > MAX_NAME_BYTES
         or any(character.isspace() or not character.isprintable() for character in name)
     ):
+        return ""
+    if name.startswith("-"):
+        if name not in _IGNORED and len(_IGNORED) < MAX_OUTPUTS:
+            _IGNORED.add(name)
+            LOGGER.warning(
+                "ignored a display named %r: a name that starts with '-' would be read as "
+                "an option by the programs it is given to",
+                name,
+            )
         return ""
     return name
 

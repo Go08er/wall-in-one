@@ -234,7 +234,7 @@ def current_wallpaper(
     cancelled: CancelCheck | None = None,
 ) -> Path | None:
     """The default wallpaper path, or the effective one for a given output."""
-    arguments = [connector] if connector else []
+    arguments = _connector_argument(connector)
     reply = message("wallpaper-get", *arguments, cancelled=cancelled)
     return Path(reply) if reply else None
 
@@ -246,8 +246,21 @@ def set_wallpaper(path: Path, connector: str | None = None) -> None:
     -- more importantly -- so it regenerates the palette, which is what fires
     our template's post-hook and keeps the app's colours in sync.
     """
-    arguments = [connector] if connector else []
+    arguments = _connector_argument(connector)
     message("wallpaper-set", *arguments, str(path))
+
+
+def _connector_argument(connector: str | None) -> list[str]:
+    """``connector`` as Noctalia's operand; refused when it would read as an option.
+
+    Discovery never offers such a name (`wallpaper.outputs`), so this is the
+    second line, as at every other place a connector becomes an argument.
+    """
+    if not connector:
+        return []
+    if connector.startswith("-"):
+        raise NoctaliaError(f"display name {connector!r} starts with '-', which is an option")
+    return [connector]
 
 
 def current_scheme_selection(*, cancelled: CancelCheck | None = None) -> ColourSchemeSelection:

@@ -851,87 +851,265 @@ fn recorded_arguments(arguments: &Path, launches: usize) -> String {
     fs::read_to_string(arguments).unwrap_or_default()
 }
 
-#[test]
-fn a_display_whose_name_starts_with_a_dash_is_skipped_as_refused_and_the_others_play() {
-    // review-f3 M1: the name is data; only where it would become an argument
-    // of a program is it refused, as a skip of that display (`refused` in
-    // status), never a failure, so a reload is not rolled back.
+/// A schema 8 document over playlist `p1` holding `entries` (`still`, `video` or a scene id)
+/// and, by name, `displays` (connector, playlist).
+fn dash_document(mode: &str, displays: &[(&str, &str)], entries: &[&str]) -> String {
+    let theme = if mode == "independent" { "DP-1" } else { "" };
+    let mut document = format!(
+        r#"schema_version = 8
+config_generation = "6319beb596edd7da48bfde4e70adba5b7fcf02ed4c7729ffc0db4adb9a0b426d"
+default_playlist = "p1"
+
+[settings]
+cycle_interval_seconds = 300
+cycle_enabled = false
+shuffle = false
+dynamics_enabled = true
+display_mode = "{mode}"
+theme_source_connector = "{theme}"
+allow_web_wallpapers = false
+
+[renderer]
+noctalia_program = "/bin/true"
+mpvpaper_program = "/bin/true"
+linux_wallpaperengine_program = "/bin/true"
+own_scene_renderer = true
+layer = "background"
+video_when_hidden = "pause"
+video_hardware_decode = true
+video_interpolation = "off"
+video_muted = true
+video_volume = 100
+scene_fps = 30
+scene_muted = true
+scene_volume = 0
+scene_pause_when_covered = true
+scene_scaling = ""
+scene_clamp = ""
+
+[[playlists]]
+id = "p1"
+name = "p1"
+"#
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        let lines = match *entry {
+            "still" => format!("kind = \"still\"\nstill = \"/tmp/s{index}.png\""),
+            "video" => format!(
+                "kind = \"video\"\nstill = \"/tmp/s{index}.png\"\nmotion = \"/tmp/v{index}.mp4\""
+            ),
+            scene => {
+                format!("kind = \"scene\"\nstill = \"/tmp/s{index}.png\"\nscene_id = \"{scene}\"")
+            }
+        };
+        document.push_str(&format!(
+            "\n[[playlists.entries]]\nid = \"e{index}\"\n{lines}\npalette = {{ kind = \"keep\", mode = \"keep\" }}\n"
+        ));
+    }
+    for (connector, playlist) in displays {
+        document.push_str(&format!(
+            "\n[[displays]]\nconnector = \"{connector}\"\nplaylist = \"{playlist}\"\n"
+        ));
+    }
+    document
+}
+
+/// What the three programs were given, one argument a line, and the status.
+struct DashRun {
+    engine: String,
+    mpvpaper: String,
+    noctalia: String,
+    status: serde_json::Value,
+}
+
+/// `document` on a real driver whose compositor reports `outputs` (or none can be asked),
+/// applied once; with `reload`, that document is then loaded in its place. `launched`:
+/// the programs ("engine", "mpvpaper") whose start is waited for.
+fn dash_run(
+    label: &str,
+    document: &str,
+    outputs: Option<Vec<Output>>,
+    reload: Option<&str>,
+    launched: &[&str],
+) -> DashRun {
     use std::os::unix::fs::PermissionsExt;
-    let root = directory("dash-output");
+    let root = directory(label);
     let (noctalia, noctalia_arguments) = argument_recorder(&root, "noctalia");
     // Noctalia is asked and must answer at once.
     fs::write(
         &noctalia,
-        format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> {:?}\nexit 0\n",
-            noctalia_arguments
-        ),
+        format!("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> {noctalia_arguments:?}\nexit 0\n"),
     )
     .unwrap();
     fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
-    let (mpvpaper, arguments) = argument_recorder(&root, "mpvpaper");
+    let (mpvpaper, mpvpaper_arguments) = argument_recorder(&root, "mpvpaper");
     let (engine, engine_arguments) = argument_recorder(&root, "engine");
-    let document = config(&noctalia, &mpvpaper, true).replace(
-        "linux_wallpaperengine_program = \"/bin/true\"",
-        &format!("linux_wallpaperengine_program = {engine:?}"),
-    );
-    let parsed: Config = toml::from_str(&document).unwrap();
-    let still = parsed.playlists[0].entries[0].clone();
-    let video = parsed.playlists[0].entries[1].clone();
-    let scene = parsed.playlists[1].entries[0].clone();
-    let (mut driver, _) = driver_with(
-        parsed.renderer.clone(),
-        vec![live("-o", None), live("DP-1", None)],
-    );
-    // The runtime's view of the displays keeps the name: it is routed and
-    // reported, not hidden.
-    assert_eq!(
-        driver.connected_outputs().unwrap(),
-        vec!["-o".to_string(), "DP-1".to_string()]
-    );
-    // Named outright, such a display is skipped for each kind, not failed.
-    for entry in [&still, &video, &scene] {
-        assert_eq!(driver.apply(entry, "-o", &parsed.settings), Ok(()));
-        let refused = driver.motion_refused("-o").expect("refused");
-        assert!(!refused.web_page);
-        assert!(refused.reason.contains("starts with '-'"), "{refused}");
+    let programs = |text: &str| {
+        text.replace(
+            "noctalia_program = \"/bin/true\"",
+            &format!("noctalia_program = {noctalia:?}"),
+        )
+        .replace(
+            "mpvpaper_program = \"/bin/true\"",
+            &format!("mpvpaper_program = {mpvpaper:?}"),
+        )
+        .replace(
+            "linux_wallpaperengine_program = \"/bin/true\"",
+            &format!("linux_wallpaperengine_program = {engine:?}"),
+        )
+    };
+    let config_path = root.join("runtime.toml");
+    fs::write(&config_path, programs(document)).unwrap();
+    let parsed = Config::load(&config_path).unwrap();
+    let driver = match outputs {
+        Some(outputs) => driver_with(parsed.renderer.clone(), outputs).0,
+        None => offline_driver(parsed.renderer.clone()),
+    };
+    let mut runtime = Runtime::new(config_path.clone(), parsed, driver, noon()).unwrap();
+    without_text_file_busy(|| runtime.apply_current()).unwrap();
+    if let Some(next) = reload {
+        fs::write(&config_path, programs(next)).unwrap();
+        let reloaded = runtime_command(&mut runtime, noon(), "reload", None);
+        assert!(reloaded.ok, "{}", reloaded.message);
     }
-    assert_eq!(
-        driver.apply_still_only(&still, "--help", &parsed.settings),
-        Ok(())
-    );
-    assert!(driver.motion_refused("--help").is_some());
-    assert!(
-        !arguments.exists(),
-        "mpvpaper was started for a dash output"
-    );
-    assert!(
-        !engine_arguments.exists(),
-        "the engine was started for a dash output"
-    );
-    assert!(
-        !fs::read_to_string(&noctalia_arguments)
-            .unwrap_or_default()
-            .lines()
-            .any(|word| word == "-o" || word == "--help"),
-        "Noctalia was given the name"
-    );
-    // The other display plays, and is not refused.
-    without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
-    assert!(driver.motion_refused("DP-1").is_none());
-    let launched = recorded_arguments(&arguments, 1);
-    assert!(launched.lines().any(|word| word == "DP-1"), "{launched}");
-    // Asked for all of them, the engine is given only the usable one.
-    without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
-    let given = recorded_arguments(&engine_arguments, 1);
-    assert!(given.lines().any(|word| word == "DP-1"), "{given}");
-    assert!(!given.lines().any(|word| word == "-o"), "{given}");
-    driver.stop();
+    let read = |path: &Path| fs::read_to_string(path).unwrap_or_default();
+    let mut run = DashRun {
+        engine: String::new(),
+        mpvpaper: String::new(),
+        noctalia: String::new(),
+        status: status(&mut runtime, noon()),
+    };
+    if launched.contains(&"engine") {
+        run.engine = recorded_arguments(&engine_arguments, 1);
+    }
+    if launched.contains(&"mpvpaper") {
+        run.mpvpaper = recorded_arguments(&mpvpaper_arguments, 1);
+    }
+    run.noctalia = read(&noctalia_arguments);
+    runtime.shutdown();
     fs::remove_dir_all(root).unwrap();
+    run
+}
+
+fn word_after(arguments: &str, option: &str) -> Vec<String> {
+    let words: Vec<&str> = arguments.lines().collect();
+    words
+        .windows(2)
+        .filter(|pair| pair[0] == option)
+        .map(|pair| pair[1].to_string())
+        .collect()
 }
 
 #[test]
-fn when_every_output_has_a_dash_name_a_scene_is_refused_not_failed() {
+fn a_display_whose_name_starts_with_a_dash_is_not_present_and_the_others_play() {
+    // review-f4 F4-1: a live head named `-X` made the runtime refuse every scene of the
+    // shared playlist on every display, DP-1 included. No real compositor names a
+    // connector so: such a head is left out at discovery, never a target, never given
+    // to a program; the name stays data in the document (dash_connector.rs).
+    let both = || vec![live("-X", None), live("DP-1", None)];
+    let scenes = ["12345", "12346"];
+    for (label, document) in [
+        (
+            "dash-independent-named",
+            dash_document("independent", &[("DP-1", "p1"), ("-X", "p1")], &scenes),
+        ),
+        (
+            "dash-independent-unnamed",
+            dash_document("independent", &[("DP-1", "p1")], &scenes),
+        ),
+        (
+            "dash-mirrored-assigned",
+            dash_document("mirrored", &[("DP-1", "p1"), ("-X", "p1")], &scenes),
+        ),
+        ("dash-mirrored", dash_document("mirrored", &[], &scenes)),
+    ] {
+        let run = dash_run(label, &document, Some(both()), None, &["engine"]);
+        assert_eq!(
+            word_after(&run.engine, "--screen-root"),
+            ["DP-1"],
+            "{label}: {}",
+            run.engine
+        );
+        assert_eq!(word_after(&run.engine, "--bg"), ["12345"], "{label}");
+        assert_eq!(run.status["refused"], serde_json::json!([]), "{label}");
+        assert_eq!(run.status["last_error"], "", "{label}");
+        assert!(
+            !run.noctalia.lines().any(|word| word == "-X"),
+            "{label}: {}",
+            run.noctalia
+        );
+        let names: Vec<&str> = run.status["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["DP-1"], "{label}: not present");
+        for row in run.status["displays"].as_array().unwrap() {
+            if row["connector"] == "-X" {
+                // Named in the document: a display that isn't connected.
+                assert_eq!(row["connected"], false, "{label}");
+                assert_eq!(row["motion_active"], false, "{label}");
+            } else {
+                assert!(row["nothing_to_play"].is_null(), "{label}: {row}");
+                assert_eq!(row["kind"], "scene", "{label}: {row}");
+            }
+        }
+    }
+    // A video and a still play on DP-1, and nothing is given the name.
+    for (label, entry) in [("dash-video", "video"), ("dash-still", "still")] {
+        let document = dash_document("independent", &[("DP-1", "p1"), ("-X", "p1")], &[entry]);
+        let launched: &[&str] = if entry == "video" { &["mpvpaper"] } else { &[] };
+        let run = dash_run(label, &document, Some(both()), None, launched);
+        assert!(!run.mpvpaper.lines().any(|word| word == "-X"), "{label}");
+        assert!(!run.noctalia.lines().any(|word| word == "-X"), "{label}");
+        if entry == "video" {
+            assert_eq!(
+                word_after(&run.mpvpaper, "--"),
+                ["DP-1"],
+                "{label}: {}",
+                run.mpvpaper
+            );
+        } else {
+            assert!(
+                run.noctalia
+                    .lines()
+                    .collect::<Vec<_>>()
+                    .windows(2)
+                    .any(|pair| pair == ["wallpaper-set", "DP-1"]),
+                "{label}: {}",
+                run.noctalia
+            );
+        }
+    }
+    // Before the compositor can be asked, the document's assignments are the targets:
+    // never the dash name. And a reload that moves its assignment changes nothing.
+    let document = dash_document("independent", &[("DP-1", "p1"), ("-X", "p1")], &scenes);
+    let run = dash_run("dash-offline", &document, None, None, &["engine"]);
+    assert_eq!(
+        word_after(&run.engine, "--screen-root"),
+        ["DP-1"],
+        "{}",
+        run.engine
+    );
+    let moved = dash_document("independent", &[("-X", "p1"), ("DP-1", "p1")], &["12346"]);
+    let run = dash_run(
+        "dash-reload",
+        &document,
+        Some(both()),
+        Some(&moved),
+        &["engine"],
+    );
+    assert!(
+        !run.engine.lines().any(|word| word == "-X"),
+        "{}",
+        run.engine
+    );
+    assert_eq!(run.status["refused"], serde_json::json!([]));
+}
+
+#[test]
+fn when_every_output_has_a_dash_name_none_is_present_and_no_window_opens() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("dash-only");
     let noctalia = root.join("noctalia");
@@ -945,8 +1123,13 @@ fn when_every_output_has_a_dash_name_a_scene_is_refused_not_failed() {
     let parsed: Config = toml::from_str(&document).unwrap();
     let scene = parsed.playlists[1].entries[0].clone();
     let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("-X", None)]);
-    assert_eq!(driver.apply(&scene, "", &parsed.settings), Ok(()));
-    assert!(driver.motion_refused("").is_some());
+    assert!(driver.connected_outputs().is_err(), "no display is present");
+    // Asked for all of them, the engine is given none and not started.
+    assert!(driver.apply(&scene, "", &parsed.settings).is_err());
+    assert!(
+        driver.motion_refused("").is_none(),
+        "nothing is said against the scene"
+    );
     assert!(!engine_arguments.exists(), "the engine opened a window");
     fs::remove_dir_all(root).unwrap();
 }

@@ -6,7 +6,9 @@ use crate::config::{
 use crate::outputs::Output;
 use crate::power::{PowerObservation, PowerPolicy, PowerSource};
 use crate::protocol::{Request, Response, escaped_len, success_excess, success_fits, success_room};
-use crate::renderer::{MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver};
+use crate::renderer::{
+    MAX_OUTPUT_NAME_BYTES, MissingRenderer, RendererFailure, WallpaperDriver, option_like_name,
+};
 use crate::schedule;
 use crate::workshop::Refusal;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
@@ -968,6 +970,18 @@ struct NondurableFindings {
     order: Vec<ResolvedMediaIdentity>,
 }
 
+/// The displays the document assigns, as the targets before any live list is
+/// known: a name that starts with '-' is never one (`option_like_name`), so an
+/// assignment to it is one to a display that isn't connected.
+fn assigned_targets(config: &Config) -> Vec<String> {
+    config
+        .displays
+        .iter()
+        .map(|display| display.connector.clone())
+        .filter(|connector| !option_like_name(connector))
+        .collect()
+}
+
 fn configured_taboo(
     config: &Config,
     config_epoch: u64,
@@ -1179,19 +1193,11 @@ impl<D: WallpaperDriver> Runtime<D> {
             .to_string();
         let independent = config.settings.display_mode == DisplayMode::Independent;
         let mut target_outputs = if independent {
-            config
-                .displays
-                .iter()
-                .map(|display| display.connector.clone())
-                .collect()
+            assigned_targets(&config)
         } else if config.displays.is_empty() {
             vec![String::new()]
         } else {
-            config
-                .displays
-                .iter()
-                .map(|display| display.connector.clone())
-                .collect()
+            assigned_targets(&config)
         };
         target_outputs.sort();
         target_outputs.dedup();
@@ -3569,11 +3575,14 @@ impl<D: WallpaperDriver> Runtime<D> {
 
     fn probe_outputs(&mut self) -> Result<Vec<String>, String> {
         let mut outputs = self.driver.connected_outputs()?;
+        // The driver leaves out a name that starts with '-' and says so
+        // (`SystemDriver::query_outputs`); this holds for any driver.
         outputs.retain(|output| {
             !output.is_empty()
                 && output.len() <= MAX_OUTPUT_NAME_BYTES
                 && !output.chars().any(char::is_whitespace)
                 && !output.chars().any(char::is_control)
+                && !option_like_name(output)
         });
         outputs.sort();
         outputs.dedup();
@@ -3609,11 +3618,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     if let Some(outputs) = &self.live_outputs {
                         outputs.clone()
                     } else {
-                        self.config
-                            .displays
-                            .iter()
-                            .map(|display| display.connector.clone())
-                            .collect()
+                        assigned_targets(&self.config)
                     }
                 } else if self.config.displays.is_empty() {
                     vec![String::new()]
@@ -3623,11 +3628,7 @@ impl<D: WallpaperDriver> Runtime<D> {
                     // The compositor may not be ready during login. Preserve the former
                     // explicit-assignment behaviour until a live snapshot is
                     // available; unassigned outputs join on the first probe.
-                    self.config
-                        .displays
-                        .iter()
-                        .map(|display| display.connector.clone())
-                        .collect()
+                    assigned_targets(&self.config)
                 }
             }
         };
@@ -3872,13 +3873,9 @@ impl<D: WallpaperDriver> Runtime<D> {
             Err(error) => {
                 self.output_discovery_error =
                     truncate_middle(&error, MAX_OUTPUT_DISCOVERY_ERROR_BYTES);
-                self.live_outputs.clone().unwrap_or_else(|| {
-                    self.config
-                        .displays
-                        .iter()
-                        .map(|display| display.connector.clone())
-                        .collect()
-                })
+                self.live_outputs
+                    .clone()
+                    .unwrap_or_else(|| assigned_targets(&self.config))
             }
         };
         self.target_outputs.sort();
@@ -5460,23 +5457,15 @@ impl<D: WallpaperDriver> Runtime<D> {
         self.reconcile_configured_taboo(&nondurable_findings);
         if mode_changed || (displays_changed && self.live_outputs.is_none()) {
             self.target_outputs = if self.is_independent() {
-                self.live_outputs.clone().unwrap_or_else(|| {
-                    self.config
-                        .displays
-                        .iter()
-                        .map(|display| display.connector.clone())
-                        .collect()
-                })
+                self.live_outputs
+                    .clone()
+                    .unwrap_or_else(|| assigned_targets(&self.config))
             } else if self.config.displays.is_empty() {
                 vec![String::new()]
             } else {
-                self.live_outputs.clone().unwrap_or_else(|| {
-                    self.config
-                        .displays
-                        .iter()
-                        .map(|display| display.connector.clone())
-                        .collect()
-                })
+                self.live_outputs
+                    .clone()
+                    .unwrap_or_else(|| assigned_targets(&self.config))
             };
             self.target_outputs.sort();
             self.target_outputs.dedup();

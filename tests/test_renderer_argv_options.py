@@ -19,7 +19,9 @@ from typing import Any
 import pytest
 
 from wall_in_one import paths, runtime_config
-from wall_in_one.wallpaper import renderer, scenes
+from wall_in_one.theme import noctalia
+from wall_in_one.theme.noctalia import set_wallpaper as real_set_wallpaper
+from wall_in_one.wallpaper import outputs, renderer, scenes
 
 
 @pytest.fixture
@@ -135,3 +137,42 @@ def test_a_connector_that_starts_with_a_dash_is_data_to_the_compiler(tmp_path: P
     )
     assert isinstance(proposal, dict) and proposal["theme_source_connector"] == "-X"
     runtime_config.render(replace(settings, **proposal), session)
+
+
+def test_a_display_whose_name_starts_with_a_dash_is_not_discovered() -> None:
+    """review-f4 F4-1: such a head is not present, from the service's list or GTK's."""
+    status = {"outputs": [{"name": "-X", "enabled": True}, {"name": "DP-1", "enabled": True}]}
+    assert outputs.names(outputs.from_status(status) or ()) == ("DP-1",)
+
+    class Monitor:
+        def __init__(self, connector: str) -> None:
+            self.connector = connector
+
+        def get_connector(self) -> str:
+            return self.connector
+
+    found = outputs.from_monitors([Monitor("--help"), Monitor("eDP-1")])
+    assert outputs.names(found) == ("eDP-1",)
+
+
+def test_noctalia_is_never_given_a_display_name_that_starts_with_a_dash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review-f4 F4-12: `wallpaper-set <connector> <path>` takes the name as an operand."""
+    sent: list[tuple[str, ...]] = []
+
+    def message(command: str, *arguments: str, **_keywords: object) -> str:
+        sent.append((command, *arguments))
+        return ""
+
+    monkeypatch.setattr(noctalia, "message", message)
+    still = tmp_path / "still.png"
+    for name in ("-X", "--help"):
+        with pytest.raises(noctalia.NoctaliaError, match="starts with '-'"):
+            real_set_wallpaper(still, name)
+        with pytest.raises(noctalia.NoctaliaError, match="starts with '-'"):
+            noctalia.current_wallpaper(name)
+    assert sent == []
+    real_set_wallpaper(still, "DP-1")
+    real_set_wallpaper(still)
+    assert sent == [("wallpaper-set", "DP-1", str(still)), ("wallpaper-set", str(still))]

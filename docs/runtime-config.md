@@ -399,13 +399,15 @@ read as an option) is refused like any other invalid one. A connector (a
 display assignment, a schedule's, the theme source) is not checked for its
 spelling beyond being non-empty where required, without whitespace or control
 characters and at most 256 bytes: one that starts with `-`, which 0.4.1 wrote
-without a check, still loads. Only where a name would become a program's
-argument is it refused, and then for that display alone: the service starts
-nothing for it, says why in `refused` (never a taboo, never a failed renderer,
-so a reload isn't rolled back), and the other displays play on. mpvpaper gets
-its output and video after a `--`; linux-wallpaperengine, which has no `--` to
-rely on, is given only the other outputs; Noctalia is not asked to set a
-still on such a display.
+without a check, still loads. A display the compositor names that way (no real
+one does) is not present: the service leaves it out where it reads the
+compositor's list, says so once in its journal ("ignored a display named
+..."), and never makes it a target, so mpvpaper, linux-wallpaperengine and
+Noctalia are never given the name and nothing is refused or failed for it; an
+assignment to it is one to a display that isn't connected (its status row says
+`connected = false`), and every other display plays as usual. The app's own
+display lists leave it out the same way. mpvpaper gets its output and video
+after a `--` all the same.
 
 **An entry the service refuses is skipped.** Such an entry is never started.
 While motion can start, the service asks before its still goes up, so it isn't

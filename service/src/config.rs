@@ -155,10 +155,11 @@ pub struct Settings {
     pub display_mode: DisplayMode,
     pub theme_source_connector: String,
     /// Whether a Wallpaper Engine web page may play (schema 8). Absent means
-    /// not allowed: before linux-wallpaperengine is started for a scene, the
-    /// service then reads the item's `project.json` and refuses a web page,
-    /// or one whose type it can't read (`crate::workshop`); the runtime skips
-    /// such an entry (`Runtime::refused_scenes`).
+    /// not allowed. Before linux-wallpaperengine is started for a scene, the
+    /// service reads the item's `project.json` whatever this says: it allows a
+    /// `scene` or a `video`, a `web` page only when this is true, and refuses
+    /// any other type or one it can't read (`crate::workshop`); the runtime
+    /// skips such an entry (`Runtime::refused_scenes`).
     #[serde(default)]
     pub allow_web_wallpapers: bool,
 }

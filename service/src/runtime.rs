@@ -1125,9 +1125,9 @@ pub struct Runtime<D: WallpaperDriver> {
     taboo_order: Vec<EntryKey>,
     /// The Wallpaper Engine items the driver would not start in this
     /// document generation, by the item an entry renders
-    /// (`Entry::rendered_scene`), with why: while web wallpapers aren't
-    /// allowed, a web page, or an item the service can't find or read
-    /// (`WallpaperDriver::motion_refusal`). Every entry of one is skipped
+    /// (`Entry::rendered_scene`), with why: a web page while web wallpapers
+    /// aren't allowed, or, whether they are or not, an item of another type
+    /// or one the service can't find or read (`WallpaperDriver::motion_refusal`). Every entry of one is skipped
     /// (owner: "skip to next, if it's in a playlist alone, then use the
     /// default playlist in schedule"), so each is asked once. Never a taboo
     /// and never saved; a reload forgets them. Status lists them

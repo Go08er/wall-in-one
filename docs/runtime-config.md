@@ -378,9 +378,10 @@ On such a row `entry_id`, `kind` and `still` are empty and there is no
 rotation countdown.
 
 `[settings] allow_web_wallpapers = true` is schema 8 too, written only while
-the setting is on. Absent, web wallpapers aren't allowed: before the service
-starts linux-wallpaperengine for a scene, it reads that item's `project.json`
-where the engine finds it, and refuses a web page or an item it can't classify
+the setting is on. Before the service starts linux-wallpaperengine for a scene,
+whether it is on or not, it reads that item's `project.json` where the engine
+finds it. Absent, web wallpapers aren't allowed and a web page is refused; any
+type but `scene`, `video` and an allowed `web`, or an item it can't classify,
 ([wallpaper-engine.md](wallpaper-engine.md#web-wallpapers-are-off-until-allowed)).
 A change of the setting starts every display again. Status says what the
 loaded document allows:

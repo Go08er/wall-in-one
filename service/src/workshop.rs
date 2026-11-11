@@ -567,6 +567,39 @@ mod tests {
     }
 
     #[test]
+    fn every_place_the_engine_looks_must_agree_with_web_on_too() {
+        let home = home("places-web-on");
+        // A scene in one folder and an application in another: refused.
+        item(&home, 0, "20", r#"{"type":"scene"}"#);
+        item(&home, 2, "20", r#"{"type":"application"}"#);
+        assert!(refusal(Some(&home), "20", true).is_some());
+        // And the other way round, found only in the Snap's folder.
+        item(&home, 1, "21", r#"{"type":"application"}"#);
+        item(&home, 3, "21", r#"{"type":"scene"}"#);
+        assert!(refusal(Some(&home), "21", true).is_some());
+        item(&home, 3, "22", r#"{"type":"application"}"#);
+        assert!(refusal(Some(&home), "22", true).is_some());
+        // A web page beside a scene passes only with web on.
+        item(&home, 0, "23", r#"{"type":"scene"}"#);
+        item(&home, 2, "23", r#"{"type":"web"}"#);
+        assert_eq!(refusal(Some(&home), "23", true), None);
+        assert!(refusal(Some(&home), "23", false).is_some());
+        // A web page beside an application is still refused.
+        item(&home, 0, "24", r#"{"type":"web"}"#);
+        item(&home, 1, "24", r#"{"type":"application"}"#);
+        assert!(refusal(Some(&home), "24", true).is_some());
+        // Scene and video agree.
+        item(&home, 1, "25", r#"{"type":"scene"}"#);
+        item(&home, 3, "25", r#"{"type":"video"}"#);
+        assert_eq!(refusal(Some(&home), "25", true), None);
+        // A copy that can't be read is refused beside a good one.
+        item(&home, 0, "26", r#"{"type":"scene"}"#);
+        item(&home, 2, "26", "not json");
+        assert!(refusal(Some(&home), "26", true).is_some());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn a_folder_that_cant_be_looked_into_is_refused() {
         let home = home("unreadable");
         let steam = home.join(".local/share/Steam/steamapps/workshop/content");

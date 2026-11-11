@@ -199,8 +199,9 @@ app no longer knows, the app stops it. A service that reads 8 is then handed
 a document that plays nothing, which also replaces the file on disk; one that
 can't read it is told to quit, and its next start is guarded. A service that
 reads 8, holding a document that doesn't allow web wallpapers with none on
-disk that does, is left alone: it refuses every page itself (below, where an `application` or an item it can't read is refused with the setting on too), and the
-app only says that the setting hasn't reached it yet. With no service
+disk that does, is left alone: it refuses every page itself (below, where an
+`application` or an item it can't read is refused with the setting on too),
+and the app only says that the setting hasn't reached it yet. With no service
 running, nothing is stopped, but a file on disk that allows web wallpapers is
 replaced the same way, so that a start already past its check can't load it.
 A publication that read the setting before it was turned off (a service start's
@@ -314,8 +315,8 @@ web wallpapers on or off: a scene in a Steam library on another drive is one,
 since the engine never looks there. Each reason says what it is; only a web
 page is put down to web wallpapers ("this configuration doesn't allow web
 wallpapers", since a document can lack the key for other reasons than the
-setting being off). The engine isn't started, and the entry is skipped, as the owner put
-it: "skip to next, if it's in a playlist alone, then use the default playlist
+setting being off). The engine isn't started, and the entry is skipped, as the
+owner put it: "skip to next, if it's in a playlist alone, then use the default playlist
 in schedule". While motion can start, the service asks before anything of the
 entry is shown, so its still doesn't go up, and the next entry of the same
 playlist takes over. While motion is off (on battery with the battery policy
@@ -328,8 +329,8 @@ service moves on at once. Both checks run before the engine is started. A
 change after the second one, in the moment before the engine reads the file
 itself, isn't caught. A playlist with nothing left that can play gives way
 to the document's default playlist, then to All media; with nothing left at
-all the display plays nothing, but for the known
-exceptions ([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never a taboo,
+all the display plays nothing, but for the known exceptions
+([schema 8](runtime-config.md#nothing-to-play-schema-8)). It is never a taboo,
 so nothing is saved against the item. The service's journal says what it
 skipped and why, and so does its status
 ([fields](runtime-config.md#nothing-to-play-schema-8)): `refused` lists the
@@ -344,9 +345,8 @@ and nothing names the pick; refused items aren't mentioned at all (its
 companion update. Each item is asked once per document,
 in one pass along the playlist however many are refused: a reload (which
 turning the setting on or off is) asks again. A document from before schema 8
-has no such key, so it allows no web page. While the document does allow web
-wallpapers nothing is checked, and such a scene fails in the engine as at
-0.4.0.
+has no such key, so it allows no web page. The check is the same while the
+document does allow web wallpapers, except that a `web` page then passes.
 
 **No previews while it is off.** Owner: "it shouldn't load the papers to make a
 preview if web wallpapers are off." While the setting is off, nothing in a web

@@ -946,10 +946,11 @@ def allows_web_wallpapers(path: Path | None = None, *, text: str | None = None) 
     """Whether the published ``runtime.toml`` says ``allow_web_wallpapers = true`` (schema 8).
 
     Such a document lets a web page play whatever it names today: it turns
-    the service's own check off (the service reads an item's type before it
-    starts the engine only while the document doesn't allow web wallpapers),
-    so a Workshop item whose type became ``web`` after the compile would play
-    as one. A caller that must not keep a web page while the setting is off
+    a web page play: the service's own check of an item's type, before it
+    starts the engine, then lets a ``web`` one through (every other type but
+    ``scene`` and ``video`` is refused with the setting on too), so a
+    Workshop item whose type became ``web`` after the compile would play as
+    one. A caller that must not keep a web page while the setting is off
     counts it as one. ``text`` as for `retained_web_wallpapers`.
 
     One the service can't read either says nothing: missing, unreadable, not

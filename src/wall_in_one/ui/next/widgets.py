@@ -799,8 +799,9 @@ _CORNER_CSS: Final = """
 #: Room a page leaves at the right of the row above the list, so the hanging
 #: pill never covers that row's own controls.
 CORNER_RESERVE: Final = 96
-#: The selection-mode icon (two tiles ticked in a grid). The prototype ships
-#: it in its icon folder; elsewhere the icon theme's fallback shows.
+#: The selection-mode icon (two tiles ticked in a grid). The app ships it
+#: (`style.ICON_DIR`), and `style.install` adds that folder to the icon
+#: theme's search path, so it resolves with no system icon theme.
 SELECT_ICON: Final = "wio-select-multiple-symbolic"
 _corner_styled = False
 

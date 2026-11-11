@@ -631,8 +631,8 @@ def _retained_web_refusal() -> str:
     still plays a web page, and the service can't tell one from a scene. A
     service that starts on it plays what the person turned off. So does one
     that starts on a document that allows web wallpapers whatever it names
-    (`runtime_config.allows_web_wallpapers`): that turns the service's own
-    check off, and a Workshop item that became a web page would play. And so
+    (`runtime_config.allows_web_wallpapers`): which lets a web page through
+    the service's own check, so a Workshop item that became a web page would play. And so
     does one this can't read as TOML 1.0, which the service reads as 1.1
     (`runtime_config.not_toml_1_0`; review r13f, N1): what it allows or
     names can't be checked.

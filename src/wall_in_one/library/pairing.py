@@ -447,31 +447,38 @@ def _selected_still(video: Path, *, strict: bool) -> Path | None:
 
 
 def selector_is_foreign(video: Path, roots: Iterable[Path]) -> bool:
-    """Whether ``video``'s sidecar names a picture the reader ignores for where it is.
+    """Whether ``video``'s sidecar is one this app did not write, and so is not its to delete.
 
-    True for a readable selector that names a file outside every root (or beside
-    Workshop content): `read_sidecar` ignores it, and it may be the person's own, so
-    nothing here owns it. A selector that is absent, can't be read, or names no
-    still is not "foreign" (there is nothing it points at), and one the reader
-    trusts is the app's own. Used so that removing a video never deletes a
-    selector the app did not write (`manage.pairing_artifact_paths`).
+    This app writes a selector only inside a root, naming a still there. So the
+    sidecar is the app's own only when it is a small readable JSON naming a still
+    that `_trusted_location` accepts. Anything else the readers ignore (not JSON,
+    empty, over `MAX_SIDECAR_BYTES`, no still named or not a string, a still outside
+    every root, beside Workshop content) may be the person's own: it is left, byte
+    for byte, as `stills._record_beside` leaves it. An absent sidecar is nobody's.
+    Used so that removing a video deletes only the selectors it owns
+    (`manage.pairing_artifact_paths`).
     """
     roots = tuple(roots)
     if workshop.is_workshop_content(video, labelled=False, roots=roots):
         return True
     sidecar = video.with_name(video.name + SIDECAR_SUFFIX)
     try:
+        if not sidecar.is_symlink() and not sidecar.exists():
+            return False
+    except OSError:
+        return True
+    try:
         raw = file_io.read_regular_bytes(sidecar, MAX_SIDECAR_BYTES)
         document = json.loads(raw) if raw is not None else None
     except OSError, ValueError, RecursionError:
-        return False
+        return True
     recorded = document.get(SIDECAR_STILL_KEY) if isinstance(document, dict) else None
     if not isinstance(recorded, str) or not recorded:
-        return False
+        return True
     candidate = Path(recorded)
     if not candidate.is_absolute():
         candidate = video.parent / candidate
-    return not _trusted_location(video, candidate, tuple(roots))
+    return not _trusted_location(video, candidate, roots)
 
 
 def _present_or_raise(path: Path) -> bool:

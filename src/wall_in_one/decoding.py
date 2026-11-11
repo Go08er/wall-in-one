@@ -24,7 +24,7 @@ from typing import Final
 #: them (a name with aliases, ``matroska,webm``, matches by any one of them).
 FORMATS: Final = (
     "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,flv,mpegts,mpeg,asf,ogg,ogv,ivf,m4v,h264,hevc,"
-    "gif,apng,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe,jpegxl_pipe,image2"
+    "gif,apng,png_pipe,jpeg_pipe,webp_pipe,webp_anim,bmp_pipe,tiff_pipe,jpegxl_pipe,jpegxl_anim,image2"
 )
 
 

@@ -33,6 +33,11 @@ pub const ENGINE_WORKSHOP_FOLDERS: &[&str] = &[
 /// The app's scan cap for one `project.json` (`workshop.MAX_PROJECT_BYTES`).
 pub const MAX_PROJECT_BYTES: u64 = 256 * 1024;
 
+/// The most digits a Workshop id has, as the app's `workshop.is_workshop_id`
+/// reads one (`[0-9]{1,20}`: a `u64` is at most 20). Past it no folder is
+/// looked for, in either.
+pub const MAX_ID_DIGITS: usize = 20;
+
 /// The longest project `type` a refusal reason quotes, cut in the middle past
 /// it. `project.json` may be `MAX_PROJECT_BYTES` long, and a reason is logged
 /// and kept for the runtime's generation before status shortens it.
@@ -81,9 +86,15 @@ pub fn refusal(home: Option<&Path>, id: &str, allow_web: bool) -> Option<Refusal
         None => Why::Other(format!(
             "Workshop item {id} can't be checked: the service has no home folder"
         )),
-        Some(_) if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) => Why::Other(
-            format!("Workshop item {id:?} has no Workshop id the service can check"),
-        ),
+        Some(_)
+            if id.is_empty()
+                || id.len() > MAX_ID_DIGITS
+                || !id.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            Why::Other(format!(
+                "Workshop item {id:?} has no Workshop id the service can check"
+            ))
+        }
         Some(home) => classify(home, id, allow_web)?,
     };
     Some(match why {
@@ -120,7 +131,15 @@ fn classify(home: &Path, id: &str, allow_web: bool) -> Option<Why> {
             // The engine follows a link to the item's folder, so this does.
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => continue,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            // Not there, or an ancestor of it is a file (`~/.var` as a regular
+            // file): absent, as the app's `is_absent` and the engine's own
+            // lookup read it. `FilenameTooLong` is left out: a Workshop id is
+            // at most `MAX_ID_DIGITS` digits, so no name here is too long.
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                continue;
+            }
             Err(error) => {
                 return Some(Why::Other(format!(
                     "Workshop item {id} can't be checked: {}: {error}",
@@ -611,6 +630,39 @@ mod tests {
         if unsafe { libc::geteuid() } != 0 {
             assert!(refused.is_some());
         }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_folder_whose_ancestor_is_a_file_is_absent_not_unreadable() {
+        // review-f2 L3: `~/.var` a regular file made the Flatpak folder's stat
+        // fail with ENOTDIR, which refused a good scene found in the first
+        // folder as "can't be checked". The app's `is_absent` and the
+        // engine's lookup read it as not there.
+        let home = home("ancestor-file");
+        item(&home, 0, "70", r#"{"type":"scene"}"#);
+        fs::write(home.join(".var"), "not a folder").unwrap();
+        fs::write(home.join("snap"), "not a folder").unwrap();
+        for allow_web in [false, true] {
+            assert_eq!(refusal(Some(&home), "70", allow_web), None);
+        }
+        // Found nowhere, it is still "wasn't found", not "can't be checked".
+        let reason = refusal(Some(&home), "71", true).unwrap().reason;
+        assert!(reason.contains("wasn't found where"), "{reason}");
+        assert!(!reason.contains("can't be checked"), "{reason}");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_id_longer_than_the_apps_is_refused_before_any_lookup() {
+        let home = home("long-id");
+        let long = "1".repeat(MAX_ID_DIGITS + 1);
+        let longest = "1".repeat(MAX_ID_DIGITS);
+        item(&home, 0, &long, r#"{"type":"scene"}"#);
+        item(&home, 0, &longest, r#"{"type":"scene"}"#);
+        assert_eq!(refusal(Some(&home), &longest, false), None);
+        let refused = refusal(Some(&home), &long, false).unwrap().reason;
+        assert!(refused.contains("no Workshop id the service can check"));
         fs::remove_dir_all(home).unwrap();
     }
 

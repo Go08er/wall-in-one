@@ -1092,6 +1092,14 @@ fn a_display_whose_name_starts_with_a_dash_is_not_present_and_the_others_play() 
         "{}",
         run.engine
     );
+    let dash_row = run.status["displays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["connector"] == "-X")
+        .expect("the assignment keeps its row")
+        .clone();
+    assert_eq!(dash_row["connected"], false, "never a target: {dash_row}");
     let moved = dash_document("independent", &[("-X", "p1"), ("DP-1", "p1")], &["12346"]);
     let run = dash_run(
         "dash-reload",

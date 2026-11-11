@@ -212,7 +212,7 @@ def test_a_rename_writes_nothing_while_a_store_it_reads_is_unreadable(
         # An older profile's default, by name, as its file holds it; the
         # application takes it as it takes any change to the file.
         config.update({"active_playlist": "Dock"})
-        application._on_settings_changed(config.load())
+        application._adopt_settings(application.settings, config.load())
         yield "the default to be adopted", lambda: settled(application)
         assert application.settings.active_playlist == "Dock"
         settings_bytes = paths.settings_path().read_bytes()

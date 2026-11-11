@@ -211,7 +211,8 @@ def test_after_the_services_own_start_a_folder_dropped_elsewhere_and_a_failed_re
     service.fail_the_next_rescan()
     config.update({"roots": (service.root,)})
     with pytest.raises(OSError, match="the rescan failed"):
-        application._on_settings_changed(config.load_strict())  # as the file monitor does
+        # Adopted as every saved change is (`_adopt_settings`): --service rescans here.
+        application._adopt_settings(application.settings, config.load_strict())
     assert application.settings.roots == (service.root,)
     stale_and_refused(service, mine)
 

@@ -292,7 +292,7 @@ def test_application_side_settings_refresh_the_open_preferences_page(
     monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)
     try:
         external = replace(application.settings, dynamics_enabled=False)
-        application._on_settings_changed(external)
+        application._adopt_settings(application.settings, external)
 
         assert window._settings_page._dynamics.get_active() is False
         window._settings_page._opacity.set_value(0.75)

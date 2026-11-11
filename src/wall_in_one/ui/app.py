@@ -3802,47 +3802,6 @@ class Application(Adw.Application):
             else Adw.ColorScheme.FORCE_LIGHT
         )
 
-    def _on_settings_changed(self, settings: config.Settings) -> None:
-        # Web wallpapers' preview stills are part of what a scan resolves, so a
-        # move of `Settings.preview_stills` is a library source like the rest.
-        library_sources_changed = (
-            settings.roots,
-            settings.scan_workshop,
-            settings.preview_stills,
-        ) != (
-            self._settings.roots,
-            self._settings.scan_workshop,
-            self._settings.preview_stills,
-        )
-        palette_source_changed = (
-            settings.preview_scheme,
-            settings.follow_noctalia_palette,
-        ) != (
-            self._settings.preview_scheme,
-            self._settings.follow_noctalia_palette,
-        )
-        web_turned_on = settings.allow_web_wallpapers and not self._settings.allow_web_wallpapers
-        self._settings = settings
-        async_scan = library_sources_changed and not self._service_start
-        self._session.update_settings(settings, rescan_library=not async_scan)
-        if self._window is not None:
-            # The settings document can also move without a Preferences-page
-            # gesture. Keep those persistent widgets on the application-owned
-            # snapshot so their next edit cannot write stale sibling fields.
-            self._window.apply_settings(settings)
-        if async_scan:
-            self.refresh_library()
-        else:
-            self._publish_runtime_for_context()
-            if web_turned_on:
-                # Web wallpapers were left without stills while off; theirs are
-                # made now, and the rescan after them compiles them in.
-                self._make_missing_stills()
-        if palette_source_changed:
-            self.reload_palette()
-        elif self._resolved is not None:
-            self._apply_stylesheet(self._resolved)
-
     @property
     def resolved_palette(self) -> source.ResolvedPalette | None:
         return self._resolved

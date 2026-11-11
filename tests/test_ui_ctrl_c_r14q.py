@@ -311,9 +311,10 @@ def test_r14q_a_fatal_signal_landing_inside_restore(mode: str) -> None:
     )
     facts: dict[str, Any] = {}
     try:
+        assert child.stdout is not None
         ready, _, _ = select.select([child.stdout], [], [], 30)
         assert ready, "the child never started its countdown"
-        facts["keys"] = child.stdout.readline().decode().strip()  # type: ignore[union-attr]
+        facts["keys"] = child.stdout.readline().decode().strip()
         facts["during"] = _cbreak(termios.tcgetattr(slave))
         if mode == "start-then-term":
             # It dies inside start(), before its line: keys and during are set here, not read.
@@ -324,7 +325,7 @@ def test_r14q_a_fatal_signal_landing_inside_restore(mode: str) -> None:
         facts["status"] = child.wait(30)
         facts["after_cbreak"] = _cbreak(termios.tcgetattr(slave))
         facts["restored"] = termios.tcgetattr(slave) == before
-        facts["stdout"] = child.stdout.read().decode()  # type: ignore[union-attr]
+        facts["stdout"] = child.stdout.read().decode()
         facts["stderr"] = child.stderr.read().decode()[-200:]  # type: ignore[union-attr]
     finally:
         if child.poll() is None:
@@ -409,9 +410,10 @@ def test_r14r_a_fatal_signal_inside_restore_with_another_thread(mode: str) -> No
     )
     facts: dict[str, Any] = {}
     try:
+        assert child.stdout is not None
         ready, _, _ = select.select([child.stdout], [], [], 30)
         assert ready, "the child never started its countdown"
-        facts["keys"] = child.stdout.readline().decode().strip()  # type: ignore[union-attr]
+        facts["keys"] = child.stdout.readline().decode().strip()
         facts["during"] = _cbreak(termios.tcgetattr(slave))
         if "term-then-hup" in mode:
             os.kill(child.pid, signal.SIGTERM)  # the exact PID this test started

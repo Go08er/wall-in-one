@@ -498,9 +498,10 @@ def test_r14p_the_terminal_after_the_process_ends_during_the_countdown(ended_by:
     )
     facts: dict[str, Any] = {}
     try:
+        assert child.stdout is not None
         ready, _, _ = select.select([child.stdout], [], [], 30)
         assert ready, "the child never started its countdown"
-        facts["keys"] = child.stdout.readline().decode().strip()  # type: ignore[union-attr]
+        facts["keys"] = child.stdout.readline().decode().strip()
         facts["during"] = _cbreak(termios.tcgetattr(slave))
         if ended_by in FATAL:
             os.kill(child.pid, FATAL[ended_by])  # the exact PID this test started

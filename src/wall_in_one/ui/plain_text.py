@@ -13,7 +13,7 @@ escaped (`markup_text`).
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import gi
 
@@ -45,8 +45,7 @@ def plain[Widget: Adw.PreferencesRow | Adw.Banner](
     it, libadwaita parses them as markup first, whatever the order, and warns
     (and shows nothing) for text that isn't markup.
     """
-    # mypy calls a union-bound type's constructor the union, not ``Widget``.
-    widget = cast(Widget, widget_type(use_markup=False, **properties))
+    widget = widget_type(use_markup=False, **properties)
     if title is not None:
         widget.set_property("title", title)
     if subtitle is not None:

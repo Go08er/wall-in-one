@@ -146,7 +146,7 @@ class _Download:
 
     def said(self) -> str:
         assert self.process.stdout is not None
-        line = self.process.stdout.readline().strip()
+        line: str = self.process.stdout.readline().strip()
         if not line:
             assert self.process.stderr is not None
             raise AssertionError("the download ended early: " + self.process.stderr.read()[-2000:])

@@ -18,7 +18,7 @@ import pytest
 
 from tests.test_stills import make_video
 from wall_in_one import decoding, thumbnails
-from wall_in_one.library import scan, stills, workshop
+from wall_in_one.library import pairing, scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
 
 
@@ -333,3 +333,98 @@ def test_a_gated_folder_is_said_once_and_not_when_the_workshop_scan_lists_it(
     assert [u for u in off.unseen if u.path == content / "9"], "scanning off: said"
     on = scan.scan([content], records={}, include_workshop=True, workshop_roots=(steam,))
     assert not [u for u in on.unseen if u.path == content / "9"], "the Workshop scan lists it"
+
+
+# -- review-f4 F4-6, U4, F4-11/U8: every project.json up the chain, by name, once per scan -------
+
+
+def test_a_video_project_nested_in_a_web_item_lists_nothing(tmp_path: Path) -> None:
+    """F4-6: the nearest project.json decided, so the author chose what was listed."""
+    root = tmp_path / "library"
+    web = _folder(root, "web1", {"type": "web", "file": "index.html"}, ("index.html",))
+    _folder(web, "assets", {"type": "video", "file": "loop.mp4"}, ("loop.mp4",))
+    assert _listed(root) == set()
+    assert workshop.folder_gate(web / "assets", (root,)) == frozenset()
+
+
+def test_a_video_project_nested_in_a_video_item_lists_only_the_outer_ones_file(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "library"
+    outer = _folder(root, "v1", {"type": "video", "file": "clip.mp4"}, ("clip.mp4",))
+    _folder(outer, "more", {"type": "video", "file": "b.mp4"}, ("b.mp4",))
+    assert _listed(root) == {"v1/clip.mp4"}
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["item", "web-around-it"])
+def test_a_root_reached_through_a_linked_folder_lists_a_video_items_file(
+    tmp_path: Path, nested: bool
+) -> None:
+    """U4: the gate held the resolved path; the walk met its own spelling of it."""
+    real = tmp_path / "real" / "walls"
+    real.mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    root = tmp_path / "link" / "walls"
+    holder = root
+    if nested:
+        holder = _folder(root, "web1", {"type": "web", "file": "index.html"}, ("index.html",))
+    _folder(holder, "item", {"type": "video", "file": "movie.mp4"}, ("movie.mp4", "other.mp4"))
+    expected = set() if nested else {"item/movie.mp4"}
+    assert _listed(root) == expected
+    assert workshop.folder_gate(holder / "item", (root,)) == frozenset(
+        {"movie.mp4"} if not nested else ()
+    )
+
+
+def test_one_scan_resolves_each_path_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F4-11, U8: the place tests ran for every video, two or three times, from scratch."""
+    root = tmp_path / "library"
+    folders = [root / f"a{a}" / f"b{b}" for a in range(3) for b in range(3)]
+    for folder in folders:
+        folder.mkdir(parents=True)
+        for index in range(10):
+            (folder / f"v{index}.mp4").write_bytes(b"x")
+    real_resolve = Path.resolve
+    calls: list[Path] = []
+
+    def counting(self: Path, strict: bool = False) -> Path:
+        calls.append(self)
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", counting)
+    library = scan.scan([root], records={})
+    assert len(library.items) == 90
+    # Each video, folder and the root once (100), not a few times per video for each of
+    # the walk's and the still readers' place tests (567 without the scan's memo).
+    assert len(calls) == len(set(calls)), "a path resolved twice in one scan"
+    assert len(calls) <= 90 + len(folders) + 1, len(calls)
+
+
+def test_nothing_learned_in_one_scan_outlives_it(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    folder = _folder(root, "mine", None, ("a.mp4",))
+    assert _listed(root) == {"mine/a.mp4"}
+    (folder / "project.json").write_text(json.dumps({"type": "web"}), encoding="utf-8")
+    assert _listed(root) == set(), "the next scan sees the project.json"
+    assert workshop._SCAN_MEMO.get() is None
+
+
+def test_a_selector_beside_a_hand_copied_video_item_is_not_the_apps_to_delete(
+    tmp_path: Path,
+) -> None:
+    """review-f4 F4-9: the Workshop branch of `selector_is_foreign`, which no test told apart.
+
+    The same app-shaped selector, naming a still inside the root, is the app's own beside a
+    video of yours, and the author's beside an item's video: a removal leaves that one.
+    """
+    root = tmp_path / "library"
+    still = root / "Wall-in-One" / "Automatic Stills" / "chosen.png"
+    still.parent.mkdir(parents=True)
+    still.write_bytes(b"png")
+    for name, project in (("mine", None), ("item", {"type": "video", "file": "clip.mp4"})):
+        folder = _folder(root, name, project, ("clip.mp4",))
+        video = folder / "clip.mp4"
+        video.with_name(video.name + pairing.SIDECAR_SUFFIX).write_text(
+            json.dumps({"still_path": str(still)}), encoding="utf-8"
+        )
+        assert pairing.selector_is_foreign(video, (root,)) is (project is not None), name

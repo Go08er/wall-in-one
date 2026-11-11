@@ -591,7 +591,7 @@ def scan(
     too, and a deleted path is never found again under another branch of
     the scan. Nothing here writes, so a dry run changes nothing.
     """
-    with pairing.excluding(excluded):
+    with pairing.excluding(excluded), workshop.one_scan():
         return _scan(
             roots,
             records,
@@ -648,8 +648,8 @@ def _scan(
         tuple[file_io.FileFingerprint, int, int],
     ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
-    # Per folder, which files the walk may list (`workshop.folder_gate`).
-    gates: dict[Path, frozenset[Path] | None] = {}
+    # Per folder, the names of the files the walk may list (`workshop.folder_gate`).
+    gates: dict[Path, frozenset[str] | None] = {}
     # Gated folders already said once.
     gated_said: set[Path] = set()
     # Folders whose files could be listed but not looked at, each said once.
@@ -687,7 +687,7 @@ def _scan(
             if path.parent not in gates:
                 gates[path.parent] = workshop.folder_gate(path.parent, (root,))
             allowed = gates[path.parent]
-            if allowed is not None and path not in allowed:
+            if allowed is not None and path.name not in allowed:
                 # Workshop content, or an item folder: not local media
                 # (`workshop.folder_gate`). Left out of `seen`, so the
                 # Workshop scan still lists what it lists.

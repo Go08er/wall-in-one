@@ -36,8 +36,10 @@ import re
 import stat
 import string
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final
 
@@ -94,6 +96,71 @@ def labelled_workshop(item: MediaItem) -> bool:
     return item.provider == WORKSHOP_PROVIDER
 
 
+@dataclass
+class _ScanMemo:
+    """What the place tests learned during one scan (`one_scan`)."""
+
+    #: A path as given, resolved; ``None`` when it couldn't be.
+    resolved: dict[Path, Path | None] = field(default_factory=dict)
+    #: A resolved folder: whether it holds a ``project.json`` (or can't be looked at).
+    holds_project: dict[Path, bool] = field(default_factory=dict)
+    #: `in_content_tree` of a path as given.
+    in_content: dict[Path, bool] = field(default_factory=dict)
+    #: `item_folders_of` of a folder and the roots, as given.
+    item_folders: dict[tuple[Path, tuple[Path, ...]], tuple[Path, ...]] = field(
+        default_factory=dict
+    )
+
+
+_SCAN_MEMO: ContextVar[_ScanMemo | None] = ContextVar("wall_in_one_scan_places", default=None)
+
+
+@contextmanager
+def one_scan() -> Iterator[None]:
+    """Within this, each path is resolved and each folder looked at once (`scan.scan`).
+
+    The place tests (`in_content_tree`, `item_folder_of`, `folder_gate`,
+    `is_workshop_content`) run several times for every video of a scan, by the
+    walk and by the still and sidecar readers. What they learn is kept for that
+    scan alone, context-local, and dropped with it: nothing outlives the scan
+    to go stale.
+    """
+    token = _SCAN_MEMO.set(_ScanMemo())
+    try:
+        yield
+    finally:
+        _SCAN_MEMO.reset(token)
+
+
+def _resolved(path: Path) -> Path | None:
+    """``path`` resolved, or ``None`` if it can't be (kept for the scan, `one_scan`)."""
+    memo = _SCAN_MEMO.get()
+    if memo is not None and path in memo.resolved:
+        return memo.resolved[path]
+    try:
+        found: Path | None = path.resolve()
+    except OSError, ValueError, RuntimeError:
+        found = None
+    if memo is not None:
+        memo.resolved[path] = found
+    return found
+
+
+def _holds_project(folder: Path) -> bool:
+    """Whether the resolved ``folder`` holds a ``project.json`` (or can't be looked at)."""
+    memo = _SCAN_MEMO.get()
+    if memo is not None and folder in memo.holds_project:
+        return memo.holds_project[folder]
+    try:
+        candidate = folder / "project.json"
+        held = candidate.is_file() or candidate.is_symlink()
+    except OSError, ValueError:
+        held = True
+    if memo is not None:
+        memo.holds_project[folder] = held
+    return held
+
+
 def in_content_tree(path: Path) -> bool:
     """Whether the resolved ``path`` lies under a ``steamapps/workshop/content/431960`` folder.
 
@@ -101,40 +168,64 @@ def in_content_tree(path: Path) -> bool:
     spells the same folder any way), so it holds on any drive and with no Steam
     config. A path that can't be resolved is treated as inside (not trusted).
     """
-    try:
-        parts = tuple(part.casefold() for part in path.resolve().parts)
-    except OSError, ValueError, RuntimeError:
-        return True
-    width = len(_CONTENT_PARTS)
-    return any(parts[at : at + width] == _CONTENT_PARTS for at in range(len(parts) - width + 1))
+    memo = _SCAN_MEMO.get()
+    if memo is not None and path in memo.in_content:
+        return memo.in_content[path]
+    resolved = _resolved(path)
+    if resolved is None:
+        inside = True
+    else:
+        parts = tuple(part.casefold() for part in resolved.parts)
+        width = len(_CONTENT_PARTS)
+        inside = any(
+            parts[at : at + width] == _CONTENT_PARTS for at in range(len(parts) - width + 1)
+        )
+    if memo is not None:
+        memo.in_content[path] = inside
+    return inside
 
 
-def item_folder_of(folder: Path, roots: Sequence[Path] = ()) -> Path | None:
-    """The nearest folder, ``folder`` first, that holds a ``project.json``; ``None`` if none.
+def item_folders_of(folder: Path, roots: Sequence[Path] = ()) -> tuple[Path, ...]:
+    """Every folder, ``folder`` first, that holds a ``project.json``, resolved; empty if none.
 
     An item copied in by hand has subfolders (``assets/``, ``img/``) that belong
     to it as much as the files beside its ``project.json``. The search goes up
     from ``folder`` to the library root that contains it, never above (a
     ``project.json`` in somebody's home folder makes nothing of what is below it
     Workshop content). With no ``roots`` only ``folder`` itself is looked at.
-    A folder that can't be looked at counts as an item folder (fails closed).
+    A folder that can't be looked at counts as an item folder (fails closed), and
+    so does ``folder`` itself when it can't be resolved.
     """
-    try:
-        current = folder.resolve()
-        bounds = [root.resolve() for root in roots]
-    except OSError, ValueError, RuntimeError:
-        return folder
-    ceiling = next((root for root in bounds if current.is_relative_to(root)), None)
+    memo = _SCAN_MEMO.get()
+    key = (folder, tuple(roots))
+    if memo is not None and key in memo.item_folders:
+        return memo.item_folders[key]
+    found = _item_folders_of(folder, roots)
+    if memo is not None:
+        memo.item_folders[key] = found
+    return found
+
+
+def _item_folders_of(folder: Path, roots: Sequence[Path]) -> tuple[Path, ...]:
+    """`item_folders_of`'s walk up from ``folder``."""
+    current = _resolved(folder)
+    bounds = [_resolved(root) for root in roots]
+    if current is None or None in bounds:
+        return (folder,)
+    ceiling = next((root for root in bounds if root and current.is_relative_to(root)), None)
+    found: list[Path] = []
     while True:
-        try:
-            candidate = current / "project.json"
-            if candidate.is_file() or candidate.is_symlink():
-                return current
-        except OSError, ValueError:
-            return current
+        if _holds_project(current):
+            found.append(current)
         if ceiling is None or current == ceiling or current.parent == current:
-            return None
+            return tuple(found)
         current = current.parent
+
+
+def item_folder_of(folder: Path, roots: Sequence[Path] = ()) -> Path | None:
+    """The nearest of `item_folders_of`, or ``None`` when ``folder`` is in no item's folder."""
+    found = item_folders_of(folder, roots)
+    return found[0] if found else None
 
 
 def is_workshop_content(path: Path, *, labelled: bool, roots: Sequence[Path] = ()) -> bool:
@@ -162,30 +253,38 @@ def is_workshop_content(path: Path, *, labelled: bool, roots: Sequence[Path] = (
     return item_folder_of(path.parent, roots) is not None
 
 
-def folder_gate(folder: Path, roots: Sequence[Path] = ()) -> frozenset[Path] | None:
-    """Which files of ``folder`` the library walk may list as local media; ``None``: all.
+def folder_gate(folder: Path, roots: Sequence[Path] = ()) -> frozenset[str] | None:
+    """The names of ``folder``'s files the library walk may list as local media; ``None``: all.
 
-    The walk of a library root asks this once per folder, with the test every
-    other gate uses (`is_workshop_content`). Workshop content is untrusted, so a
-    root that holds Steam's tree, or an item copied in by hand, must not list an
-    item's files (a web wallpaper's ``preview.gif`` is a video to the
-    classifier), at any depth, as local media, where no web gate would hold:
+    By name, so the walk compares its own spelling of each file, whatever links
+    lie above the library root. The walk of a library root asks this once per
+    folder, with the test every other gate uses (`is_workshop_content`).
+    Workshop content is untrusted, so a root that holds Steam's tree, or an item
+    copied in by hand, must not list an item's files (a web wallpaper's
+    ``preview.gif`` is a video to the classifier), at any depth, as local media,
+    where no web gate would hold:
 
     - under `in_content_tree`: nothing. The Workshop scan lists those items itself.
-    - below a ``project.json`` (`item_folder_of`): an item, and it fails closed.
-      A ``video`` lists at most its declared video file, wherever below its folder
-      that is, so a hand-copied video still works; a web page, an application, any
-      other type, and a ``project.json`` that can't be read, list nothing.
+    - in or below a folder with a ``project.json`` (`item_folders_of`): an item's,
+      and it fails closed. If any ``project.json`` from ``folder`` up to the
+      library root is not a ``video`` that names its file (a web page, an
+      application, any other type, one that can't be read), nothing is listed.
+      Otherwise only the file that ``folder``'s own ``project.json`` names, and
+      nothing in a folder below an item's (no ``project.json`` names a file
+      there), so a hand-copied video still works.
     """
     if in_content_tree(folder):
         return frozenset()
-    item = item_folder_of(folder, roots)
-    if item is None:
+    items = item_folders_of(folder, roots)
+    if not items:
         return None
-    project = _read_project(item)
-    if project is None or not project.is_video or project.entry is None:
+    projects = [_read_project(item) for item in items]
+    if any(project is None or not project.is_video for project in projects):
         return frozenset()
-    return frozenset({project.entry})
+    nearest = projects[0]
+    if len(items) > 1 or items[0] != _resolved(folder) or nearest is None or nearest.entry is None:
+        return frozenset()
+    return frozenset({nearest.entry.name})
 
 
 #: Where linux-wallpaperengine looks for `--bg <id>`, under the home folder, in

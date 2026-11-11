@@ -584,8 +584,9 @@ the pairing pages and the compiler all use).
   existing preview-made still counts again.
 - **Off, or web off.** Such an item has no automatic still, only one you pick.
   Until then it plays nothing (the compiler leaves it out, as for a video with
-  none), the pairing page says "No automatic still for this kind of wallpaper:
-  choose one by hand", and there is no "Regenerate". A `<id>.png` already on disk
+  none), the new interface's Library inspector says "No automatic still for this
+  kind of wallpaper: choose one by hand", and there is no "Regenerate" (the
+  classic pairing page just drops the row). A `<id>.png` already on disk
   is left alone and not used; a record naming it counts as no choice.
 - Turning web off keeps the saved value; it just doesn't apply.
 - A picked still works in every case. An item that can't play gets no still.
@@ -597,8 +598,9 @@ is off. An explicit value is always kept. The key is written only when it
 differs from what its absence would mean, so an untouched 0.4.1 profile keeps its
 bytes. Downgrading to 0.4.1 is therefore harmless in the usual case: 0.4.1 reads
 settings with a key it doesn't know as read-only (changes disabled, nothing
-lost), and it only meets this key when you chose an unusual combination (preview
-stills off while web is on, or on while web is off). 0.4.1 always uses the
+lost), and it only meets this key in an unusual combination: preview stills off
+while web is on, or on while web is off, which includes an upgraded profile where
+you turn Allow web wallpapers off (the saved "on" is kept, so the key is written). 0.4.1 always uses the
 preview for web pages and presets. The wallpaper service never reads a preview
 or this setting, and is unchanged.
 
@@ -606,8 +608,15 @@ or this setting, and is unchanged.
 stay in `Automatic Stills`, hidden from the library as before. A preset of a true
 scene never uses its `<id>.png` (it is never "already captured", whatever its
 size, and a record naming it counts as no choice): it gets a fresh engine still
-under its own name, so a 0.4.1 profile with web off that plays scene presets keeps
-playing them. For a web page or a preset of one, with the setting on (the default
+under its own name. Until Wall-in-One has taken that still the preset is left out
+of the published `runtime.toml` (its card says "it has no still for playback to
+show yet"), so it drops out of rotation after the update and comes back once its
+capture exists. The automatic pass that takes it runs after every library scan the
+app makes, so it happens the first time Wall-in-One is open after the update, and
+needs linux-wallpaperengine installed and a display size it can measure (the
+service's snapshot, or the window's monitors). The service's own pre-start compile
+(`--service-startup-prepare`) never captures, so restarting the service alone does
+not bring them back. For a web page or a preset of one, with the setting on (the default
 for a profile that allowed web pages) the files are the stills they were. With it
 off they are not used, a still you had picked is kept and used, and
 the next compile leaves an item without one out of its playlists (a playlist left

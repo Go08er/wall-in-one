@@ -446,6 +446,7 @@ fn startup_readiness_error(error: &str) -> bool {
         "the Wayland connection failed",
         "the Wayland compositor did not answer",
         "the compositor reported no enabled outputs",
+        "no usable outputs",
     ]
     .iter()
     .any(|marker| error.contains(marker))

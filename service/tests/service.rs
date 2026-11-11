@@ -1143,7 +1143,10 @@ fn when_every_output_has_a_dash_name_none_is_present_and_no_window_opens() {
     let parsed: Config = toml::from_str(&document).unwrap();
     let scene = parsed.playlists[1].entries[0].clone();
     let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("-X", None)]);
-    assert!(driver.connected_outputs().is_err(), "no display is present");
+    let error = driver.connected_outputs().unwrap_err();
+    assert!(error.contains("no usable outputs"), "{error}");
+    assert!(error.contains("-X"), "names the ignored head: {error}");
+    assert!(!error.contains("reported no enabled outputs"), "{error}");
     // Asked for all of them, the engine is given none and not started.
     assert!(driver.apply(&scene, "", &parsed.settings).is_err());
     assert!(

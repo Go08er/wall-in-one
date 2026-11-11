@@ -1353,6 +1353,13 @@ impl SystemDriver {
         if enabled.is_empty() {
             // A failure like any other: `published` keeps the last snapshot
             // that succeeded, as status documents.
+            if !self.ignored_outputs.is_empty() {
+                return Err(format!(
+                    "no usable outputs: ignored {}, a name that starts with '-'; \
+                     paired still remains applied",
+                    self.ignored_outputs.join(", ")
+                ));
+            }
             return Err(
                 "the compositor reported no enabled outputs; paired still remains applied".into(),
             );

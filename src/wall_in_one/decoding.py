@@ -12,19 +12,33 @@ network. Every decode of such a file puts `input_options` before ``-i``:
   (`FORMATS`), which leaves out the demuxers that follow references
   (``hls``, ``concat``, ``dash``, ``image2pipe`` lists...).
 
+ffmpeg reads more into a name than the file, too: its ``image2`` demuxer takes
+``preview%01d.png`` for a numbered sequence and opens ``preview0.png`` instead,
+which may be a link out of the folder that was checked (R42-10). So it is never
+handed a name: the input is the file opened (`opened`), and ``image2`` is not in
+`FORMATS`.
+
 A file that is none of these is refused ("Invalid argument"), which is a card
 without a picture, not an error worth a dialog.
 """
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import os
+import stat
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Final
 
 #: The demuxers a wallpaper's picture or video can be, by the names ffmpeg gives
-#: them (a name with aliases, ``matroska,webm``, matches by any one of them).
+#: them (a name with aliases, ``matroska,webm``, matches by any one of them). The
+#: bytes choose among them: the input is a descriptor's path (`opened`), which has
+#: no extension to go by.
 FORMATS: Final = (
     "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,flv,mpegts,mpeg,asf,ogg,ogv,ivf,m4v,h264,hevc,"
-    "gif,apng,png_pipe,jpeg_pipe,webp_pipe,webp_anim,bmp_pipe,tiff_pipe,jpegxl_pipe,jpegxl_anim,image2"
+    "gif,apng,png_pipe,jpeg_pipe,webp_pipe,webp_anim,bmp_pipe,tiff_pipe,jpegxl_pipe,jpegxl_anim"
 )
 
 
@@ -36,3 +50,23 @@ def input_options(*, pipe: bool = False) -> list[str]:
         "-format_whitelist",
         FORMATS,
     ]
+
+
+@contextlib.contextmanager
+def opened(path: Path) -> Iterator[Path]:
+    """``path`` as ffmpeg's input: the regular file it names now, opened, by its descriptor.
+
+    The path given to ffmpeg is ``/proc/<pid>/fd/<n>``: exactly the inode opened
+    here, whatever is at the name by the time ffmpeg runs, and a name with no
+    pattern, glob or extension in it to be read as anything else. A symbolic
+    link at ``path`` itself is refused (the library's walk lists none), as is
+    anything but a regular file: an `OSError`, as when it can't be opened.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        yield Path("/proc") / str(os.getpid()) / "fd" / str(descriptor)
+    finally:
+        os.close(descriptor)

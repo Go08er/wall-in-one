@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from wall_in_one import thumbnails
+from wall_in_one import decoding, thumbnails
 from wall_in_one.library.model import Kind, MediaItem
 
 needs_ffmpeg = pytest.mark.skipif(not thumbnails.is_available(), reason="ffmpeg is not installed")
@@ -76,13 +76,15 @@ def test_cached_path_lives_under_the_cache_home(cache_home: Path) -> None:
 
 def test_video_seeks_before_input(cache_home: Path) -> None:
     """`-ss` before `-i` is the fast seek; after it, ffmpeg decodes the lot."""
-    command = thumbnails._command(_item(Path("/w/a.mp4"), Kind.VIDEO), Path("/out.png"))
+    command = thumbnails._command(
+        _item(Path("/w/a.mp4"), Kind.VIDEO), Path("/proc/1/fd/3"), Path("/out.png")
+    )
     assert "-ss" in command
     assert command.index("-ss") < command.index("-i")
 
 
 def test_stills_do_not_seek(cache_home: Path) -> None:
-    command = thumbnails._command(_item(Path("/w/a.png")), Path("/out.png"))
+    command = thumbnails._command(_item(Path("/w/a.png")), Path("/proc/1/fd/3"), Path("/out.png"))
     assert "-ss" not in command
 
 
@@ -102,9 +104,7 @@ def test_a_scene_uses_its_generated_still_instead_of_its_directory(
         paired_still=still,
     )
 
-    command = thumbnails._command(scene, Path("/out.png"))
-
-    assert command[command.index("-i") + 1] == str(still)
+    assert thumbnails._thumbnail_source(scene) == still
 
 
 def test_a_scene_falls_back_to_the_workshop_preview(cache_home: Path, tmp_path: Path) -> None:
@@ -121,9 +121,7 @@ def test_a_scene_falls_back_to_the_workshop_preview(cache_home: Path, tmp_path: 
         preview=preview,
     )
 
-    command = thumbnails._command(scene, Path("/out.png"))
-
-    assert command[command.index("-i") + 1] == str(preview)
+    assert thumbnails._thumbnail_source(scene) == preview
 
 
 def test_a_scene_cache_key_changes_when_its_still_changes(cache_home: Path, tmp_path: Path) -> None:
@@ -286,6 +284,150 @@ def test_a_file_that_is_not_an_image_fails_cleanly(cache_home: Path, tmp_path: P
     assert not thumbnails.cached_path(item).exists()
     leftovers = list(thumbnails.cache_directory().glob("*.tmp.png"))
     assert leftovers == []
+
+
+# -- ffmpeg is handed the file, never its name (R42-10) --------------------
+
+
+def _made(path: Path, colour: str, *encoding: str, seconds: int = 0) -> Path:
+    """A real picture of one ``colour`` (or ``seconds`` of animation), skipped if not made."""
+    source = f"color={colour}:size=64x36:rate=5" + (f":duration={seconds}" if seconds else "")
+    frames = () if seconds else ("-frames:v", "1")
+    made = path.with_name(f"made{path.suffix}")  # ffmpeg's own output would read a % too
+    done = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", source, *frames, *encoding, str(made)],
+        capture_output=True,
+        check=False,
+    )
+    if done.returncode != 0 or not made.is_file():
+        pytest.skip(f"this ffmpeg cannot make {path.name}")
+    return made.rename(path)
+
+
+def _first_pixel(thumbnail: Path) -> tuple[int, ...]:
+    """The first pixel of a thumbnail the app made (a cache name: no ``%`` in it)."""
+    decoded = subprocess.run(
+        ["ffmpeg", "-v", "error", *decoding.input_options(), "-i", str(thumbnail),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        capture_output=True, check=True, timeout=10,
+    ).stdout  # fmt: skip
+    return tuple(decoded[:3])
+
+
+def _red(pixel: tuple[int, ...]) -> bool:
+    return len(pixel) == 3 and pixel[0] > 200 and pixel[1] < 60 and pixel[2] < 60
+
+
+def _scene_showing(still: Path) -> MediaItem:
+    """A scene whose thumbnail is drawn from ``still``, its paired still."""
+    directory = still.parent / "123"
+    directory.mkdir()
+    return MediaItem(
+        path=directory, kind=Kind.SCENE, size=1, mtime=1, scene="123", paired_still=still
+    )
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("scene", [False, True], ids=["still", "scene-still"])
+@pytest.mark.parametrize(
+    ("name", "neighbour"),
+    [("50%.png", None), ("frame%02d.png", "frame00.png"), ("shot%d.jpg", "shot0.jpg")],
+)
+def test_a_picture_with_a_percent_in_its_name_is_thumbnailed_from_itself(
+    cache_home: Path, tmp_path: Path, name: str, neighbour: str | None, scene: bool
+) -> None:
+    """Your own file may have ``%`` in its name. ffmpeg's image2 read ``frame%02d.png`` as
+    a numbered sequence and decoded ``frame00.png`` beside it (on 534a9da)."""
+    source = _made(tmp_path / name, "red")
+    if neighbour is not None:
+        _made(tmp_path / neighbour, "blue")
+    item = _scene_showing(source) if scene else _item(source, size=source.stat().st_size)
+
+    assert _red(_first_pixel(thumbnails.generate(item)))
+
+
+@needs_ffmpeg
+def test_a_video_named_like_a_sequence_is_thumbnailed_from_itself(
+    cache_home: Path, tmp_path: Path
+) -> None:
+    """The video route, its seek before the input, from a descriptor. image2 never took
+    a video's name (an animated ``.gif`` is one), so this held on 534a9da too."""
+    source = _made(tmp_path / "loop%d.gif", "red", seconds=3)
+    _made(tmp_path / "loop0.gif", "blue", seconds=3)
+    item = _item(source, Kind.VIDEO, size=source.stat().st_size)
+
+    assert _red(_first_pixel(thumbnails.generate(item)))
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("name", "kind", "encoding", "seconds"),
+    [("wallpaper.png", Kind.STILL, (), 0), ("clip.mp4", Kind.VIDEO, ("-pix_fmt", "yuv420p"), 3)],
+)
+def test_a_wallpaper_that_is_a_link_now_is_not_followed(
+    cache_home: Path,
+    tmp_path: Path,
+    name: str,
+    kind: Kind,
+    encoding: tuple[str, ...],
+    seconds: int,
+) -> None:
+    """The library's walk lists no link: one at the name since then is refused, unread."""
+    elsewhere = _made(
+        tmp_path / f"elsewhere{Path(name).suffix}", "blue", *encoding, seconds=seconds
+    )
+    link = tmp_path / name
+    link.symlink_to(elsewhere)
+    item = _item(link, kind, size=1)
+
+    with pytest.raises(thumbnails.ThumbnailError, match="cannot open"):
+        thumbnails.generate(item)
+    assert not thumbnails.cached_path(item).exists()
+
+
+@needs_ffmpeg
+def test_a_name_handed_to_ffmpeg_is_never_read_as_a_sequence(tmp_path: Path) -> None:
+    """`decoding.FORMATS` leaves image2 out, so even a name handed over is no pattern."""
+    source = _made(tmp_path / "preview%01d.png", "red")
+    _made(tmp_path / "preview0.png", "blue")
+    done = subprocess.run(
+        ["ffmpeg", "-v", "error", *decoding.input_options(), "-i", str(source),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        capture_output=True, check=False, timeout=10,
+    )  # fmt: skip
+    assert done.returncode != 0 or _red(tuple(done.stdout[:3])), tuple(done.stdout[:3])
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("name", "kind", "encoding", "seconds"),
+    [
+        ("still.png", Kind.STILL, (), 0),
+        ("still.jpg", Kind.STILL, (), 0),
+        ("still.webp", Kind.STILL, ("-c:v", "libwebp"), 0),
+        ("still.avif", Kind.STILL, ("-c:v", "libaom-av1"), 0),
+        ("animated.webp", Kind.STILL, ("-c:v", "libwebp_anim", "-loop", "0"), 1),
+        ("animated.png", Kind.STILL, ("-f", "apng", "-plays", "0"), 1),
+        ("animated.jxl", Kind.STILL, ("-c:v", "libjxl_anim"), 1),
+        ("animated.gif", Kind.VIDEO, (), 3),
+        ("clip.mp4", Kind.VIDEO, ("-pix_fmt", "yuv420p"), 3),
+        ("clip.mkv", Kind.VIDEO, ("-pix_fmt", "yuv420p"), 3),
+        ("clip.webm", Kind.VIDEO, (), 3),
+    ],
+)
+def test_every_kind_of_wallpaper_is_still_thumbnailed_from_its_descriptor(
+    cache_home: Path,
+    tmp_path: Path,
+    name: str,
+    kind: Kind,
+    encoding: tuple[str, ...],
+    seconds: int,
+) -> None:
+    """Handed a descriptor's path, with no extension, ffmpeg picks the demuxer by the bytes."""
+    source = _made(tmp_path / name, "red", *encoding, seconds=seconds)
+    item = _item(source, kind, size=source.stat().st_size)
+
+    assert _red(_first_pixel(thumbnails.generate(item)))
 
 
 # -- remote previews -----------------------------------------------------

@@ -80,7 +80,9 @@ def test_animated_webp_is_decoded_through_the_hardened_options(tmp_path: Path) -
 
     thumb = tmp_path / "thumb.png"
     item = MediaItem(path=animated, kind=Kind.STILL, size=1, mtime=0)
-    done = subprocess.run(thumbnails._command(item, thumb), capture_output=True, check=False)
+    with decoding.opened(animated) as source:
+        command = thumbnails._command(item, source, thumb)
+        done = subprocess.run(command, capture_output=True, check=False)
     assert done.returncode == 0 and thumb.is_file(), done.stderr.decode()[-200:]
     # and over stdin, as a downloaded preview arrives
     assert thumbnails.to_displayable(animated.read_bytes()) != b""

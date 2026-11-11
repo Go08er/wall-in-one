@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_stills import make_video
+from tests.test_thumbnails import _first_pixel, _made, _red
 from wall_in_one import decoding, thumbnails
 from wall_in_one.library import pairing, scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
@@ -151,7 +152,8 @@ def test_a_disguised_playlist_is_not_followed_by_the_still_maker_or_the_thumbnai
 
     item = MediaItem(path=evil, kind=Kind.VIDEO, size=1, mtime=0)
     destination = tmp_path / "thumb.png"
-    assert _frames(thumbnails._command(item, destination), tmp_path) != 0
+    with decoding.opened(evil) as source:
+        assert _frames(thumbnails._command(item, source, destination), tmp_path) != 0
     assert not destination.exists()
 
 
@@ -168,7 +170,35 @@ def test_the_hardened_options_still_decode_a_real_video_and_gif(tmp_path: Path) 
         assert target.is_file()
         thumb = tmp_path / f"{source.name}.thumb.png"
         item = MediaItem(path=source, kind=Kind.VIDEO, size=1, mtime=0)
-        assert _frames(thumbnails._command(item, thumb), tmp_path) == 0, source
+        with decoding.opened(source) as opened:
+            assert _frames(thumbnails._command(item, opened, thumb), tmp_path) == 0, source
+
+
+@pytest.mark.parametrize("name", ["preview%01d.png", "preview.png"])
+def test_a_declared_preview_is_thumbnailed_from_itself_whatever_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """R42-10: `_beside` accepts the regular file ``preview%01d.png`` declares, and ffmpeg's
+    image2 read that name as a sequence: on 534a9da it decoded ``preview0.png`` instead, a
+    link out of the item to a picture of somebody else's."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    steam = tmp_path / "steam"
+    folder = steam / "steamapps/workshop/content" / workshop.APP_ID / "200"
+    folder.mkdir(parents=True)
+    declared = _made(folder / name, "red")
+    outside = _made(tmp_path / "outside.png", "blue")
+    (folder / "preview0.png").symlink_to(outside)
+    (folder / "scene.json").write_text("{}", encoding="utf-8")
+    (folder / "project.json").write_text(
+        json.dumps({"type": "scene", "file": "scene.json", "preview": name}), encoding="utf-8"
+    )
+    library = tmp_path / "library"
+    library.mkdir()
+    found = scan.scan((library,), {}, include_workshop=True, workshop_roots=(steam,))
+    item = next(item for item in found.items if item.scene == "200")
+    assert item.preview == declared and item.paired_still is None
+
+    assert _red(_first_pixel(thumbnails.generate(item, allow_web=True, force=True)))
 
 
 def test_a_downloaded_playlist_handed_over_stdin_is_not_decoded(tmp_path: Path) -> None:
@@ -186,7 +216,7 @@ def test_every_ffmpeg_command_in_the_app_carries_the_options() -> None:
         stills._command(video, Path("/o.png"), 1.0),
         stills._preview_command(video, Path("/o.png"), "gif"),
         thumbnails._command(
-            MediaItem(path=video, kind=Kind.VIDEO, size=1, mtime=0), Path("/o.png")
+            MediaItem(path=video, kind=Kind.VIDEO, size=1, mtime=0), video, Path("/o.png")
         ),
     ):
         before_input = command[: command.index("-i")]

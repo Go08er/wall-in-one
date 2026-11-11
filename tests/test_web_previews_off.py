@@ -64,20 +64,29 @@ def test_a_thumbnail_made_while_web_was_on_is_not_shown_while_it_is_off(
     assert thumbnails.lookup(web_folder.scene) is None  # nothing cached for it, and no error
 
 
-def test_a_thumbnail_is_made_when_web_is_on(
-    web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ran: list[list[str]] = []
+def _decoded_inodes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The inode each faked ffmpeg was handed as its input (`decoding.opened`'s descriptor)."""
+    decoded: list[int] = []
 
     def fake_run(argv: list[str], **_options: object) -> subprocess.CompletedProcess[bytes]:
-        ran.append(argv)
+        decoded.append(Path(argv[argv.index("-i") + 1]).stat().st_ino)
         Path(argv[-1]).write_bytes(PNG)
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    return decoded
+
+
+def test_a_thumbnail_is_made_when_web_is_on(
+    web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decoded = _decoded_inodes(monkeypatch)
+    preview = web_folder.web.preview
+    assert preview is not None
+    preview.chmod(0o600)  # web is on: reading it is the point
     made = thumbnails.generate(web_folder.web, allow_web=True)
     assert made.is_file() and thumbnails.lookup(web_folder.web, allow_web=True) == made
-    assert str(web_folder.web.preview) in ran[0]
+    assert decoded == [preview.stat().st_ino], "ffmpeg is handed the preview itself, opened"
 
 
 # -- stills -------------------------------------------------------------------------
@@ -388,13 +397,9 @@ def test_a_refused_web_item_and_a_preset_of_nothing_get_nothing_while_web_is_off
 def test_a_malformed_scene_still_gets_its_cant_play_preview(
     web_folder: Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ran: list[list[str]] = []
-
-    def fake_run(argv: list[str], **_options: object) -> subprocess.CompletedProcess[bytes]:
-        ran.append(argv)
-        Path(argv[-1]).write_bytes(PNG)
-        return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    decoded = _decoded_inodes(monkeypatch)
+    preview = web_folder.bad_scene.preview
+    assert preview is not None
+    preview.chmod(0o600)  # not a web page: its preview is read
     made = thumbnails.generate(web_folder.bad_scene)
-    assert made.is_file() and str(web_folder.bad_scene.preview) in ran[0]
+    assert made.is_file() and decoded == [preview.stat().st_ino]

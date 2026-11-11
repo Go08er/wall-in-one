@@ -412,7 +412,8 @@ def _prune_if_due() -> None:
         _prune_lock.release()
 
 
-def _command(item: MediaItem, destination: Path) -> list[str]:
+def _command(item: MediaItem, source: Path, destination: Path) -> list[str]:
+    """ffmpeg's arguments for ``item``'s thumbnail, read from ``source``: `decoding.opened`'s."""
     # Scale up to cover the tile, then crop the overflow: a wallpaper grid
     # wants every tile filled, not letterboxed.
     filters = (
@@ -427,7 +428,7 @@ def _command(item: MediaItem, destination: Path) -> list[str]:
     command += [
         *decoding.input_options(),
         "-i",
-        str(_thumbnail_source(item)),
+        str(source),
         "-vf",
         filters,
         "-frames:v",
@@ -482,6 +483,22 @@ def generate(
         raise ThumbnailError(f"no such file: {item.path}")
 
     paths.ensure_directory(destination.parent)
+    with contextlib.ExitStack() as held:
+        try:
+            # Handed the file, never its name (`decoding.opened`, R42-10).
+            opened = held.enter_context(decoding.opened(source))
+        except OSError as error:
+            raise ThumbnailError(f"cannot open {source}: {error.strerror or error}") from error
+        return _encode(item, opened, destination, processes)
+
+
+def _encode(
+    item: MediaItem,
+    source: Path,
+    destination: Path,
+    processes: worker_processes.Cancellation | None,
+) -> Path:
+    """Decode ``source`` (`decoding.opened`'s) into ``destination``, `generate`'s last step."""
     # Write to a private name and rename: two workers racing on the same item,
     # or a crash mid-encode, must never leave a half-written PNG in the cache.
     try:
@@ -496,10 +513,10 @@ def generate(
         raise ThumbnailError(f"cannot create thumbnail temporary: {error}") from error
     try:
         completed = (
-            processes.run(_command(item, temporary), timeout=GENERATE_TIMEOUT)
+            processes.run(_command(item, source, temporary), timeout=GENERATE_TIMEOUT)
             if processes is not None
             else subprocess.run(
-                _command(item, temporary),
+                _command(item, source, temporary),
                 capture_output=True,
                 timeout=GENERATE_TIMEOUT,
                 check=False,

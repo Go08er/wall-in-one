@@ -99,11 +99,15 @@ def test_a_thumbnail_reads_the_type_again_before_ffmpeg_is_asked(
         raise OSError("intercepted: the decoder was not started")
 
     monkeypatch.setattr(subprocess, "run", decode)
-    with pytest.raises(thumbnails.ThumbnailError):
-        thumbnails.generate(item, force=True, allow_web=False)
     if state == "scene-control":
+        assert item.preview is not None
+        item.preview.chmod(0o600)  # a scene's preview is read: the app opens it for ffmpeg
+        with pytest.raises(thumbnails.ThumbnailError, match="intercepted"):
+            thumbnails.generate(item, force=True, allow_web=False)
         assert len(dispatched) == 1
     else:
+        with pytest.raises(thumbnails.ThumbnailError, match=workshop.WEB_PREVIEW_OFF_NOTE):
+            thumbnails.generate(item, force=True, allow_web=False)
         assert not dispatched, "web-off thumbnail dispatched ffmpeg on the scan's old type"
 
 

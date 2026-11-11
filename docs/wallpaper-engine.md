@@ -530,8 +530,10 @@ from it, comes only from one of two places, and never from a file the item
 brought, because Workshop content is untrusted.
 
 - **An automatic still Wall-in-One makes from the item itself**, stored in
-  `Automatic Stills`: the engine's screenshot of a true `scene` (`<id>.png`), or
-  ffmpeg's frame of a Workshop video (named by the video's path, like any video's).
+  `Automatic Stills`: the engine's screenshot of a true `scene` (`<id>.png`), the
+  engine's screenshot of a **preset of a true scene** (its base rendered with the
+  preset's own values, as the service plays it; `<id>-capture.png`), or ffmpeg's
+  frame of a Workshop video (named by the video's path, like any video's).
 - **A still you picked** in the app, saved in Wall-in-One's own pairing records.
 
 So a picture named like a Workshop video (`foo.png` beside `foo.mp4`) is not its
@@ -543,11 +545,14 @@ Workshop label. The preview shows on the library card, which is a picture of the
 item and not its wallpaper.
 
 **The one exception, a setting.** The engine can't screenshot a web page (it is
-captured before it paints) and a preset's screenshot isn't its look, so a **web
-wallpaper** and a **preset** have no still of the first kind. Owner decision: "a
+captured before it paints), so a **web wallpaper**, and a **preset of one**, have
+no still of the first kind. (A preset of a true scene does: the engine renders
+its base with its values, so it never depends on the author's preview or on the
+setting. The type read before the engine starts is the base's, the id the
+engine is given; an `application`, or a web base while web is off, is refused.) Owner decision: "a
 separate toggle to use the built-in preview, only enablable when web is enabled,
-like a sub-option". That is `web_wallpaper_previews` ("Use the wallpaper's own
-preview as its still", under Allow web wallpapers in Settings → Library, greyed
+like a sub-option". That is `web_wallpaper_previews` ("Use a web wallpaper's own
+preview as its still", covering web wallpapers and presets of them; under Allow web wallpapers in Settings → Library, greyed
 out while web wallpapers are off). The effective value is
 `allow_web_wallpapers` AND `web_wallpaper_previews` (`Settings.preview_stills`),
 and it is the only thing asked (`workshop.preview_still` /
@@ -579,9 +584,13 @@ preview for web pages and presets. The wallpaper service never reads a preview
 or this setting, and is unchanged.
 
 **Upgrading from 0.4.1.** Nothing deletes the preview-made `<id>.png` files: they
-stay in `Automatic Stills`, hidden from the library as before. With the setting
-on (the default for a profile that allowed web pages) they are the stills they
-were. With it off they are not used, a still you had picked is kept and used, and
+stay in `Automatic Stills`, hidden from the library as before. A preset of a true
+scene never uses its `<id>.png` (it is never "already captured", whatever its
+size, and a record naming it counts as no choice): it gets a fresh engine still
+under its own name, so a 0.4.1 profile with web off that plays scene presets keeps
+playing them. For a web page or a preset of one, with the setting on (the default
+for a profile that allowed web pages) the files are the stills they were. With it
+off they are not used, a still you had picked is kept and used, and
 the next compile leaves an item without one out of its playlists (a playlist left
 with nothing playable is left out whole and the default falls back, as for any
 item with no still). The Tidy-up page does not touch `Automatic Stills`, and a

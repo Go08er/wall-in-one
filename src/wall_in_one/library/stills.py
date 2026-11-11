@@ -808,7 +808,7 @@ def scene_capture_required(
         # Nothing is made for it, so nothing is "required": a file under its
         # id is a leftover of a preview-made still, not used while previews are off.
         return False
-    target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    target = pairing.still_directory(root) / f"{pairing.scene_still_stem(item)}{STILL_SUFFIX}"
     if item.paired_still is not None and item.paired_still != target:
         return False
     actual = _png_size(target)
@@ -850,6 +850,21 @@ def automatic_destination(item: MediaItem, root: Path) -> Path | None:
     if item.kind is Kind.VIDEO:
         return destination(item.path, root)
     if item.kind is Kind.SCENE and item.scene:
+        return pairing.still_directory(root) / f"{pairing.scene_still_stem(item)}{STILL_SUFFIX}"
+    return None
+
+
+def preview_made_destination(item: MediaItem, root: Path) -> Path | None:
+    """Where 0.4.1 left the still it drew from ``item``'s preview, if it was that kind.
+
+    `<id>.png` for a web page or any preset (0.4.1 made one for each from its
+    own preview). Still this app's own file, so the library hides it and an
+    item's removal derives it (`automatic_destination` is where a still is made
+    now); but for a preset of a true scene it is never its still or "already
+    captured" (`pairing.PRESET_CAPTURE_SUFFIX`), and for a web page or a preset
+    of one it is the still only while previews are on.
+    """
+    if item.kind is Kind.SCENE and item.scene and item.workshop_detail:
         return pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
     return None
 
@@ -1894,7 +1909,11 @@ def capture_scene(
     else's engine owns the screen -- see `wallpaper.scenes`.
 
     The still is named by the Workshop id rather than by the directory, so a
-    reinstall that moves the directory still finds it.
+    reinstall that moves the directory still finds it. A preset of a true scene
+    is rendered as the service plays it: its base, with its own values
+    (`MediaItem.rendered_scene`, `scene_properties`), and the base's type is what
+    is read first. Its file is `pairing.scene_still_stem`'s, never 0.4.1's
+    preview-made `<id>.png`.
 
     Without ``force`` this is the automatic pass (see `scene_capture_required`).
     ``size`` is a display size the caller already measured; otherwise the
@@ -1922,7 +1941,7 @@ def capture_scene(
         # A web page or a preset with previews off: the engine's screenshot is
         # not its look and its preview is the author's, so only a picked still.
         raise StillError(f"{item.name} gets no automatic still: pick one by hand")
-    target = pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+    target = pairing.still_directory(root) / f"{pairing.scene_still_stem(item)}{STILL_SUFFIX}"
     if workshop.preview_still(item, previews):
         # From the preview: no engine, and no display to size it for.
         if not force and not scene_capture_required(item, root, automatic=True, previews=previews):
@@ -1962,7 +1981,7 @@ def capture_scene(
     # The engine finds the id under the home folder, wherever the scan found
     # it, and reads its type again there: so it is read there first, and the
     # refusal is said without the setting, as the preview's is above.
-    refusal = workshop.engine_refusal(item.scene, allow_web=allow_web)
+    refusal = workshop.engine_refusal(item.rendered_scene, allow_web=allow_web)
     if refusal:
         raise StillError(f"{refusal}, so no still was taken for {item.name}")
     source = _snapshot_source(item.path, Kind.SCENE)
@@ -2035,20 +2054,22 @@ def _capture_scene_from_source(
             _still_from_preview(item, engine_output, processes)
         elif processes is None:
             scenes.screenshot(
-                item.scene,
+                item.rendered_scene,
                 engine_output,
                 size=size,
                 prepared_output=True,
                 allow_web=allow_web,
+                properties=item.scene_properties,
             )
         else:
             scenes.screenshot(
-                item.scene,
+                item.rendered_scene,
                 engine_output,
                 size=size,
                 processes=processes,
                 prepared_output=True,
                 allow_web=allow_web,
+                properties=item.scene_properties,
             )
         with _source_lifecycle_lock(item.path, Kind.SCENE, item.scene):
             _require_unchanged_source(item.path, Kind.SCENE, source)
@@ -2152,7 +2173,7 @@ def ensure(
     if item.kind is Kind.SCENE:
         if not scene_capture_required(item, root, size=size, automatic=True, previews=previews):
             return item.paired_still or (
-                pairing.still_directory(root) / f"{item.scene}{STILL_SUFFIX}"
+                pairing.still_directory(root) / f"{pairing.scene_still_stem(item)}{STILL_SUFFIX}"
             )
         try:
             return capture_scene(

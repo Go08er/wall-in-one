@@ -69,11 +69,12 @@ WEB_WALLPAPERS_EXPLAINED: Final = (
     "Off, they are listed but never played or previewed. Executable wallpapers are never run."
 )
 #: Its sub-option, only in effect while web wallpapers are allowed.
-WEB_PREVIEWS_TITLE: Final = "Use the wallpaper\u2019s own preview as its still"
+WEB_PREVIEWS_TITLE: Final = "Use a web wallpaper\u2019s own preview as its still"
 WEB_PREVIEWS_EXPLAINED: Final = (
-    "A web wallpaper or a preset has no still of its own making, and its preview is the "
-    "author\u2019s picture. On, that preview is its still and the source of its colours; "
-    "off, it has only a still you pick. Needs Allow web wallpapers."
+    "A web wallpaper (or a preset of one) has no still of its own making, and its preview is "
+    "the author\u2019s picture. On, that preview is its still and the source of its colours; "
+    "off, it has only a still you pick. Presets of other wallpapers are not affected: they "
+    "get a still rendered by the engine. Needs Allow web wallpapers."
 )
 
 

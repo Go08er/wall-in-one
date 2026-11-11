@@ -111,9 +111,11 @@ def test_ensure_draws_the_still_from_the_preview_only_when_the_effective_setting
         "on": config.Settings(allow_web_wallpapers=True, web_wallpaper_previews=True),
     }
     for name in ("off", "web off"):
-        assert stills.ensure(item, root, previews=cases[name].preview_stills) is None, name
+        assert (
+            stills.ensure(item, root, allow_web=True, previews=cases[name].preview_stills) is None
+        ), name
         assert not target.exists(), name
-    assert stills.ensure(item, root, previews=cases["on"].preview_stills) == target
+    assert stills.ensure(item, root, allow_web=True, previews=cases["on"].preview_stills) == target
     assert target.is_file()
 
 

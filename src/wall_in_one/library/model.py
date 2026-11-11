@@ -207,18 +207,22 @@ class MediaItem:
 
     @property
     def preview_kind(self) -> bool:
-        """Whether it is a kind whose automatic still could only come from its preview.
+        """Whether its automatic still could only come from its own preview.
 
-        Everything listed as a scene but a true ``scene`` (a web page, a
-        preset): the engine's screenshot of a web page is taken before the page
-        has painted and a preset's is not its look, and the only other picture
-        it has is its author's ``preview``, which is untrusted Workshop content.
-        Whether that preview may be used is a setting
-        (`config.Settings.preview_stills`), decided in one place:
+        A web page, and a preset of one (`holds_web`, which fails closed): the
+        engine's screenshot of a web page is taken before the page has painted,
+        and the only other picture it has is its author's ``preview``, which is
+        untrusted Workshop content. Whether that preview may be used is a
+        setting (`config.Settings.preview_stills`), decided in one place:
         `workshop.preview_still` and `workshop.no_automatic_still`. Ask those,
         not this, to decide anything about a still.
+
+        Not a preset of a true scene: the engine renders its base with its own
+        property values, which is an automatic still made from the item itself
+        (`rendered_scene`, `scene_properties`), whatever the setting says. Nor
+        an item that can't play, which has no still to make.
         """
-        return bool(self.workshop_detail)
+        return bool(self.workshop_detail) and self.holds_web
 
     @property
     def is_moving(self) -> bool:

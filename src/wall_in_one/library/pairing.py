@@ -36,7 +36,7 @@ from typing import Final
 
 from wall_in_one import file_io
 from wall_in_one.library import workshop
-from wall_in_one.library.model import IMAGE_EXTENSIONS
+from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
 
 #: Written by us next to a video to record which still represents it.
 SIDECAR_SUFFIX: Final = ".wall-in-one.json"
@@ -550,20 +550,38 @@ def preview_beside(video: Path) -> Path | None:
     return None
 
 
-def scene_still(scene: str, roots: Iterable[Path] = ()) -> Path | None:
-    """The captured still for a Workshop scene, named by its id.
+#: The name a preset's engine-captured still has, after its id. A preset of a
+#: true scene is captured by the engine (its base, with its own values), under
+#: this name and not `<id>.png`: 0.4.1 drew `<id>.png` from the author's preview,
+#: and that file is never "already captured", whatever its size.
+PRESET_CAPTURE_SUFFIX: Final = "-capture"
 
-    Only for a true scene: a web page or a preset (`MediaItem.no_automatic_still`)
-    may have a file of this name made from its preview by 0.4.1, which is not
-    its still. `pairings.synthesize` is the one caller and does not ask for those.
+
+def scene_still_stem(item: MediaItem) -> str:
+    """The file stem, in `Automatic Stills`, of ``item``'s automatic still.
 
     By id rather than by directory, so a reinstall that moves the directory
-    still finds the still that was taken before.
+    still finds the still that was taken before. A scene's, and a web page's or
+    a preset-of-a-web-page's preview-made one, is the id; a preset of a true
+    scene is captured by the engine under `PRESET_CAPTURE_SUFFIX`.
     """
+    if item.scene_base and not item.preview_kind:
+        return f"{item.scene}{PRESET_CAPTURE_SUFFIX}"
+    return item.scene
+
+
+def scene_still(item: MediaItem, roots: Iterable[Path] = ()) -> Path | None:
+    """The captured still for a Workshop scene (or a preset's), named by its id.
+
+    Only a still Wall-in-One made from the item itself. For a web page or a
+    preset of one with previews off (`workshop.no_automatic_still`) the caller
+    must not ask: a file of this name may be 0.4.1's preview-made picture.
+    """
+    stem = scene_still_stem(item)
     for root in roots:
         directory = still_directory(root)
         for extension in _still_extensions():
-            candidate = directory / f"{scene}{extension}"
+            candidate = directory / f"{stem}{extension}"
             if present(candidate):
                 return candidate
     return None

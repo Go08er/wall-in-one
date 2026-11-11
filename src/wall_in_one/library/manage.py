@@ -1026,6 +1026,9 @@ def pairing_artifact_paths(
             break
         found.append(generated)
         found.append(generated.with_name(generated.name + pairing.SIDECAR_SUFFIX))
+        legacy = stills.preview_made_destination(item, root)
+        if legacy is not None and legacy != generated:
+            found.append(legacy)
 
     # A schema-1 pairing sidecar records an association, not a file
     # generation. Keep that predecessor choice usable, but never turn its

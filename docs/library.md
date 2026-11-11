@@ -176,9 +176,11 @@ directions is captured again, so an old low-resolution still is replaced. A
 still is never judged against a guessed size or by its shape, and nothing is
 written without the engine or a measured display.
 
-A web wallpaper or a preset gets no engine still: the engine would capture a web
-page before it has drawn and a preset's screenshot isn't its look. Its still is
-one you pick, or, with **Use the wallpaper's own preview as its still** on
+A preset of a true scene gets an engine still like a scene: its base is rendered
+with the preset's own values, as `<id>-capture.png` (never 0.4.1's preview-made
+`<id>.png`, which stays and is ignored). A web wallpaper, or a preset of one, gets
+no engine still: the engine would capture a web page before it has drawn. Its still is
+one you pick, or, with **Use a web wallpaper's own preview as its still** on
 (Settings → Library, under Allow web wallpapers; on for a profile from 0.4.1 that
 allowed web wallpapers), `<id>.png` drawn through ffmpeg from the preview its
 author shipped. Without either it can't be played. With that setting off, a `<id>.png` that 0.4.1 drew from a

@@ -846,7 +846,7 @@ def synthesize(
             still=(
                 None
                 if workshop.no_automatic_still(item, previews)
-                else pairing.scene_still(item.scene, roots=roots)
+                else pairing.scene_still(item, roots=roots)
             ),
             motion=item.path,
         )
@@ -867,14 +867,15 @@ def _chosen_still(
 ) -> Path | None:
     """A record's still, unless it is the preview-made one 0.4.1 left for ``item``.
 
-    A web page or a preset has no automatic still while ``previews`` is off
-    (`workshop.no_automatic_still`), but its record may name `<id>.png` in an
-    `Automatic Stills` folder: 0.4.1 drew that from the author's preview. It
-    counts as no choice, and the record and the file are left as they are.
+    0.4.1 drew `<id>.png` in an `Automatic Stills` folder from the author's
+    preview, for every web page and every preset (`stills.preview_made_destination`).
+    A record naming it counts as no choice unless that file is the item's still
+    now (a web page or preset of one with previews on, `workshop.preview_still`);
+    the record and the file are left as they are.
     """
-    if chosen is None or not workshop.no_automatic_still(item, previews):
+    if chosen is None or workshop.preview_still(item, previews):
         return chosen
-    if any(chosen == stills.automatic_destination(item, root) for root in roots):
+    if any(chosen == stills.preview_made_destination(item, root) for root in roots):
         return None
     return chosen
 
@@ -983,6 +984,15 @@ def apply(
         for root in roots
         if (destination := stills.automatic_destination(item, root)) is not None
     }
+    # 0.4.1's preview-made pictures stay this app's, hidden, whether or not they
+    # are used now (`stills.preview_made_destination`).
+    generated.update(
+        destination
+        for item in materialised
+        if item.is_moving
+        for root in roots
+        if (destination := stills.preview_made_destination(item, root)) is not None
+    )
     generated.update(adopted.values())
     kept: list[MediaItem] = []
     for item in materialised:

@@ -1255,10 +1255,14 @@ def _preview(path: Path, size: str = "64x36") -> Path:
 def _workshop_scene(root: Path, workshop_id: str, kind: str, preview: str) -> MediaItem:
     installation = root.parent / "steam" / "workshop" / "content" / "431960" / workshop_id
     installation.mkdir(parents=True)
+    # "web" is a web page and "preset" a preset of one (the kinds whose still can
+    # only come from the preview); "application" can't play.
     return replace(
         _scene(workshop_id, directory=installation),
         workshop_type=kind,
         preview=_preview(installation / preview),
+        web_page=kind in ("web", "preset"),
+        scene_base="2777242023" if kind == "preset" else "",
     )
 
 
@@ -1282,10 +1286,10 @@ def test_a_web_page_or_preset_gets_no_automatic_still_and_its_preview_is_never_o
     monkeypatch.setattr(subprocess, "run", never)
     assert item.preview_kind
     assert not stills.scene_capture_required(item, root, automatic=True)
-    assert stills.ensure(item, root) is None
+    assert stills.ensure(item, root, allow_web=True) is None
     for forced in (False, True):
         with pytest.raises(stills.StillError, match="no automatic still"):
-            stills.capture_scene(item, root, force=forced)
+            stills.capture_scene(item, root, force=forced, allow_web=True)
     assert not pairing.still_directory(root).exists()
 
 
@@ -1304,7 +1308,7 @@ def test_a_still_made_from_a_preview_by_0_4_1_is_not_the_items_still(root: Path,
     _preview(old)
     picked = _preview(root / "mine.png")
 
-    assert pairing.scene_still("2777242023", roots=(root,)) == old  # the file is there
+    assert pairing.scene_still(item, roots=(root,)) == old  # the file is there
     assert pairings.synthesize(item, (root,)).still is None
     (applied,) = pairings.apply([item], (root,), {})
     assert applied.paired_still is None
@@ -1484,6 +1488,7 @@ def test_an_engine_that_dies_mid_frame_publishes_nothing_torn(
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         del size, prepared_output
         destination.write_bytes(b"\x89PNG\r\n\x1a\nhalf a frame")
@@ -1518,6 +1523,7 @@ def test_scene_capture_replaces_the_managed_still_atomically(
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1550,6 +1556,7 @@ def test_scene_capture_never_overwrites_a_late_target(
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1585,6 +1592,7 @@ def test_scene_target_directory_replacement_cannot_redirect_publication(
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1622,6 +1630,7 @@ def test_scene_source_change_after_publication_restores_the_prior_still(
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output
@@ -1676,6 +1685,7 @@ def test_scene_capture_preserves_an_in_place_target_mutation(
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         assert size == (2560, 1600)
         assert prepared_output

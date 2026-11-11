@@ -918,6 +918,7 @@ def test_workshop_delete_that_wins_during_scene_capture_prevents_late_publicatio
         size: tuple[int, int],
         prepared_output: bool,
         allow_web: bool,
+        properties: object = (),
     ) -> Path:
         del size
         assert prepared_output

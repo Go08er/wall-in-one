@@ -367,6 +367,7 @@ def screenshot(
     processes: worker_processes.Cancellation | None = None,
     prepared_output: bool = False,
     allow_web: bool,
+    properties: Sequence[tuple[str, str]] = (),
 ) -> Path:
     """Render ``scene`` until it has written one frame, then stop it.
 
@@ -380,7 +381,10 @@ def screenshot(
 
     Its type is read first, here, where the engine is started
     (`workshop.engine_refusal`): an ``application`` is never run, and a
-    ``web`` page only with ``allow_web``.
+    ``web`` page only with ``allow_web``. For a preset ``scene`` is its base,
+    the id the service gives the engine too, and ``properties`` are its values,
+    passed through `SceneRenderer.command` and its allowlist (a name or value
+    the service would refuse is refused here, as `SceneError`).
     """
     if not is_available():
         raise SceneEngineUnavailableError("linux-wallpaperengine is not installed")
@@ -411,6 +415,7 @@ def screenshot(
                 scene,
                 screenshot=destination,
                 window=size or capture_size(renderer.output if renderer else ""),
+                properties=properties,
             ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

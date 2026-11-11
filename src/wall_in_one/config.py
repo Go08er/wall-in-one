@@ -401,8 +401,8 @@ class Settings:
     #: own older Chromium with web security and site isolation off
     #: (docs/wallpaper-engine.md). Off, they are listed and never played or previewed.
     allow_web_wallpapers: bool = False
-    #: Use a web wallpaper's or a preset's own built-in preview as its still,
-    #: and as the source of its colours: a sub-option of ``allow_web_wallpapers``
+    #: Use a web wallpaper's (or a preset of one's) own built-in preview as its
+    #: still, and as the source of its colours: a sub-option of ``allow_web_wallpapers``
     #: (it only applies while that is on; its saved value is kept while it is
     #: off). Off, such an item has only a still a person picked, because the
     #: preview is the author's file (docs/wallpaper-engine.md, "Stills").

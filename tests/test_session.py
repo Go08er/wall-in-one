@@ -1300,7 +1300,8 @@ def test_live_removal_uses_pinned_context_after_root_replacement(
     replacement_source = replacement_root / source.name
     replacement_source.hardlink_to(source)
     original_sidecar = source.with_name(source.name + pairing.SIDECAR_SUFFIX)
-    original_sidecar.write_bytes(b"old pairing")
+    # The app's own selector (names a still in the root), so it is ordinary cleanup.
+    original_sidecar.write_text(json.dumps({"still_path": str(root / "still.png")}))
     replacement_sidecar = replacement_source.with_name(
         replacement_source.name + pairing.SIDECAR_SUFFIX
     )

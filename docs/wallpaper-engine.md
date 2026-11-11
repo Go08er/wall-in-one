@@ -312,7 +312,8 @@ place the engine looks for `--bg <id>` (above): a regular file of at most
 infinity, no number that overflows, no lone surrogate escape), nested to any
 depth (once nesting first reaches 128 levels, everything after that point in the file is
 checked for its structure only, not for numbers or escapes, shallow content that
-follows the deep part included; the top level's own keys and `type` stay strict), the
+follows the deep part included; the top level's own keys and `type`, and the keys of an
+object that is the `type`, stay strict), the
 type read exactly as the engine reads it (ASCII lower-case, nothing trimmed:
 `" web "` is an unknown type, not `web`). The app's own engine starts (a
 scene's still, the legacy play) use `workshop.engine_refusal`, the same

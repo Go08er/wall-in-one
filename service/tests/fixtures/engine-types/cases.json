@@ -2604,5 +2604,105 @@
     "name": "an odd id '٣'",
     "web_off": "refused",
     "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "nest": {
+            "after": ",\"type\":{\"\\ud800\":1},\"type\":\"scene\"}",
+            "before": "{\"a\":",
+            "close": "]",
+            "depth": 128,
+            "inner": "1",
+            "open": "["
+          }
+        }
+      }
+    ],
+    "name": "depth 128, a lone surrogate key in an object type after",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "nest": {
+            "after": ",\"type\":{\"\\ud800\":1},\"type\":\"scene\"}",
+            "before": "{\"a\":",
+            "close": "]",
+            "depth": 127,
+            "inner": "1",
+            "open": "["
+          }
+        }
+      }
+    ],
+    "name": "depth 127, a lone surrogate key in an object type after",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "nest": {
+            "after": ",\"type\":{\"k\":{\"\\ud800\":1}},\"type\":\"scene\"}",
+            "before": "{\"a\":",
+            "close": "]",
+            "depth": 200,
+            "inner": "1",
+            "open": "["
+          }
+        }
+      }
+    ],
+    "name": "depth 200, a lone surrogate key one level inside an object type",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "nest": {
+            "after": ",\"type\":{\"k\":\"\\ud800\"},\"type\":\"scene\"}",
+            "before": "{\"a\":",
+            "close": "]",
+            "depth": 200,
+            "inner": "1",
+            "open": "["
+          }
+        }
+      }
+    ],
+    "name": "depth 200, a lone surrogate value in an object type",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "nest": {
+            "after": ",\"type\":[{\"\\ud800\":1}],\"type\":\"scene\"}",
+            "before": "{\"a\":",
+            "close": "]",
+            "depth": 200,
+            "inner": "1",
+            "open": "["
+          }
+        }
+      }
+    ],
+    "name": "depth 200, a type array of objects with a lone surrogate key",
+    "web_off": "allowed",
+    "web_on": "allowed"
   }
 ]

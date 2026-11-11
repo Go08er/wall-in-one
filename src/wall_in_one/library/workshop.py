@@ -1287,7 +1287,8 @@ def _engine_read(text: str) -> str | None:
 
     The grammar all through (no `NaN` or infinity), and, until the 128th
     bracket opens (`ENGINE_STRICT_DEPTH`), every number and escape; after it
-    only the top level's own keys and its `type`. The last `type` wins, and
+    only the top level's own keys, its `type`, and the keys of an object that
+    is its `type` (what the service's skip decodes). The last `type` wins, and
     is None unless it is a string. Iterative and linear, so no depth and no
     hostile text is too much for it.
     """
@@ -1342,7 +1343,9 @@ def _engine_read(text: str) -> str | None:
                 continue
             if group != "string":
                 raise EngineProjectError("is not JSON")
-            if strict or len(stack) == 1:
+            # The top level's keys, and those of an object that is its `type`: the
+            # service reads both as text at any depth (`TopLevelType`, `TypeText`).
+            if strict or len(stack) == 1 or (len(stack) == 2 and stack[1] == "{" and key == "type"):
                 name = _engine_string(token)
                 key = name if len(stack) == 1 else key
             state = "colon"

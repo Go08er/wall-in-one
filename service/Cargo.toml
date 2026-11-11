@@ -9,7 +9,11 @@ description = "Session-scoped runtime for Wall-in-One"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: numbers are parsed correctly rounded, as the app's reader
+# (Python's float) parses them, so a project's number near the largest f64 is
+# out of range for both or for neither (workshop::refusal, R42-15). No crate is
+# added; parsing a float costs more, and a project.json holds few.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 toml = "1"
 # Display discovery over the compositor's own Wayland protocols (wl_output,

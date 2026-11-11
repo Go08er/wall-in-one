@@ -2724,5 +2724,213 @@
     "name": "depth 200, a lone surrogate key in an object that isn't the type",
     "web_off": "allowed",
     "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.0}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): 1.0",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1e309}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): 1e309",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.7976931348623157e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): the largest finite f64, as printed",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.7976931348623158e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): 1.7976931348623158e308, which rounds to the largest f64",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.7976931348623159e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): 1.7976931348623159e308, which rounds to infinity",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.797693134862315807937e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): just below the halfway point to infinity",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.797693134862315807938e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): just above the halfway point to infinity",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":17976931348623158e292}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): the largest f64 with its digits before the exponent",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":-1.7976931348623158e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): -1.7976931348623158e308, which rounds to the lowest f64",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497791}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): one below the halfway point to infinity, as an integer",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): the halfway point to infinity, as an integer, which rounds to even: infinity",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":-179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): minus the halfway point to infinity, as an integer",
+    "web_off": "refused",
+    "web_on": "refused"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":1.7976931348623158E+308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): 1.7976931348623158E+308, capital E and a plus sign",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":0.17976931348623158e309}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): 0.17976931348623158e309, an exponent past 308 for a finite f64",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":0e99999999999}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): zero with an exponent past any f64's",
+    "web_off": "allowed",
+    "web_on": "allowed"
+  },
+  {
+    "copies": [
+      {
+        "folder": 0,
+        "project": {
+          "text": "{\"type\":\"scene\",\"unused\":-1.797693134862315807938e308}"
+        }
+      }
+    ],
+    "name": "f64 boundary (R42-15): just below the halfway point to minus infinity",
+    "web_off": "refused",
+    "web_on": "refused"
   }
 ]

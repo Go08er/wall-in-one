@@ -62,6 +62,11 @@ const MAX_PLAYLIST_NAME_CHARS: usize = 120;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_REFERENCE_BYTES: usize = MAX_PLAYLIST_NAME_CHARS * 4;
 const MAX_CONNECTOR_BYTES: usize = 256;
+/// The `--layer` values the app writes (`runtime_config.py`) and both
+/// renderers accept: the one the compositor's wallpaper rules depend on.
+/// Closed, because the value is one argv element of mpvpaper and of
+/// linux-wallpaperengine.
+pub const RENDERER_LAYERS: &[&str] = &["background"];
 const MAX_OPTION_BYTES: usize = 256;
 pub const MAX_PATH_BYTES: usize = 4096;
 const CONFIG_GENERATION_HEX_BYTES: usize = 64;
@@ -841,7 +846,12 @@ impl Config {
                 "a renderer dial other than its default requires schema_version {DIALS_SCHEMA_VERSION}"
             ));
         }
-        bounded_nonempty("renderer layer", &self.renderer.layer, MAX_OPTION_BYTES)?;
+        if !RENDERER_LAYERS.contains(&self.renderer.layer.as_str()) {
+            return invalid(format!(
+                "renderer layer must be one of {}",
+                RENDERER_LAYERS.join(", ")
+            ));
+        }
         for (label, path) in [
             ("noctalia_program", &self.renderer.noctalia_program),
             ("mpvpaper_program", &self.renderer.mpvpaper_program),
@@ -1240,6 +1250,7 @@ fn bounded_nonempty_chars(
 }
 fn bounded_connector(label: &str, value: &str, required: bool) -> Result<(), ConfigError> {
     if (!required || !value.is_empty())
+        && !value.starts_with('-')
         && !value.chars().any(char::is_whitespace)
         && value.len() <= MAX_CONNECTOR_BYTES
         && !value.chars().any(char::is_control)
@@ -1247,7 +1258,7 @@ fn bounded_connector(label: &str, value: &str, required: bool) -> Result<(), Con
         Ok(())
     } else {
         invalid(format!(
-            "{label} is empty when required, contains whitespace, is longer than {MAX_CONNECTOR_BYTES} bytes, or contains control characters"
+            "{label} is empty when required, starts with '-', contains whitespace, is longer than {MAX_CONNECTOR_BYTES} bytes, or contains control characters"
         ))
     }
 }

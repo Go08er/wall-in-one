@@ -904,6 +904,73 @@ fn connector_fields_are_single_protocol_tokens() {
 }
 
 #[test]
+fn a_connector_that_starts_with_a_dash_is_refused() {
+    // review-f2 N7: a connector is a separate argv element of
+    // linux-wallpaperengine (`--screen-root`) and mpvpaper's operand.
+    let theme: Config = toml::from_str(&document(4).replace(
+        "theme_source_connector = \"\"",
+        "theme_source_connector = \"--help\"",
+    ))
+    .unwrap();
+    assert!(
+        theme
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("starts with '-'")
+    );
+    let schedule: Config = toml::from_str(&document(4).replace(
+        "id = \"night\"\nplaylist = \"day\"\nweekdays",
+        "id = \"night\"\nplaylist = \"day\"\nconnector = \"-o\"\nweekdays",
+    ))
+    .unwrap();
+    assert!(
+        schedule
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("starts with '-'")
+    );
+    let display: Config = toml::from_str(&document(4).replace("eDP-1", "-eDP-1")).unwrap();
+    assert!(
+        display
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("starts with '-'")
+    );
+    // A dash inside a name is how connectors are spelled.
+    let inside: Config = toml::from_str(&document(4)).unwrap();
+    inside.validate().unwrap();
+}
+
+#[test]
+fn the_renderer_layer_is_a_closed_list() {
+    // review-f2 N6: `--layer`'s value reaches both programs as one argv element.
+    let allowed: Config = toml::from_str(&document(4)).unwrap();
+    allowed.validate().unwrap();
+    for layer in [
+        "--help",
+        "-o",
+        "bottom",
+        "Background",
+        "background ",
+        "",
+        "x",
+    ] {
+        let parsed: Config = toml::from_str(
+            &document(4).replace("layer = \"background\"", &format!("layer = {layer:?}")),
+        )
+        .unwrap();
+        let error = parsed.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("renderer layer must be one of background"),
+            "{layer:?}: {error}"
+        );
+    }
+}
+
+#[test]
 fn wrong_schema_is_refused() {
     let path = temp_file("schema");
     fs::write(&path, document(99)).unwrap();

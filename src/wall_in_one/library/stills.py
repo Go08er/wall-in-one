@@ -90,6 +90,16 @@ class StillError(Exception):
         )
 
 
+class CaptureFailedError(StillError):
+    """linux-wallpaperengine was started for a scene's still and gave none.
+
+    The one capture failure a person is told of (`ensure`'s ``failed``): with no
+    still a scene, and a preset of one, stays out of playlists until one is
+    taken or picked. Not one that never got as far as the engine (none
+    installed, no display measured, a refused item).
+    """
+
+
 class StillFolderError(StillError):
     """A still could not be made because a folder it has to write in refused.
 
@@ -317,6 +327,37 @@ class _ImageTemporary:
         """This output, already named beside the target (see `_UnnamedImage`)."""
         return self
 
+    def _withdraw_untouched(self, pin: file_io.PinnedPath) -> bool:
+        """Unlink this output by its name when nothing was ever written to it.
+
+        A renderer that failed before writing (the engine exiting with no
+        screenshot, one that could not be started) leaves the empty inode
+        ``mkstemp`` made, at its random name in the pinned folder. It holds
+        nothing to keep, so it is unlinked instead of claimed and retained, which
+        would leave a 0-byte record behind every failed attempt
+        (`file_io.discard_regular_if_same`). Only while that name, reached
+        through the pinned folder, still holds this exact inode, empty and
+        singly linked; anything else is withdrawn the retaining way.
+        """
+        try:
+            held = os.fstat(pin.descriptor)
+            named = os.lstat(self.path)
+        except OSError:
+            return False
+        if not (
+            stat.S_ISREG(named.st_mode)
+            and (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino)
+            and held.st_size == 0
+            and named.st_size == 0
+            and named.st_nlink == 1
+        ):
+            return False
+        try:
+            os.unlink(self.path)
+        except OSError:
+            return False
+        return True
+
     def close(self) -> None:
         """Release only the exact output inode created by ``mkstemp``.
 
@@ -354,7 +395,7 @@ class _ImageTemporary:
                         self.logical_path,
                         retired,
                     )
-            elif pin is not None and not self.published:
+            elif pin is not None and not self.published and not self._withdraw_untouched(pin):
                 with contextlib.suppress(OSError, ValueError):
                     file_io.discard_regular_if_same(
                         self.path,
@@ -2113,7 +2154,7 @@ def _capture_scene_from_source(
     except StillError:
         raise
     except scenes.SceneError as error:
-        raise StillError(str(error)) from error
+        raise CaptureFailedError(str(error)) from error
     except OSError as error:
         raise _not_written(
             target.parent, error, f"could not replace {target}: {error.strerror or error}"
@@ -2167,6 +2208,7 @@ def ensure(
     refused: Callable[[StillFolderError], None] | None = None,
     allow_web: bool = False,
     previews: bool = False,
+    failed: Callable[[CaptureFailedError], None] | None = None,
 ) -> Path | None:
     """The still for ``item``, making one if it has none. ``None`` if it needs none.
 
@@ -2177,7 +2219,9 @@ def ensure(
 
     ``refused`` hears the one failure that is not about the wallpaper: a
     folder that would not be written in (`StillFolderError`). It is forgiven
-    like the rest; a caller that can tell a person gives this.
+    like the rest; a caller that can tell a person gives this. ``failed`` hears
+    a scene's capture that the engine ran and gave nothing for
+    (`CaptureFailedError`), for the same caller to say.
 
     ``allow_web`` is ``allow_web_wallpapers``: a web page while they are off
     gets none, and nothing of it is opened. ``previews`` is
@@ -2207,6 +2251,10 @@ def ensure(
         except StillFolderError as error:
             if refused is not None:
                 refused(error)
+            return None
+        except CaptureFailedError as error:
+            if failed is not None:
+                failed(error)
             return None
         except StillError:
             return None

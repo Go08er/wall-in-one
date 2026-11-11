@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -97,8 +98,9 @@ def _stub_failing(made: Recording, monkeypatch: pytest.MonkeyPatch) -> None:
         size: object | None = None,
         refused: object | None = None,
         previews: bool = False,
+        failed: object | None = None,
     ) -> Path | None:
-        del processes, size, refused, previews
+        del processes, size, refused, previews, failed
         made.asked.append(target.path)
         return None
 
@@ -117,8 +119,9 @@ def maker(monkeypatch: pytest.MonkeyPatch) -> Recording:
         size: object | None = None,
         refused: object | None = None,
         previews: bool = False,
+        failed: object | None = None,
     ) -> Path | None:
-        del processes, size, refused, previews
+        del processes, size, refused, previews, failed
         made.asked.append(target.path)
         return root / f"{target.path.stem}.png" if made._succeeds else None
 
@@ -383,8 +386,9 @@ def _sizes_asked(monkeypatch: pytest.MonkeyPatch) -> list[object]:
         size: object | None = None,
         refused: object | None = None,
         previews: bool = False,
+        failed: object | None = None,
     ) -> Path | None:
-        del target, processes, refused, previews
+        del target, processes, refused, previews, failed
         sizes.append(size)
         return None
 
@@ -517,6 +521,35 @@ def test_unexpected_batch_failure_is_observed_and_reported(
     assert messages == ["Automatic still generation stopped unexpectedly: decoder vanished"]
 
 
+def test_a_scene_the_engine_gives_no_still_for_is_reported_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """review-f4 U5: a preset's still comes only from the engine; a failed capture was silent."""
+    messages: list[str] = []
+    made = StillMaker(report=messages.append, displays=lambda: ())
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments, **_keywords: callback(*arguments),
+    )
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_a, **_k: (64, 40))
+
+    def ensure(target: MediaItem, _root: Path, **options: Any) -> None:
+        failed = options["failed"]
+        failed(still_backend.CaptureFailedError(f"the engine exited for {target.name}"))
+
+    monkeypatch.setattr("wall_in_one.ui.stills.stills.ensure", ensure)
+    scenes_asked = (item("111", Kind.SCENE), item("222", Kind.SCENE))
+    made.request(scenes_asked, Path("/w"), lambda _count: None)
+    made.request(scenes_asked, Path("/w"), lambda _count: None)  # asked once a run
+    made._pool.shutdown(wait=True)
+
+    assert len(messages) == 1, messages
+    assert messages[0].startswith(
+        "linux-wallpaperengine gave no still for 2 Wallpaper Engine wallpapers: 111 (and 1 more)"
+    )
+    assert "stays out of playlists" in messages[0]
+
+
 def test_explicit_scene_regeneration_reports_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -554,8 +587,9 @@ def test_shutdown_terminates_the_active_still_child_within_budget(
         size: object | None = None,
         refused: object | None = None,
         previews: bool = False,
+        failed: object | None = None,
     ) -> Path | None:
-        del size, refused, previews
+        del size, refused, previews, failed
         assert processes is not None
         try:
             processes.run(

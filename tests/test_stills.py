@@ -1435,15 +1435,15 @@ def _retained_claims(directory: Path) -> tuple[int, int]:
     return len(claims), len(tombstones)
 
 
-def test_an_engine_that_cannot_be_started_keeps_the_still_and_one_empty_tombstone(
+def test_an_engine_that_cannot_be_started_keeps_the_still_and_leaves_nothing(
     monkeypatch: pytest.MonkeyPatch, root: Path
 ) -> None:
-    """Accepted for now: the named temporary is withdrawn through file_io.
+    """The engine needs a named ``.png`` path, so the temporary exists before it starts.
 
-    The engine needs a named ``.png`` path, so the temporary exists before the
-    process is started; `file_io`'s claim-and-retain then leaves one 0-byte
-    tombstone (the claim directory is removed once empty). Only after the engine and a
-    measured display were both found -- without either nothing is written
+    Nothing was ever written to it, so it is unlinked, not claimed and retained
+    (review-f4 U5: `file_io`'s claim-and-retain left a 0-byte tombstone for every
+    failed attempt, one more at each start). Without an engine or a measured
+    display nothing is made at all
     (`test_a_scene_capture_that_cannot_be_made_writes_nothing`).
     """
     target = pairing.still_directory(root) / "1647046763.png"
@@ -1466,9 +1466,31 @@ def test_an_engine_that_cannot_be_started_keeps_the_still_and_one_empty_tombston
 
     assert len(started) == 1
     assert stills._png_size(target) == (1270, 1537)
-    names = {path.name for path in target.parent.iterdir()}
-    assert names == {target.name, file_io.RETAINED_ENTRY_DIRECTORY}
-    assert _retained_claims(target.parent) == (0, 1), "the emptied claim directory is gone"
+    assert {path.name for path in target.parent.iterdir()} == {target.name}
+
+
+def test_an_engine_that_exits_without_a_still_is_said_and_leaves_no_record(
+    monkeypatch: pytest.MonkeyPatch, root: Path
+) -> None:
+    """review-f4 U5: a preset's still comes only from the engine now; a failure was silent."""
+    installation = root.parent / "steam" / "workshop" / "content" / "431960" / "1647046763"
+    installation.mkdir(parents=True)
+    scene = _scene("1647046763", directory=installation)
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda: (64, 40))
+    monkeypatch.setattr(scenes, "is_available", lambda: True)
+    real_popen = subprocess.Popen
+
+    def engine(arguments: list[str], *args: Any, **kwargs: Any) -> Any:
+        # The engine in its place: it starts, writes nothing, and fails.
+        return real_popen([sys.executable, "-c", "import sys; sys.exit(1)"], *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", engine)
+    failures: list[stills.CaptureFailedError] = []
+    for _start in range(2):
+        assert stills.ensure(scene, root, size=(64, 40), failed=failures.append) is None
+    assert len(failures) == 2, "said each time it is asked"
+    folder = pairing.still_directory(root)
+    assert not folder.exists() or list(folder.iterdir()) == [], "no record per attempt"
 
 
 def test_an_engine_that_dies_mid_frame_publishes_nothing_torn(

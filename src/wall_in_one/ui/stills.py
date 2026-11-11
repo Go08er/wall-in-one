@@ -72,6 +72,21 @@ def _refusal(folder: Path, count: int, reason: str) -> str:
     )
 
 
+def _captures_failed(failures: list[tuple[str, str]]) -> str:
+    """What is said for the scenes (and presets) the engine gave no still for."""
+    count = len(failures)
+    wallpapers = (
+        "1 Wallpaper Engine wallpaper" if count == 1 else f"{count} Wallpaper Engine wallpapers"
+    )
+    name, reason = failures[0]
+    more = f" (and {count - 1} more)" if count > 1 else ""
+    return (
+        f"linux-wallpaperengine gave no still for {wallpapers}: {name}{more}: {reason}. "
+        "Without a still each stays out of playlists; pick one for it, or Wall-in-One "
+        "tries again the next time it starts"
+    )
+
+
 class StillMaker:
     """Fills in the missing stills for a library, off the main thread."""
 
@@ -253,6 +268,13 @@ class StillMaker:
             count, reason = refused.get(error.folder, (0, error.reason))
             refused[error.folder] = (count + 1, reason)
 
+        # The scenes the engine ran for and gave no still, with why (`_attempted`
+        # keeps each from being asked again while this maker lives).
+        failures: list[tuple[str, str]] = []
+
+        def capture_failed(name: str) -> Callable[[stills.CaptureFailedError], None]:
+            return lambda error: failures.append((name, str(error)))
+
         # Asked once per batch, here on the worker: the service's answer is a
         # socket round trip, and neither the main thread nor every scene
         # should wait on one. `fallback` is GTK's view, for when no service
@@ -316,6 +338,7 @@ class StillMaker:
                     # Only a web page is told: for it alone is it ever true, and
                     # `stills.ensure` has the safe default.
                     previews=self._previews(),
+                    failed=capture_failed(item.name),
                     **({"allow_web": True} if item.holds_web else {}),
                 )
                 is not None
@@ -335,6 +358,11 @@ class StillMaker:
             # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
             GLib.idle_add(  # type: ignore[call-arg]
                 self._say_refused, refused, priority=GLib.PRIORITY_DEFAULT
+            )
+        if failures:
+            # Said once for the batch: each is asked once while this maker lives.
+            GLib.idle_add(  # type: ignore[call-arg]
+                self._say_failed, failures, priority=GLib.PRIORITY_DEFAULT
             )
         if made == 0:
             return
@@ -359,6 +387,17 @@ class StillMaker:
                 say(message)
             else:
                 LOGGER.warning("%s", message)
+        return GLib.SOURCE_REMOVE
+
+    def _say_failed(self, failures: list[tuple[str, str]]) -> bool:
+        """Report the scenes the engine gave no still for (`_captures_failed`)."""
+        if self._closed:
+            return GLib.SOURCE_REMOVE
+        message = _captures_failed(failures)
+        if self._report is not None:
+            self._report(message)
+        else:
+            LOGGER.warning("%s", message)
         return GLib.SOURCE_REMOVE
 
     def regenerate_scene(self, item: MediaItem, root: Path, callback: Callback) -> None:

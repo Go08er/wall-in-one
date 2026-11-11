@@ -381,7 +381,7 @@ say "what Wall-in-One still needs, if anything:"
 wall-in-one --setup-status || true
 say "add the companion plugin in Noctalia's plugin settings: $companion"
 if [ "$installed_new" = 1 ] && [ -n "$current" ]; then
-  # An update: the service's restart above compiles without the stills the new
-  # version makes only in the app (docs/releases/v0.4.2.md, Updating).
-  say "updated from $current: open Wall-in-One once now, so it makes the stills this version needs (scene presets, and videos whose old sidecar it no longer reads); restarting the service alone does not, and until then those sit out of playlists"
+  # An update: the service's restart above compiles without the stills the app
+  # makes only itself (docs/releases/v0.4.2.md, Updating). Worded for any update.
+  say "updated from $current: open Wall-in-One once now, so it can make stills for new or changed items; restarting the service alone does not, and until then an item that needs one sits out of playlists"
 fi

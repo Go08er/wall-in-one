@@ -108,7 +108,8 @@ moving a renderer later
    `--update-status` is read-only. It distinguishes the installed package, loaded
    service commands and running process. Resolve old or unverified commands
    through the configuration that owns them; the app does not rewrite pins.
-6. Open the app and check your folders. Re-enable the companion or your usual
+6. Open the app and check your folders. (The Arch setup script restarts the
+   service itself, so there this is the step it leaves for you.) Re-enable the companion or your usual
    launcher; the companion prepares and starts a direct runtime when needed.
    Check playback, then apply any temporary playback choices you want again.
 

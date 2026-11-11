@@ -409,6 +409,8 @@ def test_an_update_reloads_the_units_and_restarts_the_running_service(setup: Set
     assert not any("--now" in call for call in calls)
     # review-f4 U6: the restart alone does not make the stills the app makes.
     assert "updated from 0.3.0-1: open Wall-in-One once now" in result.stdout
+    # review f5 N6: true of any update, so it names no version.
+    assert "this version" not in result.stdout
 
 
 def test_an_up_to_date_install_is_not_rebuilt_but_still_set_up(setup: Setup) -> None:

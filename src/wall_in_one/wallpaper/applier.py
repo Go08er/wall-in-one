@@ -92,8 +92,11 @@ class Applier:
         covers the still, and because a palette that fails should not leave a
         video running over the wrong colours.
 
-        ``allow_web`` is ``allow_web_wallpapers``: while it is off, a scene's
-        type is read again before the engine is started (`_start_scene`).
+        ``allow_web`` is ``allow_web_wallpapers``. A scene's type is read
+        before every engine start (`_start_scene`, `workshop.engine_refusal`),
+        whichever way it is set; it only lets a ``web`` page through, and an
+        ``application`` or a ``project.json`` the service would not read is
+        refused either way.
         """
         if item.unplayable is not None:
             # Never handed to a renderer (docs/wallpaper-engine.md).

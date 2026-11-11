@@ -1929,10 +1929,11 @@ def capture_scene(
 
     The still is named by the Workshop id rather than by the directory, so a
     reinstall that moves the directory still finds it. A preset of a true scene
-    is rendered as the service plays it: its base, with its own values
-    (`MediaItem.rendered_scene`, `scene_properties`), and the base's type is what
-    is read first. Its file is `pairing.scene_still_stem`'s, never 0.4.1's
-    preview-made `<id>.png`.
+    is rendered as the service plays it, but for the person's own property
+    overrides, which the service puts over a preset's values and this does not:
+    its base, with the preset's own values (`MediaItem.rendered_scene`,
+    `scene_properties`), and the base's type is what is read first. Its file is
+    `pairing.scene_still_stem`'s, never 0.4.1's preview-made `<id>.png`.
 
     Without ``force`` this is the automatic pass (see `scene_capture_required`).
     ``size`` is a display size the caller already measured; otherwise the

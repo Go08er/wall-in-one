@@ -213,7 +213,7 @@ def _kept_scenes(monkeypatch: pytest.MonkeyPatch, *, allow_web: bool) -> Path:
 def test_a_kept_document_that_allows_web_wallpapers_is_refused_while_they_are_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The review's probe. Before: "" for a document that turns the service's own check off."""
+    """The review's probe. Before: "" for a document that allows web wallpapers."""
     _kept_scenes(monkeypatch, allow_web=True)
     refusal = cli._retained_web_refusal()
     assert "allows web wallpapers" in refusal and "Allow web wallpapers is off" in refusal

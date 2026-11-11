@@ -2496,9 +2496,9 @@ class Application(Adw.Application):
 
         So, when ``settings.toml`` says web wallpapers are off and the file on
         disk allows them (``allow_web_wallpapers = true``, compiled while they
-        were on, which lets a web page through the service's own check), the file is
-        replaced with the
-        document that plays nothing (`runtime_config.nothing_to_play_document`),
+        were on, which lets a web page through the service's type check), the file
+        is replaced with the document that plays nothing
+        (`runtime_config.nothing_to_play_document`),
         as `_web_off_not_running` replaces it when no service runs. Both are
         schema 8, so whatever could load the one loads the other, and the
         service's own poll of the file loads it. Nothing plays then until a
@@ -5713,7 +5713,7 @@ class Application(Adw.Application):
         it. Only what lets a page play is ended (review r13, L2):
 
         * a document that allows web wallpapers (`runtime_config.allows_web_wallpapers`),
-          whatever it names: the service's own check lets a web page through (L4);
+          whatever it names: the service's type check then lets a web page through (L4);
         * for a service not confirmed to read schema 8, which has no such
           check, one that plays a web page or a Workshop item whose type
           can't be checked, or one that isn't known any more (past

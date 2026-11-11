@@ -97,9 +97,10 @@ them. The owner's one preset (Y2K Matrix) is of a web wallpaper (Electric Eye).
 most 5 frames (`ApplicationContext.cpp:664-667`). A web page is painted by
 CEF asynchronously (`WebBrowser/CEF/RenderHandler.cpp:13-21`), so five frames
 after start is very likely a blank page that would still count as a
-successful capture, and then be somebody's wallpaper and palette. Anything
-but a true `scene` therefore gets no automatic still at all (see Stills
-below). CEF also makes a fresh cache directory in the system
+successful capture, and then be somebody's wallpaper and palette. A web page
+therefore gets no engine screenshot, and no automatic still unless a setting
+asks for its own preview (see Stills below); a true `scene`, a preset of one,
+and a Workshop video get theirs from the engine or ffmpeg. CEF also makes a fresh cache directory in the system
 temporary directory on every start (`WebBrowser/WebBrowserContext.cpp:78`).
 
 ## Design
@@ -306,9 +307,16 @@ when it starts, so an item whose type changed to `web` after the compile (a
 Workshop update) would play as one, and one that became an `application`
 would rest on the engine's own parser alone. Whatever the document says, the
 service reads the item's type just before it starts the engine, in every
-place the engine looks for `--bg <id>` (above), bounded like the app's scan
-(256 KiB, a regular file, nested to any depth). For a preset it reads the
-base. A `scene` or a `video` may start; a `web` page only while the document
+place the engine looks for `--bg <id>` (above): a regular file of at most
+256 KiB (never a link or a FIFO), strict UTF-8 and strict JSON (no `NaN` or
+infinity, no number that overflows, no lone surrogate escape), nested to any
+depth (past 128 levels it reads only the structure and the top level), the
+type read exactly as the engine reads it (ASCII lower-case, nothing trimmed:
+`" web "` is an unknown type, not `web`). The app's own engine starts (a
+scene's still, the legacy play) use `workshop.engine_refusal`, the same
+check; one case file, `service/tests/fixtures/engine-types/cases.json`, is run
+against both. The app's scan, which only lists, stays forgiving. For a preset
+it reads the base. A `scene` or a `video` may start; a `web` page only while the document
 allows web wallpapers (`allow_web_wallpapers`, written only while the setting
 is on); anything else is refused, as is an item it can't find or read, with
 web wallpapers on or off: a scene in a Steam library on another drive is one,
@@ -473,7 +481,7 @@ a preset:
 [[playlists.entries]]
 id = "..."
 kind = "scene"
-still = "/.../pictures/y2k.png"   # a preset has only a still you picked (Stills, below)
+still = "/.../pictures/y2k.png"   # the preset's still: one made for it or one you picked (Stills, below)
 scene_id = "2946165131"          # the preset's own id: identity, as before
 scene_base = "2777242023"        # new: what to render
 properties = { arcs = "true", arcsVisualsColor1 = "0.000000 0.501961 0.000000" }   # new
@@ -551,9 +559,15 @@ brought, because Workshop content is untrusted.
 - **An automatic still Wall-in-One makes from the item itself**, stored in
   `Automatic Stills`: the engine's screenshot of a true `scene` (`<id>.png`), the
   engine's screenshot of a **preset of a true scene** (its base rendered with the
-  preset's own values, as the service plays it; `<id>-capture.png`), or ffmpeg's
+  preset's own values; `<id>-capture.png`), or ffmpeg's
   frame of a Workshop video (named by the video's path, like any video's).
 - **A still you picked** in the app, saved in Wall-in-One's own pairing records.
+
+A preset's capture shows what the service plays except for one thing: the
+service puts the person's own property overrides (a scene's own settings, kept
+on its pairing record) over the preset's values, and the capture passes the
+preset's values only. So the still can differ from the wallpaper where the
+person changed a property by hand.
 
 So a picture named like a Workshop video (`foo.png` beside `foo.mp4`) is not its
 still, and its `<video>.wall-in-one.json` sidecar is never read. Which files are

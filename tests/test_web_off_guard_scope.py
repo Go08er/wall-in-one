@@ -5,7 +5,7 @@ a publication that failed or a reload the service refused while "Allow web wallp
 It used to stop every display, and say "web wallpapers are off", whenever a document the app
 remembered named an id the scan couldn't list, or more than four publications went
 unconfirmed, though no web wallpaper was anywhere; and it ignored a document that allows
-web wallpapers, which turns the service's own check off.
+web wallpapers, which lets a web page through the service's type check.
 
 What lets a page play now:
 

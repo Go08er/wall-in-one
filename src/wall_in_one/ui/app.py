@@ -6103,15 +6103,27 @@ class Application(Adw.Application):
         caller's loop publishes that, or its guard runs (`_publish_web_off`, R42-9);
         a removal defers to its own outcome, which publishes again; a shutdown
         ends it. A scan that ended in an error is the result, as ``generation``.
+
+        `_runtime_removal_lock`, which the lane holds, is given up while it
+        waits: a save that changes the library's sources takes it, and the scan
+        waited for is installed on the authoring lane, behind such a save.
+        Held, a folder added while a gesture waited (with web wallpapers turned
+        off in the same save or not) stopped both lanes until the app quit.
+        Nothing is compiled or reloaded while it waits, and the caller's loop
+        reads everything again after it.
         """
-        while not self._runtime_library_ready.wait(0.05):
-            with self._runtime_config_lock:
-                if self._runtime_shutdown:
-                    return _RuntimePublication(generation, changed=changed)
-                if self._removal_runtime_invalidated:
-                    return _RuntimePublication(generation, changed=changed, deferred=True)
-                if self._runtime_web_off_owed:
-                    break  # web wallpapers went off: that goes out first
+        self._runtime_removal_lock.release()
+        try:
+            while not self._runtime_library_ready.wait(0.05):
+                with self._runtime_config_lock:
+                    if self._runtime_shutdown:
+                        return _RuntimePublication(generation, changed=changed)
+                    if self._removal_runtime_invalidated:
+                        return _RuntimePublication(generation, changed=changed, deferred=True)
+                    if self._runtime_web_off_owed:
+                        break  # web wallpapers went off: that goes out first
+        finally:
+            self._runtime_removal_lock.acquire()
         with self._runtime_config_lock:
             scan_error = self._runtime_library_error
         if scan_error:

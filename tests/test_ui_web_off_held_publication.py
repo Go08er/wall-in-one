@@ -663,3 +663,49 @@ def test_a_gesture_waiting_after_a_refused_compile_lets_web_off_out_first(
     _and_after_the_scan(application, service, scans)
     spin_until(lambda: not application._runtime_action_pending, 20, what="the gesture")
     assert application._runtime_web_off_owed == 0
+
+
+@pytest.mark.parametrize("web_off", [False, True], ids=["folders", "folders-and-web-off"])
+def test_a_folder_save_lands_while_a_gesture_waits_for_a_scan(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    web_off: bool,
+) -> None:
+    """A gesture waiting for a folder scan doesn't hold the lock a folder save takes.
+
+    Found beside R42-9: the lane held `_runtime_removal_lock` while it waited, a save
+    that changes the folders waits for that lock, and the scan waited for is installed
+    on the authoring lane behind the save. On 534a9da the second save never landed,
+    nor did web off with it, until the app quit.
+    """
+    application = profiles().application
+    service = _web_on(application, False, monkeypatch)
+    scans = HeldScans(monkeypatch, fails=False)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _save(application, roots=(*application.settings.roots, first))
+    spin_until(lambda: application._runtime_library_scan_pending, 10, what="the scan pending")
+    assert application.runtime_action_async("next")
+    _pump(0.5)  # the gesture's job now waits on the lane for the scan
+    service.sent.clear()
+    changes: dict[str, Any] = {"roots": (*application.settings.roots, second)}
+    if web_off:
+        changes["allow_web_wallpapers"] = False
+    try:
+        _save(application, **changes)
+        assert not scans.gate.is_set(), "the save landed while the scan was held"
+        assert second in config.load_strict().roots
+        if web_off:
+            _reaches_the_service_while_held(application, service, scans, settles=False)
+            _owed_clears(application)
+    finally:
+        scans.release()
+    spin_until(lambda: not application._runtime_action_pending, 20, what="the gesture")
+    spin_until(lambda: not application._runtime_library_scan_pending, 20, what="the scans")
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="publications")
+    assert second in application.session.library.roots
+    assert application._runtime_web_off_owed == 0
+    if web_off:
+        assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())

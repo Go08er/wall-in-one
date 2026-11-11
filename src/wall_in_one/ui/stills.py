@@ -98,7 +98,7 @@ class StillMaker:
         remembered as attempted, so turning them on makes theirs.
 
         ``previews`` says whether `config.Settings.preview_stills` is on, asked
-        afresh at every step: a web page or a preset gets an automatic still only
+        afresh at every step: a web page (or a preset of one) gets an automatic still only
         then (`workshop.preview_still`), drawn from its own preview. Without it, none.
         """
         self._web_allowed = web_allowed if web_allowed is not None else _never
@@ -270,6 +270,12 @@ class StillMaker:
             if workshop.previews_off(item, web):
                 # Turned off since this was queued: nothing of it is opened,
                 # and it is not counted as attempted, so turning web on makes it.
+                self._attempted.discard(item.path)
+                continue
+            if workshop.no_automatic_still(item, self._previews()):
+                # The preview setting went off since this was queued: nothing is
+                # made, and it is not counted as attempted, so turning it back
+                # on makes it.
                 self._attempted.discard(item.path)
                 continue
             processes = (

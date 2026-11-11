@@ -852,12 +852,22 @@ fn recorded_arguments(arguments: &Path, launches: usize) -> String {
 }
 
 #[test]
-fn an_output_that_starts_with_a_dash_is_never_given_to_a_program() {
-    // review-f2 N7/U5: a hostile compositor's output name must not become an option.
+fn a_display_whose_name_starts_with_a_dash_is_skipped_as_refused_and_the_others_play() {
+    // review-f3 M1: the name is data; only where it would become an argument
+    // of a program is it refused, as a skip of that display (`refused` in
+    // status), never a failure, so a reload is not rolled back.
     use std::os::unix::fs::PermissionsExt;
     let root = directory("dash-output");
-    let noctalia = root.join("noctalia");
-    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    let (noctalia, noctalia_arguments) = argument_recorder(&root, "noctalia");
+    // Noctalia is asked and must answer at once.
+    fs::write(
+        &noctalia,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> {:?}\nexit 0\n",
+            noctalia_arguments
+        ),
+    )
+    .unwrap();
     fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
     let (mpvpaper, arguments) = argument_recorder(&root, "mpvpaper");
     let (engine, engine_arguments) = argument_recorder(&root, "engine");
@@ -866,25 +876,78 @@ fn an_output_that_starts_with_a_dash_is_never_given_to_a_program() {
         &format!("linux_wallpaperengine_program = {engine:?}"),
     );
     let parsed: Config = toml::from_str(&document).unwrap();
+    let still = parsed.playlists[0].entries[0].clone();
     let video = parsed.playlists[0].entries[1].clone();
     let scene = parsed.playlists[1].entries[0].clone();
     let (mut driver, _) = driver_with(
         parsed.renderer.clone(),
         vec![live("-o", None), live("DP-1", None)],
     );
-    // Named outright, an output like that is refused for both programs.
-    assert!(driver.apply(&video, "-o", &parsed.settings).is_err());
-    assert!(driver.apply(&scene, "--help", &parsed.settings).is_err());
+    // The runtime's view of the displays keeps the name: it is routed and
+    // reported, not hidden.
+    assert_eq!(
+        driver.connected_outputs().unwrap(),
+        vec!["-o".to_string(), "DP-1".to_string()]
+    );
+    // Named outright, such a display is skipped for each kind, not failed.
+    for entry in [&still, &video, &scene] {
+        assert_eq!(driver.apply(entry, "-o", &parsed.settings), Ok(()));
+        let refused = driver.motion_refused("-o").expect("refused");
+        assert!(!refused.web_page);
+        assert!(refused.reason.contains("starts with '-'"), "{refused}");
+    }
+    assert_eq!(
+        driver.apply_still_only(&still, "--help", &parsed.settings),
+        Ok(())
+    );
+    assert!(driver.motion_refused("--help").is_some());
+    assert!(
+        !arguments.exists(),
+        "mpvpaper was started for a dash output"
+    );
+    assert!(
+        !engine_arguments.exists(),
+        "the engine was started for a dash output"
+    );
+    assert!(
+        !fs::read_to_string(&noctalia_arguments)
+            .unwrap_or_default()
+            .lines()
+            .any(|word| word == "-o" || word == "--help"),
+        "Noctalia was given the name"
+    );
+    // The other display plays, and is not refused.
+    without_text_file_busy(|| driver.apply(&video, "DP-1", &parsed.settings)).unwrap();
+    assert!(driver.motion_refused("DP-1").is_none());
+    let launched = recorded_arguments(&arguments, 1);
+    assert!(launched.lines().any(|word| word == "DP-1"), "{launched}");
     // Asked for all of them, the engine is given only the usable one.
     without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
     let given = recorded_arguments(&engine_arguments, 1);
     assert!(given.lines().any(|word| word == "DP-1"), "{given}");
     assert!(!given.lines().any(|word| word == "-o"), "{given}");
-    assert!(
-        !arguments.exists(),
-        "mpvpaper was started for a dash output"
-    );
     driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn when_every_output_has_a_dash_name_a_scene_is_refused_not_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("dash-only");
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let (engine, engine_arguments) = argument_recorder(&root, "engine");
+    let document = config(&noctalia, Path::new("/bin/true"), true).replace(
+        "linux_wallpaperengine_program = \"/bin/true\"",
+        &format!("linux_wallpaperengine_program = {engine:?}"),
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let scene = parsed.playlists[1].entries[0].clone();
+    let (mut driver, _) = driver_with(parsed.renderer.clone(), vec![live("-X", None)]);
+    assert_eq!(driver.apply(&scene, "", &parsed.settings), Ok(()));
+    assert!(driver.motion_refused("").is_some());
+    assert!(!engine_arguments.exists(), "the engine opened a window");
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -904,44 +904,26 @@ fn connector_fields_are_single_protocol_tokens() {
 }
 
 #[test]
-fn a_connector_that_starts_with_a_dash_is_refused() {
-    // review-f2 N7: a connector is a separate argv element of
-    // linux-wallpaperengine (`--screen-root`) and mpvpaper's operand.
-    let theme: Config = toml::from_str(&document(4).replace(
-        "theme_source_connector = \"\"",
-        "theme_source_connector = \"--help\"",
-    ))
-    .unwrap();
-    assert!(
-        theme
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("starts with '-'")
-    );
-    let schedule: Config = toml::from_str(&document(4).replace(
-        "id = \"night\"\nplaylist = \"day\"\nweekdays",
-        "id = \"night\"\nplaylist = \"day\"\nconnector = \"-o\"\nweekdays",
-    ))
-    .unwrap();
-    assert!(
-        schedule
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("starts with '-'")
-    );
-    let display: Config = toml::from_str(&document(4).replace("eDP-1", "-eDP-1")).unwrap();
-    assert!(
-        display
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("starts with '-'")
-    );
-    // A dash inside a name is how connectors are spelled.
-    let inside: Config = toml::from_str(&document(4)).unwrap();
-    inside.validate().unwrap();
+fn a_connector_that_starts_with_a_dash_is_data_in_the_document() {
+    // review-f3 M1: 0.4.1 wrote such a name without a check, and refusing the
+    // document kept the unit down for every display. The name is refused only
+    // where it would become a program's argument (renderer.rs).
+    for name in ["-X", "--help", "-o"] {
+        let theme: Config = toml::from_str(&document(4).replace(
+            "theme_source_connector = \"\"",
+            &format!("theme_source_connector = {name:?}"),
+        ))
+        .unwrap();
+        theme.validate().unwrap();
+        let schedule: Config = toml::from_str(&document(4).replace(
+            "id = \"night\"\nplaylist = \"day\"\nweekdays",
+            &format!("id = \"night\"\nplaylist = \"day\"\nconnector = {name:?}\nweekdays"),
+        ))
+        .unwrap();
+        schedule.validate().unwrap();
+        let display: Config = toml::from_str(&document(4).replace("eDP-1", name)).unwrap();
+        display.validate().unwrap();
+    }
 }
 
 #[test]

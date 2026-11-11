@@ -663,10 +663,8 @@ def _bounded_connector(value: str, *, label: str, optional: bool = False) -> Non
     )
     if value and any(character.isspace() for character in value):
         raise RuntimeConfigError(f"{label} cannot contain whitespace")
-    # The service refuses it too (`bounded_connector`): a connector is one argv
-    # element of linux-wallpaperengine and mpvpaper's operand.
-    if value.startswith("-"):
-        raise RuntimeConfigError(f"{label} cannot start with '-'")
+    # A name that starts with '-' is data here, as in the service's
+    # `bounded_connector`: only where a name becomes an argument is it refused.
 
 
 def _bounded_name(value: str, *, label: str) -> None:

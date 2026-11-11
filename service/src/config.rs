@@ -1250,7 +1250,6 @@ fn bounded_nonempty_chars(
 }
 fn bounded_connector(label: &str, value: &str, required: bool) -> Result<(), ConfigError> {
     if (!required || !value.is_empty())
-        && !value.starts_with('-')
         && !value.chars().any(char::is_whitespace)
         && value.len() <= MAX_CONNECTOR_BYTES
         && !value.chars().any(char::is_control)
@@ -1258,7 +1257,7 @@ fn bounded_connector(label: &str, value: &str, required: bool) -> Result<(), Con
         Ok(())
     } else {
         invalid(format!(
-            "{label} is empty when required, starts with '-', contains whitespace, is longer than {MAX_CONNECTOR_BYTES} bytes, or contains control characters"
+            "{label} is empty when required, contains whitespace, is longer than {MAX_CONNECTOR_BYTES} bytes, or contains control characters"
         ))
     }
 }

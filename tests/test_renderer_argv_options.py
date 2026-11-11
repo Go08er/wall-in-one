@@ -106,9 +106,31 @@ def test_the_apps_layers_are_the_services_and_the_only_one_it_writes() -> None:
     assert re.findall(r"'layer = \"([^\"]*)\"'", written) == list(renderer.LAYERS)
 
 
-def test_the_compiler_never_writes_a_connector_the_service_refuses_for_a_dash() -> None:
-    runtime_config._bounded_connector("DP-1", label="display connector")
-    runtime_config._bounded_connector("", label="schedule connector", optional=True)
-    for value in ("-o", "--help", "-DP-1"):
-        with pytest.raises(runtime_config.RuntimeConfigError, match="cannot start with '-'"):
-            runtime_config._bounded_connector(value, label="display connector")
+def test_a_connector_that_starts_with_a_dash_is_data_to_the_compiler(tmp_path: Path) -> None:
+    """review-f3 M1: refusing it made every compile fail once such a name was saved."""
+    from dataclasses import replace
+
+    from tests import test_runtime_config as compiled
+    from wall_in_one import config
+    from wall_in_one.ui.next import displays_settings
+
+    cases = [
+        ("assignment", {"DP-1": "evening", "-X": "evening"}, {"theme_source_connector": "DP-1"}),
+        ("theme", {"DP-1": "evening"}, {"theme_source_connector": "-X"}),
+        ("output", {"DP-1": "evening"}, {"theme_source_connector": "DP-1", "output": "-X"}),
+    ]
+    for label, assignments, changes in cases:
+        (tmp_path / label).mkdir()
+        settings, session = compiled._session(tmp_path / label, display_assignments=assignments)
+        settings = replace(settings, display_mode=config.DISPLAY_MODE_INDEPENDENT, **changes)
+        text = runtime_config.render(settings, session)
+        assert "-X" in text or label == "output", label
+    # Switching to independent displays proposes the first attached one, which
+    # GTK may name '-X': the proposal must still compile.
+    (tmp_path / "edit").mkdir()
+    settings, session = compiled._session(tmp_path / "edit", display_assignments={})
+    proposal = displays_settings.settings_edit(
+        settings, {"display_mode": config.DISPLAY_MODE_INDEPENDENT}, ["-X", "DP-1"]
+    )
+    assert isinstance(proposal, dict) and proposal["theme_source_connector"] == "-X"
+    runtime_config.render(replace(settings, **proposal), session)

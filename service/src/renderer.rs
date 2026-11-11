@@ -534,6 +534,22 @@ impl StartError {
     }
 }
 
+/// Why a display's name can't be given to a program: it starts with '-', which
+/// mpvpaper's getopt and linux-wallpaperengine's parser read as an option
+/// (`--` is relied on only for mpvpaper), and Noctalia takes the name as an
+/// operand. The name is data in the document and in the compositor's list;
+/// only here, where it would become an argument, is it refused, and as a skip
+/// of that display (`refused` in status), never a failure or a taboo.
+fn option_like_name(output: &str) -> Option<workshop::Refusal> {
+    output.starts_with('-').then(|| workshop::Refusal {
+        web_page: false,
+        reason: format!(
+            "display name {output:?} starts with '-', which a program would read as an option, \
+             so nothing was started for it"
+        ),
+    })
+}
+
 /// Whether a spawn error means the program itself could not be started.
 fn program_missing(error: &std::io::Error) -> bool {
     matches!(
@@ -680,10 +696,8 @@ impl Mpvpaper {
             .as_ref()
             .ok_or_else(|| StartError::Failed("video entry has no motion path".into()))?;
         let target = if output.is_empty() { "ALL" } else { output };
-        if target.starts_with('-') {
-            return Err(StartError::Failed(format!(
-                "display name {target:?} starts with '-', which a program would read as an option"
-            )));
+        if let Some(refusal) = option_like_name(target) {
+            return Err(StartError::Refused(refusal));
         }
         self.stop();
         let socket = std::env::var_os("XDG_RUNTIME_DIR")
@@ -1262,6 +1276,12 @@ impl SystemDriver {
     }
 
     fn still(&self, entry: &Entry, output: &str) -> Result<(), String> {
+        // `noctalia msg wallpaper-set <output> <path>` takes the name as an
+        // operand. `apply` and its siblings skip such a display before they
+        // get here; this holds for any other caller.
+        if let Some(refusal) = option_like_name(output) {
+            return Err(refusal.reason);
+        }
         let path = entry.still.to_str().ok_or("still path is not UTF-8")?;
         if output.is_empty() {
             self.noctalia(&["msg", "wallpaper-set", path])
@@ -1350,21 +1370,10 @@ impl SystemDriver {
         }
     }
 
+    /// Every enabled output's name, as the compositor reports it.
     fn current_outputs(&mut self) -> Result<Vec<String>, String> {
-        let names: Vec<String> = self
-            .live_outputs()?
-            .into_iter()
-            .map(|output| output.name)
-            // A name that starts with '-' is not given to the engine, which
-            // has no `--` to end its options with.
-            .filter(|name| !name.starts_with('-'))
-            .collect();
-        if names.is_empty() {
-            return Err(
-                "no output the compositor reports has a name a program can be given".into(),
-            );
-        }
-        Ok(names)
+        self.live_outputs()
+            .map(|outputs| outputs.into_iter().map(|output| output.name).collect())
     }
 
     fn add_scene_target(
@@ -1410,10 +1419,8 @@ impl SystemDriver {
         }
         // Its own dials over the defaults (docs/renderer-settings.md).
         let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());
-        if output.starts_with('-') {
-            return Err(StartError::Failed(format!(
-                "display name {output:?} starts with '-', which a program would read as an option"
-            )));
+        if let Some(refusal) = option_like_name(output) {
+            return Err(StartError::Refused(refusal));
         }
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
         command
@@ -1429,8 +1436,28 @@ impl SystemDriver {
             command.arg("--set-property").arg(format!("{name}={value}"));
         }
         if output.is_empty() {
-            for connector in self.current_outputs().map_err(StartError::Failed)? {
-                self.add_scene_target(&mut command, &connector, scene, &dials);
+            // A name that starts with '-' is not given to the engine, which
+            // has no `--` to end its options with: the others are.
+            let outputs = self.current_outputs().map_err(StartError::Failed)?;
+            let mut targets = 0;
+            for connector in outputs
+                .iter()
+                .filter(|name| option_like_name(name).is_none())
+            {
+                self.add_scene_target(&mut command, connector, scene, &dials);
+                targets += 1;
+            }
+            if targets == 0 {
+                // Without a target the engine would open a window instead.
+                let refused = outputs.first().and_then(|name| option_like_name(name));
+                return Err(StartError::Refused(refused.unwrap_or_else(|| {
+                    workshop::Refusal {
+                        web_page: false,
+                        reason: "no output the compositor reports can be given to a program, \
+                                 so nothing was started"
+                            .into(),
+                    }
+                })));
             }
         } else {
             self.add_scene_target(&mut command, output, scene, &dials);
@@ -1531,6 +1558,19 @@ impl SystemDriver {
                 Ok(())
             }
             Err(StartError::Failed(message)) => Err(message),
+        }
+    }
+
+    /// Whether `output` can't be given to a program (`option_like_name`); then
+    /// it is recorded as refused, so status says so and the runtime skips the
+    /// entry for it, and nothing else of it is touched.
+    fn skip_option_like(&mut self, output: &str) -> bool {
+        match option_like_name(output) {
+            Some(refusal) => {
+                self.refused_motion.insert(Self::key(output), refusal);
+                true
+            }
+            None => false,
         }
     }
 
@@ -1638,6 +1678,9 @@ impl WallpaperDriver for SystemDriver {
     ) -> Result<(), String> {
         // Break before make. A refused scene must expose its already-applied still.
         self.stop_output(output);
+        if self.skip_option_like(output) {
+            return Ok(());
+        }
         self.still(entry, output)?;
         self.palette(&entry.palette)?;
         self.start_motion(entry, output, runtime)
@@ -1653,6 +1696,9 @@ impl WallpaperDriver for SystemDriver {
         output: &str,
         _settings: &crate::config::Settings,
     ) -> Result<(), String> {
+        if self.skip_option_like(output) {
+            return Ok(());
+        }
         self.still(entry, output)
     }
 
@@ -1666,6 +1712,9 @@ impl WallpaperDriver for SystemDriver {
         output: &str,
         settings: &crate::config::Settings,
     ) -> Result<(), String> {
+        if self.skip_option_like(output) {
+            return Ok(());
+        }
         self.start_motion(entry, output, settings)
     }
 

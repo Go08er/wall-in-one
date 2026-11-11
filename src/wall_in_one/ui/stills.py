@@ -344,10 +344,8 @@ class StillMaker:
                 is not None
             ):
                 made += 1
-            elif processes.cancelled():
-                # Cancelled mid-capture (web turned off for a page, or closing): no
-                # failure to say, and not attempted, so turning web on makes it.
-                self._attempted.discard(item.path)
+            elif self._withdrawn_if_cancelled(item, processes):
+                continue
             elif not item.holds_web and workshop.web_files_now(item):
                 # Refused because its folder may be a web wallpaper's now, even
                 # with web on: only an item the scan knew as one is told the
@@ -378,6 +376,19 @@ class StillMaker:
 
         # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
         GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
+
+    def _withdrawn_if_cancelled(
+        self, item: MediaItem, processes: worker_processes.Cancellation
+    ) -> bool:
+        """Whether ``item``'s capture was cancelled: web turned off for a page, or closing.
+
+        That is no failure to say, and it is not counted as attempted, so turning
+        web on makes it. Asked once a capture gave no still, automatic or asked for.
+        """
+        if not processes.cancelled():
+            return False
+        self._attempted.discard(item.path)
+        return True
 
     def _say_refused(self, refused: dict[Path, tuple[int, str]]) -> bool:
         """Report each folder that refused, the first time; note it every time after."""
@@ -428,15 +439,20 @@ class StillMaker:
                 else self._processes
             )
             size = scenes.measured_capture_size("", outputs.discover(fallback))
-            stills.capture_scene(
-                item,
-                root,
-                force=True,
-                processes=processes,
-                size=size,
-                previews=self._previews(),
-                **({"allow_web": True} if item.holds_web else {}),
-            )
+            try:
+                stills.capture_scene(
+                    item,
+                    root,
+                    force=True,
+                    processes=processes,
+                    size=size,
+                    previews=self._previews(),
+                    **({"allow_web": True} if item.holds_web else {}),
+                )
+            except stills.StillError:
+                if self._withdrawn_if_cancelled(item, processes):
+                    return  # as `_run`'s (R42-13)
+                raise
             if not self._processes.cancelled():
 
                 def deliver() -> bool:

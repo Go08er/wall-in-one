@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,7 +31,7 @@ from tests.web_previews import both as _both
 from wall_in_one import thumbnails, worker_processes
 from wall_in_one.library import stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
-from wall_in_one.wallpaper import scenes
+from wall_in_one.wallpaper import outputs, scenes
 
 # -- thumbnails ---------------------------------------------------------------------
 
@@ -378,6 +379,86 @@ def test_a_capture_cancelled_by_web_going_off_is_no_failure_and_is_tried_again(
     assert messages == [], messages
     assert item.path not in maker._attempted  # so turning web on makes it
     maker.shutdown()
+
+
+@pytest.mark.parametrize("when", ["mid-capture", "before-start", "decoder-fails"])
+def test_a_regenerated_still_cancelled_by_web_going_off_is_no_failure_and_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    """R42-13: the still a person asks for again is held to N2's rule too.
+
+    Web turned off while its decoder runs (here, as it would start) is no failure to say,
+    and it is not attempted, so turning web on makes it. On 534a9da it said "Could not
+    regenerate" and stayed attempted. A decoder that fails is still said, and attempted.
+    No decoder is started: the decoder boundary is replaced.
+    """
+    from tests.test_scene_preset_stills import WEB, Tree
+    from wall_in_one.ui import stills as ui_stills
+
+    tree = Tree(tmp_path)
+    (tree.automatic / f"{WEB}.png").unlink()
+    item = tree.scan(previews=True)[WEB]
+    assert item.holds_web and item.paired_still is None
+    web = {"on": True}
+    messages: list[str] = []
+    queued: list[tuple[Callable[..., None], tuple[Any, ...], str]] = []
+    decoded: list[list[str]] = []
+    maker = ui_stills.StillMaker(
+        web_allowed=lambda: web["on"],
+        previews=lambda: True,
+        displays=lambda: (),
+        report=messages.append,
+    )
+
+    def queue(work: Callable[..., None], *arguments: Any, context: str) -> None:
+        queued.append((work, arguments, context))
+
+    def decoder(
+        _processes: object, argv: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        decoded.append(argv)
+        if when == "decoder-fails":
+            return subprocess.CompletedProcess(argv, 1, b"", b"the fixture decoder failed")
+        web["on"] = False  # the gate closes as the decoder starts: it is not started
+        raise worker_processes.ProcessCancelledError("web wallpapers went off")
+
+    monkeypatch.setattr(maker, "_submit", queue)
+    monkeypatch.setattr(outputs, "discover", lambda *_a, **_k: ())
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_a, **_k: (64, 64))
+    monkeypatch.setattr(stills, "is_available", lambda: True)
+    monkeypatch.setattr(worker_processes.GatedCancellation, "run", decoder)
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments, **_k: callback(*arguments),
+    )
+    try:
+        maker.regenerate_scene(item, tree.root, lambda _made: None)
+        assert len(queued) == 1
+        if when == "before-start":
+            web["on"] = False
+        work, arguments, context = queued[0]
+        done: Future[None] = Future()
+        try:
+            work(*arguments)
+        except stills.StillError as error:
+            done.set_exception(error)
+        else:
+            done.set_result(None)
+        maker._finished(done, context)
+
+        if when == "decoder-fails":
+            assert decoded and len(messages) == 1, messages
+            assert "the fixture decoder failed" in messages[0]
+            assert item.path in maker._attempted
+        else:
+            assert bool(decoded) is (when == "mid-capture")
+            assert messages == [], messages
+            assert item.path not in maker._attempted
+            web["on"] = True
+            maker.request((item,), tree.root, lambda _made: None)
+            assert len(queued) == 2, "turning web on asks for it again"
+    finally:
+        maker.shutdown()
 
 
 def test_a_refused_web_item_and_a_preset_of_nothing_get_nothing_while_web_is_off(

@@ -1052,8 +1052,16 @@ WEB_OFF_REASON: Final = (
 
 
 def web_off(item: MediaItem, allowed: bool) -> bool:
-    """Whether ``item`` would play but for ``allow_web_wallpapers`` being off."""
-    return item.web_page and item.unplayable is None and not allowed
+    """Whether ``item`` would play but for ``allow_web_wallpapers`` being off.
+
+    A web page, and anything whose automatic still the preview setting decides
+    (`MediaItem.preview_kind`), such as a preset whose own type says ``web`` over a
+    true scene: failing closed, it is a web wallpaper's while they are off. One
+    predicate for both, so that while web wallpapers are off nothing a preview
+    could have drawn plays, and a library resolved under either preview setting
+    compiles to the same document (`config.Settings.covers`).
+    """
+    return (item.web_page or item.preview_kind) and item.unplayable is None and not allowed
 
 
 #: What a web wallpaper's tile says in place of a picture while they are off.

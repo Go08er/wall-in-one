@@ -441,11 +441,12 @@ class Settings:
         """Whether a library scanned for ``sources`` is current for these settings.
 
         The folders and Workshop scanning must be the same. The preview setting
-        must be too, except while web wallpapers are off: then every web page, and
-        every preset of one, is left out of what plays whatever its still was, so a
-        library resolved under previews on is as good as one resolved under off.
-        (That is what lets turning web wallpapers off publish at once in a profile
-        whose previews read on, without waiting for a rescan.)
+        must be too, except while web wallpapers are off: then everything whose
+        still the preview setting decides is left out of what plays, by the same
+        predicate that leaves web pages out (`library.workshop.web_off`), so a
+        library resolved under previews on compiles to the same document as one
+        resolved under off. (Turning web wallpapers off publishes from the
+        library held whatever its sources: `ui.app.Application._adopt_settings`.)
         """
         roots, workshop_scan, previews = sources
         return (roots, workshop_scan) == (self.roots, self.scan_workshop) and (

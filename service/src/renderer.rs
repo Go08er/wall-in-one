@@ -679,6 +679,12 @@ impl Mpvpaper {
             .motion
             .as_ref()
             .ok_or_else(|| StartError::Failed("video entry has no motion path".into()))?;
+        let target = if output.is_empty() { "ALL" } else { output };
+        if target.starts_with('-') {
+            return Err(StartError::Failed(format!(
+                "display name {target:?} starts with '-', which a program would read as an option"
+            )));
+        }
         self.stop();
         let socket = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -726,10 +732,14 @@ impl Mpvpaper {
         if let Some(mode) = dials::mpvpaper_auto_mode(settings) {
             command.arg("--auto-mode").arg(mode);
         }
+        // mpvpaper reads its argv with getopt_long, which takes an operand that
+        // starts with '-' for an option wherever it stands; `--` ends the
+        // options, so neither the output nor the video's path can be one.
         command
             .arg("-o")
             .arg(options.join(" "))
-            .arg(if output.is_empty() { "ALL" } else { output })
+            .arg("--")
+            .arg(target)
             .arg(video);
         command
             .stdin(Stdio::null())
@@ -1341,8 +1351,20 @@ impl SystemDriver {
     }
 
     fn current_outputs(&mut self) -> Result<Vec<String>, String> {
-        self.live_outputs()
-            .map(|outputs| outputs.into_iter().map(|output| output.name).collect())
+        let names: Vec<String> = self
+            .live_outputs()?
+            .into_iter()
+            .map(|output| output.name)
+            // A name that starts with '-' is not given to the engine, which
+            // has no `--` to end its options with.
+            .filter(|name| !name.starts_with('-'))
+            .collect();
+        if names.is_empty() {
+            return Err(
+                "no output the compositor reports has a name a program can be given".into(),
+            );
+        }
+        Ok(names)
     }
 
     fn add_scene_target(
@@ -1388,6 +1410,11 @@ impl SystemDriver {
         }
         // Its own dials over the defaults (docs/renderer-settings.md).
         let dials = dials::scene_dials(&self.settings, entry.scene.as_ref());
+        if output.starts_with('-') {
+            return Err(StartError::Failed(format!(
+                "display name {output:?} starts with '-', which a program would read as an option"
+            )));
+        }
         let mut command = Command::new(&self.settings.linux_wallpaperengine_program);
         command
             .arg("--layer")

@@ -30,6 +30,9 @@ ALL_OUTPUTS: Final = "ALL"
 
 #: Wayland layer to render on. `background` puts it under everything.
 DEFAULT_LAYER: Final = "background"
+#: The `--layer` values the app writes and mpvpaper takes: the service's
+#: `RENDERER_LAYERS` (service/src/config.rs).
+LAYERS: Final = (DEFAULT_LAYER,)
 
 #: What to do with a video nobody can see because a window is covering it.
 #: mpvpaper spells these `--auto-pause` and `--auto-stop`, and its own help
@@ -323,6 +326,10 @@ class Renderer:
             raise MpvpaperUnavailableError("mpvpaper is not installed")
         if not video.is_file():
             raise RendererError(f"no such video: {video}")
+        if self.layer not in LAYERS:
+            raise RendererError(f"{self.layer!r} is not a layer mpvpaper is given")
+        if self.output.startswith("-"):
+            raise RendererError(f"display name {self.output!r} starts with '-'")
 
         self.stop()
         ipc_namespace = self._allocate_socket_path()
@@ -339,7 +346,15 @@ class Renderer:
                     outputs.discover(), "" if self.output == ALL_OUTPUTS else self.output
                 )
             ipc_socket = ipc_namespace.writer_socket if ipc_namespace is not None else None
-            command += ["-o", self._mpv_options(ipc_socket, refresh_hz), self.output, str(video)]
+            # mpvpaper reads its argv with getopt_long: `--` ends the options, so
+            # neither the output nor the video's path can be taken for one.
+            command += [
+                "-o",
+                self._mpv_options(ipc_socket, refresh_hz),
+                "--",
+                self.output,
+                str(video),
+            ]
 
             process = subprocess.Popen(
                 command,

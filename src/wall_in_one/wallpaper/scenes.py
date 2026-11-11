@@ -50,6 +50,9 @@ from wall_in_one.wallpaper import outputs
 #: docs/compositor-window-rules.md has niri's `place-within-backdrop` as an
 #: example.
 DEFAULT_LAYER: Final = "background"
+#: The `--layer` values the app writes and the engine takes: the service's
+#: `RENDERER_LAYERS` (service/src/config.rs). One argv element, so a closed list.
+LAYERS: Final = (DEFAULT_LAYER,)
 
 #: Frames to render before the screenshot is taken. Scenes animate in, and the
 #: first frame is often the least representative one there is.
@@ -230,6 +233,15 @@ class SceneRenderer:
         name order, as the service passes them; one the service would refuse
         is refused here too.
         """
+        # Every value below is one argv element that linux-wallpaperengine
+        # reads for itself, and nothing here ends its options with `--`:
+        # none may start with '-' (or be anything but what the service gives it).
+        if self.layer not in LAYERS:
+            raise SceneError(f"{self.layer!r} is not a layer linux-wallpaperengine is given")
+        if not workshop.is_workshop_id(scene):
+            raise SceneError("a scene is named by its Workshop id, digits only")
+        if self.output.startswith("-"):
+            raise SceneError(f"display name {self.output!r} starts with '-', which is an option")
         arguments = [
             str(programs.find_program(ENGINE).path),
             "--layer",
@@ -280,6 +292,9 @@ class SceneRenderer:
                 else outputs.names(screen for screen in outputs.discover() if screen.enabled)
             )
         )
+        # A name that starts with '-' is not given to the engine, as the service
+        # leaves it out.
+        targets = tuple(target for target in targets if not target.startswith("-"))
         if not targets:
             raise SceneError(
                 "no display could be discovered; refusing to open a scene preview window"

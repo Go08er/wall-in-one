@@ -852,6 +852,43 @@ fn recorded_arguments(arguments: &Path, launches: usize) -> String {
 }
 
 #[test]
+fn an_output_that_starts_with_a_dash_is_never_given_to_a_program() {
+    // review-f2 N7/U5: a hostile compositor's output name must not become an option.
+    use std::os::unix::fs::PermissionsExt;
+    let root = directory("dash-output");
+    let noctalia = root.join("noctalia");
+    fs::write(&noctalia, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&noctalia, fs::Permissions::from_mode(0o755)).unwrap();
+    let (mpvpaper, arguments) = argument_recorder(&root, "mpvpaper");
+    let (engine, engine_arguments) = argument_recorder(&root, "engine");
+    let document = config(&noctalia, &mpvpaper, true).replace(
+        "linux_wallpaperengine_program = \"/bin/true\"",
+        &format!("linux_wallpaperengine_program = {engine:?}"),
+    );
+    let parsed: Config = toml::from_str(&document).unwrap();
+    let video = parsed.playlists[0].entries[1].clone();
+    let scene = parsed.playlists[1].entries[0].clone();
+    let (mut driver, _) = driver_with(
+        parsed.renderer.clone(),
+        vec![live("-o", None), live("DP-1", None)],
+    );
+    // Named outright, an output like that is refused for both programs.
+    assert!(driver.apply(&video, "-o", &parsed.settings).is_err());
+    assert!(driver.apply(&scene, "--help", &parsed.settings).is_err());
+    // Asked for all of them, the engine is given only the usable one.
+    without_text_file_busy(|| driver.apply(&scene, "", &parsed.settings)).unwrap();
+    let given = recorded_arguments(&engine_arguments, 1);
+    assert!(given.lines().any(|word| word == "DP-1"), "{given}");
+    assert!(!given.lines().any(|word| word == "-o"), "{given}");
+    assert!(
+        !arguments.exists(),
+        "mpvpaper was started for a dash output"
+    );
+    driver.stop();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-dials");
@@ -882,6 +919,12 @@ fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
     let position = |word: &str| words.iter().position(|w| w == word);
     let auto = position("--auto-mode").expect("--auto-mode");
     assert_eq!(words[auto + 1], "max");
+    // review-f2 U5: `--` ends mpvpaper's options before the output and the
+    // video, which are its only operands.
+    let separator = position("--").expect("--");
+    assert_eq!(words[separator + 1], "DP-1");
+    assert_eq!(words[separator + 2], "/tmp/two.mp4");
+    assert_eq!(words.len(), separator + 3);
     let options = &words[position("-o").expect("-o") + 1];
     let options: Vec<&str> = options.split(' ').collect();
     for expected in [
@@ -2788,7 +2831,10 @@ fn failed_battery_enable_restores_paused_renderer_residency() {
             "dynamics_enabled = true",
             "dynamics_enabled = true\nstop_animations_on_battery = true",
         )
-        .replace("layer = \"background\"", "layer = \"bottom\"");
+        .replace(
+            "video_hardware_decode = true",
+            "video_hardware_decode = false",
+        );
     fs::write(&path, candidate).unwrap();
     state.lock().unwrap().fail_applies_remaining = 1;
     let response = runtime.handle_with_power(
@@ -5935,7 +5981,10 @@ fn failed_reload_apply_restores_config_cursor_renderer_settings_and_wallpaper() 
         &config_path,
         original
             .replace("default_playlist = \"day\"", "default_playlist = \"night\"")
-            .replace("layer = \"background\"", "layer = \"bottom\""),
+            .replace(
+                "video_hardware_decode = true",
+                "video_hardware_decode = false",
+            ),
     )
     .unwrap();
     state.lock().unwrap().fail_applies_remaining = 1;

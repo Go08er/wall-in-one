@@ -1056,30 +1056,42 @@ fn a_display_whose_name_starts_with_a_dash_is_not_present_and_the_others_play() 
             }
         }
     }
-    // A video and a still play on DP-1, and nothing is given the name.
-    for (label, entry) in [("dash-video", "video"), ("dash-still", "still")] {
-        let document = dash_document("independent", &[("DP-1", "p1"), ("-X", "p1")], &[entry]);
-        let launched: &[&str] = if entry == "video" { &["mpvpaper"] } else { &[] };
-        let run = dash_run(label, &document, Some(both()), None, launched);
-        assert!(!run.mpvpaper.lines().any(|word| word == "-X"), "{label}");
-        assert!(!run.noctalia.lines().any(|word| word == "-X"), "{label}");
-        if entry == "video" {
-            assert_eq!(
-                word_after(&run.mpvpaper, "--"),
-                ["DP-1"],
-                "{label}: {}",
-                run.mpvpaper
-            );
-        } else {
-            assert!(
-                run.noctalia
-                    .lines()
-                    .collect::<Vec<_>>()
-                    .windows(2)
-                    .any(|pair| pair == ["wallpaper-set", "DP-1"]),
-                "{label}: {}",
-                run.noctalia
-            );
+    // A video and a still play on DP-1, and nothing is given the name, in both modes. A
+    // mirrored document without assignments plays one wallpaper on every display: mpvpaper's
+    // ALL, Noctalia's default, never a list that could name `-X`.
+    for (mode, named, target) in [
+        ("independent", true, "DP-1"),
+        ("mirrored", true, "DP-1"),
+        ("mirrored", false, "ALL"),
+    ] {
+        for entry in ["video", "still"] {
+            let label = format!("dash-{mode}-{named}-{entry}");
+            let displays: &[(&str, &str)] = if named {
+                &[("DP-1", "p1"), ("-X", "p1")]
+            } else {
+                &[]
+            };
+            let document = dash_document(mode, displays, &[entry]);
+            let launched: &[&str] = if entry == "video" { &["mpvpaper"] } else { &[] };
+            let run = dash_run(&label, &document, Some(both()), None, launched);
+            assert!(!run.mpvpaper.lines().any(|word| word == "-X"), "{label}");
+            assert!(!run.noctalia.lines().any(|word| word == "-X"), "{label}");
+            assert_eq!(run.status["refused"], serde_json::json!([]), "{label}");
+            let set: Vec<&str> = run.noctalia.lines().collect();
+            let still_set = set.windows(2).any(|pair| pair == ["wallpaper-set", "DP-1"])
+                || (target == "ALL"
+                    && set
+                        .windows(2)
+                        .any(|pair| pair[0] == "wallpaper-set" && pair[1].starts_with("/tmp/s")));
+            assert!(still_set, "{label}: {}", run.noctalia);
+            if entry == "video" {
+                assert_eq!(
+                    word_after(&run.mpvpaper, "--"),
+                    [target],
+                    "{label}: {}",
+                    run.mpvpaper
+                );
+            }
         }
     }
     // Before the compositor can be asked, the document's assignments are the targets:

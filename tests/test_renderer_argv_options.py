@@ -104,3 +104,11 @@ def test_the_apps_layers_are_the_services_and_the_only_one_it_writes() -> None:
     assert renderer.LAYERS == scenes.LAYERS
     written = Path(runtime_config.__file__).read_text()
     assert re.findall(r"'layer = \"([^\"]*)\"'", written) == list(renderer.LAYERS)
+
+
+def test_the_compiler_never_writes_a_connector_the_service_refuses_for_a_dash() -> None:
+    runtime_config._bounded_connector("DP-1", label="display connector")
+    runtime_config._bounded_connector("", label="schedule connector", optional=True)
+    for value in ("-o", "--help", "-DP-1"):
+        with pytest.raises(runtime_config.RuntimeConfigError, match="cannot start with '-'"):
+            runtime_config._bounded_connector(value, label="display connector")

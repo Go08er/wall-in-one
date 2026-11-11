@@ -31,6 +31,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.previews_param import CURRENT, _previews_param, web_on  # noqa: E402, F401
 from tests.test_ui_codex030_round1b import profiles  # noqa: E402, F401
 from tests.test_ui_web_off_failed_publish import DOCUMENT, WEB, _steam_with_web  # noqa: E402
 from wall_in_one import config, paths, runtime_config  # noqa: E402
@@ -67,7 +68,7 @@ def _turn_off(
     profile = profiles(service=service)
     application = profile.application
     _steam_with_web()
-    config.save(config.Settings(roots=application.settings.roots, allow_web_wallpapers=True))
+    config.save(web_on(application.settings.roots))
     application._settings = config.load_strict()
     application._settings_requested = application._settings
     paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
@@ -200,12 +201,21 @@ def test_gui_reload_refused(profiles: Any, monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert "stop" in sent and sent.index("reload") < sent.index("stop")
     # The service now holds the document that plays nothing: it took the second reload.
-    assert _acted(sent)[-1] == "reload" and _plays_nothing()
+    assert _acted(sent)[-1] == "reload"
+    # With previews on the save also moves the library sources, so a rescan follows and
+    # publishes the real document (without the page: web is off) over the guard's
+    # plays-nothing one; this service refuses every document but that one, which is
+    # its own doing. Either way no page is named and none is allowed.
+    assert _plays_nothing() or CURRENT[0]
+    assert not _names_page() or _plays_nothing()
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
     problem = profile.application.publication_problem
     assert problem.startswith("Runtime rejected the new configuration: refused")
-    # The held document carries the key, so what it plays is hedged as the allow is (r13k S-N12).
-    assert "still may play Electric Eye" in problem
-    assert "nothing to play: web wallpapers are off" in problem
+    if not CURRENT[0]:  # the rescan's own refusal replaces the guard's wording otherwise
+        # The held document carries the key, so what it plays is hedged as the allow is
+        # (r13k S-N12).
+        assert "still may play Electric Eye" in problem
+        assert "nothing to play: web wallpapers are off" in problem
 
 
 # -- what makes it last, and an older service ------------------------------------------------

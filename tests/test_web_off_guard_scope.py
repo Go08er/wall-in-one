@@ -36,6 +36,7 @@ gi = pytest.importorskip("gi")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
+from tests.previews_param import _previews_param, web_on  # noqa: E402, F401
 from tests.test_ui_codex030_round1b import profiles  # noqa: E402, F401
 from tests.test_ui_web_off_failed_publish import DOCUMENT, _steam_with_web  # noqa: E402
 from tests.test_web_off_nothing_to_play import _library  # noqa: E402
@@ -549,7 +550,7 @@ def test_web_wallpapers_left_out_are_published_again_once_the_service_is_confirm
     """
     application = profiles().application
     root = _library(Path(os.environ["HOME"]), still_beside=True)
-    settings = config.Settings(roots=(root,), allow_web_wallpapers=True)
+    settings = web_on((root,))
     config.save(settings)
     application._settings = config.load_strict()
     publications: list[str] = []

@@ -25,6 +25,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from tests.gtk_helpers import spin_until  # noqa: E402
+from tests.previews_param import _previews_param, web_on  # noqa: E402, F401
 from tests.test_ui_codex030_round1b import Profile, profiles  # noqa: E402, F401
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
@@ -51,7 +52,7 @@ def _off_with_a_failing_publication(
     profile: Profile = profiles()
     application = profile.application
     _steam_with_web()
-    config.save(config.Settings(roots=application.settings.roots, allow_web_wallpapers=True))
+    config.save(web_on(application.settings.roots))
     application._settings = config.load_strict()
     paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
     paths.runtime_config_path().write_text(document, encoding="utf-8")

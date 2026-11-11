@@ -1328,7 +1328,7 @@ class Session:
             # still choices (`_resolved_with`). Otherwise it is scanned here.
             scanned_for_these = (
                 saved.library_sources == accepted.library_sources
-                and library.previews == saved.preview_stills
+                and saved.covers((saved.roots, saved.scan_workshop, library.previews))
                 and _resolved_with(library, view._pairings.records)
             )
             view._confirmable = scanned_for_these

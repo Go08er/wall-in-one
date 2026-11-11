@@ -221,3 +221,34 @@ def test_the_still_note_follows_the_preview_setting(tree: _Tree) -> None:
     # An item that can't play gets neither line: there is nothing to pick for.
     cant = replace(off, unplayable=Unplayable.RUNTIME)
     assert "choose one by hand" not in real_state._still_note(cant, None, False, False)
+
+
+def test_a_saved_view_does_not_trust_a_library_older_than_the_sessions_own_settings(
+    tree: _Tree,
+) -> None:
+    """The session's settings can move ahead of its library (the window rescans afterwards).
+
+    `library_sources` equal on both sides is then no proof: the library's own `previews`
+    is asked too (S3-N3: the `session.py` clause that looked redundant is not).
+    """
+    from dataclasses import replace
+
+    settings = config.Settings(
+        roots=(tree.root,), allow_web_wallpapers=True, web_wallpaper_previews=True
+    )
+    config.save(settings)
+    session = Session(settings)
+    try:
+        session.refresh()
+        assert session.library.previews
+        moved = replace(settings, web_wallpaper_previews=False)
+        config.save(moved)
+        session.update_settings(moved, rescan_library=False)  # the library is not rescanned yet
+        view = session.saved_view()()
+        try:
+            assert not view.settings.preview_stills
+            assert view.library.previews is False, "rescanned for the saved policy"
+        finally:
+            view.shutdown()
+    finally:
+        session.shutdown()

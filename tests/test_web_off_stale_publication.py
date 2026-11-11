@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.previews_param import _previews_param, web_on  # noqa: F401
 from tests.test_web_off_nothing_to_play import _library, _service
 from wall_in_one import cli, config, paths, runtime_config
 from wall_in_one.library import state_file
@@ -39,7 +40,7 @@ from wall_in_one.session import Session
 def _web_on() -> Path:
     """A web page and a picture, with web wallpapers on; the library folder."""
     root = _library(Path(os.environ["HOME"]), still_beside=True)
-    config.save(config.Settings(roots=(root,), allow_web_wallpapers=True))
+    config.save(web_on((root,)))
     return root
 
 

@@ -437,6 +437,21 @@ class Settings:
         """
         return (self.roots, self.scan_workshop, self.preview_stills)
 
+    def covers(self, sources: tuple[tuple[Path, ...], bool, bool]) -> bool:
+        """Whether a library scanned for ``sources`` is current for these settings.
+
+        The folders and Workshop scanning must be the same. The preview setting
+        must be too, except while web wallpapers are off: then every web page, and
+        every preset of one, is left out of what plays whatever its still was, so a
+        library resolved under previews on is as good as one resolved under off.
+        (That is what lets turning web wallpapers off publish at once in a profile
+        whose previews read on, without waiting for a rescan.)
+        """
+        roots, workshop_scan, previews = sources
+        return (roots, workshop_scan) == (self.roots, self.scan_workshop) and (
+            previews == self.preview_stills or not self.allow_web_wallpapers
+        )
+
     @property
     def preview_stills(self) -> bool:
         """Whether web wallpapers (and presets of them) take their still from their own preview.

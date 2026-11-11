@@ -1156,6 +1156,9 @@ class Application(Adw.Application):
         self._runtime_library_scan_generation = 0
         self._runtime_library_scan_sources: _LibrarySources | None = None
         self._runtime_library_scan_pending = False
+        #: Requests up to this generation are the publication of web wallpapers going off:
+        #: they do not wait for a library scan in flight (`_runtime_publication`).
+        self._runtime_urgent_generation = 0
         self._runtime_library_error = ""
         # A source-changing Settings write is not publishable until its
         # Library scan settles. The settings actor can finish before a runtime
@@ -4188,9 +4191,10 @@ class Application(Adw.Application):
         sources = self._settings.library_sources
         acquire_lifetime = False
         with self._runtime_config_lock:
+            accepted = self._accepted_library_sources
             source_barrier = (
-                self._accepted_library_sources != sources or self._runtime_library_scan_held
-            )
+                accepted is None or not self._settings.covers(accepted)
+            ) or self._runtime_library_scan_held
             self._runtime_library_scan_generation = generation
             self._runtime_library_scan_sources = sources
             self._runtime_library_scan_pending = True
@@ -5275,7 +5279,7 @@ class Application(Adw.Application):
         # None only before any scan was accepted, by a worker or synchronously
         # (`_library_scanned`): the library is empty, so nothing in it can come
         # from older sources.
-        if sources is not None and sources != self._settings.library_sources:
+        if sources is not None and not self._settings.covers(sources):
             return (
                 "the library is being scanned for its changed folders, so wallpapers can\u2019t "
                 "be taken from it yet; wait for that scan to finish (refresh the library if it "
@@ -5532,8 +5536,7 @@ class Application(Adw.Application):
             runtime_config.compiler_lock(),
         ):
             settings = config.load_strict()
-            durable_sources = settings.library_sources
-            if request.library_sources != durable_sources:
+            if not settings.covers(request.library_sources):
                 raise _RuntimeLibraryNotReadyError(
                     "the accepted library belongs to older source settings"
                 )
@@ -6106,6 +6109,7 @@ class Application(Adw.Application):
                 authoring_generation = self._runtime_authoring_generation
                 inventory_valid = self._inventory_valid
                 inventory_problem = self._inventory_problem
+                urgent_generation = self._runtime_urgent_generation
             if shutting_down:
                 return _RuntimePublication(max(completed, compiled), changed=changed_any)
             if not inventory_valid and not scan_pending and not removal_pending:
@@ -6117,7 +6121,12 @@ class Application(Adw.Application):
                     changed=changed_any,
                     error=scan_error or inventory_problem or "the library needs a fresh scan",
                 )
-            if scan_pending and (request is None or wait_for_library):
+            urgent = (
+                request is not None
+                and request.generation <= urgent_generation
+                and self._settings.covers(request.library_sources)
+            )
+            if scan_pending and (request is None or wait_for_library) and not urgent:
                 # Delete/Trash deliberately removes the old immutable Library
                 # before its physical worker starts.  With no replacement
                 # request, falling through here would reload the stale runtime
@@ -6269,8 +6278,20 @@ class Application(Adw.Application):
                 scan_sources = self._runtime_library_scan_sources
                 removal_pending = self._removal_runtime_invalidated
                 authoring_generation = self._runtime_authoring_generation
+                urgent_generation = self._runtime_urgent_generation
             if latest is not None and latest.generation > completed:
                 continue
+            # The publication of web wallpapers going off, for a library that is
+            # current for the settings, is not held by a scan in flight, nor by one
+            # that failed: it is sent now, and the scan's own publication follows.
+            urgent = (
+                latest is not None
+                and latest.generation <= urgent_generation
+                and self._settings.covers(latest.library_sources)
+            )
+            if urgent:
+                scan_pending = False
+                scan_error = ""
             if (
                 scan_error
                 and latest is not None
@@ -6334,6 +6355,9 @@ class Application(Adw.Application):
                 authoring_generation = self._runtime_authoring_generation
             if latest is not None and latest.generation > completed:
                 continue
+            if scan_pending and latest is not None and latest.generation <= urgent_generation:
+                if self._settings.covers(latest.library_sources):
+                    return publication  # web-off went out; the scan's publication follows
             if scan_pending or authoring_generation > completed:
                 if not wait_for_library or removal_pending or not scan_pending:
                     return _RuntimePublication(
@@ -7809,7 +7833,7 @@ class Application(Adw.Application):
         # the settings no longer name is no inventory, so it is not installed
         # and the rescan below replaces it, as one that failed would be.
         own_scan = result.own_scan
-        if own_scan is not None and own_scan[1] != self._settings.library_sources:
+        if own_scan is not None and not self._settings.covers(own_scan[1]):
             own_scan = None
         refresh = self._refresh_after_removal or (
             result.committed and (partial or own_scan is None)
@@ -8870,13 +8894,12 @@ class Application(Adw.Application):
                 return _SettingsResult(generation, published, changes, str(error))
             return _SettingsResult(generation, saved, changes)
 
-        # What a saved change to a library source is, for the barrier: the folders,
-        # Workshop scanning, and the settings that decide whether web wallpapers
-        # take their still from their preview (`Settings.library_sources`).
-        source_change = any(
-            key in {"roots", "scan_workshop", "allow_web_wallpapers", "web_wallpaper_previews"}
-            for key, _gen, _value in changes
-        )
+        # The barrier is for the folders and Workshop scanning. A move of the
+        # settings that decide `Settings.preview_stills` (web wallpapers on or off,
+        # the previews sub-option) is not one: turning web wallpapers off must always
+        # land, and a library resolved under the other policy is refused at the
+        # publication's admission instead (`Settings.covers`).
+        source_change = any(key in {"roots", "scan_workshop"} for key, _gen, _value in changes)
         if source_change:
             # A compiler/reload owns this same lane for its entire snapshot to
             # Rust acknowledgement.  A new durable source set cannot land in
@@ -9173,8 +9196,19 @@ class Application(Adw.Application):
             self._session.sync_with_noctalia()
         # Do not publish a temporary document which combines new roots with an
         # old library. The completed async scan publishes the coherent pair.
-        if not async_scan:
-            self._publish_runtime_for_context()
+        #
+        # Except for web wallpapers going off: that reaches the service at once,
+        # whatever else this save changed and whatever the scan then does (owner
+        # contract since 0.4.0). A library resolved under the other preview policy
+        # is as good as any while web is off (`Settings.covers`), so a move of
+        # `preview_stills` that only the web setting caused publishes now; a save
+        # that also changed the folders is refused here, before any scan is
+        # pending, which runs the web-off guard (`_stopping_web_after_failure`).
+        web_turned_off = previous.allow_web_wallpapers and not candidate.allow_web_wallpapers
+        if not async_scan or web_turned_off:
+            if self._publish_runtime_for_context() and web_turned_off:
+                with self._runtime_config_lock:
+                    self._runtime_urgent_generation = self._runtime_authoring_generation
         self.sync_cycle_timer()
         if self._resolved is not None:
             self._apply_stylesheet(self._resolved)

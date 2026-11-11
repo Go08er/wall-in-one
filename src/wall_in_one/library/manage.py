@@ -841,8 +841,14 @@ def _companions(
     lookup_parent: Path | None = None,
     source_context: file_io.PinnedDirectoryContext | None = None,
     access_stack: contextlib.ExitStack,
+    proven: frozenset[Path] = frozenset(),
 ) -> tuple[list[_ArtifactCandidate], list[Path]]:
     """Everything we wrote beside ``item`` and should take with it.
+
+    ``proven``: names a removal recorded as the wallpaper's own when it was prepared
+    (`prove_companions`). Their ownership was decided then, so it is not decided again
+    from whatever bytes are there now: a selector edited since is reported as changed
+    by the replay, not dropped here as foreign.
 
     Only files whose names we generate: the download sidecar, the pairing
     sidecar, and a still that lives in the managed `Automatic Stills`
@@ -922,6 +928,7 @@ def _companions(
             if (
                 candidate == item.path.with_name(item.path.name + pairing.SIDECAR_SUFFIX)
                 and not adopted_role
+                and candidate not in proven
                 and pairing.selector_is_foreign(item.path, roots, sidecar=access)
             ):
                 # A selector the reader ignores (not JSON, empty, oversize, naming no
@@ -1342,8 +1349,11 @@ def _own_companions(
     source_root: Path,
     source_context: file_io.PinnedDirectoryContext,
     access_stack: contextlib.ExitStack,
+    proven: frozenset[Path] = frozenset(),
 ) -> tuple[list[_ArtifactCandidate], list[Path]]:
     """``item``'s own files that are there now, and its own names that can't be looked at.
+
+    ``proven``: what the removal's record names as its own (`_companions`).
 
     Its selector, its captured stills and their records
     (`pairing_artifact_paths`), reached through the folder the removal
@@ -1361,6 +1371,7 @@ def _own_companions(
         lookup_parent=source_context.directory_anchor,
         source_context=source_context,
         access_stack=access_stack,
+        proven=proven,
     )
     return (
         [candidate for candidate in found if candidate.logical in own],
@@ -1484,6 +1495,7 @@ def discard_proven_companions(
                     source_root=source_root,
                     source_context=source_context,
                     access_stack=fallback_stack,
+                    proven=frozenset(recorded),
                 )
             except OSError, ValueError:
                 return CompanionCleanup(kept=tuple(recorded))
@@ -1522,6 +1534,7 @@ def _discard_proven_companions_locked(
             source_root=source_root,
             source_context=source_context,
             access_stack=access_stack,
+            proven=frozenset(recorded),
         )
     except OSError, ValueError:
         return CompanionCleanup(kept=tuple(recorded))

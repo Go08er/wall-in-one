@@ -546,6 +546,56 @@ def test_the_recorded_times_with_other_bytes_are_not_proof(
     _is_finished(wallpaper, journal)
 
 
+def test_a_selector_edited_into_another_valid_selector_is_left_and_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same proof test, with an edit that leaves the file a selector (`.png` to `.pnx`)."""
+    root, journal = tmp_path / "wallpapers", tmp_path / "pending-removals.json"
+    wallpaper = _stopped("sync-failed", tmp_path, root, journal, monkeypatch)
+    selector = wallpaper.selector
+    selector.write_bytes(selector.read_bytes().replace(b".png", b".pnx"))
+    document = json.loads(journal.read_text(encoding="utf-8"))
+    (proof,) = (
+        proof for proof in document["removals"][0]["companions"] if proof["path"] == str(selector)
+    )
+    status = selector.stat()
+    if (proof["device"], proof["inode"], proof["size"]) != (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+    ):
+        pytest.skip("the edit changed the length")
+    proof["mtime_ns"], proof["ctime_ns"] = status.st_mtime_ns, status.st_ctime_ns
+    journal.write_text(json.dumps(document), encoding="utf-8")
+    edited = _snapshot(selector)
+
+    failures, left = _replay(tmp_path, root, journal)
+
+    assert _snapshot(selector) == edited
+    assert failures == ()
+    assert left == (
+        "aurora: one of the wallpaper's own files is not exactly what this removal "
+        f"prepared, so it was left as it is: {selector}",
+    )
+
+
+def test_a_selector_that_stops_being_one_after_prepare_is_still_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner rule: anything left must be said. Ownership was decided when the removal was
+    prepared (its proof names the selector), so bytes that are not a selector any more are
+    reported as changed, not dropped as foreign (S3-5 first did that, silently)."""
+    root, journal = tmp_path / "wallpapers", tmp_path / "pending-removals.json"
+    wallpaper = _stopped("sync-failed", tmp_path, root, journal, monkeypatch)
+    selector = wallpaper.selector
+    selector.write_bytes(selector.read_bytes().replace(b"still_path", b"STILL_PATH"))
+    assert selector.exists()
+    failures, left = _replay(tmp_path, root, journal)
+    assert selector.exists(), "left byte for byte"
+    assert failures == ()
+    assert any(str(selector) in note for note in left), left
+
+
 def test_a_pending_record_cannot_name_a_file_that_is_not_the_wallpapers_own(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

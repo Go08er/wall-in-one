@@ -1745,7 +1745,9 @@ def test_legacy_remove_uses_the_prepared_root_after_a_same_inode_root_swap(
     path = _downloaded(sandbox)
     item = _on_disk(path, Ownership.MANAGED)
     original_pairing = path.with_name(path.name + pairing.SIDECAR_SUFFIX)
-    original_pairing.write_bytes(b"old pairing")
+    # The app's own selector (a still in the root): ordinary cleanup. Bytes that are not
+    # one the app could have written are left (decision 1), which is not what this tests.
+    original_pairing.write_text(json.dumps({"still_path": str(sandbox / "still.png")}))
     replacement_root = sandbox.parent / "replacement-wallpapers"
     replacement_parent = replacement_root / path.parent.relative_to(sandbox)
     replacement_parent.mkdir(parents=True)

@@ -347,6 +347,31 @@ def test_a_video_project_nested_in_a_web_item_lists_nothing(tmp_path: Path) -> N
     assert workshop.folder_gate(web / "assets", (root,)) == frozenset()
 
 
+def test_an_explicit_root_inside_an_item_folder_lists_its_own_files(tmp_path: Path) -> None:
+    """review f5 N4: the gate answers for each root, not once for the folder."""
+    root = tmp_path / "library"
+    web = _folder(root, "web1", {"type": "web", "file": "index.html"}, ("index.html",))
+    assets = _folder(web, "assets", None, ("clip.mp4",))
+    assert _listed(root) == set()
+    both = scan.scan([root, assets], records={})
+    assert {item.path.name for item in both.items} == {"clip.mp4"}
+    first = scan.scan([assets, root], records={})
+    assert {item.path.name for item in first.items} == {"clip.mp4"}
+
+
+def test_steams_content_tree_lists_nothing_under_any_root(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    item = _folder(
+        root,
+        "steam/steamapps/workshop/content/431960/9",
+        {"type": "video", "file": "clip.mp4"},
+        ("clip.mp4",),
+    )
+    assets = _folder(item, "assets", None, ("extra.mp4",))
+    for roots in ([root, item], [root, assets], [item, assets]):
+        assert scan.scan(roots, records={}).items == (), roots
+
+
 def test_a_video_project_nested_in_a_video_item_lists_only_the_outer_ones_file(
     tmp_path: Path,
 ) -> None:

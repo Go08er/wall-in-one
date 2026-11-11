@@ -648,8 +648,9 @@ def _scan(
         tuple[file_io.FileFingerprint, int, int],
     ] = {}
     marker_cache: dict[Path, tuple[str, dict[str, object]] | None] = {}
-    # Per folder, the names of the files the walk may list (`workshop.folder_gate`).
-    gates: dict[Path, frozenset[str] | None] = {}
+    # Per folder and root, the names of the files the walk may list
+    # (`workshop.folder_gate`): a root nested in an item folder is its own answer.
+    gates: dict[tuple[Path, Path], frozenset[str] | None] = {}
     # Gated folders already said once.
     gated_said: set[Path] = set()
     # Folders whose files could be listed but not looked at, each said once.
@@ -684,9 +685,10 @@ def _scan(
             kind = classify(path)
             if kind is None:
                 continue
-            if path.parent not in gates:
-                gates[path.parent] = workshop.folder_gate(path.parent, (root,))
-            allowed = gates[path.parent]
+            gate = (path.parent, root)
+            if gate not in gates:
+                gates[gate] = workshop.folder_gate(path.parent, (root,))
+            allowed = gates[gate]
             if allowed is not None and path.name not in allowed:
                 # Workshop content, or an item folder: not local media
                 # (`workshop.folder_gate`). Left out of `seen`, so the

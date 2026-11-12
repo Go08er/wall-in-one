@@ -435,8 +435,10 @@ def test_a_capture_goes_only_where_its_folder_is_trusted_now(
 
         monkeypatch.setattr(paths, "ensure_directory", making)
     heard: list[stills.StillFolderError] = []
+    found = library.find(clip)
+    assert found is not None
 
-    made = stills.ensure(library.find(clip), root, refused=heard.append)
+    made = stills.ensure(found, root, refused=heard.append)
 
     if when == "unchanged":
         assert made is not None and made.resolve().is_relative_to(clean)
@@ -487,4 +489,5 @@ def test_a_library_folder_spelled_with_dotdot_gets_its_stills(
     made = stills.ensure(found, root, refused=refused.append)
 
     assert made is not None and made.is_file(), [str(error) for error in refused]
-    assert scan.scan(settings.roots, {}).find(clip).paired_still == made
+    again = scan.scan(settings.roots, {}).find(clip)
+    assert again is not None and again.paired_still == made

@@ -473,17 +473,20 @@ def test_an_old_selector_reads_a_capture_only_from_a_still_folder_that_is_truste
         )
 
     library = scan.scan([root], {})
+    found, beside = library.find(video), library.find(other)
+    assert found is not None and beside is not None
     trusted = folder == "ordinary"
     assert pairing.still_directory_trusted(root) is trusted
-    assert library.find(video).paired_still == (capture if trusted else None)
+    assert found.paired_still == (capture if trusted else None)
     assert pairing.find_still(video, (root,), labelled_workshop=False) == (
         capture if trusted else None
     )
-    assert library.find(other).paired_still == mine
+    assert beside.paired_still == mine
     assert capture.is_file()
-    identity = pairings.Identity.of(library.find(video))
+    identity = pairings.Identity.of(found)
     picked = {identity.key: pairings.Pairing(identity=identity, still=capture, customized=True)}
-    assert scan.scan([root], picked).find(video).paired_still == capture
+    again = scan.scan([root], picked).find(video)
+    assert again is not None and again.paired_still == capture
 
 
 @pytest.mark.parametrize("change", ["linked-to-an-items-folder", "made-by-a-first-capture"])

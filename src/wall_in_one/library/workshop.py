@@ -110,6 +110,8 @@ class _ScanMemo:
     item_folders: dict[tuple[Path, tuple[Path, ...]], tuple[Path, ...]] = field(
         default_factory=dict
     )
+    #: A root as given: whether its still directory is trusted (`still_root_judged`).
+    still_roots: dict[Path, bool] = field(default_factory=dict)
 
 
 _SCAN_MEMO: ContextVar[_ScanMemo | None] = ContextVar("wall_in_one_scan_places", default=None)
@@ -183,6 +185,21 @@ def in_content_tree(path: Path) -> bool:
     if memo is not None:
         memo.in_content[path] = inside
     return inside
+
+
+def still_root_judged(root: Path, judge: Callable[[Path], bool]) -> bool:
+    """``judge(root)``, asked once per root in a scan (`one_scan`, f7 G7).
+
+    For `pairing.still_directory_trusted`, which every video and scene of a scan
+    asks for every root: the answer doesn't change within one.
+    """
+    memo = _SCAN_MEMO.get()
+    if memo is not None and root in memo.still_roots:
+        return memo.still_roots[root]
+    judged = judge(root)
+    if memo is not None:
+        memo.still_roots[root] = judged
+    return judged
 
 
 def lies_beneath(path: Path, folder: Path) -> bool:

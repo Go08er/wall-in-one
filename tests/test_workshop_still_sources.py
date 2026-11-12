@@ -374,3 +374,24 @@ def test_a_paused_videos_still_is_made_where_no_items_author_writes(
         session.adopt_library(library)
         assert session._still_for_the_video_being_paused() is None
         assert asked == wanted, roots
+
+
+def test_a_scan_judges_each_roots_still_directory_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f7 G7: every video and scene of a scan asked it for every root, from scratch."""
+    mine, other = tmp_path / "mine", tmp_path / "other"
+    for root in (mine, other):
+        root.mkdir()
+        for index in range(5):
+            (root / f"clip{index}.mp4").write_bytes(b"x")
+    judged: list[Path] = []
+    real = workshop.lies_beneath
+
+    def counting(path: Path, folder: Path) -> bool:
+        judged.append(folder)
+        return real(path, folder)
+
+    monkeypatch.setattr(workshop, "lies_beneath", counting)
+    scan.scan([mine, other], {})
+    assert sorted(judged) == sorted([mine, other])

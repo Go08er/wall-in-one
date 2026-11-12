@@ -581,8 +581,14 @@ def still_directory_trusted(root: Path) -> bool:
     ``root`` (an item's ``Wall-in-One`` can be one), which the app never captures
     through (`stills._pin_target_directory`). Another's stills are not looked at,
     and no capture goes there (`capture_root`): an author could have shipped any
-    picture, or a link, under the name a still is looked for by.
+    picture, or a link, under the name a still is looked for by. Judged once per
+    root in a scan (`workshop.still_root_judged`).
     """
+    return workshop.still_root_judged(root, _still_directory_trusted)
+
+
+def _still_directory_trusted(root: Path) -> bool:
+    """`still_directory_trusted`, judged."""
     directory = still_directory(root)
     if not workshop.lies_beneath(directory, root):
         return False

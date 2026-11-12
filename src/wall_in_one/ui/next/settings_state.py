@@ -144,9 +144,17 @@ KEY_FAILED: Final = "failed"
 # -- records ----------------------------------------------------------------------
 
 
+#: Where generated stills go, said where the first folder isn't it (f7 G5).
+STILLS_ELSEWHERE: Final = (
+    "Generated stills go to the first folder Wall-in-One can trust with them: one that is "
+    "there, and that no Workshop item could write in (docs/library.md)"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Folder:
-    """One library folder. The first receives downloads and generated stills."""
+    """One library folder. The first receives downloads; generated stills go to the
+    first that takes them (`takes_stills`), normally the same one."""
 
     path: str
     name: str
@@ -155,6 +163,9 @@ class Folder:
     #: Why it shows nothing though it is there (a symbolic link is not
     #: scanned), and what to add instead; empty for an ordinary folder.
     note: str = ""
+    #: Whether Wall-in-One's stills may go in it, as the last scan judged
+    #: (`Library.capture_roots`, f7 G5); None while no scan judged these folders.
+    takes_stills: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

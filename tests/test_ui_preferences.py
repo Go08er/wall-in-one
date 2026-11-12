@@ -149,6 +149,40 @@ def test_folder_labels_preserve_paths_order_and_missing_destination(
             assert (root / "wallpaper.png").read_bytes() == b"existing wallpaper"
 
 
+@pytest.mark.parametrize(
+    ("judged", "titles"),
+    [
+        (None, ["first · Downloads & generated stills", "second", "third"]),
+        ((1,), ["first · Downloads", "second · Generated stills", "third"]),
+        ((), ["first · Downloads", "second", "third"]),
+    ],
+    ids=["not-judged", "the-second-takes-them", "none-takes-them"],
+)
+def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
+    tmp_path: Path, judged: tuple[int, ...] | None, titles: list[str]
+) -> None:
+    """f7 G5: the first folder was said to get the stills whatever the scan found; one a
+    Workshop item could write in (or one not there) gets none (f7 W1, G8)."""
+    from wall_in_one.library.model import Library
+
+    roots = tuple(tmp_path / name for name in ("first", "second", "third"))
+    for root in roots:
+        root.mkdir()
+    application = SettingsApp(roots[0])
+    application.settings = replace(application.settings, roots=roots)
+    capture_roots = None if judged is None else tuple(roots[index] for index in judged)
+    application.session = SimpleNamespace(  # type: ignore[attr-defined]
+        library=Library(roots, (), capture_roots=capture_roots),
+        displays=SimpleNamespace(all=lambda: ()),
+        schedules=SimpleNamespace(rules=()),
+    )
+
+    page = PreferencesPage(application)  # type: ignore[arg-type]
+    page.apply_settings(application.settings)
+
+    assert [row.get_title() for row in page._root_rows] == titles
+
+
 def test_adaptive_default_copy_and_saved_setting_preserve_explicit_pairing_choices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

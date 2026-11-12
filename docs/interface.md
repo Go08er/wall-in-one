@@ -254,8 +254,9 @@ order reversed, where the last matching rule wins.
 Every setting classic Settings has, each saved to the same `settings.toml` key
 the same way, in searchable groups:
 
-- library folders: add, remove, and make one the folder downloads and generated
-  stills go to. A folder found on this machine is only suggested. One whose
+- library folders: add, remove, and make one the folder downloads go to, and
+  generated stills (unless Wall-in-One can't trust that folder with them; the
+  folder they go to then has its own mark). A folder found on this machine is only suggested. One whose
   wallpapers a playlist needs can't be removed: Settings asks as it does for
   any folder, then the change is tried for pretend before it is saved and
   refused, naming the playlist and what it would lose; turning off Wallpaper

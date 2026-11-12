@@ -28,7 +28,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -605,6 +605,17 @@ def capture_roots(roots: Iterable[Path], refused: Iterable[Path] = ()) -> tuple[
     """
     left_out = set(refused)
     return tuple(root for root in roots if root not in left_out and still_directory_trusted(root))
+
+
+def judged_capture_roots(library: Library, roots: Sequence[Path]) -> tuple[Path, ...] | None:
+    """`Library.capture_roots` when ``library``'s scan judged exactly ``roots``; else None.
+
+    For the settings pages, which say where stills go only when the scan has
+    said so (f7 G5): with no verdict for these folders they keep their usual word.
+    """
+    if library.capture_roots is None or tuple(library.roots) != tuple(roots):
+        return None
+    return library.capture_roots
 
 
 def library_capture_root(library: Library) -> Path | None:

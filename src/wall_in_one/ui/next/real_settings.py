@@ -60,7 +60,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib
 
 from wall_in_one import config, display_policy
-from wall_in_one.library import scan
+from wall_in_one.library import pairing, scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.session import Session
 from wall_in_one.theme import noctalia, palettes, source, template
@@ -883,6 +883,9 @@ class RealSettings:
         known = self._check()
         missing = known.missing if known is not None else frozenset[Path]()
         notes = dict(known.linked) if known is not None else {}
+        roots = self._roots()
+        # The scan's verdict, read (never looked up here): where stills may go.
+        judged = pairing.judged_capture_roots(self._backend.session.library, roots)
         return tuple(
             Folder(
                 str(root),
@@ -890,8 +893,9 @@ class RealSettings:
                 # A link is "there" or not by what its row says, not by this.
                 root in missing and root not in notes,
                 notes.get(root, ""),
+                None if judged is None else root in judged,
             )
-            for root in self._roots()
+            for root in roots
         )
 
     def suggested_folder(self) -> str:

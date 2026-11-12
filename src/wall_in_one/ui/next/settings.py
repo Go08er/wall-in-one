@@ -30,8 +30,10 @@ settings, and only when pressed; it never renders. While the template is
 installed but not rendered yet, a separate Render now row asks Noctalia to
 re-render all of its templates, and says so before it is pressed.
 
-**Folders.** The first folder receives downloads and generated stills; another
-one is made first with its download button. There is no separate download
+**Folders.** The first folder receives downloads, and generated stills go to the
+first folder Wall-in-One can trust with them, normally the same one (the scan
+says which: `Folder.takes_stills`); another one is made first with its download
+button. There is no separate download
 folder (owner decision 4) and no "Locate" for a missing folder: it is said to
 be missing and comes back when its drive does. A folder found on this
 machine is only ever suggested, never added (a suggestion is not consent).
@@ -39,7 +41,7 @@ machine is only ever suggested, never added (a suggestion is not consent).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
@@ -74,6 +76,7 @@ from wall_in_one.ui.next.settings_state import (
     SCENE_CLAMP,
     SCENE_SCALING,
     SCHEMES,
+    STILLS_ELSEWHERE,
     VOLUME_RANGE,
     WHEN_HIDDEN,
     Folder,
@@ -178,6 +181,16 @@ class _Binding:
 
 #: Settings that only apply while another is on: the row is insensitive otherwise.
 _SUB_OPTIONS: Final = {"web_wallpaper_previews": "allow_web_wallpapers"}
+
+
+def _stills_index(folders: Sequence[Folder]) -> int | None:
+    """Which of ``folders`` generated stills go to, as the scan judged; None: none of them.
+
+    The first, as ever, while the scan hasn't judged these folders (`Folder.takes_stills`).
+    """
+    if not folders or any(folder.takes_stills is None for folder in folders):
+        return 0 if folders else None
+    return next((index for index, folder in enumerate(folders) if folder.takes_stills), None)
 
 
 def _row_text(row: Gtk.Widget) -> str:
@@ -549,8 +562,9 @@ class SettingsPage(Page):
             group.widget.remove(self._add_folder_row)
         group.entries = []
         self._folder_rows = []
+        stills_at = _stills_index(folders)
         for index, folder in enumerate(folders):
-            row = self._folder_row(index, folder, blocked)
+            row = self._folder_row(index, folder, blocked, stills=index == stills_at)
             keywords = f"folder {folder.path} {'missing unplugged' if folder.missing else ''}"
             if index == 0:
                 keywords += " downloads save store wallhaven motionbgs stills destination"
@@ -569,7 +583,9 @@ class SettingsPage(Page):
         self._add(group, self._add_folder_row, "add folder new location")
         self._apply_filter()
 
-    def _folder_row(self, index: int, folder: Folder, blocked: bool) -> Adw.ActionRow:
+    def _folder_row(
+        self, index: int, folder: Folder, blocked: bool, *, stills: bool
+    ) -> Adw.ActionRow:
         row = plain(Adw.ActionRow, title=folder.name, subtitle=folder.path)
         writers: list[Gtk.Widget] = []
         if folder.note:
@@ -592,11 +608,20 @@ class SettingsPage(Page):
             )
         row.add_prefix(icon)
         if index == 0:
-            badge = widgets.pill("Downloads & stills", None, "accent")
+            badge = widgets.pill("Downloads & stills" if stills else "Downloads", None, "accent")
             badge.set_valign(Gtk.Align.CENTER)
             row.add_suffix(badge)
-            row.set_tooltip_text("Downloads and generated stills go here")
+            row.set_tooltip_text(
+                "Downloads and generated stills go here"
+                if stills
+                else f"Downloads go here. {STILLS_ELSEWHERE}"
+            )
         else:
+            if stills:
+                badge = widgets.pill("Stills", None, "accent")
+                badge.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(badge)
+                row.set_tooltip_text(f"Generated stills go here. {STILLS_ELSEWHERE}")
             first = widgets.icon_button(
                 "folder-download-symbolic",
                 "Make this the download and generated-still folder",
@@ -653,16 +678,40 @@ class SettingsPage(Page):
         access = self.access
         if access is None:
             return None
-        folders = [folder.path for folder in access.folder_list()]
+        entries = tuple(access.folder_list())
+        folders = [folder.path for folder in entries]
         if path not in folders:
             return None
         escaped = GLib.markup_escape_text(path)
         body = f"<b>{escaped}</b> leaves the library. Its files stay on disk."
-        if folders[0] == path and len(folders) > 1:
+        left = tuple(folder for folder in entries if folder.path != path)
+        stills_now, stills_after = _stills_index(entries), _stills_index(left)
+        after = (
+            GLib.markup_escape_text(left[stills_after].path) if stills_after is not None else None
+        )
+        if folders[0] == path and left:
             following = GLib.markup_escape_text(folders[1])
-            body += f"\n\nDownloads and generated stills will go to <b>{following}</b>."
+            if after == following:
+                body += f"\n\nDownloads and generated stills will go to <b>{following}</b>."
+            elif after is not None:
+                body += (
+                    f"\n\nDownloads will go to <b>{following}</b>, and generated stills "
+                    f"to <b>{after}</b>."
+                )
+            else:
+                body += (
+                    f"\n\nDownloads will go to <b>{following}</b>. Generated stills stop "
+                    "until you add a folder Wall-in-One can trust with them."
+                )
         elif folders[0] == path:
             body += "\n\nDownloads and generated stills stop until you add a folder."
+        elif stills_now is not None and entries[stills_now].path == path:
+            body += (
+                f"\n\nGenerated stills will go to <b>{after}</b>."
+                if after is not None
+                else "\n\nGenerated stills stop until you add a folder Wall-in-One can "
+                "trust with them."
+            )
         dialog = Adw.AlertDialog(heading="Remove from library?", body=body, body_use_markup=True)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("remove", "Remove")

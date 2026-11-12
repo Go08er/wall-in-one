@@ -858,3 +858,54 @@ def test_the_classic_previews_sub_option_follows_web_wallpapers(
     assert classic._web_previews.get_sensitive() and classic._web_previews.get_active()
     classic.apply_settings(config.Settings(allow_web_wallpapers=False, web_wallpaper_previews=True))
     assert not classic._web_previews.get_sensitive() and classic._web_previews.get_active()
+
+
+@pytest.mark.parametrize(
+    ("taking", "tips", "removing_the_first"),
+    [
+        (None, ["Downloads and generated stills go here", None], "and generated stills will go to"),
+        (
+            (False, True),
+            ["Downloads go here.", "Generated stills go here."],
+            "and generated stills",
+        ),
+        ((False, False), ["Downloads go here.", None], "Generated stills stop until you add"),
+    ],
+    ids=["not-judged", "the-second-takes-them", "none-takes-them"],
+)
+def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
+    taking: tuple[bool, bool] | None, tips: list[str | None], removing_the_first: str
+) -> None:
+    """f7 G5: the badge, its tooltip and the remove dialog said the first folder gets the
+    stills whatever the scan found; one a Workshop item could write in gets none (f7 W1)."""
+    from wall_in_one.ui.next import settings as settings_page
+    from wall_in_one.ui.next.settings_state import Folder
+
+    folders = tuple(
+        Folder(f"/w/{name}", name, takes_stills=None if taking is None else taking[index])
+        for index, name in enumerate(("first", "second"))
+    )
+
+    class Access:
+        def folder_list(self) -> tuple[Folder, ...]:
+            return folders
+
+    page = SimpleNamespace(
+        access=Access(), make_download_folder=print, _ask_remove=print, _present=print
+    )
+    stills_at = settings_page._stills_index(folders)
+    for index, (folder, tip) in enumerate(zip(folders, tips, strict=True)):
+        row = settings_page.SettingsPage._folder_row(
+            page,  # type: ignore[arg-type]
+            index,
+            folder,
+            False,
+            stills=index == stills_at,
+        )
+        shown = row.get_tooltip_text()
+        assert (shown is None) if tip is None else (shown or "").startswith(tip), shown
+
+    dialog = settings_page.SettingsPage.confirm_remove(page, "/w/first")  # type: ignore[arg-type]
+    assert dialog is not None
+    assert removing_the_first in dialog.get_body()
+    dialog.force_close()

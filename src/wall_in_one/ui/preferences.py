@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from wall_in_one import config, dials, display_policy, programs
-from wall_in_one.library import scan
+from wall_in_one.library import pairing, scan
 from wall_in_one.providers import credentials, registry
 from wall_in_one.theme import source
 from wall_in_one.theme.noctalia import ALL_SCHEMES
@@ -32,6 +32,7 @@ from wall_in_one.ui.next.catalog import (
     WEB_WALLPAPERS_TITLE,
 )
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
+from wall_in_one.ui.next.settings_state import STILLS_ELSEWHERE
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.ui.plain_text import plain
 from wall_in_one.ui.setup_section import SetupSection
@@ -174,8 +175,8 @@ class PreferencesPage(Adw.PreferencesPage):
         group = Adw.PreferencesGroup(
             title="Library",
             description=(
-                "Folders scanned for wallpapers. The marked folder receives "
-                "downloads and generated stills."
+                "Folders scanned for wallpapers. The marked folder receives downloads, and "
+                "generated stills unless another is marked for them."
             ),
         )
         add = Gtk.Button(icon_name="folder-new-symbolic", tooltip_text="Add a folder")
@@ -227,16 +228,35 @@ class PreferencesPage(Adw.PreferencesPage):
             return
 
         read_only = bool(self._read_only_keys())
+        # Where generated stills go, as the scan judged; the first folder while it
+        # hasn't judged these (f7 G5).
+        session = getattr(self._app, "session", None)
+        judged = (
+            pairing.judged_capture_roots(session.library, roots) if session is not None else None
+        )
+        stills_root = roots[0] if judged is None else (judged[0] if judged else None)
         for index, root in enumerate(roots):
             row = plain(Adw.ActionRow, title=root.name or str(root), subtitle=str(root))
             # Every suffix button rewrites `roots`. The row itself stays
             # sensitive so its path remains readable.
             writers: list[Gtk.Button] = []
             if index == 0:
-                row.set_title(f"{root.name or str(root)} · Downloads & generated stills")
+                here = root == stills_root
+                row.set_title(
+                    f"{root.name or str(root)} · Downloads & generated stills"
+                    if here
+                    else f"{root.name or str(root)} · Downloads"
+                )
                 row.add_prefix(Gtk.Image(icon_name="folder-download-symbolic"))
-                row.set_tooltip_text("Downloads and generated stills go here")
+                row.set_tooltip_text(
+                    "Downloads and generated stills go here"
+                    if here
+                    else f"Downloads go here. {STILLS_ELSEWHERE}"
+                )
             else:
+                if root == stills_root:
+                    row.set_title(f"{root.name or str(root)} · Generated stills")
+                    row.set_tooltip_text(f"Generated stills go here. {STILLS_ELSEWHERE}")
                 destination = Gtk.Button(
                     icon_name="folder-download-symbolic",
                     tooltip_text="Make this the download and generated-still folder",

@@ -232,7 +232,7 @@ See [what Wall-in-One checks for you](installing.md#what-wall-in-one-checks-for-
 
 | key | meaning | default |
 |---|---|---|
-| `roots` | Folders scanned for wallpapers. Empty is unconfigured and triggers the graphical first-run choice; the first chosen root receives downloads and generated stills. | `[]` |
+| `roots` | Folders scanned for wallpapers. Empty is unconfigured and triggers the graphical first-run choice; the first root receives downloads, and generated stills unless Wall-in-One can't trust it with them; they then go to the first root it can, and Settings marks that one ([library.md](library.md)). | `[]` |
 | `opacity` | The classic window's background opacity, 0.30-1.0; `1.0` is fully opaque. Settings → Classic interface → **Window opacity**; the new window's translucency is its window style instead (see [`compositor-window-rules.md`](compositor-window-rules.md)). | `1.0` |
 | `preview_scheme` | Default adaptive colour scheme for previews and pairings that inherit it. Explicit pairing schemes take precedence; the app's Noctalia-following UI colours are separate. | `"m3-tonal-spot"` |
 | `follow_noctalia_palette` | Apply Noctalia's palette to the app's own chrome. | `true` |

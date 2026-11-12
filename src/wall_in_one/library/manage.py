@@ -689,10 +689,10 @@ def _artifact_access_path(
         raise ValueError("artifact cleanup requires logical and retained root/parent pairs")
     if candidate.parent == source_parent:
         return lookup_parent / candidate.name
-    # Generated stills can live under roots[0], and even a same-root path would
-    # require following unpinned descendant directories. No identity for that
-    # artifact parent is journaled, so leave the inert app-owned file rather
-    # than traverse a directory which could have become a symlink.
+    # Generated stills can live under another root (`pairing.capture_root`), and even
+    # a same-root path would require following unpinned descendant directories. No
+    # identity for that artifact parent is journaled, so leave the inert app-owned
+    # file rather than traverse a directory which could have become a symlink.
     return None
 
 

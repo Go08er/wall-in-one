@@ -577,11 +577,15 @@ def still_directory_trusted(root: Path) -> bool:
     it lists (R42-12). Nor in an item of Steam's tree: below a
     ``steamapps/workshop/content/431960`` folder, unless ``root`` is that folder
     itself (`workshop.is_content_folder`), whose still directory sits beside the
-    items, where none of them writes. Another's stills are not looked at, and
-    no capture goes there (`capture_root`): an author could have shipped any
+    items, where none of them writes. Nor one reached through a link out of
+    ``root`` (an item's ``Wall-in-One`` can be one), which the app never captures
+    through (`stills._pin_target_directory`). Another's stills are not looked at,
+    and no capture goes there (`capture_root`): an author could have shipped any
     picture, or a link, under the name a still is looked for by.
     """
     directory = still_directory(root)
+    if not workshop.lies_beneath(directory, root):
+        return False
     if workshop.item_folder_of(directory, (root,)) is not None:
         return False
     return not workshop.in_content_tree(directory) or workshop.is_content_folder(root)

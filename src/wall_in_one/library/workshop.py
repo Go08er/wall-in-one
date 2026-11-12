@@ -185,6 +185,12 @@ def in_content_tree(path: Path) -> bool:
     return inside
 
 
+def lies_beneath(path: Path, folder: Path) -> bool:
+    """Whether the resolved ``path`` lies in the resolved ``folder`` (False if either can't be)."""
+    resolved, within = _resolved(path), _resolved(folder)
+    return resolved is not None and within is not None and resolved.is_relative_to(within)
+
+
 def is_content_folder(path: Path) -> bool:
     """Whether the resolved ``path`` is Steam's ``steamapps/workshop/content/431960`` folder itself.
 

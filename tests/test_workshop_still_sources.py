@@ -230,7 +230,8 @@ def _steam_scene(steam: Path, wid: str) -> Path:
 
 def _authors_root(tmp_path: Path, steam: Path, place: str) -> Path:
     """A library folder an item's author writes in: an item copied in by hand, one of Steam's,
-    or a folder inside one of Steam's (with no ``project.json`` of its own)."""
+    or a folder inside one of Steam's (with no ``project.json`` of its own); or an item copied
+    in whose ``Wall-in-One`` is a link out of it."""
     if place == "steam-item":
         return _steam_scene(steam, "300")
     if place == "inside-a-steam-item":
@@ -240,11 +241,17 @@ def _authors_root(tmp_path: Path, steam: Path, place: str) -> Path:
     root = tmp_path / "copied-in"
     root.mkdir()
     (root / "project.json").write_text(json.dumps({"type": "video", "file": "v.mp4"}))
+    if place == "copied-in-item-linking-out":
+        outside = tmp_path / "outside" / "Wall-in-One"
+        outside.mkdir(parents=True)
+        (root / "Wall-in-One").symlink_to(outside)
     return root
 
 
 @pytest.mark.parametrize("planted", ["file", "link"])
-@pytest.mark.parametrize("place", ["copied-in-item", "steam-item", "inside-a-steam-item"])
+@pytest.mark.parametrize(
+    "place", ["copied-in-item", "copied-in-item-linking-out", "steam-item", "inside-a-steam-item"]
+)
 def test_a_still_an_items_author_could_have_shipped_is_not_paired(
     tmp_path: Path, place: str, planted: str
 ) -> None:
@@ -337,3 +344,33 @@ def test_a_removal_takes_nothing_from_a_still_directory_nothing_of_ours_is_in(
     found = manage.pairing_artifact_paths(scene, (copied, mine))
     assert pairing.still_directory(mine) / "200.png" in found
     assert not any(path.is_relative_to(copied) for path in found), found
+
+
+def test_a_paused_videos_still_is_made_where_no_items_author_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third capture path, a video paused without a still (`Session`), took the first
+    library folder too (on 86840ed); with none that no author writes in it makes none."""
+    from types import SimpleNamespace
+
+    from wall_in_one.library import stills
+    from wall_in_one.library.model import Library
+
+    steam = tmp_path / "steam"
+    copied = _authors_root(tmp_path, steam, "copied-in-item")
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    video = MediaItem(mine / "clip.mp4", Kind.VIDEO, 1, 0)
+    asked: list[Path] = []
+    monkeypatch.setattr(stills, "ensure", lambda _item, root, **_keywords: asked.append(root))
+    for roots, wanted in (((copied, mine), [mine]), ((copied,), [])):
+        asked.clear()
+        library = Library(roots, (video,))
+        session = Session(
+            config.Settings(roots=roots),
+            applier=SimpleNamespace(current=SimpleNamespace(item=video)),  # type: ignore[arg-type]
+            scanner=lambda _roots, library=library: library,  # type: ignore[misc]
+        )
+        session.adopt_library(library)
+        assert session._still_for_the_video_being_paused() is None
+        assert asked == wanted, roots

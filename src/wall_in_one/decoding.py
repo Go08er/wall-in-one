@@ -32,6 +32,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
+from wall_in_one import file_io
+
 #: The demuxers a wallpaper's picture or video can be, by the names ffmpeg gives
 #: them (a name with aliases, ``matroska,webm``, matches by any one of them). The
 #: bytes choose among them: the input is a descriptor's path (`opened`), which has
@@ -61,13 +63,21 @@ def opened(path: Path, *, follow: bool = False) -> Iterator[Path]:
     pattern, glob or extension in it to be read as anything else. A symbolic
     link at ``path`` itself is refused (the library's walk lists none), unless
     ``follow``, as is anything but a regular file: an `OSError`, as when it
-    can't be opened. ``follow`` is for a scene's paired still only, which
-    playback follows too (`thumbnails.generate`).
+    can't be opened. So is a link in place of the folder it is in, a Workshop
+    item's swapped for one since the scan (f7 R42-18): that folder is opened
+    without following one, and the file in it; the folders above it are
+    followed (a library folder reached through a link). ``follow`` is for a
+    scene's paired still only, which playback follows too (`thumbnails.generate`).
     """
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
     if follow:
-        flags &= ~os.O_NOFOLLOW
-    descriptor = os.open(path, flags)
+        descriptor = os.open(path, flags & ~os.O_NOFOLLOW)
+    else:
+        folder = file_io.pin_directory_path(path.parent)
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=folder.descriptor)
+        finally:
+            folder.close()
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise OSError(errno.EINVAL, "not a regular file", str(path))

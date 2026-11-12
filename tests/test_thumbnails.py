@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from wall_in_one import decoding, thumbnails
+from wall_in_one.library import scan, workshop
 from wall_in_one.library.model import Kind, MediaItem
 
 needs_ffmpeg = pytest.mark.skipif(not thumbnails.is_available(), reason="ffmpeg is not installed")
@@ -428,6 +430,44 @@ def test_a_scenes_paired_still_that_is_a_link_is_thumbnailed_and_its_preview_is_
     with pytest.raises(thumbnails.ThumbnailError, match="cannot open"):
         thumbnails.generate(scene)
     assert not thumbnails.cached_path(scene).exists()
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("folder", ["as-scanned", "a-link-now"])
+def test_an_items_preview_is_read_in_its_own_folder_never_one_linked_in_its_place(
+    cache_home: Path, tmp_path: Path, folder: str
+) -> None:
+    """f7 R42-18: only the preview's own name was opened without following a link, so a
+    Workshop item's folder replaced by a link since the scan led the thumbnail to the picture
+    of that name wherever the link pointed (on c8b2fddb). The folder it is in is opened without
+    following one too; Steam's folders above it may still be reached through a link."""
+    steam = tmp_path / "disk" / "steam"
+    item_folder = steam / "steamapps" / "workshop" / "content" / workshop.APP_ID / "200"
+    item_folder.mkdir(parents=True)
+    _made(item_folder / "preview.png", "red")
+    project = json.dumps({"type": "scene", "file": "scene.json", "preview": "preview.png"})
+    (item_folder / "project.json").write_text(project, encoding="utf-8")
+    (item_folder / "scene.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "steam").symlink_to(steam, target_is_directory=True)
+    library = tmp_path / "library"
+    library.mkdir()
+    found = scan.scan((library,), {}, include_workshop=True, workshop_roots=(tmp_path / "steam",))
+    item = next(item for item in found.items if item.scene == "200")
+    assert item.preview == tmp_path / "steam" / item_folder.relative_to(steam) / "preview.png"
+    assert item.paired_still is None
+    if folder == "as-scanned":
+        assert _red(_first_pixel(thumbnails.generate(item)))
+        return
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _made(elsewhere / "preview.png", "blue")
+    (elsewhere / "project.json").write_text(project, encoding="utf-8")
+    item_folder.rename(item_folder.with_name("old-200"))
+    item_folder.symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(thumbnails.ThumbnailError, match="cannot open"):
+        thumbnails.generate(item)
+    assert not thumbnails.cached_path(item).exists()
 
 
 @needs_ffmpeg

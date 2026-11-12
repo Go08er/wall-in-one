@@ -422,7 +422,8 @@ files or the network. ffmpeg is never handed a file's name: a thumbnail, a
 still's frame and a declared preview are read from the file already opened, and
 a downloaded preview arrives on stdin. That list leaves out `image2`, which reads
 a name such as `preview%01d.png` as a numbered sequence and opens `preview0.png`
-instead: a file with `%` in its name is decoded as itself.
+instead: a file with `%` in its name is decoded as itself, and what ffmpeg
+writes keeps the name it is given (`-update 1`).
 
 ### Executable wallpapers are never run
 

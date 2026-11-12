@@ -433,6 +433,10 @@ def _command(item: MediaItem, source: Path, destination: Path) -> list[str]:
         filters,
         "-frames:v",
         "1",
+        # The output is a name too: without this, image2's muxer reads a `%` in it
+        # (in the cache path, say) as a pattern and writes elsewhere, or fails (f6 N4).
+        "-update",
+        "1",
         str(destination),
     ]
     return command

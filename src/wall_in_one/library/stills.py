@@ -1640,6 +1640,10 @@ def _command(video: Path, target: Path, seek: float) -> list[str]:
         "png",
         "-f",
         "image2",
+        # The target as written, never a pattern: image2 reads a `%` in a name as
+        # one (`thumbnails._command`, f6 N4). Ours are descriptor paths with none.
+        "-update",
+        "1",
         str(target),
     ]
 

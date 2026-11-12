@@ -223,6 +223,31 @@ def test_every_ffmpeg_command_in_the_app_carries_the_options() -> None:
         assert "-protocol_whitelist" in before_input and "-format_whitelist" in before_input
 
 
+def test_every_ffmpeg_command_in_the_app_writes_the_name_it_is_given(tmp_path: Path) -> None:
+    """f6 N4: image2's muxer reads a ``%`` in an output name as a pattern, as its demuxer
+    did an input's (R42-10): ``pct%dir/t.png`` became ``pct1ir/t.png``. Each command the
+    app builds now writes the name it is given, ``%`` and all; a downloaded preview's goes
+    to ``pipe:1``, a name with none."""
+    folder = tmp_path / "pct%dir"
+    folder.mkdir()
+    picture = _made(tmp_path / "red.png", "red")
+    video = make_video(tmp_path / "clip.mp4")
+    item = MediaItem(path=picture, kind=Kind.STILL, size=1, mtime=0)
+    with decoding.opened(picture) as opened:
+        commands = {
+            "thumb%d.png": thumbnails._command(item, opened, folder / "thumb%d.png"),
+            "still%d.png": stills._command(video, folder / "still%d.png", 0.0),
+            "preview%d.png": stills._preview_command(
+                picture, folder / "preview%d.png", "png_pipe"
+            ),
+        }
+        for name, command in commands.items():
+            assert _frames(command, tmp_path) == 0, name
+            assert (folder / name).is_file(), name
+    assert sorted(path.name for path in folder.iterdir()) == sorted(commands)
+    assert not (tmp_path / "pct1ir").exists()
+
+
 # -- S3-3: the gate is inherited by everything below an item folder ----------------------------
 
 

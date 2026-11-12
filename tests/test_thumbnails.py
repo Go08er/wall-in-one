@@ -360,6 +360,25 @@ def test_a_video_named_like_a_sequence_is_thumbnailed_from_itself(
 
 
 @needs_ffmpeg
+def test_a_cache_folder_with_a_percent_in_its_name_still_gets_thumbnails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f6 N4: the output is a name to ffmpeg too, and image2's muxer read ``pct%dir`` as
+    ``pct1ir``, which isn't there: every thumbnail failed (on 86840ed)."""
+    cache = tmp_path / "pct%dir"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    source = _made(tmp_path / "red.png", "red")
+    item = _item(source, size=source.stat().st_size)
+
+    thumbnail = thumbnails.generate(item)
+
+    assert cache in thumbnail.parents
+    with decoding.opened(thumbnail) as opened:
+        assert _red(_first_pixel(opened))
+    assert not (tmp_path / "pct1ir").exists()
+
+
+@needs_ffmpeg
 @pytest.mark.parametrize(
     ("name", "kind", "encoding", "seconds"),
     [("wallpaper.png", Kind.STILL, (), 0), ("clip.mp4", Kind.VIDEO, ("-pix_fmt", "yuv420p"), 3)],

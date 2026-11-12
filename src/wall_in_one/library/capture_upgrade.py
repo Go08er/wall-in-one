@@ -336,13 +336,18 @@ def prepare() -> Result:
             settings = config.load_strict(require_present=True)
             if adoption.root not in settings.roots:
                 return Result()
-            if not pairing.still_directory_trusted(adoption.root) or not workshop.reached_as_named(
-                pairing.still_directory(adoption.root), adoption.root
+            if (
+                adoption.root.is_symlink()
+                or not pairing.still_directory_trusted(adoption.root)
+                or not workshop.reached_as_named(
+                    pairing.still_directory(adoption.root), adoption.root
+                )
             ):
-                # An item's author could write in its still folder now, or it is reached
-                # through a link: nothing there is used (f7 W1), nor made (R42-17, f7 H3),
-                # so there is nothing to upgrade, and no start is to fail at it, say so,
-                # or touch its selectors.
+                # The library folder is itself a link now, which the scan doesn't use
+                # (R42-29), or an item's author could write in its still folder, or that
+                # is reached through a link: nothing there is used (f7 W1), nor made
+                # (R42-17, f7 H3), so there is nothing to upgrade, and no start is to
+                # fail at it, say so, or touch its selectors. A link above it is fine.
                 return Result()
             protected: set[str] = set()
             for module in (pairings, playlists, favourites, removals):

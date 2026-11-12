@@ -900,7 +900,25 @@ def test_missing_manual_choice_does_not_render_repeatedly(
     assert not stills.destination(fixture.source, fixture.root).exists()
 
 
-@pytest.mark.parametrize("untrusted", ("an-items-folder", "linked-inside"))
+def test_an_upgrade_of_a_library_folder_below_a_link_is_not_skipped(
+    tmp_path: Path, cleanup_environment: list[Path]
+) -> None:
+    """R42-29's control: only the library folder's own entry being a link is skipped; one
+    reached through a link above it (f7 P1) is no reason to, and is tried as before. (The
+    adoption's own pins walk from ``/`` without following a link, so that try is refused,
+    the capture kept, as on 19e7ac7b.)"""
+    real = tmp_path / "real"
+    real.mkdir()
+    above = tmp_path / "above"
+    above.symlink_to(real, target_is_directory=True)
+    fixture = _cleanup_fixture(above)
+    stills.write_sidecar(fixture.source, fixture.capture)
+
+    assert capture_upgrade.prepare() == capture_upgrade.Result(retained=1), "tried, not skipped"
+    assert fixture.capture.is_file()
+
+
+@pytest.mark.parametrize("untrusted", ("an-items-folder", "linked-inside", "the-root-a-link"))
 def test_an_upgrade_in_a_still_folder_no_longer_trusted_is_skipped_quietly_at_every_start(
     tmp_path: Path,
     cleanup_environment: list[Path],
@@ -915,18 +933,26 @@ def test_an_upgrade_in_a_still_folder_no_longer_trusted_is_skipped_quietly_at_ev
     nothing to upgrade: it is skipped, and nothing is said, run or written, start after start.
 
     So is one whose `Wall-in-One` is a link to a folder in the same library folder: no capture
-    is made through it (f7 H3), and it was refused at every start the same way (f9)."""
+    is made through it (f7 H3), and it was refused at every start the same way (f9). And one
+    whose library folder is itself a link now, which the scan doesn't use: a rebuild refused
+    and an incomplete scan, two warnings a start (R42-29, on 19e7ac7b)."""
     fixture = _cleanup_fixture(tmp_path)
     selector = stills.write_sidecar(fixture.source, fixture.capture)
     managed = fixture.root / pairing.MANAGED_PARENT
     if untrusted == "an-items-folder":
         (managed / "project.json").write_text(json.dumps({"type": "web", "file": "index.html"}))
         assert not pairing.still_directory_trusted(fixture.root)
-    else:
+    elif untrusted == "linked-inside":
         managed.rename(fixture.root / "elsewhere")
         managed.symlink_to("elsewhere", target_is_directory=True)
         assert pairing.still_directory_trusted(fixture.root)
         assert not workshop.reached_as_named(pairing.still_directory(fixture.root), fixture.root)
+    else:
+        real = fixture.root.with_name(f"{fixture.root.name}-real")
+        fixture.root.rename(real)
+        fixture.root.symlink_to(real, target_is_directory=True)
+        assert pairing.still_directory_trusted(fixture.root)
+        assert workshop.reached_as_named(pairing.still_directory(fixture.root), fixture.root)
     kept = (_fingerprint(selector), _fingerprint(fixture.capture), selector.read_bytes())
     compiled: list[object] = []
     update = runtime_config.update

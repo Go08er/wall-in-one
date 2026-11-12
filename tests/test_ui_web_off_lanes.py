@@ -497,7 +497,9 @@ def test_the_health_lane_says_the_guards_words_once_under_a_standing_refusal(
     assert STOPPED in application.publication_problem
 
 
-@pytest.mark.parametrize("clear", ["web-back-on", "newer-success", "nothing-clears"])
+@pytest.mark.parametrize(
+    "clear", ["web-back-on", "newer-success", "nothing-clears", "a-success-before-it-ran"]
+)
 def test_a_guard_still_running_doesnt_put_back_what_a_later_clear_ended(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -507,8 +509,13 @@ def test_a_guard_still_running_doesnt_put_back_what_a_later_clear_ended(
     reply. Meanwhile web wallpapers go back on, or a newer publication gets through; each
     clears what was kept, and there was nothing yet. The guard then returned and kept its
     words, and the next failure said "Allow web wallpapers is off, …" again (on 19e7ac7b). A
-    guard that returns after such a clear keeps nothing; with nothing between, it keeps them."""
+    guard that returns after such a clear keeps nothing; with nothing between, it keeps them.
+
+    A publication as new that got through before the guard began clears nothing it did: the
+    service it stopped was stopped after that, so its words are kept (as with nothing between)."""
     application, said, _shown, _guard = _lane(profiles, monkeypatch)
+    if clear == "a-success-before-it-ran":
+        _settled(application, _RuntimePublication(1, response=Response.success()), 1)
     monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
     _steam_with_web()
     paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
@@ -557,7 +564,7 @@ def test_a_guard_still_running_doesnt_put_back_what_a_later_clear_ended(
 
     _settled(application, _RuntimePublication(3, error=FAILED), 3)
 
-    if clear == "nothing-clears":
+    if clear in ("nothing-clears", "a-success-before-it-ran"):
         assert words in application.publication_problem
         assert sum(words in report for report in said) == 1, said
     else:

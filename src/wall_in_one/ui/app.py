@@ -5812,13 +5812,17 @@ class Application(Adw.Application):
         (`publication_problem`, `_publication_got_through`).
         """
         with self._runtime_config_lock:
-            epoch = self._web_off_on_epoch
+            epoch, through = self._web_off_on_epoch, self._web_off_through_at
         done = self._web_off_guard()
         if done:
             with self._runtime_config_lock:
                 # What it did is over if web went back on or one as new got through while
-                # it ran: those cleared what was kept, and it isn't put back (R42-23).
-                over = epoch != self._web_off_on_epoch or self._web_off_through_at >= generation
+                # it ran: those cleared what was kept, and it isn't put back (R42-23). One
+                # that got through before it began is older than what it did.
+                newest = self._web_off_through_at
+                over = epoch != self._web_off_on_epoch or (
+                    newest > through and newest >= generation
+                )
                 if not over:
                     if done != self._web_off_explained:  # new words; the same said stay so (f9 F2)
                         self._web_off_explained_said = False

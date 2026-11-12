@@ -64,6 +64,7 @@ from wall_in_one.session import (
     LibraryRefreshCancelledError,
     LibraryRefreshPlan,
     LibraryRefreshResult,
+    RemovalPlan,
     RemovalResult,
     Session,
     removal_lock_refusal,
@@ -339,6 +340,9 @@ SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS: Final = 1.0
 SHUTDOWN_WORKSHOP_LOOK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
+#: How long a removal waits, at most, for web wallpapers going off to reach the
+#: service before it takes the runtime lane (`Application._removal_run`).
+REMOVAL_WEB_OFF_WAIT_SECONDS: Final = 10.0
 #: The line the compiler writes in ``[settings]`` while it allows web wallpapers
 #: (`runtime_config._document_head`). Nothing else it writes starts a line with
 #: the key: every value is one quoted line after its own key.
@@ -7665,6 +7669,35 @@ class Application(Adw.Application):
         if self._window is not None:
             self._window.show_library(self._session)
 
+    def _removal_run(self, plan: RemovalPlan) -> Callable[[], RemovalResult]:
+        """``plan``'s run on the authoring worker, the runtime lane and the compiler lock held.
+
+        Web wallpapers going off get out first (f6 L2). Their save landed before
+        this removal, queued behind it, was prepared, and their publication, or
+        the guard it runs (`_stopping_web_after_failure`), needs the lane and the
+        compiler lock this run holds throughout. Taken first, they waited for the
+        whole removal. So the run waits, before it takes either, until nothing is
+        owed (`_runtime_web_off_owed`), the application shuts down, or
+        `REMOVAL_WEB_OFF_WAIT_SECONDS` pass; no save can land meanwhile, being on
+        this same worker. The ``ctl`` removal runs this too.
+        """
+
+        def run() -> RemovalResult:
+            deadline = time.monotonic() + REMOVAL_WEB_OFF_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                with self._runtime_config_lock:
+                    if not self._runtime_web_off_owed or self._runtime_shutdown:
+                        break
+                time.sleep(0.05)
+            with (
+                self._runtime_removal_lock,
+                legacy_migration.unattended_transaction(),
+                runtime_config.compiler_lock(),
+            ):
+                return plan.run()
+
+        return run
+
     def remove_item_async(
         self,
         item: MediaItem,
@@ -7697,16 +7730,7 @@ class Application(Adw.Application):
             plan = self._session.prepare_removal_plan(current, trash=trash)
             self._invalidate_runtime_for_pending_removal()
             self._removal_active = True
-
-            def run() -> RemovalResult:
-                with (
-                    self._runtime_removal_lock,
-                    legacy_migration.unattended_transaction(),
-                    runtime_config.compiler_lock(),
-                ):
-                    return plan.run()
-
-            return run
+            return self._removal_run(plan)
 
         def adopted(result: RemovalResult) -> None:
             self._adopt_item_removal(result)
@@ -10369,16 +10393,7 @@ class _Commands:
             plan = self._app.session.prepare_removal_plan(item, trash=not item.deletable)
             self._app._invalidate_runtime_for_pending_removal()
             self._app._removal_active = True
-
-            def run() -> RemovalResult:
-                with (
-                    self._app._runtime_removal_lock,
-                    legacy_migration.unattended_transaction(),
-                    runtime_config.compiler_lock(),
-                ):
-                    return plan.run()
-
-            return run
+            return self._app._removal_run(plan)
 
         def finish(result: RemovalResult) -> Response:
             self._app._adopt_item_removal(result)

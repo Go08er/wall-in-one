@@ -43,6 +43,7 @@ from tests.test_ui_service_library_currency import services, toolkit  # noqa: E4
 from tests.test_ui_web_off_failed_publish import _steam_with_web  # noqa: E402
 from tests.test_ui_web_off_lanes import ALLOWING, READS_EIGHT  # noqa: E402
 from wall_in_one import config, paths, runtime_config  # noqa: E402
+from wall_in_one import session as session_module  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.library import scan as scan_module  # noqa: E402
@@ -385,6 +386,85 @@ def test_web_off_during_a_removal_runs_the_guard_at_once(
         assert application._runtime_web_off_owed == 0
     finally:
         application._restore_runtime_after_uncommitted_removal()
+
+
+#: How long the removal below takes, holding what a removal holds.
+SLOW_REMOVAL = 3.0
+
+
+@pytest.mark.parametrize("gesture", [False, True], ids=["no-gesture", "a-gesture-waits"])
+def test_web_off_saved_just_before_a_removal_reaches_the_service_before_the_removal(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    gesture: bool,
+) -> None:
+    """f6 L2: a real removal, queued in the same tick as web off, takes its time.
+
+    Its run holds the runtime lane's lock and the compiler lock throughout, and web off's
+    publication, or the guard it runs, needs both. On 86840ed, with a gesture waiting for a
+    scan (which lets the lock go while it waits), the removal always took them first, and the
+    service heard nothing until the removal was over; without one, now and then. Now the
+    removal lets web off out first: the service hears it at once, nothing left allows web
+    wallpapers, the removal still runs, holding the lock, and nothing is owed after.
+    """
+    profile = profiles()
+    application = profile.application
+    service = _web_on(application, False, monkeypatch)
+    scans = HeldScans(monkeypatch, fails=False)
+    real_run = session_module.RemovalPlan.run
+    held: list[bool] = []
+    ran: list[float] = []
+
+    def slow_run(plan: Any) -> Any:
+        held.append(application._runtime_removal_lock.locked())
+        ran.append(time.monotonic())
+        time.sleep(SLOW_REMOVAL)
+        try:
+            return real_run(plan)
+        finally:
+            ran.append(time.monotonic())
+
+    monkeypatch.setattr(session_module.RemovalPlan, "run", slow_run)
+    if gesture:
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        _save(application, roots=(*application.settings.roots, extra))
+        spin_until(lambda: application._runtime_library_scan_pending, 10, what="the scan pending")
+        assert application.runtime_action_async("next")
+        _pump(0.5)  # the gesture's job now waits on the lane for the scan
+    reached: list[float] = []
+    heard = service.send
+
+    def send(verb: str, *arguments: object, **keywords: object) -> Response:
+        if verb in {"reload", "stop", "quit"} and not reached:
+            reached.append(time.monotonic())
+        return heard(verb, *arguments, **keywords)
+
+    monkeypatch.setattr(client, "send_runtime", send)
+    saved: list[object] = []
+    removed: list[object] = []
+
+    # The same tick: web off saved, then the removal queued behind it.
+    assert application.update_settings_async(
+        on_success=saved.append, on_error=saved.append, allow_web_wallpapers=False
+    )
+    assert application.remove_item_async(profile.rain, trash=True, finish=removed.append)
+    spin_until(lambda: bool(removed), SLOW_REMOVAL + AT_ONCE, what="the removal")
+    assert held == [True], "the removal's run holds the runtime lane's lock"
+    assert reached, "web off never reached the service"
+    assert reached[0] < ran[-1] - SLOW_REMOVAL / 2, (
+        f"web off reached the service {reached[0] - ran[0]:.2f}s into a {SLOW_REMOVAL}s removal"
+    )
+    assert getattr(removed[0], "committed", False), removed
+    scans.release()
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publications")
+    assert saved and not any(isinstance(outcome, str) for outcome in saved), saved
+    assert config.load_strict().allow_web_wallpapers is False
+    assert not service.allows_web(), service.sent
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+    assert application._runtime_web_off_owed == 0
 
 
 @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])

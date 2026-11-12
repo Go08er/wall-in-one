@@ -25,6 +25,7 @@ from wall_in_one.library import (
     displays,
     favourites,
     manage,
+    pairing,
     pairings,
     playlists,
     removals,
@@ -2393,10 +2394,10 @@ class Session:
             return None
         if current.item.paired_still is not None:
             return None
-        roots = self._library.roots
-        if not roots:
+        root = pairing.capture_root(self._library.roots)  # f6 W1
+        if root is None:
             return None
-        if stills.ensure(current.item, roots[0]) is None:
+        if stills.ensure(current.item, root) is None:
             return None
         self.refresh()
         return current.item.path

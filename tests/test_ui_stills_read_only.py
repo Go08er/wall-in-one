@@ -27,6 +27,7 @@ import contextlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -40,11 +41,12 @@ from tests import read_only_probe as ro  # noqa: E402
 from tests.gtk_helpers import settle, spin_until  # noqa: E402
 from tests.test_scenes import where_the_engine_looks  # noqa: E402
 from tests.test_stills_read_only import DISPLAY, FRAME, SCENE, read_only  # noqa: E402
+from tests.test_ui_codex030_round1b import profiles  # noqa: E402,F401 -- a fixture
 from tests.test_ui_next_window import toolkit  # noqa: E402,F401 -- a fixture: GTK, once
 from tests.test_ui_runtime import FakeWindow  # noqa: E402
 from wall_in_one import config, worker_processes  # noqa: E402
 from wall_in_one.library import pairing, stills  # noqa: E402
-from wall_in_one.library.model import Kind, MediaItem  # noqa: E402
+from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.app import Application  # noqa: E402
 from wall_in_one.ui.stills import StillMaker  # noqa: E402
 from wall_in_one.wallpaper import scenes  # noqa: E402
@@ -332,6 +334,40 @@ def test_regenerating_a_scene_still_says_which_folder_refused_and_why(
     expected = f"Could not regenerate the still for {SCENE}: {wording}: {DENIED}"
     assert reports == [expected, expected], "asked twice, answered twice"
     assert lines == reports
+
+
+@pytest.mark.parametrize("mine_too", [True, False], ids=["and-mine", "only-the-items"])
+def test_the_app_captures_only_where_no_items_author_writes(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mine_too: bool,
+) -> None:
+    """f6 W1: both of the app's capture paths took the first library folder, an item folder
+    copied in by hand too, whose still directory is not looked in: what was made there never
+    paired, and was made again after every scan (on 86840ed). They take the first library
+    folder no item's author writes in, and with none they capture nothing, as with no folder."""
+    profile = profiles()
+    application = profile.application
+    copied = tmp_path / "copied-in"
+    copied.mkdir()
+    (copied / "project.json").write_text('{"type": "video", "file": "v.mp4"}', encoding="utf-8")
+    mine = profile.rain.path.parent
+    roots = (copied, mine) if mine_too else (copied,)
+    scene = MediaItem(path=tmp_path / "200", kind=Kind.SCENE, size=0, mtime=0, scene="200")
+    application.session.adopt_library(Library(roots, (profile.rain, scene)))
+    asked: list[Path] = []
+    stills_maker = application._stills
+    monkeypatch.setattr(stills_maker, "request", lambda _items, root, _done: asked.append(root))
+    monkeypatch.setattr(
+        stills_maker, "regenerate_scene", lambda _item, root, _done: asked.append(root)
+    )
+
+    application._make_missing_stills()
+    regenerating = application.regenerate_scene_still(scene)
+
+    assert regenerating is mine_too
+    assert asked == ([mine, mine] if mine_too else [])
 
 
 # -- the maker on its own --------------------------------------------------------------------------

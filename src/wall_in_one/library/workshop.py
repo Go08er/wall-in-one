@@ -185,6 +185,21 @@ def in_content_tree(path: Path) -> bool:
     return inside
 
 
+def is_content_folder(path: Path) -> bool:
+    """Whether the resolved ``path`` is Steam's ``steamapps/workshop/content/431960`` folder itself.
+
+    Not one inside an item (`in_content_tree` of its parent): its items are its
+    subfolders, so what sits beside them is no item's. False when ``path``
+    can't be resolved.
+    """
+    resolved = _resolved(path)
+    if resolved is None:
+        return False
+    width = len(_CONTENT_PARTS)
+    tail = tuple(part.casefold() for part in resolved.parts[-width:])
+    return tail == _CONTENT_PARTS and not in_content_tree(resolved.parent)
+
+
 def item_folders_of(folder: Path, roots: Sequence[Path] = ()) -> tuple[Path, ...]:
     """Every folder, ``folder`` first, that holds a ``project.json``, resolved; empty if none.
 

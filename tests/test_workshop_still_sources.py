@@ -212,3 +212,123 @@ def test_the_pages_say_there_is_no_automatic_still_and_offer_no_regenerate(tree:
     note = real_state._still_note(web, None, False)
     assert "choose one by hand" in note and "preview" not in note
     assert real_state._still_note(items["200"], None, False) == "Captured from the scene"
+
+
+# -- f6 W1: no still directory an item's author could have shipped is looked in ----------------
+
+
+def _steam_scene(steam: Path, wid: str) -> Path:
+    folder = steam / "steamapps" / "workshop" / "content" / workshop.APP_ID / wid
+    folder.mkdir(parents=True)
+    (folder / "project.json").write_text(
+        json.dumps({"type": "scene", "title": wid, "file": "scene.json"})
+    )
+    for name in ("scene.json", "scene.pkg"):
+        (folder / name).write_bytes(b"x")
+    return folder
+
+
+def _authors_root(tmp_path: Path, steam: Path, place: str) -> Path:
+    """A library folder an item's author writes in: an item copied in by hand, or Steam's own."""
+    if place == "steam-item":
+        return _steam_scene(steam, "300")
+    root = tmp_path / "copied-in"
+    root.mkdir()
+    (root / "project.json").write_text(json.dumps({"type": "video", "file": "v.mp4"}))
+    return root
+
+
+@pytest.mark.parametrize("planted", ["file", "link"])
+@pytest.mark.parametrize("place", ["copied-in-item", "steam-item"])
+def test_a_still_an_items_author_could_have_shipped_is_not_paired(
+    tmp_path: Path, place: str, planted: str
+) -> None:
+    """``<root>/Wall-in-One/Automatic Stills`` was looked in under every library folder,
+    one that is an item folder too, so the item's author could ship any scene's still, or
+    any video's, or a link out to a file of yours (on 86840ed). It is not looked in now, and
+    nothing is captured there."""
+    steam = tmp_path / "steam"
+    _steam_scene(steam, "200")
+    root = _authors_root(tmp_path, steam, place)
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    video = mine / "clip.mp4"
+    video.write_bytes(b"x")
+    yours = tmp_path / "yours.png"
+    yours.write_bytes(PNG)
+    shipped = pairing.still_directory(root)
+    shipped.mkdir(parents=True)
+    for name in ("200.png", f"{pairing.automatic_still_stem(video)}.png"):
+        if planted == "link":
+            (shipped / name).symlink_to(yours)
+        else:
+            (shipped / name).write_bytes(PNG)
+
+    library = scan.scan([root], {}, include_workshop=True, workshop_roots=(steam,))
+    scene = next(item for item in library.items if item.scene == "200")
+    assert scene.paired_still is None
+    assert pairing.find_still(video, roots=(mine, root), labelled_workshop=False) is None
+    assert pairing.capture_root([root]) is None
+
+
+def test_a_library_folder_inside_an_item_folder_keeps_its_own_stills(tmp_path: Path) -> None:
+    """R42-12's design: a library folder of someone's own inside an item folder lists its own
+    files, and its still directory is theirs as well. Only the item folder itself is not."""
+    steam = tmp_path / "steam"
+    _steam_scene(steam, "200")
+    item = _authors_root(tmp_path, steam, "copied-in-item")
+    root = item / "mine"
+    root.mkdir()
+    capture = pairing.still_directory(root) / "200.png"
+    capture.parent.mkdir(parents=True)
+    capture.write_bytes(PNG)
+
+    library = scan.scan([root], {}, include_workshop=True, workshop_roots=(steam,))
+    assert next(item for item in library.items if item.scene == "200").paired_still == capture
+    assert pairing.capture_root([item, root]) == root
+
+
+def test_the_apps_capture_in_steams_own_content_folder_still_pairs(tmp_path: Path) -> None:
+    """A library folder that is Steam's ``431960`` folder itself: its still directory sits
+    beside the items (``431960/<id>/``), where none of them writes, so it is the app's."""
+    steam = tmp_path / "steam"
+    _steam_scene(steam, "200")
+    root = steam / "steamapps" / "workshop" / "content" / workshop.APP_ID
+    capture = pairing.still_directory(root) / "200.png"
+    capture.parent.mkdir(parents=True)
+    capture.write_bytes(PNG)
+
+    library = scan.scan([root], {}, include_workshop=True, workshop_roots=(steam,))
+    assert next(item for item in library.items if item.scene == "200").paired_still == capture
+    assert pairing.capture_root([root]) == root
+
+
+def test_captures_go_to_the_first_root_no_items_author_can_write(tmp_path: Path) -> None:
+    """One made under another would never pair, so it would be made again after every scan."""
+    steam = tmp_path / "steam"
+    copied = _authors_root(tmp_path, steam, "copied-in-item")
+    steams = _authors_root(tmp_path, steam, "steam-item")
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    assert pairing.capture_root([copied, steams, mine]) == mine
+    assert pairing.capture_root([mine, copied]) == mine
+    assert pairing.capture_root([copied, steams]) is None
+
+
+def test_a_removal_takes_nothing_from_a_still_directory_nothing_of_ours_is_in(
+    tmp_path: Path,
+) -> None:
+    """A scene's removal took ``<id>.png`` out of every root's still directory, an item
+    folder's too, where the author's file is: only one the app writes in is looked in now."""
+    from wall_in_one.library import manage
+
+    steam = tmp_path / "steam"
+    folder = _steam_scene(steam, "200")
+    copied = _authors_root(tmp_path, steam, "copied-in-item")
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    scene = MediaItem(path=folder, kind=Kind.SCENE, size=0, mtime=0, scene="200")
+
+    found = manage.pairing_artifact_paths(scene, (copied, mine))
+    assert pairing.still_directory(mine) / "200.png" in found
+    assert not any(path.is_relative_to(copied) for path in found), found

@@ -1044,6 +1044,9 @@ def pairing_artifact_paths(
         found.append(pairing_sidecar)
 
     for root in bounded:
+        if not pairing.still_directory_trusted(root):
+            # Nothing of ours is made there, and what is may be an item's (f6 W1).
+            continue
         generated = stills.automatic_destination(item, root)
         if generated is None:
             break

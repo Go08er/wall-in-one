@@ -44,6 +44,7 @@ from wall_in_one.library import (
     displays,
     favourites,
     manage,
+    pairing,
     pairings,
     playlists,
     removals,
@@ -7617,15 +7618,17 @@ class Application(Adw.Application):
         # write target.  Only Settings.roots records the first-run choice.
         if not self._settings.roots:
             return
-        roots = self._session.library.roots
-        if not roots:
+        # The first root whose still directory no Workshop item can write: one made
+        # in another would never be found (`pairing.capture_root`, f6 W1).
+        root = pairing.capture_root(self._session.library.roots)
+        if root is None:
             return
         # A web page while they are off is never played, so it gets no still.
         allowed = self._settings.allow_web_wallpapers
         wanted = [
             item for item in self._session.library.items if not workshop.web_off(item, allowed)
         ]
-        self._stills.request(wanted, roots[0], self._on_stills_made)
+        self._stills.request(wanted, root, self._on_stills_made)
 
     def regenerate_scene_still(self, item: MediaItem) -> bool:
         """Queue an explicit scene recapture; return whether it could start."""
@@ -7634,16 +7637,16 @@ class Application(Adw.Application):
         if not self._settings.roots:
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
-        roots = self._session.library.roots
+        root = pairing.capture_root(self._session.library.roots)
         if (
-            not roots
+            root is None
             or not item.scene
             or workshop.no_automatic_still(item, self._settings.preview_stills)
         ):
             return False
         if workshop.why_not_played(item, self._settings.allow_web_wallpapers):
             return False
-        self._stills.regenerate_scene(item, roots[0], self._on_stills_made)
+        self._stills.regenerate_scene(item, root, self._on_stills_made)
         return True
 
     def _on_stills_made(self, made: int) -> None:

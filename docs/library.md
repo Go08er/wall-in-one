@@ -57,8 +57,9 @@ saves the root, so configured users are not asked again.
 Three properties of the list are worth knowing:
 
 - **Order is kept, and the first one is special.** Downloads and generated
-  stills land under the first root. Settings marks it **Downloads & stills**;
-  the download button on any other folder makes that one the first.
+  stills land under the first root (stills under the first one a Workshop item
+  can't write in, below). Settings marks it **Downloads & stills**; the download
+  button on any other folder makes that one the first.
 - **Duplicates are dropped.** Paths are expanded and made absolute first, so
   `~/Pictures` and `/home/you/Pictures` count as one entry rather than putting
   every wallpaper in it into the rotation twice.
@@ -130,7 +131,7 @@ A video finds its still in this order:
    stop Wall-in-One making the video's own still (found by its name, step 2);
 2. its deterministic path-keyed file under
    `<each configured root>/Wall-in-One/Automatic Stills/`, searched in root
-   order;
+   order (one a Workshop item could have shipped is not searched, below);
 3. a verified legacy capture recorded by the upgrade migration;
 4. a sibling named `foo-still.png` -- or plain `foo.png` -- next to `foo.mp4`
    (not for Wallpaper Engine content, below).
@@ -140,6 +141,13 @@ Wallpaper Engine content is told by place, not by label: a file under a
 root), or with a `project.json` beside it (an item copied in by hand). Its author
 supplied everything beside it, so neither its sidecar nor a sibling picture is
 used: its still is the frame Wall-in-One takes from the video, or one you pick.
+For the same reason a library folder's own `Wall-in-One/Automatic Stills/` is
+not searched, and nothing is captured into it, when an item's author could have
+shipped it: when the library folder is an item folder (a `project.json` in it,
+or in the folders down to the stills), or lies inside one of the items in
+Steam's tree. A library folder that is Steam's `431960` folder itself keeps its
+own, which sits beside the items; one of yours inside an item folder keeps its
+own, as it lists its own files.
 
 Until a video has a still, playback can't show it: the wallpaper service's
 compiler leaves it out, and every page counts it the same way. Its Library
@@ -155,9 +163,10 @@ internal to their moving wallpaper. A sibling or manually added image is
 user-provided and remains a separate library item with its own Pairing, even
 while one or more moving wallpapers use it as their representative.
 
-New automatic captures are written under the first configured root. Existing
-deterministic captures are discovered under every configured root so changing
-root order does not strand an older representative.
+New automatic captures are written under the first configured root whose still
+directory no Workshop item could have shipped (above); with no such root none is
+made. Existing deterministic captures are discovered under every such root so
+changing root order does not strand an older representative.
 
 At app or wallpaper-service startup, verified older automatic captures are
 replaced with current captures, generating missing ones and rebinding the
@@ -188,7 +197,8 @@ the app does not write a pairing file beside a source outside that target root.
 A Wallpaper Engine scene gets its still from `linux-wallpaperengine`, rendered
 in a window at the size of a measured display (the wallpaper service's
 snapshot, or GTK's monitors when no service answers), as `<scene id>.png` in the
-first library folder's `Wall-in-One/Automatic Stills/`. A scene whose managed still is smaller than that display in both
+`Wall-in-One/Automatic Stills/` of the first library folder captures go to
+(above). A scene whose managed still is smaller than that display in both
 directions is captured again, so an old low-resolution still is replaced. A
 still is never judged against a guessed size or by its shape, and nothing is
 written without the engine or a measured display.
@@ -856,7 +866,7 @@ Nothing else is removed, whatever its name.
 | `$XDG_RUNTIME_DIR/wall-in-one.sock` | the control socket, 0600 |
 | `$XDG_RUNTIME_DIR/wall-in-one-runtime.sock` | Rust runtime commands and status, 0600; falls back to `$XDG_STATE_HOME/wall-in-one/wall-in-one-runtime.sock` when unset |
 | `$XDG_STATE_HOME/wall-in-one/runtime.toml` | atomically compiled, fully resolved service config |
-| `<each configured root>/Wall-in-One/Automatic Stills/` | generated stills are discovered under every root; new captures use the first root |
+| `<each configured root>/Wall-in-One/Automatic Stills/` | generated stills are discovered under every root, but one a Workshop item could have shipped; new captures use the first such root |
 | `<first root>/Wall-in-One/Wallhaven/`, `.../MotionBGS/` | downloads |
 | `<affected parent>/.wall-in-one-retained/entry-*` | private exact cleanup residue; zero tombstones and intact retired transaction records/candidates are expected (a transient claim container is removed once its discard empties it; an empty one may remain from 0.2.2 or earlier, or after an interrupted discard), while multiply linked files, sockets and unexpected evidence remain intact. Settings → Tidy up archives only the provably inert ones: empty claim containers untouched for an hour and empty, singly linked records |
 | `~/.config/wall-in-one/tidy-archive/<date>-<action>/` | what Settings → Tidy up moved or backed up, with `manifest.json` (where each item came from) and a README; Undo uses it. Nothing in it is ever deleted |

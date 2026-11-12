@@ -568,6 +568,35 @@ def still_directory(root: Path) -> Path:
     return root / MANAGED_PARENT / AUTOMATIC_STILLS_DIRECTORY
 
 
+def still_directory_trusted(root: Path) -> bool:
+    """Whether ``root``'s `still_directory` is out of every Workshop item author's reach (f6 W1).
+
+    Not in an item folder: a ``project.json`` in it or above it, up to ``root``
+    (`workshop.item_folder_of`), so a root that is an item copied in by hand has
+    none, and one nested in an item folder keeps its own, as it keeps the files
+    it lists (R42-12). Nor in an item of Steam's tree: below a
+    ``steamapps/workshop/content/431960`` folder, unless ``root`` is that folder
+    itself (`workshop.is_content_folder`), whose still directory sits beside the
+    items, where none of them writes. Another's stills are not looked at, and
+    no capture goes there (`capture_root`): an author could have shipped any
+    picture, or a link, under the name a still is looked for by.
+    """
+    directory = still_directory(root)
+    if workshop.item_folder_of(directory, (root,)) is not None:
+        return False
+    return not workshop.in_content_tree(directory) or workshop.is_content_folder(root)
+
+
+def capture_root(roots: Iterable[Path]) -> Path | None:
+    """The first of ``roots`` whose still directory is trusted (`still_directory_trusted`).
+
+    Where captures are made. One made in another would never be found, and so
+    would be made again. None when there is no such root: nothing is captured,
+    as with no root at all.
+    """
+    return next((root for root in roots if still_directory_trusted(root)), None)
+
+
 #: What this app names the stills it makes in `Automatic Stills`: a video's
 #: (`automatic_still_stem`), a scene's or web page's (`<id>`), a preset's capture.
 _GENERATED_NAME: Final = re.compile(r"video-[0-9a-f]{24}\.png|[0-9]+(?:-capture)?\.png")
@@ -617,8 +646,13 @@ def automatic_still_stem(video: Path) -> str:
 
 
 def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
-    """Look for a generated still under a managed `Automatic Stills` directory."""
+    """Look for a generated still under a managed `Automatic Stills` directory.
+
+    Only a trusted one (`still_directory_trusted`, f6 W1).
+    """
     for root in roots:
+        if not still_directory_trusted(root):
+            continue
         directory = still_directory(root)
         for extension in _still_extensions():
             candidate = directory / (automatic_still_stem(video) + extension)
@@ -674,12 +708,16 @@ def scene_still_stem(item: MediaItem) -> str:
 def scene_still(item: MediaItem, roots: Iterable[Path] = ()) -> Path | None:
     """The captured still for a Workshop scene (or a preset's), named by its id.
 
-    Only a still Wall-in-One made from the item itself. For a web page or a
-    preset of one with previews off (`workshop.no_automatic_still`) the caller
-    must not ask: a file of this name may be 0.4.1's preview-made picture.
+    Only a still Wall-in-One made from the item itself, so only in a still
+    directory no item's author can write (`still_directory_trusted`, f6 W1).
+    For a web page or a preset of one with previews off
+    (`workshop.no_automatic_still`) the caller must not ask: a file of this
+    name may be 0.4.1's preview-made picture.
     """
     stem = scene_still_stem(item)
     for root in roots:
+        if not still_directory_trusted(root):
+            continue
         directory = still_directory(root)
         for extension in _still_extensions():
             candidate = directory / f"{stem}{extension}"

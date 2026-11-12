@@ -19,7 +19,7 @@ import pytest
 
 from wall_in_one import config
 from wall_in_one import runtime_config as rc
-from wall_in_one.library import pairing, pairings, playlists, scan, workshop
+from wall_in_one.library import pairing, pairings, playlists, scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.session import Session
 
@@ -445,14 +445,15 @@ def test_captures_skip_a_folder_the_scan_couldnt_look_in_or_one_linked_inside(
 
 @pytest.mark.parametrize("folder", ["ordinary", "an-items-folder-now"])
 def test_an_old_selector_reads_a_capture_only_from_a_still_folder_that_is_trusted(
-    tmp_path: Path, folder: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str
 ) -> None:
     """f7 R42-16: 0.4.1's automatic selector names its capture, and a selector is trusted by
     where it and what it names are (both inside a library folder), so a capture under a
     `Wall-in-One` that is an item's folder now still paired through it, though W1 looks in that
     folder no longer (on c8b2fddb). It reads as none, as the folder's other captures do, and is
-    left on disk. A selector naming a picture of the person's own, and a pick of the capture
-    itself, still pair."""
+    left on disk; nor does it stop the video's own still, made in a folder that takes one. A
+    selector naming a picture of the person's own, and a pick of the capture itself, still
+    pair."""
     root = tmp_path / "library"
     root.mkdir()
     video, other = root / "clip.mp4", root / "other.mp4"
@@ -487,6 +488,21 @@ def test_an_old_selector_reads_a_capture_only_from_a_still_folder_that_is_truste
     picked = {identity.key: pairings.Pairing(identity=identity, still=capture, customized=True)}
     again = scan.scan([root], picked).find(video)
     assert again is not None and again.paired_still == capture
+    if trusted:
+        return
+
+    def render(_source: Path, output: Path, *_arguments: object, **_options: object) -> str:
+        output.write_bytes(PNG)
+        return ""
+
+    monkeypatch.setattr(stills, "is_available", lambda: True)
+    monkeypatch.setattr(stills, "_run", render)
+    second = tmp_path / "second"
+    second.mkdir()
+    made = stills.ensure(found, second)
+    assert made == stills.destination(video, second) and made.is_file()
+    rescanned = scan.scan([root, second], {}).find(video)
+    assert rescanned is not None and rescanned.paired_still == made
 
 
 @pytest.mark.parametrize("change", ["linked-to-an-items-folder", "made-by-a-first-capture"])

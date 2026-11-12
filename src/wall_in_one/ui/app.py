@@ -5804,8 +5804,9 @@ class Application(Adw.Application):
         done = self._web_off_guard()
         if done:
             with self._runtime_config_lock:
+                if done != self._web_off_explained:  # new words; the same ones said stay so (f9 F2)
+                    self._web_off_explained_said = False
                 self._web_off_explained = done
-                self._web_off_explained_said = False
                 self._web_off_explained_at = generation
         return done
 

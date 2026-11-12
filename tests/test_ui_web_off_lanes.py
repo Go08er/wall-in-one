@@ -41,7 +41,11 @@ from tests.test_ui_web_off_failed_publish import DOCUMENT, WEB, _steam_with_web 
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
-from wall_in_one.ui.app import _RuntimePublication  # noqa: E402
+from wall_in_one.ui.app import (  # noqa: E402
+    _RuntimeHealthRequest,
+    _RuntimeHealthResult,
+    _RuntimePublication,
+)
 
 READS_EIGHT = [4, 5, 6, 7, 8]
 OLDER = [4, 5]
@@ -463,6 +467,32 @@ def test_turning_web_wallpapers_back_on_ends_what_the_guard_did(
 
     assert application.publication_problem == FAILED
     assert said[-1] == FAILED, said
+
+
+def test_the_health_lane_says_the_guards_words_once_under_a_standing_refusal(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f9 F2 (Sonnet's shape): each guard run armed its words to be said again, even words it
+    had said, so every health publication ending in the same refusal said them anew and told
+    the window again, where 0b96417c said the standing problem once (3 toasts, on cab9225a).
+    The same words, said, stay said; the problem stands as it was."""
+    application, said, shown, _guard = _lane(profiles, monkeypatch)
+    refused = Response.failure("refused: a bound this service enforces")
+    heard: list[tuple[int, int]] = []
+    for _ in range(3):
+        publication = application._stopping_web_after_failure(
+            _RuntimePublication(5, response=refused)
+        )
+        request = _RuntimeHealthRequest(5, application.session.library, "{}", None)
+        application._apply_runtime_health_result(
+            _RuntimeHealthResult(request, publication=publication), 5
+        )
+        heard.append((len(said), len(shown)))
+
+    assert len(said) == 1 and STOPPED in said[0], said
+    assert heard[1:] == [heard[0], heard[0]], "nothing more said or shown"
+    assert STOPPED in application.publication_problem
 
 
 def test_a_held_document_without_web_is_left_alone(

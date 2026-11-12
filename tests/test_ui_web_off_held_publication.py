@@ -78,9 +78,11 @@ class Service:
         self.loaded = ALLOWING
 
     def send(self, verb: str, *_arguments: object, **_keywords: object) -> Response:
-        self.sent.append(verb)
+        # What a reload loads is in place before the verb is seen: the tests read `sent`
+        # on GTK while the lane sends, and judge `loaded` once "reload" is in it.
         if verb == "reload":
             self.loaded = paths.runtime_config_path().read_text(encoding="utf-8")
+        self.sent.append(verb)
         if verb == "status":
             return Response.success(
                 json.dumps(
@@ -437,9 +439,10 @@ def test_web_off_saved_just_before_a_removal_reaches_the_service_before_the_remo
     heard = service.send
 
     def send(verb: str, *arguments: object, **keywords: object) -> Response:
+        answer = heard(verb, *arguments, **keywords)
         if verb in {"reload", "stop", "quit"} and not reached:
             reached.append(time.monotonic())
-        return heard(verb, *arguments, **keywords)
+        return answer
 
     monkeypatch.setattr(client, "send_runtime", send)
     saved: list[object] = []

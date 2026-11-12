@@ -348,3 +348,18 @@ def test_a_link_inside_the_library_folder_is_still_not_written_through_and_is_sa
     assert len(heard) == 1 and "symbolic link" in heard[0].reason, heard
     assert rendered == [], "refused before ffmpeg was run"
     assert list(kept.rglob("*.png")) == []
+
+
+def test_a_refusal_nobody_asked_to_hear_is_logged_not_dropped(
+    tmp_path: Path, rendered: list[Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    """`stills.ensure` without ``refused`` (the paused video's still, `Session`) dropped the
+    folder's refusal; it is logged now (f7 P1)."""
+    root = tmp_path / "library"
+    root.mkdir()
+    clip = video(root)
+    (root / "kept").mkdir()
+    (root / "Wall-in-One").symlink_to(root / "kept")
+    with caplog.at_level("WARNING", logger=stills.LOGGER.name):
+        assert stills.ensure(item(clip, Kind.VIDEO), root) is None
+    assert any("could not safely retain" in record.getMessage() for record in caplog.records)

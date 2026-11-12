@@ -569,7 +569,7 @@ def still_directory(root: Path) -> Path:
 
 
 def still_directory_trusted(root: Path) -> bool:
-    """Whether ``root``'s `still_directory` is out of every Workshop item author's reach (f6 W1).
+    """Whether ``root``'s `still_directory` is out of every Workshop item author's reach (f7 W1).
 
     Not in an item folder: a ``project.json`` in it or above it, up to ``root``
     (`workshop.item_folder_of`), so a root that is an item copied in by hand has
@@ -648,7 +648,7 @@ def automatic_still_stem(video: Path) -> str:
 def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
     """Look for a generated still under a managed `Automatic Stills` directory.
 
-    Only a trusted one (`still_directory_trusted`, f6 W1).
+    Only a trusted one (`still_directory_trusted`, f7 W1).
     """
     for root in roots:
         if not still_directory_trusted(root):
@@ -709,7 +709,7 @@ def scene_still(item: MediaItem, roots: Iterable[Path] = ()) -> Path | None:
     """The captured still for a Workshop scene (or a preset's), named by its id.
 
     Only a still Wall-in-One made from the item itself, so only in a still
-    directory no item's author can write (`still_directory_trusted`, f6 W1).
+    directory no item's author can write (`still_directory_trusted`, f7 W1).
     For a web page or a preset of one with previews off
     (`workshop.no_automatic_still`) the caller must not ask: a file of this
     name may be 0.4.1's preview-made picture.

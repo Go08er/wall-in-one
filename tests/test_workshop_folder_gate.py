@@ -537,7 +537,7 @@ def test_one_scan_resolves_each_path_once(tmp_path: Path, monkeypatch: pytest.Mo
     library = scan.scan([root], records={})
     assert len(library.items) == 90
     # Each video, folder and the root once (100), and the root's still directory once
-    # (`pairing.still_directory_trusted`, f6 W1), not a few times per video for each of
+    # (`pairing.still_directory_trusted`, f7 W1), not a few times per video for each of
     # the walk's and the still readers' place tests (567 without the scan's memo).
     assert len(calls) == len(set(calls)), "a path resolved twice in one scan"
     assert len(calls) <= 90 + len(folders) + 1 + 1, len(calls)

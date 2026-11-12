@@ -343,7 +343,7 @@ def test_the_app_captures_only_where_no_items_author_writes(
     tmp_path: Path,
     mine_too: bool,
 ) -> None:
-    """f6 W1: both of the app's capture paths took the first library folder, an item folder
+    """f7 W1: both of the app's capture paths took the first library folder, an item folder
     copied in by hand too, whose still directory is not looked in: what was made there never
     paired, and was made again after every scan (on 86840ed). They take the first library
     folder no item's author writes in, and with none they capture nothing, as with no folder."""

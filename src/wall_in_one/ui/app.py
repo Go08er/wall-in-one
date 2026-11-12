@@ -7619,7 +7619,7 @@ class Application(Adw.Application):
         if not self._settings.roots:
             return
         # The first root whose still directory no Workshop item can write: one made
-        # in another would never be found (`pairing.capture_root`, f6 W1).
+        # in another would never be found (`pairing.capture_root`, f7 W1).
         root = pairing.capture_root(self._session.library.roots)
         if root is None:
             return

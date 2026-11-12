@@ -2394,7 +2394,7 @@ class Session:
             return None
         if current.item.paired_still is not None:
             return None
-        root = pairing.capture_root(self._library.roots)  # f6 W1
+        root = pairing.capture_root(self._library.roots)  # f7 W1
         if root is None:
             return None
         if stills.ensure(current.item, root) is None:

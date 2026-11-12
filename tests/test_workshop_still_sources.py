@@ -214,7 +214,7 @@ def test_the_pages_say_there_is_no_automatic_still_and_offer_no_regenerate(tree:
     assert real_state._still_note(items["200"], None, False) == "Captured from the scene"
 
 
-# -- f6 W1: no still directory an item's author could have shipped is looked in ----------------
+# -- f7 W1: no still directory an item's author could have shipped is looked in ----------------
 
 
 def _steam_scene(steam: Path, wid: str) -> Path:

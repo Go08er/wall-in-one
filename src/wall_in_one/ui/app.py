@@ -5633,16 +5633,29 @@ class Application(Adw.Application):
         *,
         wait_for_library: bool = False,
     ) -> _RuntimePublication:
-        """Serialize runtime publication with the physical removal boundary."""
-        with self._runtime_removal_lock:
-            publication = self._compile_runtime_until_current_locked(
-                wait_for_library=wait_for_library,
-            )
-        publication = self._stopping_web_after_failure(publication)
-        with self._runtime_config_lock:
-            if 0 < self._runtime_web_off_owed <= publication.generation:
-                # It landed, or what held it ran the guard: nothing is owed now.
-                self._runtime_web_off_owed = 0
+        """Serialize runtime publication with the physical removal boundary.
+
+        A job that raises is a failed publication like any other (f7 G9): numbered
+        as the newest request, so that web wallpapers going off, owed while it ran,
+        get the guard and are owed no longer, and a removal waiting for them
+        (`_removal_run`) doesn't wait out its bound.
+        """
+        try:
+            with self._runtime_removal_lock:
+                publication = self._compile_runtime_until_current_locked(
+                    wait_for_library=wait_for_library,
+                )
+        except Exception as error:  # the lane's worker boundary (`_finish_runtime_compile`'s)
+            with self._runtime_config_lock:
+                newest = self._runtime_authoring_generation
+            publication = _RuntimePublication(newest, error=f"runtime compiler failed: {error}")
+        try:
+            publication = self._stopping_web_after_failure(publication)
+        finally:
+            with self._runtime_config_lock:
+                if 0 < self._runtime_web_off_owed <= publication.generation:
+                    # It landed, or what held it ran the guard: nothing is owed now.
+                    self._runtime_web_off_owed = 0
         return publication
 
     def _stopping_web_after_failure(self, publication: _RuntimePublication) -> _RuntimePublication:

@@ -488,6 +488,35 @@ def test_web_off_saved_just_before_a_removal_reaches_the_service_before_the_remo
     assert application._runtime_web_off_owed == 0
 
 
+def test_a_lane_job_that_raises_with_web_off_owed_runs_the_guard_and_owes_nothing(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f7 G9: a job that raised left web off owed, unguarded, and every removal until the
+    next publication waited out its bound for it. It is a failed publication now: the guard
+    runs, nothing is owed, and the lane doesn't go round again for it."""
+    application = profiles().application
+    service = _web_on(application, False, monkeypatch)
+    real = application._compile_runtime_until_current_locked
+    jobs: list[object] = []
+
+    def raising_once(**keywords: Any) -> Any:
+        jobs.append(keywords)
+        if len(jobs) == 1:
+            raise RuntimeError("injected: the job failed")
+        return real(**keywords)
+
+    monkeypatch.setattr(application, "_compile_runtime_until_current_locked", raising_once)
+    _save(application, allow_web_wallpapers=False)
+    spin_until(lambda: "stop" in service.sent, AT_ONCE, what="the guard")
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publication")
+    _pump(1.0)
+    assert len(jobs) <= 2, f"{len(jobs)} jobs"
+    assert not service.allows_web(), service.sent
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+
+
 @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
 @pytest.mark.parametrize("rescan", ["ok", "raises"])
 def test_service_publishes_web_off_before_its_rescan(

@@ -147,7 +147,8 @@ KEY_FAILED: Final = "failed"
 #: Where generated stills go, said where the first folder isn't it (f7 G5).
 STILLS_ELSEWHERE: Final = (
     "Generated stills go to the first folder Wall-in-One can trust with them: one that is "
-    "there, and that no Workshop item could write in (docs/library.md)"
+    "there and can be read, that isn't a Wallpaper Engine item's folder or inside one, and "
+    "whose Wall-in-One folder isn't a link"
 )
 
 

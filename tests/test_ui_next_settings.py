@@ -897,6 +897,7 @@ def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
         row = settings_page.SettingsPage._folder_row(page, index, folders, False)  # type: ignore[arg-type]
         shown = row.get_tooltip_text()
         assert (shown is None) if tip is None else (shown or "").startswith(tip), shown
+        assert "docs/" not in (shown or ""), "a file a packaged install hasn't got (f7 H7)"
 
     dialog = settings_page.SettingsPage.confirm_remove(page, "/w/first")  # type: ignore[arg-type]
     assert dialog is not None

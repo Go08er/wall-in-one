@@ -565,6 +565,99 @@ def test_a_guard_still_running_doesnt_put_back_what_a_later_clear_ended(
         assert not any(words in report for report in said), said
 
 
+def _published(application: Any, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Each publication `_publish_again_when_presets_become_readable` asks for."""
+    published: list[bool] = []
+
+    def publish() -> bool:
+        published.append(True)
+        return True
+
+    monkeypatch.setattr(application, "_publish_runtime_for_context", publish)
+    return published
+
+
+@pytest.mark.parametrize("seen", [False, True], ids=["schema-8-new-to-it", "schema-8-seen-before"])
+def test_a_schema_eight_service_the_guard_quit_is_published_to_once_started_again(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    seen: bool,
+) -> None:
+    """R42-24 (Codex's real-guard shape): the real guard writes the document that plays
+    nothing, the schema-8 service refuses to load it, and it is told to quit; its words say to
+    start it again. Started again it was published to only when schema 8 was new to the app,
+    so after one already seen the words stayed (on 19e7ac7b). A new instance while the words
+    stand is published to, once; the same instance polled again is not."""
+    application, _said, _shown, _guard = _lane(profiles, monkeypatch)
+    _steam_with_web()
+    paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.runtime_config_path().write_text(ALLOWING, encoding="utf-8")
+    service = {"running": True, "instance": "before-the-quit", "allows_web": True}
+    sent: list[str] = []
+
+    def schema_eight(verb: str, *_arguments: object, **_keywords: object) -> Response:
+        if not service["running"]:
+            raise client.NotRunningError("the service quit")
+        sent.append(verb)
+        if verb == "status":
+            return Response.success(
+                json.dumps(
+                    {
+                        "status_version": 2,
+                        "supported_config_schemas": READS_EIGHT,
+                        "runtime_instance": service["instance"],
+                        "allow_web_wallpapers": service["allows_web"],
+                        "playback_state": "playing",
+                    }
+                )
+            )
+        if verb == "reload":
+            return Response.failure("refused: it won't load the document that plays nothing")
+        if verb == "quit":
+            service["running"] = False
+        return Response.success()
+
+    def status() -> dict[str, object]:
+        decoded: dict[str, object] = json.loads(schema_eight("status").message)
+        return decoded
+
+    monkeypatch.setattr(client, "send_runtime", schema_eight)
+    monkeypatch.setattr(
+        application, "_web_off_guard", lambda: Application._web_off_guard(application)
+    )
+    if seen:
+        application._publish_again_when_presets_become_readable(status())
+    _settled(application, _ran(application, 1, FAILED), 1)
+    assert [verb for verb in sent if verb != "status"] == ["stop", "reload", "quit"]
+    words = application._web_off_explained
+    assert "couldn\u2019t be given a document that plays nothing" in words, words
+    _settled(application, _RuntimePublication(2, unavailable=True), 2)
+    assert words in application.publication_problem
+    published = _published(application, monkeypatch)
+    service.update(running=True, instance="started-again", allows_web=False)
+
+    application._publish_again_when_presets_become_readable(status())
+    application._publish_again_when_presets_become_readable(status())
+
+    assert published == [True]
+
+
+def test_a_service_started_again_with_nothing_standing_is_not_published_to_for_it(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R42-24's control: a new instance is a reason to publish only while the guard's words
+    stand."""
+    application, _said, _shown, _guard = _lane(profiles, monkeypatch)
+    started = {"status_version": 2, "supported_config_schemas": READS_EIGHT}
+    application._publish_again_when_presets_become_readable({**started, "runtime_instance": "a"})
+    published = _published(application, monkeypatch)
+
+    application._publish_again_when_presets_become_readable({**started, "runtime_instance": "b"})
+
+    assert published == []
+
+
 def test_a_held_document_without_web_is_left_alone(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

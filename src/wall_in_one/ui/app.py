@@ -7069,9 +7069,11 @@ class Application(Adw.Application):
         self._dials_readable_seen = dials
         eight = runtime_config.nothing_to_play_supported(status)
         instance = status.get("runtime_instance")
+        restarted = False
         if isinstance(instance, str):
             if self._runtime_instance_seen is not None and instance != self._runtime_instance_seen:
                 self._left_out_retried = False
+                restarted = True
             self._runtime_instance_seen = instance
         # Left out of the last publication, which compiled without a
         # confirmation (a status that timed out, say, or units that couldn't
@@ -7099,6 +7101,11 @@ class Application(Adw.Application):
         newly_eight = eight and not self._nothing_readable_seen
         self._nothing_readable_seen = eight
         if newly_eight and (self.publication_problem or self._settings.allow_web_wallpapers):
+            self._publish_runtime_for_context()
+            return
+        # A service started again while what the web-off guard did stands (it says to
+        # start it), whatever it reads: published to, once for this instance (R42-24).
+        if restarted and self._web_off_explained:
             self._publish_runtime_for_context()
             return
         if (newly or retry) and any(

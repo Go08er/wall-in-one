@@ -5481,20 +5481,27 @@ class Application(Adw.Application):
         GLib.idle_add(callback, future, priority=COMPLETION_PRIORITY)  # type: ignore[call-arg]
 
     def _ensure_runtime_compile_queued(self) -> None:
-        """Start at most one coalescing compiler job for the latest request."""
+        """Start at most one coalescing compiler job for the latest request.
+
+        Web wallpapers going off are owed a job of their own, request or none
+        (f7 G1): a removal's prepare withdraws the request, and the job then
+        defers to the removal and runs the guard (`_stopping_web_after_failure`).
+        """
         with self._runtime_config_lock:
             if self._runtime_shutdown or self._runtime_compile_pending:
                 return
             request = self._runtime_authoring_request
             withdrawn = request is None
-            if request is None or (
-                request.generation <= self._runtime_compiled_generation
-                and not self._runtime_publication_held
-            ):
-                request = None
-            else:
+            due = self._runtime_web_off_owed != 0 or (
+                request is not None
+                and (
+                    request.generation > self._runtime_compiled_generation
+                    or self._runtime_publication_held
+                )
+            )
+            if due:
                 self._runtime_compile_pending = True
-        if request is None:
+        if not due:
             if withdrawn:
                 self._settle_publication_without_request()
             return
@@ -6416,7 +6423,12 @@ class Application(Adw.Application):
             self._runtime_compile_pending = False
             latest = self._runtime_authoring_request
             current = latest is None or latest.generation <= publication.generation
-            again = latest is not None and latest.generation > publication.generation
+            # Or web wallpapers went off while this ran, too late for it, and their
+            # request was withdrawn since (a removal's prepare): still owed a job (f7
+            # G1). One started while they are owed always clears it, so this ends.
+            again = (
+                latest is not None and latest.generation > publication.generation
+            ) or self._runtime_web_off_owed != 0
             retry_terminal_scan = (
                 publication.deferred
                 and not self._runtime_library_scan_pending

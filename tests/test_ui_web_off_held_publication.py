@@ -48,6 +48,7 @@ from wall_in_one.control import client, server  # noqa: E402
 from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import scan as scan_module  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
+from wall_in_one.ui import app as app_module  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
     _Commands,
     _RuntimeInventoryInvalidError,
@@ -486,6 +487,68 @@ def test_web_off_saved_just_before_a_removal_reaches_the_service_before_the_remo
     assert not service.allows_web(), service.sent
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
     assert application._runtime_web_off_owed == 0
+
+
+@pytest.mark.parametrize("hold", [0.5, 3.0])
+def test_web_off_owed_while_a_finished_jobs_completion_waits_still_gets_a_job(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    hold: float,
+) -> None:
+    """f7 G1: a job J done on the lane, its completion not yet run on GTK, so the lane counts
+    as busy. Web off saved then queued no job of its own, the removal's prepare in the same
+    tick withdrew the request, and J's completion found none to follow: nothing published or
+    guarded web off, and the removal waited out its 10 s for it (on c41700b9; on 86840ed the
+    removal didn't wait). Owed web off now gets a job of its own: it reaches the service as
+    soon as J's completion lands, and the removal goes on then."""
+    profile = profiles()
+    application = profile.application
+    service = _web_on(application, False, monkeypatch)
+    real_post = app_module.Application._post_runtime_completion
+    held: list[tuple[Any, Any]] = []
+
+    def hold_the_first(future: Any, callback: Any) -> None:
+        if held:
+            real_post(future, callback)
+        else:
+            held.append((future, callback))
+
+    monkeypatch.setattr(
+        app_module.Application, "_post_runtime_completion", staticmethod(hold_the_first)
+    )
+    real_run = session_module.RemovalPlan.run
+    ran: list[float] = []
+
+    def run(plan: Any) -> Any:
+        ran.append(time.monotonic())
+        return real_run(plan)
+
+    monkeypatch.setattr(session_module.RemovalPlan, "run", run)
+    assert application._publish_runtime_for_context()  # J
+    spin_until(lambda: bool(held) and held[0][0].done(), AT_ONCE, what="J done on the lane")
+    assert application._runtime_compile_pending
+    # What the service held before J: a document that allows web wallpapers.
+    service.loaded = ALLOWING
+    paths.runtime_config_path().write_text(ALLOWING, encoding="utf-8")
+    service.sent.clear()
+    removed: list[object] = []
+    started = time.monotonic()
+    assert application.update_settings_async(allow_web_wallpapers=False)
+    assert application.remove_item_async(profile.rain, trash=True, finish=removed.append)
+    _pump(hold)
+    future, callback = held[0]
+    GLib.idle_add(callback, future, priority=GLib.PRIORITY_DEFAULT)
+    spin_until(lambda: bool(removed), AT_ONCE, what="the removal")
+    heard = next(
+        (index for index, verb in enumerate(service.sent) if verb in {"reload", "stop", "quit"}),
+        None,
+    )
+    assert heard is not None, service.sent
+    assert ran and ran[0] - started < hold + 2.0, f"the removal waited {ran[0] - started:.1f}s"
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publications")
+    assert not service.allows_web(), service.sent
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
 def test_a_lane_job_that_raises_with_web_off_owed_runs_the_guard_and_owes_nothing(

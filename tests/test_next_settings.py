@@ -407,6 +407,28 @@ def test_folder_checks_run_off_the_main_thread_and_a_suggestion_is_never_added(
     assert settings.folder_list() == () and backend.saves == [], "suggested, never added"
 
 
+def test_each_folder_says_whether_stills_go_in_it_as_the_scan_judged(
+    backend: FakeApplication, part: tuple[RealSettings, Host], tmp_path: Path
+) -> None:
+    """f7 G5: what the rows' stills mark reads (`Folder.takes_stills`): the scan's verdict
+    for exactly the folders shown (`Library.capture_roots`), and nothing while it has none."""
+    settings, _host = part
+    first = backend.durable.roots[0]
+    second = tmp_path / "second"
+    second.mkdir()
+    roots = (first, second)
+    backend.durable = replace(backend.durable, roots=roots)
+    session = backend.session
+    session.adopt_library(Library(roots, ()), reconcile_workshop=False)
+    assert [folder.takes_stills for folder in settings.folder_list()] == [None, None]
+    session.adopt_library(Library(roots, (), capture_roots=(second,)), reconcile_workshop=False)
+    assert [folder.takes_stills for folder in settings.folder_list()] == [False, True]
+    session.adopt_library(Library((first,), (), capture_roots=(first,)), reconcile_workshop=False)
+    assert [folder.takes_stills for folder in settings.folder_list()] == [None, None], (
+        "judged for other folders"
+    )
+
+
 # -- the Wallhaven key ----------------------------------------------------------------------
 
 

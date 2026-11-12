@@ -81,6 +81,7 @@ from wall_in_one.ui.next.settings_state import (
     WHEN_HIDDEN,
     Folder,
     SettingsAccess,
+    make_first_tip,
 )
 from wall_in_one.ui.next.state import AppState
 from wall_in_one.ui.plain_text import markup_text, plain
@@ -624,7 +625,7 @@ class SettingsPage(Page):
                 row.set_tooltip_text(f"Generated stills go here. {STILLS_ELSEWHERE}")
             first = widgets.icon_button(
                 "folder-download-symbolic",
-                "Make this the download and generated-still folder",
+                make_first_tip(folder.takes_stills),
                 lambda *_: self.make_download_folder(folder.path),
                 "flat",
             )

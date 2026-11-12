@@ -152,6 +152,15 @@ STILLS_ELSEWHERE: Final = (
 )
 
 
+def make_first_tip(takes_stills: bool | None) -> str:
+    """What a folder's "make it the first" button says moves to it: the generated stills
+    too only when they would go there, as the scan judged (`Folder.takes_stills`; None
+    while it hasn't, when they are expected to, f7 R42-21)."""
+    if takes_stills is False:
+        return "Make this the download folder"
+    return "Make this the download and generated-still folder"
+
+
 @dataclass(frozen=True, slots=True)
 class Folder:
     """One library folder. The first receives downloads; generated stills go to the

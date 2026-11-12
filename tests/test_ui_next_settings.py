@@ -861,23 +861,38 @@ def test_the_classic_previews_sub_option_follows_web_wallpapers(
 
 
 @pytest.mark.parametrize(
-    ("taking", "tips", "removing_the_first"),
+    ("taking", "tips", "removing_the_first", "make_the_second_first"),
     [
-        (None, ["Downloads and generated stills go here", None], "and generated stills will go to"),
+        (
+            None,
+            ["Downloads and generated stills go here", None],
+            "and generated stills will go to",
+            "Make this the download and generated-still folder",
+        ),
         (
             (False, True),
             ["Downloads go here.", "Generated stills go here."],
             "and generated stills",
+            "Make this the download and generated-still folder",
         ),
-        ((False, False), ["Downloads go here.", None], "Generated stills stop until you add"),
+        (
+            (False, False),
+            ["Downloads go here.", None],
+            "Generated stills stop until you add",
+            "Make this the download folder",
+        ),
     ],
     ids=["not-judged", "the-second-takes-them", "none-takes-them"],
 )
 def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
-    taking: tuple[bool, bool] | None, tips: list[str | None], removing_the_first: str
+    taking: tuple[bool, bool] | None,
+    tips: list[str | None],
+    removing_the_first: str,
+    make_the_second_first: str,
 ) -> None:
     """f7 G5: the badge, its tooltip and the remove dialog said the first folder gets the
-    stills whatever the scan found; one a Workshop item could write in gets none (f7 W1)."""
+    stills whatever the scan found; one a Workshop item could write in gets none (f7 W1).
+    The button that makes a folder the first said it would get them too (R42-21)."""
     from wall_in_one.ui.next import settings as settings_page
     from wall_in_one.ui.next.settings_state import Folder
 
@@ -898,6 +913,12 @@ def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
         shown = row.get_tooltip_text()
         assert (shown is None) if tip is None else (shown or "").startswith(tip), shown
         assert "docs/" not in (shown or ""), "a file a packaged install hasn't got (f7 H7)"
+    second = settings_page.SettingsPage._folder_row(page, 1, folders, False)  # type: ignore[arg-type]
+    assert [
+        button.get_tooltip_text()
+        for button in _descendants(second)
+        if isinstance(button, Gtk.Button) and button.get_icon_name() == "folder-download-symbolic"
+    ] == [make_the_second_first]
 
     dialog = settings_page.SettingsPage.confirm_remove(page, "/w/first")  # type: ignore[arg-type]
     assert dialog is not None

@@ -32,7 +32,7 @@ from wall_in_one.ui.next.catalog import (
     WEB_WALLPAPERS_TITLE,
 )
 from wall_in_one.ui.next.prefs import UiPrefsKeeper
-from wall_in_one.ui.next.settings_state import STILLS_ELSEWHERE
+from wall_in_one.ui.next.settings_state import STILLS_ELSEWHERE, make_first_tip
 from wall_in_one.ui.palette_browser import STRIP_TOKENS, swatch
 from wall_in_one.ui.plain_text import plain
 from wall_in_one.ui.setup_section import SetupSection
@@ -257,7 +257,7 @@ class PreferencesPage(Adw.PreferencesPage):
                     row.set_tooltip_text(f"Generated stills go here. {STILLS_ELSEWHERE}")
                 destination = Gtk.Button(
                     icon_name="folder-download-symbolic",
-                    tooltip_text="Make this the download and generated-still folder",
+                    tooltip_text=make_first_tip(None if judged is None else root in judged),
                 )
                 destination.set_valign(Gtk.Align.CENTER)
                 destination.add_css_class("flat")

@@ -61,7 +61,8 @@ Three properties of the list are worth knowing:
   a Workshop item can't write in, below). Settings marks it **Downloads &
   stills**, or **Downloads** when the stills go to another, which it marks
   **Stills** once a scan has found that; the download button on any other folder
-  makes that one the first.
+  makes that one the first (its tooltip says whether the stills would go there
+  too).
 - **Duplicates are dropped.** Paths are expanded and made absolute first, so
   `~/Pictures` and `/home/you/Pictures` count as one entry rather than putting
   every wallpaper in it into the rotation twice.

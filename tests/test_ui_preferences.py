@@ -149,20 +149,25 @@ def test_folder_labels_preserve_paths_order_and_missing_destination(
             assert (root / "wallpaper.png").read_bytes() == b"existing wallpaper"
 
 
+BOTH = "Make this the download and generated-still folder"
+DOWNLOADS = "Make this the download folder"
+
+
 @pytest.mark.parametrize(
-    ("judged", "titles"),
+    ("judged", "titles", "make_first"),
     [
-        (None, ["first · Downloads & generated stills", "second", "third"]),
-        ((1,), ["first · Downloads", "second · Generated stills", "third"]),
-        ((), ["first · Downloads", "second", "third"]),
+        (None, ["first · Downloads & generated stills", "second", "third"], [BOTH, BOTH]),
+        ((1,), ["first · Downloads", "second · Generated stills", "third"], [BOTH, DOWNLOADS]),
+        ((), ["first · Downloads", "second", "third"], [DOWNLOADS, DOWNLOADS]),
     ],
     ids=["not-judged", "the-second-takes-them", "none-takes-them"],
 )
 def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
-    tmp_path: Path, judged: tuple[int, ...] | None, titles: list[str]
+    tmp_path: Path, judged: tuple[int, ...] | None, titles: list[str], make_first: list[str]
 ) -> None:
     """f7 G5: the first folder was said to get the stills whatever the scan found; one a
-    Workshop item could write in (or one not there) gets none (f7 W1, G8)."""
+    Workshop item could write in (or one not there) gets none (f7 W1, G8). The button that
+    makes a folder the first said it would get them too (R42-21)."""
     from wall_in_one.library.model import Library
 
     roots = tuple(tmp_path / name for name in ("first", "second", "third"))
@@ -182,6 +187,12 @@ def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
 
     rows = [row for row in page._root_rows if isinstance(row, Adw.ActionRow)]
     assert [row.get_title() for row in rows] == titles
+    assert [
+        button.get_tooltip_text()
+        for row in rows
+        for button in _buttons(row)
+        if button.get_icon_name() == "folder-download-symbolic"
+    ] == make_first
 
 
 def test_adaptive_default_copy_and_saved_setting_preserve_explicit_pairing_choices(

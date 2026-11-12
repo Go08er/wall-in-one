@@ -584,3 +584,27 @@ def test_a_still_is_published_only_where_the_folder_takes_stills_then(
         assert left <= {file_io.RETAINED_ENTRY_DIRECTORY}, left
         if left:
             _retained_claims(automatic)  # empty claims and tombstones only
+
+
+def test_a_library_folder_that_cant_be_reached_is_the_folders_refusal_and_is_said(
+    tmp_path: Path, rendered: list[Path]
+) -> None:
+    """f7 P1's refusal, now that R42-28 makes the folders through the library folder: one
+    the app can't reach (a permission on the way) is still the folder's refusal, which the
+    still maker says, not a plain failure; nothing is rendered."""
+    if os.geteuid() == 0:
+        pytest.skip("permission bits don't bind root")
+    gate = tmp_path / "gate"
+    root = gate / "library"
+    root.mkdir(parents=True)
+    clip = video(tmp_path)
+    heard: list[stills.StillFolderError] = []
+    gate.chmod(0)
+    try:
+        made = stills.ensure(item(clip, Kind.VIDEO), root, refused=heard.append)
+    finally:
+        gate.chmod(0o700)
+
+    assert (made, rendered) == (None, [])
+    assert len(heard) == 1 and heard[0].reason == "Permission denied", heard
+    assert everything_under(root) == []

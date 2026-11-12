@@ -229,9 +229,14 @@ def _steam_scene(steam: Path, wid: str) -> Path:
 
 
 def _authors_root(tmp_path: Path, steam: Path, place: str) -> Path:
-    """A library folder an item's author writes in: an item copied in by hand, or Steam's own."""
+    """A library folder an item's author writes in: an item copied in by hand, one of Steam's,
+    or a folder inside one of Steam's (with no ``project.json`` of its own)."""
     if place == "steam-item":
         return _steam_scene(steam, "300")
+    if place == "inside-a-steam-item":
+        inside = _steam_scene(steam, "300") / "assets"
+        inside.mkdir()
+        return inside
     root = tmp_path / "copied-in"
     root.mkdir()
     (root / "project.json").write_text(json.dumps({"type": "video", "file": "v.mp4"}))
@@ -239,7 +244,7 @@ def _authors_root(tmp_path: Path, steam: Path, place: str) -> Path:
 
 
 @pytest.mark.parametrize("planted", ["file", "link"])
-@pytest.mark.parametrize("place", ["copied-in-item", "steam-item"])
+@pytest.mark.parametrize("place", ["copied-in-item", "steam-item", "inside-a-steam-item"])
 def test_a_still_an_items_author_could_have_shipped_is_not_paired(
     tmp_path: Path, place: str, planted: str
 ) -> None:

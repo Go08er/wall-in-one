@@ -416,6 +416,33 @@ def test_the_app_reads_where_to_capture_from_the_scan_never_the_disk(
     assert asked == [root, root]
 
 
+def test_regenerate_says_once_why_when_no_library_folder_takes_stills(
+    profiles: Callable[..., Any],  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """f7 G4: with folders, but none a still can go in, Regenerate said nothing in the new
+    window and "Choose a library directory" in the classic one (on c41700b9). Both say why."""
+    from types import SimpleNamespace
+
+    from wall_in_one.library import scan as scan_module
+    from wall_in_one.ui.app import NO_STILLS_FOLDER
+    from wall_in_one.ui.pairings_page import PairingsPage
+
+    profile = profiles()
+    application = profile.application
+    copied = tmp_path / "copied-in"
+    copied.mkdir()
+    (copied / "project.json").write_text('{"type": "video", "file": "v.mp4"}', encoding="utf-8")
+    application.session.adopt_library(scan_module.scan((copied,), {}))
+    scene = MediaItem(path=tmp_path / "200", kind=Kind.SCENE, size=0, mtime=0, scene="200")
+    before = len(profile.window.reports)
+
+    page = SimpleNamespace(_web_off_for=lambda _item: False, _app=application)
+    PairingsPage._regenerate_scene(page, scene)  # type: ignore[arg-type]
+
+    assert profile.window.reports[before:] == [NO_STILLS_FOLDER]
+
+
 # -- the maker on its own --------------------------------------------------------------------------
 
 

@@ -1271,7 +1271,6 @@ class PairingsPage(Gtk.Box):
                 "\u2192 Library to take its still"
             )
             return
+        # When it can't start, the application says why (f7 G4).
         if self._app.regenerate_scene_still(item):
             self._app.window_report("Regenerating the automatic scene still in the background")
-        else:
-            self._app.window_report("Choose a library directory before generating scene stills")

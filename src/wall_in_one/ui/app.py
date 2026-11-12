@@ -341,6 +341,13 @@ SHUTDOWN_OLDER_SERVICE_QUIT_SECONDS: Final = 1.0
 SHUTDOWN_WORKSHOP_LOOK_SECONDS: Final = 2.0
 #: How often a wait in that step looks whether a second Ctrl-C has ended it.
 SHUTDOWN_INTERRUPT_POLL_SECONDS: Final = 0.1
+#: What Regenerate says when there are library folders but none a still can go in
+#: (`pairing.library_capture_root`, f7 G4).
+NO_STILLS_FOLDER: Final = (
+    "No still can be made: none of your library folders can take Wall-in-One\u2019s "
+    "stills (each is not there, is or lies in a Workshop item\u2019s folder, or reaches its "
+    "Wall-in-One folder through a link). Add a folder of your own in Settings \u2192 Library"
+)
 #: How long a removal waits, at most, for web wallpapers going off to reach the
 #: service before it takes the runtime lane (`Application._removal_run`).
 REMOVAL_WEB_OFF_WAIT_SECONDS: Final = 10.0
@@ -7660,11 +7667,11 @@ class Application(Adw.Application):
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
         root = pairing.library_capture_root(self._session.library)  # read, not looked up (G2)
-        if (
-            root is None
-            or not item.scene
-            or workshop.no_automatic_still(item, self._settings.preview_stills)
-        ):
+        if root is None:
+            # Folders there are, but none a still can go in (f7 G4).
+            self.window_report(NO_STILLS_FOLDER)
+            return False
+        if not item.scene or workshop.no_automatic_still(item, self._settings.preview_stills):
             return False
         if workshop.why_not_played(item, self._settings.allow_web_wallpapers):
             return False

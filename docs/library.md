@@ -133,7 +133,9 @@ A video finds its still in this order:
 
 1. a `<video>.wall-in-one.json` sidecar naming one. It counts only when the
    video's folder and the still it names are both inside a configured library
-   root, and never beside Wallpaper Engine content (see below). One that
+   root, and never beside Wallpaper Engine content (see below); one naming a
+   still Wall-in-One made (as 0.4.1's did) counts only while that still's
+   `Automatic Stills` is searched (step 2). One that
    doesn't count is ignored: it is not read, replaced or deleted, and it does not
    stop Wall-in-One making the video's own still (found by its name, step 2);
 2. its deterministic path-keyed file under

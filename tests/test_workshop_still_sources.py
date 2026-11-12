@@ -441,3 +441,46 @@ def test_captures_skip_a_folder_the_scan_couldnt_look_in_or_one_linked_inside(
         gate.chmod(0o700)
     assert library.capture_roots == (mine,)
     assert pairing.still_directory_trusted(linked), "still read: it stays inside its folder"
+
+
+@pytest.mark.parametrize("folder", ["ordinary", "an-items-folder-now"])
+def test_an_old_selector_reads_a_capture_only_from_a_still_folder_that_is_trusted(
+    tmp_path: Path, folder: str
+) -> None:
+    """f7 R42-16: 0.4.1's automatic selector names its capture, and a selector is trusted by
+    where it and what it names are (both inside a library folder), so a capture under a
+    `Wall-in-One` that is an item's folder now still paired through it, though W1 looks in that
+    folder no longer (on c8b2fddb). It reads as none, as the folder's other captures do, and is
+    left on disk. A selector naming a picture of the person's own, and a pick of the capture
+    itself, still pair."""
+    root = tmp_path / "library"
+    root.mkdir()
+    video, other = root / "clip.mp4", root / "other.mp4"
+    for clip in (video, other):
+        clip.write_bytes(b"x")
+    capture = pairing.still_directory(root) / f"{pairing.automatic_still_stem(video)}.png"
+    capture.parent.mkdir(parents=True)
+    capture.write_bytes(PNG)
+    mine = root / "mine.png"
+    mine.write_bytes(PNG)
+    for clip, still in ((video, capture), (other, mine)):
+        clip.with_name(clip.name + pairing.SIDECAR_SUFFIX).write_text(
+            json.dumps({pairing.SIDECAR_STILL_KEY: str(still)})
+        )
+    if folder == "an-items-folder-now":
+        (root / pairing.MANAGED_PARENT / "project.json").write_text(
+            json.dumps({"type": "web", "file": "index.html"})
+        )
+
+    library = scan.scan([root], {})
+    trusted = folder == "ordinary"
+    assert pairing.still_directory_trusted(root) is trusted
+    assert library.find(video).paired_still == (capture if trusted else None)
+    assert pairing.find_still(video, (root,), labelled_workshop=False) == (
+        capture if trusted else None
+    )
+    assert library.find(other).paired_still == mine
+    assert capture.is_file()
+    identity = pairings.Identity.of(library.find(video))
+    picked = {identity.key: pairings.Pairing(identity=identity, still=capture, customized=True)}
+    assert scan.scan([root], picked).find(video).paired_still == capture

@@ -394,14 +394,19 @@ def read_sidecar(video: Path, roots: Iterable[Path]) -> Path | None:
     one beside Workshop content (`workshop.is_workshop_content`, decided by
     place here, whatever the caller labelled it) is the author's, and one is
     trusted by location (see `_trusted_location`) only when the video's folder
-    and the named still are both inside a root. Not for deciding what may be
-    destroyed: `read_sidecar_strict`.
+    and the named still are both inside a root. One naming a still this app made
+    (`is_generated_still`, as 0.4.1's automatic selectors do) is read only while
+    that still's directory is trusted (`still_directory_trusted`), as the
+    directory's other stills are (f7 R42-16); the still is left where it is. Not
+    for deciding what may be destroyed: `read_sidecar_strict`.
     """
     roots = tuple(roots)
     if workshop.is_workshop_content(video, labelled=False, roots=roots):
         return None
     chosen = _selected_still(video, strict=False)
     if chosen is None or not _trusted_location(video, chosen, roots):
+        return None
+    if is_generated_still(chosen) and not still_directory_trusted(chosen.parents[2]):
         return None
     return chosen
 

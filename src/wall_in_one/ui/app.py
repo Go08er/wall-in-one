@@ -1143,6 +1143,9 @@ class Application(Adw.Application):
         #: replaced before it is (R42-22). Written under `_runtime_config_lock`.
         self._web_off_explained = ""
         self._web_off_explained_said = True
+        #: The generation of the publication whose guard said them: one as new that
+        #: gets through takes them away, said or not (f9 F1).
+        self._web_off_explained_at = 0
         #: What the runtime document was built without when this process last
         #: compiled it (`runtime_config.LeftOut`); None before the first
         #: compile. Written by whichever lane compiled, under
@@ -5709,7 +5712,7 @@ class Application(Adw.Application):
         )
         try:
             if not self._runtime_shutdown:
-                self._explaining_web_off_guard()
+                self._explaining_web_off_guard(owed)
         except Exception as error:  # said, and not tried again: the lane goes on
             LOGGER.warning("the web-off guard failed again: %s", error)
         with self._runtime_config_lock:
@@ -5771,7 +5774,7 @@ class Application(Adw.Application):
                 return publication
             # Web wallpapers went off and their publication is held after all (a
             # removal in its way): the page ends now, and the publication follows.
-            done = self._explaining_web_off_guard()
+            done = self._explaining_web_off_guard(publication.generation)
             return replace(publication, error=done) if done else publication
         if publication.unavailable or (publication.error == "" and publication.response is None):
             if publication.unavailable:
@@ -5780,14 +5783,14 @@ class Application(Adw.Application):
         refused = publication.response is not None and not publication.response.ok
         if not publication.error and not refused:
             return publication
-        done = self._explaining_web_off_guard()
+        done = self._explaining_web_off_guard(publication.generation)
         if not done:
             return publication
         if refused:
             return replace(publication, note=done)
         return replace(publication, error=f"{publication.error.rstrip().rstrip('.')}. {done}")
 
-    def _explaining_web_off_guard(self) -> str:
+    def _explaining_web_off_guard(self, generation: int) -> str:
         """`_web_off_guard` on a publication lane, what it did kept until it is said.
 
         A lane's publication carries what the guard did, and only a current one is
@@ -5795,13 +5798,15 @@ class Application(Adw.Application):
         the service stopped or how to start it again (R42-22). So it is also kept
         apart (`_web_off_explained`), said with the next publication that is
         (`_said_with_web_off`), and shown with the publication problem until a
-        publication gets through (`publication_problem`).
+        publication as new as ``generation`` (the one the guard ran for) gets through
+        (`publication_problem`, `_publication_got_through`).
         """
         done = self._web_off_guard()
         if done:
             with self._runtime_config_lock:
                 self._web_off_explained = done
                 self._web_off_explained_said = False
+                self._web_off_explained_at = generation
         return done
 
     def _said_with_web_off(self, problem: str) -> str:
@@ -5823,17 +5828,19 @@ class Application(Adw.Application):
             return problem
         return f"{problem.rstrip().rstrip('.')}. {explained}" if problem else explained
 
-    def _publication_got_through(self) -> None:
-        """A publication didn't fail: what the web-off guard did, once said, goes.
+    def _publication_got_through(self, generation: int) -> None:
+        """A publication of ``generation`` didn't fail: what the web-off guard did for one
+        no newer goes, said or not, and is not said (f9 F1).
 
-        Asked before the publication says anything (`_said_with_web_off`), so what a
-        later lane job's guard did, not said yet, stays: an older success that settles
-        after it doesn't take it away unheard.
+        Asked before the publication says anything (`_said_with_web_off`). An older
+        success, which GTK can settle after a later lane job's guard ran, leaves it, to
+        be said if it wasn't: that publication failed after it.
         """
         with self._runtime_config_lock:
-            gone = bool(self._web_off_explained) and self._web_off_explained_said
+            gone = bool(self._web_off_explained) and generation >= self._web_off_explained_at
             if gone:
                 self._web_off_explained = ""
+                self._web_off_explained_said = True
         changed = getattr(self._window, "publication_changed", None)
         if gone and callable(changed):
             changed()
@@ -6571,7 +6578,7 @@ class Application(Adw.Application):
                 elif publication.changed and self._window is not None:
                     self.refresh_runtime_status_async()
                 if not publication.deferred and not problem and not publication.unavailable:
-                    self._publication_got_through()
+                    self._publication_got_through(publication.generation)
                 said = self._said_with_web_off(problem)
                 if said:
                     self.window_report(said)
@@ -7073,7 +7080,7 @@ class Application(Adw.Application):
         # `allow_web_wallpapers` for it, is made again, once.
         newly_eight = eight and not self._nothing_readable_seen
         self._nothing_readable_seen = eight
-        if newly_eight and (self._publication_problem or self._settings.allow_web_wallpapers):
+        if newly_eight and (self.publication_problem or self._settings.allow_web_wallpapers):
             self._publish_runtime_for_context()
             return
         if (newly or retry) and any(
@@ -7332,7 +7339,7 @@ class Application(Adw.Application):
         # again: it stands (`publication_problem`) until a publication gets
         # through, this lane's or the compile lane's, and is new after that.
         if not problem and not publication.unavailable:
-            self._publication_got_through()
+            self._publication_got_through(publication.generation)
         said = self._said_with_web_off(problem if problem != self._publication_problem else "")
         if said:
             self.window_report(said)
@@ -9383,6 +9390,11 @@ class Application(Adw.Application):
         if candidate.allow_web_wallpapers:
             with self._runtime_config_lock:
                 self._runtime_web_off_owed = 0
+                # What the guard did while they were off is over (f9 F1).
+                explained, self._web_off_explained = self._web_off_explained, ""
+            changed = getattr(self._window, "publication_changed", None)
+            if explained and callable(changed):
+                changed()
         self._session.update_settings(candidate, rescan_library=rescan_now and not web_turned_off)
         if web_turned_off:
             # Web wallpapers going off reach the service first, whatever else this

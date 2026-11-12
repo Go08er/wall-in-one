@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import tomllib
+from collections.abc import Callable
 from concurrent.futures import Future
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -306,10 +308,17 @@ def _lane(
     shown: list[str] = []
     monkeypatch.setattr(application, "window_report", said.append)
     monkeypatch.setattr(application, "_ensure_runtime_compile_queued", lambda: None)
-    window = SimpleNamespace(
-        publication_changed=lambda: shown.append(application.publication_problem)
-    )
-    monkeypatch.setattr(application, "_window", window)
+
+    class Window:
+        """Records what the header would show; every other call does nothing."""
+
+        def publication_changed(self) -> None:
+            shown.append(application.publication_problem)
+
+        def __getattr__(self, _name: str) -> Callable[..., None]:
+            return lambda *_arguments, **_keywords: None
+
+    monkeypatch.setattr(application, "_window", Window())
     guard = {"says": STOPPED}
     monkeypatch.setattr(application, "_web_off_guard", lambda: guard["says"])
     return application, said, shown, guard
@@ -388,6 +397,72 @@ def test_an_older_success_settling_after_what_the_guard_did_doesnt_take_it_away_
     assert application.publication_problem == f"{FAILED}. {STOPPED}"
     _settled(application, _RuntimePublication(3), 3)
     assert application.publication_problem == ""
+
+
+def test_a_newer_success_takes_what_the_guard_did_away_unsaid(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f9 F1 (a): what the guard did for a publication goes with one as new that gets through,
+    said or not, and is not said: it is over. Only an older success leaves it (above)."""
+    application, said, shown, guard = _lane(profiles, monkeypatch)
+    failed = _ran(application, 1, FAILED)
+    guard["says"] = ""
+    _settled(application, failed, 2)  # replaced before it was said
+    _settled(application, _RuntimePublication(2), 2)
+
+    assert said == []
+    assert application.publication_problem == ""
+    assert shown[-1:] == [""], shown
+
+
+def test_a_service_started_again_is_published_to_while_what_the_guard_did_stands(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f9 F1 (b): the guard quit an older service, and a later publication found none, which
+    keeps the guard's words but clears the problem itself. A service started again, as the words
+    ask, was published to only while that problem stood, so the banner kept telling the person
+    to start it (on cab9225a). What is shown decides: it is published to, once."""
+    application, _said, _shown, guard = _lane(profiles, monkeypatch)
+    _settled(application, _ran(application, 1, FAILED), 1)  # said with the problem
+    guard["says"] = ""
+    _settled(application, _RuntimePublication(2, unavailable=True), 2)
+    assert application._publication_problem == "" and STOPPED in application.publication_problem
+    published: list[bool] = []
+
+    def publish() -> bool:
+        published.append(True)
+        return True
+
+    monkeypatch.setattr(application, "_publish_runtime_for_context", publish)
+    application._nothing_readable_seen = False
+    started = {"status_version": 2, "supported_config_schemas": READS_EIGHT}
+
+    application._publish_again_when_presets_become_readable(started)
+
+    assert published == [True]
+
+
+def test_turning_web_wallpapers_back_on_ends_what_the_guard_did(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f9 F1 (c): with the words standing and the compile still failing, web wallpapers going
+    back on left the banner saying "Allow web wallpapers is off, but…" with the next failure
+    (on cab9225a). They go with the save that turns them on; that save's own publication, which
+    fails too, says only why."""
+    application, said, _shown, guard = _lane(profiles, monkeypatch)
+    _settled(application, _ran(application, 1, FAILED), 1)
+    guard["says"] = ""
+    previous = application.settings
+    assert not previous.allow_web_wallpapers
+
+    application._adopt_settings(previous, replace(previous, allow_web_wallpapers=True))
+    _settled(application, _ran(application, 2, FAILED), 2)
+
+    assert application.publication_problem == FAILED
+    assert said[-1] == FAILED, said
 
 
 def test_a_held_document_without_web_is_left_alone(

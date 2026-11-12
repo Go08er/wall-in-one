@@ -664,6 +664,62 @@ def test_web_off_owed_under_a_number_no_request_carries_is_settled_in_one_job(
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
+class _SlowStop(Service):
+    """A service whose ``stop`` takes a while, so a newer request lands while the guard runs."""
+
+    def send(self, verb: str, *arguments: object, **keywords: object) -> Response:
+        if verb == "stop":
+            time.sleep(0.8)
+        return super().send(verb, *arguments, **keywords)
+
+
+def test_what_the_guard_did_goes_unsaid_when_a_newer_publication_gets_through(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f9 F1 (Sonnet's real-lane probe): web off's compile fails once, the guard stops the page
+    (slowly), and a newer request lands meanwhile, so the guard's publication is not current and
+    goes unsaid. The newer one compiles and its reload goes through. Its success took the guard's
+    words for an older one's leftovers and said them, and the banner kept them under "Publication
+    failed", though the service plays what was just published (on cab9225a). A success as new as
+    the guard's publication takes them away unsaid."""
+    application = profiles().application
+    _web_on(application, False, monkeypatch)
+    service = _SlowStop()
+    monkeypatch.setattr(client, "send_runtime", service.send)
+    said: list[str] = []
+    report = application.window_report
+
+    def reported(message: str) -> None:
+        said.append(message)
+        report(message)
+
+    monkeypatch.setattr(application, "window_report", reported)
+    compile_request = application._compile_runtime_request
+    compiles: list[object] = []
+
+    def fails_once(request: Any) -> bool:
+        compiles.append(request)
+        if len(compiles) == 1:
+            raise runtime_config.RuntimeConfigError("injected: a store file can't be read, once")
+        return bool(compile_request(request))
+
+    monkeypatch.setattr(application, "_compile_runtime_request", fails_once)
+    done: list[object] = []
+    assert application.update_settings_async(
+        on_success=done.append, on_error=done.append, allow_web_wallpapers=False
+    )
+    spin_until(lambda: "stop" in service.sent, 20, what="the guard to stop the page")
+    application._publish_runtime_async()  # another change publishes while it does
+    spin_until(lambda: bool(done) and not application._runtime_compile_pending, 30, what="both")
+    _pump(1.0)
+
+    assert service.sent.count("reload") >= 2 and len(compiles) >= 2, (service.sent, compiles)
+    assert not service.allows_web()
+    assert application.publication_problem == ""
+    assert not any("Allow web wallpapers is off" in message for message in said), said
+
+
 @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
 @pytest.mark.parametrize("rescan", ["ok", "raises"])
 def test_service_publishes_web_off_before_its_rescan(

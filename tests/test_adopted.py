@@ -11,9 +11,9 @@ import sys
 import time
 import zlib
 from collections.abc import Callable
-from typing import Any
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 

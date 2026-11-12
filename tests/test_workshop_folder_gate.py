@@ -237,9 +237,7 @@ def test_every_ffmpeg_command_in_the_app_writes_the_name_it_is_given(tmp_path: P
         commands = {
             "thumb%d.png": thumbnails._command(item, opened, folder / "thumb%d.png"),
             "still%d.png": stills._command(video, folder / "still%d.png", 0.0),
-            "preview%d.png": stills._preview_command(
-                picture, folder / "preview%d.png", "png_pipe"
-            ),
+            "preview%d.png": stills._preview_command(picture, folder / "preview%d.png", "png_pipe"),
         }
         for name, command in commands.items():
             assert _frames(command, tmp_path) == 0, name

@@ -5831,13 +5831,18 @@ class Application(Adw.Application):
         web-off guard did, if that hasn't been said yet (`_explaining_web_off_guard`).
 
         The new window is told when that is new, as `publication_problem` now says it
-        too, whether or not the problem itself changed.
+        too, whether or not the problem itself changed. Said already, it is not said
+        again inside a new problem that carries it too (R42-27): only the problem is.
         """
         with self._runtime_config_lock:
             explained, said = self._web_off_explained, self._web_off_explained_said
             self._web_off_explained_said = True
-        if not explained or said:
+        if not explained:
             return problem
+        if said:
+            if explained not in problem:
+                return problem
+            return problem.replace(f". {explained}", "").replace(explained, "").strip()
         changed = getattr(self._window, "publication_changed", None)
         if callable(changed):
             changed()

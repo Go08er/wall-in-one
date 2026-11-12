@@ -658,6 +658,31 @@ def test_a_service_started_again_with_nothing_standing_is_not_published_to_for_i
     assert published == []
 
 
+@pytest.mark.parametrize("lane", ["compile", "health"])
+def test_the_guards_words_said_once_are_not_said_again_with_a_different_problem(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+) -> None:
+    """R42-27 (Codex's two cases): the same guard words on two failed publications whose
+    problems differ were said twice, inside each new problem, though F2 had marked them said
+    (on 19e7ac7b). The second problem is said without them; the header keeps them."""
+    application, said, _shown, _guard = _lane(profiles, monkeypatch)
+    problems = [FAILED, "a different saved setting can't be compiled"]
+    for generation, problem in enumerate(problems, 1):
+        publication = _ran(application, generation, problem)
+        if lane == "compile":
+            _settled(application, publication, generation)
+        else:
+            request = _RuntimeHealthRequest(generation, application.session.library, "{}", None)
+            application._apply_runtime_health_result(
+                _RuntimeHealthResult(request, publication=publication), generation
+            )
+
+    assert said == [f"{FAILED}. {STOPPED}", problems[1]], said
+    assert application.publication_problem == f"{problems[1]}. {STOPPED}"
+
+
 def test_a_held_document_without_web_is_left_alone(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

@@ -370,6 +370,52 @@ def test_the_app_captures_only_where_no_items_author_writes(
     assert asked == ([mine, mine] if mine_too else [])
 
 
+def test_the_app_reads_where_to_capture_from_the_scan_never_the_disk(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """f7 G2: where a capture goes was looked up on disk (`pairing.capture_root`) on GTK: at
+    the end of every scan, on a settings save and on a Regenerate click, so a stale share
+    stalled the window (on c41700b9). The scan judges it on its worker now, and GTK reads it."""
+    import os
+
+    from wall_in_one.library import scan as scan_module
+
+    profile = profiles()
+    application = profile.application
+    root = profile.rain.path.parent
+    application.session.adopt_library(scan_module.scan((root,), {}))
+    asked: list[Path] = []
+    stills_maker = application._stills
+    monkeypatch.setattr(stills_maker, "request", lambda _items, root, _done: asked.append(root))
+    monkeypatch.setattr(
+        stills_maker, "regenerate_scene", lambda _item, root, _done: asked.append(root)
+    )
+    scene = MediaItem(path=tmp_path / "200", kind=Kind.SCENE, size=0, mtime=0, scene="200")
+    looked: list[str] = []
+    originals = {name: getattr(os, name) for name in ("lstat", "stat", "readlink")}
+
+    def counting(name: str) -> Callable[..., Any]:
+        def counted(*arguments: Any, **keywords: Any) -> Any:
+            looked.append(name)
+            return originals[name](*arguments, **keywords)
+
+        return counted
+
+    try:
+        for name in originals:
+            setattr(os, name, counting(name))
+        application._make_missing_stills()
+        regenerating = application.regenerate_scene_still(scene)
+    finally:
+        for name, original in originals.items():
+            setattr(os, name, original)
+    assert looked == [], looked
+    assert regenerating is True
+    assert asked == [root, root]
+
+
 # -- the maker on its own --------------------------------------------------------------------------
 
 

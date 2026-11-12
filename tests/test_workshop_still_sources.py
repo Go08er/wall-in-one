@@ -395,3 +395,21 @@ def test_a_scan_judges_each_roots_still_directory_once(
     monkeypatch.setattr(workshop, "lies_beneath", counting)
     scan.scan([mine, other], {})
     assert sorted(judged) == sorted([mine, other])
+
+
+def test_captures_skip_a_library_folder_the_scan_doesnt_use(tmp_path: Path) -> None:
+    """f7 G8: a library folder that is a link, or isn't there, is one the scan reports and
+    lists nothing from; a capture there fails too (a link isn't written through, and a missing
+    one would be made on the disk under its mount point). The scan's verdict, kept with its
+    library (`Library.capture_roots`), leaves both out."""
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real)
+    missing = tmp_path / "unplugged" / "Wallpapers"
+    mine = tmp_path / "mine"
+    mine.mkdir()
+
+    library = scan.scan([linked, missing, mine], {})
+    assert library.capture_roots == (mine,)
+    assert pairing.library_capture_root(library) == mine

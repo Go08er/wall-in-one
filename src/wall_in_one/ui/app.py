@@ -5228,18 +5228,14 @@ class Application(Adw.Application):
             chosen = tuple(sorted(kept))
         if adopted != current or chosen != library.chosen_stills:
             self._session.adopt_library(
-                Library(
-                    roots=library.roots,
+                # Everything else the scan found carried over (`capture_roots` too).
+                replace(
+                    library,
                     items=tuple(
                         adopted if candidate.path == current.path else candidate
                         for candidate in library.items
                     ),
-                    skipped=library.skipped,
-                    unseen=library.unseen,
-                    still_inventory=library.still_inventory,
-                    adopted_stills=library.adopted_stills,
                     chosen_stills=chosen,
-                    previews=library.previews,
                 ),
                 reconcile_workshop=False,
             )
@@ -7644,8 +7640,9 @@ class Application(Adw.Application):
         if not self._settings.roots:
             return
         # The first root whose still directory no Workshop item can write: one made
-        # in another would never be found (`pairing.capture_root`, f7 W1).
-        root = pairing.capture_root(self._session.library.roots)
+        # in another would never be found (f7 W1). The scan's verdict, read: this
+        # runs on GTK at the end of every scan (`pairing.library_capture_root`, f7 G2).
+        root = pairing.library_capture_root(self._session.library)
         if root is None:
             return
         # A web page while they are off is never played, so it gets no still.
@@ -7662,7 +7659,7 @@ class Application(Adw.Application):
         if not self._settings.roots:
             self.window_report("Choose a library folder in Settings before generating stills")
             return False
-        root = pairing.capture_root(self._session.library.roots)
+        root = pairing.library_capture_root(self._session.library)  # read, not looked up (G2)
         if (
             root is None
             or not item.scene

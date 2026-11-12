@@ -37,7 +37,7 @@ from typing import Final
 
 from wall_in_one import file_io
 from wall_in_one.library import workshop
-from wall_in_one.library.model import IMAGE_EXTENSIONS, MediaItem
+from wall_in_one.library.model import IMAGE_EXTENSIONS, Library, MediaItem
 
 #: Written by us next to a video to record which still represents it.
 SIDECAR_SUFFIX: Final = ".wall-in-one.json"
@@ -595,6 +595,28 @@ def _still_directory_trusted(root: Path) -> bool:
     if workshop.item_folder_of(directory, (root,)) is not None:
         return False
     return not workshop.in_content_tree(directory) or workshop.is_content_folder(root)
+
+
+def capture_roots(roots: Iterable[Path], refused: Iterable[Path] = ()) -> tuple[Path, ...]:
+    """The roots, in order, whose still directory is trusted, but those in ``refused``.
+
+    ``refused``: the roots a scan didn't use (`scan.scan`'s ``ROOT_NOT_USABLE``: a
+    link, not a folder, not there), where no capture can land either (f7 G8).
+    """
+    left_out = set(refused)
+    return tuple(root for root in roots if root not in left_out and still_directory_trusted(root))
+
+
+def library_capture_root(library: Library) -> Path | None:
+    """Where ``library``'s captures go: the first of the scan's `Library.capture_roots`.
+
+    Read, never looked up on disk, for a library a scan built: the GTK callers
+    (the still maker, Regenerate) must not stall on a slow folder (f7 G2). One no
+    scan built (a test's) is judged here.
+    """
+    if library.capture_roots is None:
+        return capture_root(library.roots)
+    return library.capture_roots[0] if library.capture_roots else None
 
 
 def capture_root(roots: Iterable[Path]) -> Path | None:

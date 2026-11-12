@@ -331,6 +331,12 @@ class Library:
     #: against this library reads it from here (`Store.resolve_accepted`), so the
     #: answer is the scan's; a setting moved since is a rescan.
     previews: bool = False
+    #: The roots, in order, that captures may go in: those the scan used whose
+    #: still directory no Workshop item can write in (`pairing.capture_roots`),
+    #: judged on the scan's worker, so that whoever starts a capture on GTK reads
+    #: it here instead of the disk (f7 G2). None: not built by the scanner (a
+    #: test's ready library), judged where asked (`pairing.library_capture_root`).
+    capture_roots: tuple[Path, ...] | None = None
 
     def __len__(self) -> int:
         return len(self.items)

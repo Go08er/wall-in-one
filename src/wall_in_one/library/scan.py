@@ -856,4 +856,7 @@ def _scan(
         adopted_stills=adopted_pairs,
         chosen_stills=pairings.chosen_stills(records or {}),
         previews=previews,
+        # Judged here, on the scan's worker and once per root (f7 G2, G7), with the
+        # scan's own verdict on its roots (f7 G8).
+        capture_roots=pairing.capture_roots(resolved_roots, unusable_roots),
     )

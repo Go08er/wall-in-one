@@ -481,6 +481,7 @@ def test_a_library_folder_spelled_with_dotdot_gets_its_stills(
         assert stills.ensure(item(clip, Kind.VIDEO), root, refused=refused.append) is None
         assert len(refused) == 1 and "symbolic link" in refused[0].reason, refused
         assert rendered == []
+        assert everything_under(physical / "child") == ["clip.mp4"], "nothing made through it"
         return
     assert pairing.library_capture_root(library) == root
     found = library.find(clip)
@@ -491,3 +492,35 @@ def test_a_library_folder_spelled_with_dotdot_gets_its_stills(
     assert made is not None and made.is_file(), [str(error) for error in refused]
     again = scan.scan(settings.roots, {}).find(clip)
     assert again is not None and again.paired_still == made
+
+
+@pytest.mark.parametrize("kind", [Kind.VIDEO, Kind.SCENE])
+def test_a_library_folder_that_is_a_link_gets_nothing_made_through_it(
+    tmp_path: Path, rendered: list[Path], monkeypatch: pytest.MonkeyPatch, kind: Kind
+) -> None:
+    """f7 R42-17 follow-up: the scan doesn't use a library folder that is itself a link, and
+    the pin refuses one, but a capture handed one straight (`stills.ensure`) made
+    `Wall-in-One/Automatic Stills` through the link first, wherever it led (on fd680432). The
+    link is refused before anything is made, as the folder holding it refusing, as before."""
+    real = tmp_path / "real"
+    real.mkdir()
+    root = tmp_path / "linked"
+    root.symlink_to(real, target_is_directory=True)
+    if kind is Kind.SCENE:
+        from tests.test_scene_preset_stills import _engine
+
+        _engine(monkeypatch)
+        where_the_engine_looks(SCENE)
+        folder = tmp_path / "workshop" / SCENE
+        folder.mkdir(parents=True)
+        wallpaper = item(folder, Kind.SCENE, SCENE)
+    else:
+        wallpaper = item(video(tmp_path), Kind.VIDEO)
+    heard: list[stills.StillFolderError] = []
+
+    made = stills.ensure(wallpaper, root, size=DISPLAY, refused=heard.append)
+
+    assert (made, rendered) == (None, [])
+    assert everything_under(real) == [], "nothing made through the link"
+    assert len(heard) == 1 and heard[0].folder == tmp_path, heard
+    assert heard[0].reason.startswith("linked in it is a symbolic link"), heard[0].reason

@@ -1454,8 +1454,17 @@ def _made_target_directory(root: Path, target: Path) -> file_io.PinnedDirectoryC
     again where the folder retained is (`_pin_target_directory`, f7 R42-17): the
     scan's verdict is as old as the scan, and a link above the library folder (P1)
     may lead into an item since. Such a folder changed since the scan, which is a
-    plain `StillError`, no folder's refusal (f7 H5).
+    plain `StillError`, no folder's refusal (f7 H5). First of all, a link at the
+    library folder or below it, which the pin refuses (`_pin_target_directory`),
+    is refused before anything is made through it, wherever it leads.
     """
+    linked = _linked_on_the_way(root.absolute(), target.parent.absolute())
+    if linked is not None:
+        raise _linked_refusal(
+            f"could not safely retain automatic-still directory {target.parent}: "
+            f"{linked} is a symbolic link",
+            linked,
+        )
     if not pairing.still_directory_trusted(root):
         raise StillError(_untrusted(target.parent))
     try:
@@ -1518,12 +1527,7 @@ def _pin_target_directory(
         message = f"could not safely retain automatic-still directory {target.parent}: {error}"
         linked = _linked_on_the_way(absolute_root, absolute_directory)
         if linked is not None:
-            raise StillFolderError(
-                message,
-                linked.parent,
-                f"{linked.name} in it is a symbolic link, which Wall-in-One doesn't write "
-                "a still through",
-            ) from error
+            raise _linked_refusal(message, linked) from error
         if isinstance(error, file_io.PathChangedError | FileNotFoundError):
             raise StillError(message) from error
         reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
@@ -1536,6 +1540,15 @@ def _pin_target_directory(
         context.close()
         raise StillError(_untrusted(target.parent))
     return context
+
+
+def _linked_refusal(message: str, linked: Path) -> StillFolderError:
+    """The refusal of a still folder reached through ``linked``, said of the folder holding it."""
+    return StillFolderError(
+        message,
+        linked.parent,
+        f"{linked.name} in it is a symbolic link, which Wall-in-One doesn't write a still through",
+    )
 
 
 def _linked_on_the_way(root: Path, directory: Path) -> Path | None:

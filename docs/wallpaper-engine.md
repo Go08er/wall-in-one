@@ -418,10 +418,11 @@ downloaded preview) is told what it may open (`decoding.input_options`):
 `-protocol_whitelist file` (plus `pipe` for stdin) and a `-format_whitelist` of
 picture and video containers. A playlist named like a picture or a video (an
 HLS playlist, an `ffconcat` script) is therefore refused, not followed to other
-files or the network. ffmpeg is handed the file already opened, never its name
-(`decoding.opened`), and that list leaves out `image2`, which reads a name such
-as `preview%01d.png` as a numbered sequence and opens `preview0.png` instead: a
-file with `%` in its name is decoded as itself.
+files or the network. ffmpeg is never handed a file's name: a thumbnail, a
+still's frame and a declared preview are read from the file already opened, and
+a downloaded preview arrives on stdin. That list leaves out `image2`, which reads
+a name such as `preview%01d.png` as a numbered sequence and opens `preview0.png`
+instead: a file with `%` in its name is decoded as itself.
 
 ### Executable wallpapers are never run
 

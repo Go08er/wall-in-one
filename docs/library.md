@@ -147,9 +147,11 @@ For the same reason a library folder's own `Wall-in-One/Automatic Stills/` is
 not searched, and nothing is captured into it, when an item's author could have
 shipped it: when the library folder is an item folder (a `project.json` in it,
 or in the folders down to the stills), or lies inside one of the items in
-Steam's tree. A library folder that is Steam's `431960` folder itself keeps its
-own, which sits beside the items; one of yours inside an item folder keeps its
-own, as it lists its own files.
+Steam's tree, or when its `Wall-in-One` or `Automatic Stills` is a link that
+leads out of the library folder (an item's could be one; Wall-in-One never
+writes through a link there anyway). A library folder that is Steam's `431960`
+folder itself keeps its own, which sits beside the items; one of yours inside an
+item folder keeps its own, as it lists its own files.
 
 Until a video has a still, playback can't show it: the wallpaper service's
 compiler leaves it out, and every page counts it the same way. Its Library
@@ -166,8 +168,10 @@ user-provided and remains a separate library item with its own Pairing, even
 while one or more moving wallpapers use it as their representative.
 
 New automatic captures are written under the first configured root whose still
-directory no Workshop item could have shipped (above); with no such root none is
-made. Existing deterministic captures are discovered under every such root so
+directory no Workshop item could have shipped (above), skipping one the scan
+doesn't use (a link, not a folder, or not there right now); with no such root
+none is made, and Regenerate says why. Existing deterministic captures are
+discovered under every root whose still directory no item could have shipped, so
 changing root order does not strand an older representative.
 
 At app or wallpaper-service startup, verified older automatic captures are
@@ -868,7 +872,7 @@ Nothing else is removed, whatever its name.
 | `$XDG_RUNTIME_DIR/wall-in-one.sock` | the control socket, 0600 |
 | `$XDG_RUNTIME_DIR/wall-in-one-runtime.sock` | Rust runtime commands and status, 0600; falls back to `$XDG_STATE_HOME/wall-in-one/wall-in-one-runtime.sock` when unset |
 | `$XDG_STATE_HOME/wall-in-one/runtime.toml` | atomically compiled, fully resolved service config |
-| `<each configured root>/Wall-in-One/Automatic Stills/` | generated stills are discovered under every root, but one a Workshop item could have shipped; new captures use the first such root |
+| `<each configured root>/Wall-in-One/Automatic Stills/` | generated stills are discovered under every root except one a Workshop item could have shipped; new captures go to the first root that is not one and that the scan uses |
 | `<first root>/Wall-in-One/Wallhaven/`, `.../MotionBGS/` | downloads |
 | `<affected parent>/.wall-in-one-retained/entry-*` | private exact cleanup residue; zero tombstones and intact retired transaction records/candidates are expected (a transient claim container is removed once its discard empties it; an empty one may remain from 0.2.2 or earlier, or after an interrupted discard), while multiply linked files, sockets and unexpected evidence remain intact. Settings → Tidy up archives only the provably inert ones: empty claim containers untouched for an hour and empty, singly linked records |
 | `~/.config/wall-in-one/tidy-archive/<date>-<action>/` | what Settings → Tidy up moved or backed up, with `manifest.json` (where each item came from) and a README; Undo uses it. Nothing in it is ever deleted |

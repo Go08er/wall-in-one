@@ -573,7 +573,8 @@ brought, because Workshop content is untrusted.
   frame of a Workshop video (named by the video's path, like any video's).
   Only a library folder's `Automatic Stills` that no item can write in is
   looked in or captured into: not one in an item folder, nor one inside one of
-  Steam's items ([library.md](library.md)).
+  Steam's items, nor one reached through a link out of its library folder
+  ([library.md](library.md)).
 - **A still you picked** in the app, saved in Wall-in-One's own pairing records.
 
 A preset's capture shows what the service plays except for one thing: the

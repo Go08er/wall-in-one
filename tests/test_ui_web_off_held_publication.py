@@ -580,6 +580,90 @@ def test_a_lane_job_that_raises_with_web_off_owed_runs_the_guard_and_owes_nothin
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
+def _counting_jobs(application: Any, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Each runtime lane job, as it starts."""
+    real = application._compile_runtime_until_current_locked
+    jobs: list[object] = []
+
+    def counted(**keywords: Any) -> Any:
+        jobs.append(keywords)
+        return real(**keywords)
+
+    monkeypatch.setattr(application, "_compile_runtime_until_current_locked", counted)
+    return jobs
+
+
+@pytest.mark.parametrize("raises", ["once", "always"])
+def test_a_guard_that_raises_with_a_failing_compile_doesnt_send_the_lane_round(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    raises: str,
+) -> None:
+    """f7 H2: with the compile failing and the guard raising, the job's future raised, the
+    completion numbered it 0, and the lane went round again for ever (hundreds of jobs a
+    second, on 0b96417c). A guard that raises is a failed publication now, and a job that
+    ends owing what it began owing has the guard run once more, and owes nothing."""
+    application = profiles().application
+    service = _web_on(application, False, monkeypatch)
+
+    def refused(_request: object) -> bool:
+        raise runtime_config.RuntimeConfigError("injected: the profile is read-only")
+
+    real_guard = application._web_off_guard
+    guards: list[object] = []
+
+    def guard() -> str:
+        guards.append(None)
+        if raises == "always" or len(guards) == 1:
+            raise RuntimeError("injected: the guard raised")
+        return str(real_guard())
+
+    monkeypatch.setattr(application, "_compile_runtime_request", refused)
+    monkeypatch.setattr(application, "_web_off_guard", guard)
+    jobs = _counting_jobs(application, monkeypatch)
+    _save(application, allow_web_wallpapers=False)
+    _owed_clears(application)
+    _pump(2.0)
+    assert len(jobs) <= 3, f"{len(jobs)} jobs"
+    assert 2 <= len(guards) <= 4, f"{len(guards)} guards"
+    if raises == "once":
+        assert not service.allows_web(), service.sent
+        assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+
+
+def test_web_off_owed_under_a_number_no_request_carries_is_settled_in_one_job(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f7 H2: what web off owed was cleared only by a job numbered at or above it, and a
+    number no request carries sent the lane round for ever (on 0b96417c). Not reachable
+    through `_publish_web_off`; now one job settles it, with the guard."""
+    application = profiles().application
+    service = _web_on(application, False, monkeypatch)
+    _save(application, allow_web_wallpapers=False)
+    _owed_clears(application)
+    spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="web off")
+    jobs = _counting_jobs(application, monkeypatch)
+    real_guard = application._web_off_guard
+    guards: list[object] = []
+
+    def guard() -> str:
+        guards.append(None)
+        return str(real_guard())
+
+    monkeypatch.setattr(application, "_web_off_guard", guard)
+    with application._runtime_config_lock:
+        application._runtime_authoring_request = None
+        application._runtime_web_off_owed = application._runtime_authoring_generation + 10
+    application._ensure_runtime_compile_queued()
+    _owed_clears(application)
+    _pump(2.0)
+    assert len(jobs) <= 2, f"{len(jobs)} jobs"
+    assert guards, "the guard didn't run"
+    assert not service.allows_web(), service.sent
+    assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+
+
 @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
 @pytest.mark.parametrize("rescan", ["ok", "raises"])
 def test_service_publishes_web_off_before_its_rescan(

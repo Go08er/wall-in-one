@@ -5648,8 +5648,14 @@ class Application(Adw.Application):
         A job that raises is a failed publication like any other (f7 G9): numbered
         as the newest request, so that web wallpapers going off, owed while it ran,
         get the guard and are owed no longer, and a removal waiting for them
-        (`_removal_run`) doesn't wait out its bound.
+        (`_removal_run`) doesn't wait out its bound. So is a guard that raises
+        (f7 H2): its failure is said with the publication's.
+
+        A job that started owing web off and ends owing the same is settled here
+        (`_settle_stuck_web_off`), never sent round again (f7 H2).
         """
+        with self._runtime_config_lock:
+            owed_at_start = self._runtime_web_off_owed
         try:
             with self._runtime_removal_lock:
                 publication = self._compile_runtime_until_current_locked(
@@ -5659,14 +5665,50 @@ class Application(Adw.Application):
             with self._runtime_config_lock:
                 newest = self._runtime_authoring_generation
             publication = _RuntimePublication(newest, error=f"runtime compiler failed: {error}")
+        guarded = True
         try:
             publication = self._stopping_web_after_failure(publication)
-        finally:
-            with self._runtime_config_lock:
-                if 0 < self._runtime_web_off_owed <= publication.generation:
-                    # It landed, or what held it ran the guard: nothing is owed now.
-                    self._runtime_web_off_owed = 0
+        except Exception as error:  # the guard's own failure is the publication's (f7 H2)
+            guarded = False
+            failed = f"the web-off guard failed: {error}"
+            publication = replace(
+                publication,
+                error=f"{publication.error.rstrip().rstrip('.')}; {failed}"
+                if publication.error
+                else failed,
+            )
+        with self._runtime_config_lock:
+            owed = self._runtime_web_off_owed
+            if guarded and 0 < owed <= publication.generation:
+                # It landed, or what held it ran the guard: nothing is owed now.
+                self._runtime_web_off_owed = owed = 0
+            stuck = owed != 0 and owed == owed_at_start
+        if stuck:
+            self._settle_stuck_web_off(owed)
         return publication
+
+    def _settle_stuck_web_off(self, owed: int) -> None:
+        """Web wallpapers going off, owed when a lane job began and still owed when it ended.
+
+        A job that starts owing them publishes them or runs the guard, which ends
+        what is owed; one that couldn't (its guard raised, or what is owed is a
+        number no request carries) was sent round again by `_finish_runtime_compile`,
+        for ever (f7 H2). Here the guard is run once more instead, that is logged,
+        and nothing is owed: the next publication carries web off, as every one does.
+        """
+        LOGGER.warning(
+            "web wallpapers going off were still owed (%s) after a runtime job that began "
+            "owing them; the web-off guard runs once more",
+            owed,
+        )
+        try:
+            if not self._runtime_shutdown:
+                self._web_off_guard()
+        except Exception as error:  # said, and not tried again: the lane goes on
+            LOGGER.warning("the web-off guard failed again: %s", error)
+        with self._runtime_config_lock:
+            if self._runtime_web_off_owed == owed:
+                self._runtime_web_off_owed = 0
 
     def _stopping_web_after_failure(self, publication: _RuntimePublication) -> _RuntimePublication:
         """A failed publication or a refused reload, while web wallpapers are off, ends any page.

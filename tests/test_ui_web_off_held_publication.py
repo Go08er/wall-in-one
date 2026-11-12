@@ -631,6 +631,45 @@ def test_a_guard_that_raises_with_a_failing_compile_doesnt_send_the_lane_round(
         assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
+def test_a_guard_that_raises_after_a_refused_reload_leaves_the_refusals_own_words(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f9 F4: H2 made a raising guard its publication's error, and for a refused reload that
+    error was all that was said: "the web-off guard failed: …", not why the service refused
+    (on cab9225a). The failure is said beside the refusal's words now."""
+    application = profiles().application
+    service = _web_on(application, False, monkeypatch)
+    said: list[str] = []
+    report = application.window_report
+
+    def reported(message: str) -> None:
+        said.append(message)
+        report(message)
+
+    monkeypatch.setattr(application, "window_report", reported)
+
+    def refusing(verb: str, *arguments: object, **keywords: object) -> Response:
+        if verb == "reload":
+            service.sent.append(verb)
+            return Response.failure("refused: a bound this service enforces")
+        return service.send(verb, *arguments, **keywords)
+
+    def guard() -> str:
+        raise RuntimeError("injected: the guard raised")
+
+    monkeypatch.setattr(client, "send_runtime", refusing)
+    monkeypatch.setattr(application, "_web_off_guard", guard)
+    _save(application, allow_web_wallpapers=False)
+    _owed_clears(application)
+    _pump(1.0)
+
+    problem = application.publication_problem
+    assert problem.startswith("Runtime rejected the new configuration: refused: a bound"), problem
+    assert "the web-off guard failed: injected: the guard raised" in problem, problem
+    assert problem in said, said
+
+
 def test_web_off_owed_under_a_number_no_request_carries_is_settled_in_one_job(
     profiles: Callable[..., Any],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

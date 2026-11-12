@@ -5680,12 +5680,17 @@ class Application(Adw.Application):
         except Exception as error:  # the guard's own failure is the publication's (f7 H2)
             guarded = False
             failed = f"the web-off guard failed: {error}"
-            publication = replace(
-                publication,
-                error=f"{publication.error.rstrip().rstrip('.')}; {failed}"
-                if publication.error
-                else failed,
-            )
+            refused = publication.response is not None and not publication.response.ok
+            if refused and not publication.error:
+                # Beside the refusal's own words, which `error` would replace (f9 F4).
+                publication = replace(publication, note=failed)
+            else:
+                publication = replace(
+                    publication,
+                    error=f"{publication.error.rstrip().rstrip('.')}; {failed}"
+                    if publication.error
+                    else failed,
+                )
         with self._runtime_config_lock:
             owed = self._runtime_web_off_owed
             if guarded and 0 < owed <= publication.generation:

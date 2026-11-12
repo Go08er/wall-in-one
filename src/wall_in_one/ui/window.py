@@ -156,6 +156,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._playlists_page = PlaylistsPage(application)
         self._schedules_page = SchedulesPage(application)
         self._settings_page = PreferencesPage(application)
+        #: The library's roots and where its stills may go, as the Settings page's
+        #: folder rows were last built for (f7 H1).
+        self._stills_verdict: tuple[object, ...] | None = None
         self._runtime_summary = ""
         self._runtime_error = ""
         #: The renderers the service last reported missing when the window
@@ -690,6 +693,12 @@ class MainWindow(Adw.ApplicationWindow):
         # renderer at all is worth the setup card.
         self._setup_card.library_changed()
         library = session.library
+        # The Settings page's folder rows say where stills go as the scan judged: built
+        # again when that changes, and only then (f7 H1).
+        verdict = (library.roots, library.capture_roots)
+        if verdict != self._stills_verdict:
+            self._stills_verdict = verdict
+            self._settings_page.folders_changed()
         self._management_session = session
         # A Media removal or an authoring-socket rescan may have changed which
         # provider ids exist without going through Browse. Drop its ownership

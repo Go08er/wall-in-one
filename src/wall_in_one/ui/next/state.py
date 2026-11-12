@@ -20,8 +20,10 @@ the slice uses: ``now`` (what is on screen), ``playback``, ``library``,
 ``playlists``, ``displays``, ``system`` (service, power and read-only
 notices), ``scope`` (the player bar's display scope), ``settings``,
 ``theme``, ``appearance`` (window style, glass dials), ``palettes`` (the
-Settings page's palette manager) and ``colors`` (scheme previews or the
-palette list arrived: only the inspector's colors redraw); with
+Settings page's palette manager), ``colors`` (scheme previews or the
+palette list arrived: only the inspector's colors redraw) and ``folders``
+(a scan changed where the library's stills go: only Settings' folder rows
+are rebuilt); with
 `AppState.scheduling`, also ``schedule`` (the rules and the default) and
 ``routes`` (each display's route, rule and rotation, as the runtime says).
 

@@ -889,6 +889,10 @@ class PreferencesPage(Adw.PreferencesPage):
 
     # -- state -----------------------------------------------------------
 
+    def folders_changed(self) -> None:
+        """A scan changed where the library's stills go: the folder rows only (f7 H1)."""
+        self._refresh_roots()
+
     def apply_settings(self, settings: config.Settings) -> None:
         """Reflect an application-owned settings snapshot without writing it.
 

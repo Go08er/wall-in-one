@@ -559,3 +559,53 @@ def test_a_failed_save_puts_back_what_is_requested_keeping_a_newer_queued_edit(
     assert application.reports and "nothing changed" in application.reports[-1]
     assert page._shuffle.get_active(), "the newer queued edit still shows"
     assert page._cycle.get_active() == application.settings.cycle_enabled, "this one went back"
+
+
+def test_the_classic_folder_rows_take_the_scans_verdict_when_it_lands_and_only_then(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """f7 H1, the classic window: its Settings page is built with it, before the first scan
+    lands, and the window's `show_library` didn't rebuild the rows (on 0b96417c). A scan that
+    changes where stills go rebuilds them now; one that changes nothing doesn't."""
+    from tests.test_ui_next_window import sandboxed_runtime
+    from wall_in_one import runtime_compatibility
+    from wall_in_one.ui.window import MainWindow
+
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    item = tmp_path / "an item"
+    item.mkdir()
+    (item / "project.json").write_text('{"type": "video", "file": "v.mp4"}', encoding="utf-8")
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    config.update({"roots": (item, mine)})
+    application = started_application(ui="classic")
+    application._authoring_migration_ready = True
+    monkeypatch.setattr(application, "_publish_runtime_for_context", lambda: True)
+    window = MainWindow(application, application.settings)
+    application._window = window
+    page = window._settings_page
+
+    def titles() -> list[str]:
+        return [row.get_title() for row in page._root_rows if isinstance(row, Adw.ActionRow)]
+
+    try:
+        assert titles() == ["an item · Downloads & generated stills", "mine"], "no verdict yet"
+        done: list[bool] = []
+        application.refresh_library(finished=done.append)
+        spin_until(lambda: bool(done), 30, what="the scan")
+        spin_until(
+            lambda: titles() == ["an item · Downloads", "mine · Generated stills"],
+            10,
+            what=f"the marks: {titles()}",
+        )
+        rows = list(page._root_rows)
+        done.clear()
+        application.refresh_library(finished=done.append)
+        spin_until(lambda: bool(done), 30, what="the second scan")
+        assert page._root_rows == rows, "rebuilt for a verdict that didn't change"
+    finally:
+        application._window = None
+        window.destroy()
+        application._stills.shutdown()
+        application.session.shutdown()

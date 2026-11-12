@@ -386,6 +386,9 @@ class RealAppState(GObject.Object):
         self._scanning = False
         #: ``allow_web_wallpapers`` as the views were last built for it.
         self._web_allowed = False
+        #: The library's roots and where its stills may go (`Library.capture_roots`),
+        #: as Settings' folder rows were last told (the ``folders`` topic, f7 H1).
+        self._stills_verdict: tuple[object, ...] | None = None
         #: What the wallpaper service refused, by Workshop id, as the views
         #: were last built for it (status ``refused``).
         self._refused: dict[str, str] = {}
@@ -572,6 +575,13 @@ class RealAppState(GObject.Object):
         self._playlists = self._read_playlists()
         self._playlist_index = {playlist.id: playlist for playlist in self._playlists}
         self.emit_changed("library", "playlists")
+        # Settings' folder rows say where stills go as the scan judged: told when that
+        # changes, and only then (f7 H1). Pages are built before the first scan lands.
+        library = self._session.library
+        verdict = (library.roots, library.capture_roots)
+        if verdict != self._stills_verdict:
+            self._stills_verdict = verdict
+            self.emit_changed("folders")
         self._adopt_status(self._view)
 
     def _read_playlists(self) -> tuple[LibraryPlaylist, ...]:

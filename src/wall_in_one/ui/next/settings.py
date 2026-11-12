@@ -1609,6 +1609,9 @@ class SettingsPage(Page):
     def _on_changed(self, _state: AppState, topic: str) -> None:
         if topic == "settings":
             self._sync()
+        elif topic == "folders" and self.access is not None:
+            # Only the folder rows: where the scan says stills go (f7 H1).
+            self._rebuild_folders(self.access, bool(self.access.settings_blocked()))
         elif topic == "theme" and self.access is not None:
             self._sync_palette(self.access)
         elif topic == "appearance":

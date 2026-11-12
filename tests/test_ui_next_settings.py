@@ -902,3 +902,49 @@ def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
     assert dialog is not None
     assert removing_the_first in dialog.get_body()
     dialog.force_close()
+
+
+def _tips(page: SettingsPage) -> list[str | None]:
+    return [row.get_tooltip_text() for row in page._folder_rows]
+
+
+def test_the_folder_rows_take_the_scans_verdict_when_it_lands_and_only_then(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """f7 H1: the page is built with the window, before the first scan lands, and a scan
+    told it nothing, so the marks kept their usual words on every ordinary start (on
+    0b96417c). A scan that changes where stills go now rebuilds the folder rows, and only
+    them; one that changes nothing rebuilds nothing."""
+    sandboxed_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_compatibility, "require_schema", lambda _schema: None)
+    item = tmp_path / "an item"
+    item.mkdir()
+    (item / "project.json").write_text('{"type": "video", "file": "v.mp4"}', encoding="utf-8")
+    ordinary = tmp_path / "mine"
+    ordinary.mkdir()
+    config.update({"roots": (item, ordinary)})
+    shown = _open(monkeypatch)
+    try:
+        page = shown.page
+        spin_until(lambda: len(page._folder_rows) == 2, what="the rows")
+        assert _tips(page) == ["Downloads and generated stills go here", None], "no verdict yet"
+        topics: list[str] = []
+        shown.window._state.connect("changed", lambda _state, topic: topics.append(topic))
+        done: list[bool] = []
+        shown.application.refresh_library(finished=done.append)
+        spin_until(lambda: bool(done), 30, what="the scan")
+        spin_until(
+            lambda: (_tips(page)[0] or "").startswith("Downloads go here"), 10, what="the marks"
+        )
+        assert (_tips(page)[1] or "").startswith("Generated stills go here"), _tips(page)
+        assert topics.count("folders") == 1, topics
+
+        rows = list(page._folder_rows)
+        topics.clear()
+        done.clear()
+        shown.application.refresh_library(finished=done.append)
+        spin_until(lambda: bool(done), 30, what="the second scan")
+        assert "folders" not in topics, topics
+        assert page._folder_rows == rows, "rebuilt for a verdict that didn't change"
+    finally:
+        _close(shown)

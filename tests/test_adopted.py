@@ -11,6 +11,7 @@ import sys
 import time
 import zlib
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -888,6 +889,43 @@ def test_missing_manual_choice_does_not_render_repeatedly(
         assert fixture.authority.sidecar_path.exists()
         assert selector.read_bytes() == selector_before
     assert cleanup_environment == []
+    assert not stills.destination(fixture.source, fixture.root).exists()
+
+
+def test_an_upgrade_in_a_still_folder_no_longer_trusted_is_skipped_quietly_at_every_start(
+    tmp_path: Path,
+    cleanup_environment: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """f7 R42-17 follow-up: a capture is made only in a still folder no item's author can write
+    in, so the rebuild of one whose library folder's `Wall-in-One` is an item's folder now was
+    refused at every start: logged as a failure, its selector withdrawn and written back, and a
+    scan and a compile run, each start (on b867faff). Nothing there is used (f7 W1), so there is
+    nothing to upgrade: it is skipped, and nothing is said, run or written, start after start."""
+    fixture = _cleanup_fixture(tmp_path)
+    selector = stills.write_sidecar(fixture.source, fixture.capture)
+    (fixture.root / pairing.MANAGED_PARENT / "project.json").write_text(
+        json.dumps({"type": "web", "file": "index.html"})
+    )
+    assert not pairing.still_directory_trusted(fixture.root)
+    kept = (_fingerprint(selector), _fingerprint(fixture.capture), selector.read_bytes())
+    compiled: list[object] = []
+    update = capture_upgrade.runtime_config.update
+
+    def compile_counted(*arguments: Any, **keywords: Any) -> Any:
+        compiled.append(arguments)
+        return update(*arguments, **keywords)
+
+    monkeypatch.setattr(capture_upgrade.runtime_config, "update", compile_counted)
+
+    with caplog.at_level(logging.INFO, logger=capture_upgrade.LOGGER.name):
+        results = [capture_upgrade.prepare(), capture_upgrade.prepare()]
+
+    assert results == [capture_upgrade.Result(), capture_upgrade.Result()]
+    assert caplog.records == [], [record.getMessage() for record in caplog.records]
+    assert (cleanup_environment, compiled) == ([], [])
+    assert (_fingerprint(selector), _fingerprint(fixture.capture), selector.read_bytes()) == kept
     assert not stills.destination(fixture.source, fixture.root).exists()
 
 

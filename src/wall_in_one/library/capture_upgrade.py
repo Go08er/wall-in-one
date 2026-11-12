@@ -335,6 +335,11 @@ def prepare() -> Result:
             settings = config.load_strict(require_present=True)
             if adoption.root not in settings.roots:
                 return Result()
+            if not pairing.still_directory_trusted(adoption.root):
+                # An item's author could write in its still folder now: nothing there is
+                # used (f7 W1), nor made (R42-17), so there is nothing to upgrade, and
+                # no start is to fail at it, say so, or touch its selectors.
+                return Result()
             protected: set[str] = set()
             for module in (pairings, playlists, favourites, removals):
                 path = module.state_path()

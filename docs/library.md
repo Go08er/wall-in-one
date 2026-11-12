@@ -189,7 +189,9 @@ used. Nothing removes it.
 
 At app or wallpaper-service startup, verified older automatic captures are
 replaced with current captures, generating missing ones and rebinding the
-videos. The app refreshes its playback configuration before deleting the old
+videos (except in a library folder whose still directory a Workshop item could
+have shipped, above: nothing there is used, so they are left as they are,
+quietly). The app refreshes its playback configuration before deleting the old
 images and their metadata to reclaim space. A video already bound to a separate
 still keeps that choice; its unused old capture needs no rebuild. If rebuilding
 or runtime handover fails, cleanup waits for a later startup; the old images are

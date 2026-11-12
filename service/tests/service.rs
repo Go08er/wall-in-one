@@ -1293,6 +1293,129 @@ fn a_head_usable_again_is_played_on_at_the_next_probe() {
 }
 
 #[test]
+fn a_reload_while_every_head_has_a_dash_name_is_loaded_and_plays_on_the_next_usable_head() {
+    // f6 L1: R42-14's early return made such a reload fail when it changed what plays
+    // ("reload rejected: no usable outputs ...; could not restore wallpaper"), the document
+    // that plays nothing the web-off guard installs as well. The old document stayed in
+    // force, its video kept running, and a head that came back played it. Each is now
+    // loaded: what the old one started stops, nothing is given to a program while no head
+    // can be used, and the head that comes back plays the new one. With a usable head (the
+    // control) the same reloads play at once.
+    const RELOADED: &str = "7319beb596edd7da48bfde4e70adba5b7fcf02ed4c7729ffc0db4adb9a0b426d";
+    for (reloaded, head) in [
+        ("changed", "-X"),
+        ("nothing-to-play", "-X"),
+        ("changed", "DP-1"),
+        ("nothing-to-play", "DP-1"),
+    ] {
+        let label = format!("dash-reload-{reloaded}-{head}");
+        let root = directory(&label);
+        let noctalia = root.join("noctalia");
+        let asked = root.join("noctalia-arguments");
+        script(
+            &noctalia,
+            &format!("for a in \"$@\"; do printf '%s\\n' \"$a\"; done >> {asked:?}"),
+        );
+        let mpvpaper = root.join("mpvpaper");
+        let pids = root.join("mpvpaper-pids");
+        script(&mpvpaper, &format!("echo $$ >> {pids:?}\nexec sleep 30"));
+        let programs = |document: String| {
+            document
+                .replace(
+                    "noctalia_program = \"/bin/true\"",
+                    &format!("noctalia_program = {noctalia:?}"),
+                )
+                .replace(
+                    "mpvpaper_program = \"/bin/true\"",
+                    &format!("mpvpaper_program = {mpvpaper:?}"),
+                )
+        };
+        let started = || {
+            fs::read_to_string(&pids)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let config_path = root.join("runtime.toml");
+        fs::write(
+            &config_path,
+            programs(dash_document("mirrored", &[], &["video"])),
+        )
+        .unwrap();
+        let parsed = Config::load(&config_path).unwrap();
+        let heads = SwitchableOutputs::default();
+        heads.set(vec![live("DP-1", None)]);
+        let driver = SystemDriver::with_output_source(
+            parsed.renderer.clone(),
+            Path::new("/wall-in-one-runtime.sock"),
+            Box::new(heads.clone()),
+        );
+        let mut runtime = Runtime::new(config_path.clone(), parsed, driver, noon()).unwrap();
+        without_text_file_busy(|| runtime.apply_current()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while started().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let [video] = started().try_into().unwrap();
+        heads.set(vec![live(head, None)]);
+
+        let document = if reloaded == "changed" {
+            dash_document("mirrored", &[], &["still"]).replace("/tmp/s0.png", "/tmp/reloaded.png")
+        } else {
+            dash_document("mirrored", &[], &[]).replace(
+                "name = \"p1\"\n",
+                "name = \"p1\"\nnothing_to_play = \"web wallpapers are off\"\nentries = []\n",
+            )
+        };
+        let document = document.replace(
+            "6319beb596edd7da48bfde4e70adba5b7fcf02ed4c7729ffc0db4adb9a0b426d",
+            RELOADED,
+        );
+        fs::write(&config_path, programs(document)).unwrap();
+        fs::remove_file(&asked).unwrap();
+        let reply = runtime_command(&mut runtime, noon(), "reload", None);
+        assert!(reply.ok, "{label}: {}", reply.message);
+        let snapshot = status(&mut runtime, noon());
+        assert_eq!(snapshot["config_generation"], RELOADED, "{label}");
+        assert_eq!(snapshot["renderer_failed"], false, "{label}: {snapshot}");
+        let gone = Path::new("/proc").join(&video);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while gone.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!gone.exists(), "{label}: the old document's video still runs");
+        let set = || fs::read_to_string(&asked).unwrap_or_default();
+        if head == "-X" {
+            assert!(!set().contains("wallpaper-set"), "{label}: {}", set());
+            heads.set(vec![live("DP-1", None)]);
+            runtime.tick(noon(), Instant::now() + Duration::from_secs(6));
+        }
+        // The new document plays, not the old one: its still, and no video again.
+        if reloaded == "changed" {
+            assert!(set().contains("/tmp/reloaded.png"), "{label}: {}", set());
+        } else {
+            assert!(!set().contains("wallpaper-set"), "{label}: {}", set());
+            assert_eq!(
+                status(&mut runtime, noon())["nothing_to_play"],
+                "web wallpapers are off",
+                "{label}"
+            );
+        }
+        assert!(!set().contains("/tmp/s0.png"), "{label}: {}", set());
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(started(), [video.clone()], "{label}: the old video started again");
+        assert_eq!(
+            status(&mut runtime, noon())["output_discovery_error"],
+            "",
+            "{label}"
+        );
+        runtime.shutdown();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn a_videos_dials_reach_mpvpaper_each_as_one_option() {
     use std::os::unix::fs::PermissionsExt;
     let root = directory("video-dials");

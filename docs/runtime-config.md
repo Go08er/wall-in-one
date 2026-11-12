@@ -409,8 +409,11 @@ assignment to it is one to a display that isn't connected (its status row says
 display the compositor reports is named so, a mirrored document has nowhere to
 play: the service plays nothing, says "no usable outputs", naming them, and at
 startup waits for a display it can use, as for a compositor that isn't ready
-yet; no entry is held against it. The app's own display lists leave it out the
-same way. mpvpaper gets its output and video
+yet; no entry is held against it. A document reloaded meanwhile is loaded all
+the same: what the one before it started stops, and the new one is played once a
+display can be used. An independent document plays as when discovery fails: on
+the displays last found, or else on those assigned to it. The app's own display
+lists leave such a display out the same way. mpvpaper gets its output and video
 after a `--` all the same.
 
 **An entry the service refuses is skipped.** Such an entry is never started.

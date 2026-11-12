@@ -5593,8 +5593,16 @@ impl<D: WallpaperDriver> Runtime<D> {
             } else {
                 self.apply_current()
             };
-            if let Err(error) = applied {
-                failure = Some(error);
+            match applied {
+                Err(error) if error.starts_with(NO_USABLE_OUTPUTS) => {
+                    // Every head is named with a '-' (`apply_current_in_batch`): nowhere to
+                    // play now, which is no reason to keep the old document in force (f6 L1).
+                    // This one is loaded; what the old one started stops, as for a document
+                    // that plays nothing, and `tick`'s probe plays this one on a usable head.
+                    self.driver.retain_outputs(&[]);
+                }
+                Err(error) => failure = Some(error),
+                Ok(_) => {}
             }
         }
         if failure.is_none() && palette_only_needed {

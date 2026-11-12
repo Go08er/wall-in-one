@@ -5806,16 +5806,30 @@ class Application(Adw.Application):
 
     def _said_with_web_off(self, problem: str) -> str:
         """What a settled publication says: ``problem`` (empty: nothing new), and what the
-        web-off guard did, if that hasn't been said yet (`_explaining_web_off_guard`)."""
+        web-off guard did, if that hasn't been said yet (`_explaining_web_off_guard`).
+
+        The new window is told when that is new, as `publication_problem` now says it
+        too, whether or not the problem itself changed.
+        """
         with self._runtime_config_lock:
             explained, said = self._web_off_explained, self._web_off_explained_said
             self._web_off_explained_said = True
-        if not explained or said or explained in problem:
+        if not explained or said:
+            return problem
+        changed = getattr(self._window, "publication_changed", None)
+        if callable(changed):
+            changed()
+        if explained in problem:
             return problem
         return f"{problem.rstrip().rstrip('.')}. {explained}" if problem else explained
 
     def _publication_got_through(self) -> None:
-        """A publication reached the service: what the web-off guard did, once said, goes."""
+        """A publication didn't fail: what the web-off guard did, once said, goes.
+
+        Asked before the publication says anything (`_said_with_web_off`), so what a
+        later lane job's guard did, not said yet, stays: an older success that settles
+        after it doesn't take it away unheard.
+        """
         with self._runtime_config_lock:
             gone = bool(self._web_off_explained) and self._web_off_explained_said
             if gone:
@@ -6556,13 +6570,13 @@ class Application(Adw.Application):
                         problem = f"{problem.rstrip().rstrip('.')}. {publication.note}"
                 elif publication.changed and self._window is not None:
                     self.refresh_runtime_status_async()
+                if not publication.deferred and not problem and not publication.unavailable:
+                    self._publication_got_through()
                 said = self._said_with_web_off(problem)
                 if said:
                     self.window_report(said)
                 if not publication.deferred:
                     self._set_publication_problem(problem)
-                    if not problem and not publication.unavailable:
-                        self._publication_got_through()
                     self._note_left_out()
         finally:
             # Whatever reporting did: the next request, the publication hold
@@ -7317,12 +7331,12 @@ class Application(Adw.Application):
         # Said when it becomes the problem, not by every poll that meets it
         # again: it stands (`publication_problem`) until a publication gets
         # through, this lane's or the compile lane's, and is new after that.
+        if not problem and not publication.unavailable:
+            self._publication_got_through()
         said = self._said_with_web_off(problem if problem != self._publication_problem else "")
         if said:
             self.window_report(said)
         self._set_publication_problem(problem)
-        if not problem and not publication.unavailable:
-            self._publication_got_through()
 
     def _say_health_failure_once(self, message: str) -> None:
         """Report a health save that failed, unless that was just said.

@@ -294,47 +294,100 @@ STOPPED = (
 FAILED = "a library folder can't be read"
 
 
+def _lane(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, list[str], list[str], dict[str, str]]:
+    """An application whose lane steps run here, on publications made for them: no service,
+    no compile. What it said, what the new window was shown each time it was told, and what
+    the guard says next."""
+    application = profiles().application
+    said: list[str] = []
+    shown: list[str] = []
+    monkeypatch.setattr(application, "window_report", said.append)
+    monkeypatch.setattr(application, "_ensure_runtime_compile_queued", lambda: None)
+    window = SimpleNamespace(
+        publication_changed=lambda: shown.append(application.publication_problem)
+    )
+    monkeypatch.setattr(application, "_window", window)
+    guard = {"says": STOPPED}
+    monkeypatch.setattr(application, "_web_off_guard", lambda: guard["says"])
+    return application, said, shown, guard
+
+
+def _ran(application: Any, generation: int, error: str) -> _RuntimePublication:
+    """The lane's tail (`_compile_runtime_until_current`): the guard, on a failure."""
+    publication: _RuntimePublication = application._stopping_web_after_failure(
+        _RuntimePublication(generation, error=error)
+    )
+    return publication
+
+
+def _settled(application: Any, publication: _RuntimePublication, newest: int) -> None:
+    """GTK's tail (`_finish_runtime_compile`), with ``newest`` the latest request."""
+    application._runtime_authoring_request = SimpleNamespace(generation=newest)
+    done: Future[_RuntimePublication] = Future()
+    done.set_result(publication)
+    application._finish_runtime_compile(done)
+
+
+@pytest.mark.parametrize("standing", ["nothing-failed-yet", "already-failing"])
 @pytest.mark.parametrize("first", ["replaced-before-it-was-said", "said"])
 def test_what_the_guard_did_is_said_and_stays_whatever_publication_comes_next(
     profiles: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     first: str,
+    standing: str,
 ) -> None:
     """R42-22: only a current publication is said, so the one that carried what the guard did
     (the older service stopped, and how to start it again) went unsaid when a later request had
     replaced it, and the later one's compile error was all that was said and shown (seen once in
     a larger run, on fd680432). What the guard did is kept apart: said with the next publication
-    that is said, once, shown with the newest problem, and gone when a publication gets through.
-    The lane's own steps run here, on publications made for it: no service, no compile."""
-    application = profiles().application
-    said: list[str] = []
-    monkeypatch.setattr(application, "window_report", said.append)
-    monkeypatch.setattr(application, "_ensure_runtime_compile_queued", lambda: None)
-    guard = {"says": STOPPED}
-    monkeypatch.setattr(application, "_web_off_guard", lambda: guard["says"])
+    that is said, once, shown with the newest problem (the new window told so, though that
+    problem may read as the one standing before), and gone when one doesn't fail."""
+    application, said, shown, guard = _lane(profiles, monkeypatch)
+    before: list[str] = []
+    if standing == "already-failing":
+        guard["says"] = ""
+        _settled(application, _ran(application, 0, FAILED), 0)
+        before = [FAILED]
+        guard["says"] = STOPPED
+        assert application.publication_problem == FAILED
 
-    def settle(generation: int, error: str, newest: int) -> None:
-        # The lane's tail (`_compile_runtime_until_current`), then GTK's.
-        publication = application._stopping_web_after_failure(
-            _RuntimePublication(generation, error=error)
-        )
-        application._runtime_authoring_request = SimpleNamespace(generation=newest)
-        done: Future[_RuntimePublication] = Future()
-        done.set_result(publication)
-        application._finish_runtime_compile(done)
-
-    settle(1, FAILED, 2 if first == "replaced-before-it-was-said" else 1)
+    _settled(application, _ran(application, 1, FAILED), 2 if first.startswith("replaced") else 1)
     guard["says"] = ""  # the service is gone: nothing more to do or say
-    settle(2, FAILED, 2)
+    _settled(application, _ran(application, 2, FAILED), 2)
 
     # Said once, with whichever was said first; shown with the newest problem.
-    replaced = first == "replaced-before-it-was-said"
-    assert said == [f"{FAILED}. {STOPPED}"] + ([] if replaced else [FAILED])
+    replaced = first.startswith("replaced")
+    assert said == [*before, f"{FAILED}. {STOPPED}"] + ([] if replaced else [FAILED])
     assert application.publication_problem == f"{FAILED}. {STOPPED}"
+    assert shown and shown[-1] == f"{FAILED}. {STOPPED}", shown
     reported = list(said)
-    settle(3, "", 3)  # one gets through
+    _settled(application, _RuntimePublication(3), 3)  # one doesn't fail
     assert application.publication_problem == ""
+    assert shown[-1] == ""
     assert said == reported
+
+
+def test_an_older_success_settling_after_what_the_guard_did_doesnt_take_it_away_unsaid(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R42-22: a lane job's guard can run before GTK settles the job before it. That one went
+    through, which takes what the guard did away; but only once it was said: here it is said
+    by that publication, and stays until a later one doesn't fail."""
+    application, said, _shown, guard = _lane(profiles, monkeypatch)
+    failed = _ran(application, 2, FAILED)  # the guard runs on the lane
+    guard["says"] = ""
+    _settled(application, _RuntimePublication(1), 1)  # the success before it settles after
+
+    assert said == [STOPPED]
+    assert application.publication_problem == STOPPED
+    _settled(application, failed, 2)
+    assert application.publication_problem == f"{FAILED}. {STOPPED}"
+    _settled(application, _RuntimePublication(3), 3)
+    assert application.publication_problem == ""
 
 
 def test_a_held_document_without_web_is_left_alone(

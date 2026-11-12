@@ -198,8 +198,10 @@ names, or when the service predates schema 8 (it has no check of its own) and
 the document plays a web page, an item the scan can't classify, or one the
 app no longer knows, the app stops it. A service that reads 8 is then handed
 a document that plays nothing, which also replaces the file on disk; one that
-can't read it is told to quit, and its next start is guarded. A service that
-reads 8, holding a document that doesn't allow web wallpapers with none on
+can't read it is told to quit, and its next start is guarded. What was
+stopped, and how to start it again, is said once, and the new window keeps it
+under its header until a publication gets through, whatever a later one fails
+with. A service that reads 8, holding a document that doesn't allow web wallpapers with none on
 disk that does, is left alone: it refuses every page itself (below, where an
 `application` or an item it can't read is refused with the setting on too),
 and the app only says that the setting hasn't reached it yet. With no service

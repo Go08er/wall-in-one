@@ -1137,6 +1137,12 @@ class Application(Adw.Application):
         self._runtime_authoring_request: _RuntimeAuthoringRequest | None = None
         #: Why the last publication didn't reach the wallpaper service, or empty.
         self._publication_problem = ""
+        #: What the web-off guard last did on a lane (`_explaining_web_off_guard`),
+        #: kept apart from the problem until a publication gets through, and
+        #: whether it has been said: the publication that carried it may be
+        #: replaced before it is (R42-22). Written under `_runtime_config_lock`.
+        self._web_off_explained = ""
+        self._web_off_explained_said = True
         #: What the runtime document was built without when this process last
         #: compiled it (`runtime_config.LeftOut`); None before the first
         #: compile. Written by whichever lane compiled, under
@@ -5703,7 +5709,7 @@ class Application(Adw.Application):
         )
         try:
             if not self._runtime_shutdown:
-                self._web_off_guard()
+                self._explaining_web_off_guard()
         except Exception as error:  # said, and not tried again: the lane goes on
             LOGGER.warning("the web-off guard failed again: %s", error)
         with self._runtime_config_lock:
@@ -5765,7 +5771,7 @@ class Application(Adw.Application):
                 return publication
             # Web wallpapers went off and their publication is held after all (a
             # removal in its way): the page ends now, and the publication follows.
-            done = self._web_off_guard()
+            done = self._explaining_web_off_guard()
             return replace(publication, error=done) if done else publication
         if publication.unavailable or (publication.error == "" and publication.response is None):
             if publication.unavailable:
@@ -5774,12 +5780,49 @@ class Application(Adw.Application):
         refused = publication.response is not None and not publication.response.ok
         if not publication.error and not refused:
             return publication
-        done = self._web_off_guard()
+        done = self._explaining_web_off_guard()
         if not done:
             return publication
         if refused:
             return replace(publication, note=done)
         return replace(publication, error=f"{publication.error.rstrip().rstrip('.')}. {done}")
+
+    def _explaining_web_off_guard(self) -> str:
+        """`_web_off_guard` on a publication lane, what it did kept until it is said.
+
+        A lane's publication carries what the guard did, and only a current one is
+        said: one a later request replaced was not, and the person never heard why
+        the service stopped or how to start it again (R42-22). So it is also kept
+        apart (`_web_off_explained`), said with the next publication that is
+        (`_said_with_web_off`), and shown with the publication problem until a
+        publication gets through (`publication_problem`).
+        """
+        done = self._web_off_guard()
+        if done:
+            with self._runtime_config_lock:
+                self._web_off_explained = done
+                self._web_off_explained_said = False
+        return done
+
+    def _said_with_web_off(self, problem: str) -> str:
+        """What a settled publication says: ``problem`` (empty: nothing new), and what the
+        web-off guard did, if that hasn't been said yet (`_explaining_web_off_guard`)."""
+        with self._runtime_config_lock:
+            explained, said = self._web_off_explained, self._web_off_explained_said
+            self._web_off_explained_said = True
+        if not explained or said or explained in problem:
+            return problem
+        return f"{problem.rstrip().rstrip('.')}. {explained}" if problem else explained
+
+    def _publication_got_through(self) -> None:
+        """A publication reached the service: what the web-off guard did, once said, goes."""
+        with self._runtime_config_lock:
+            gone = bool(self._web_off_explained) and self._web_off_explained_said
+            if gone:
+                self._web_off_explained = ""
+        changed = getattr(self._window, "publication_changed", None)
+        if gone and callable(changed):
+            changed()
 
     def _web_off_guard(self) -> str:
         """End a web page the service may still hold while web wallpapers are off; say what.
@@ -6504,7 +6547,6 @@ class Application(Adw.Application):
             if not self._runtime_shutdown and current:
                 problem = ""
                 if publication.error:
-                    self.window_report(publication.error)
                     problem = publication.error
                 elif publication.unavailable:
                     self._status_model.mark_unavailable(forget=False)
@@ -6512,11 +6554,15 @@ class Application(Adw.Application):
                     problem = self._rejected_configuration(publication.response.message)
                     if publication.note:
                         problem = f"{problem.rstrip().rstrip('.')}. {publication.note}"
-                    self.window_report(problem)
                 elif publication.changed and self._window is not None:
                     self.refresh_runtime_status_async()
+                said = self._said_with_web_off(problem)
+                if said:
+                    self.window_report(said)
                 if not publication.deferred:
                     self._set_publication_problem(problem)
+                    if not problem and not publication.unavailable:
+                        self._publication_got_through()
                     self._note_left_out()
         finally:
             # Whatever reporting did: the next request, the publication hold
@@ -6537,9 +6583,14 @@ class Application(Adw.Application):
         a limit of the runtime's) or the runtime's own; the service keeps the
         last configuration that worked meanwhile. The next publication that
         gets through clears it. A playlist that can't play is never this: the
-        document is published without what names it (`left_out_notice`).
+        document is published without what names it (`left_out_notice`). What
+        the web-off guard did on a lane is said with it until then too, whatever
+        later publications fail with (`_explaining_web_off_guard`, R42-22).
         """
-        return self._publication_problem
+        problem, explained = self._publication_problem, self._web_off_explained
+        if not explained or explained in problem:
+            return problem
+        return f"{problem.rstrip().rstrip('.')}. {explained}" if problem else explained
 
     @property
     def left_out_notice(self) -> str:
@@ -7266,9 +7317,12 @@ class Application(Adw.Application):
         # Said when it becomes the problem, not by every poll that meets it
         # again: it stands (`publication_problem`) until a publication gets
         # through, this lane's or the compile lane's, and is new after that.
-        if problem and problem != self._publication_problem:
-            self.window_report(problem)
+        said = self._said_with_web_off(problem if problem != self._publication_problem else "")
+        if said:
+            self.window_report(said)
         self._set_publication_problem(problem)
+        if not problem and not publication.unavailable:
+            self._publication_got_through()
 
     def _say_health_failure_once(self, message: str) -> None:
         """Report a health save that failed, unless that was just said.

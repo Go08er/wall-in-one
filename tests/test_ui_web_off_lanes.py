@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import tomllib
+from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,6 +39,7 @@ from tests.test_ui_web_off_failed_publish import DOCUMENT, WEB, _steam_with_web 
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
+from wall_in_one.ui.app import _RuntimePublication  # noqa: E402
 
 READS_EIGHT = [4, 5, 6, 7, 8]
 OLDER = [4, 5]
@@ -256,12 +259,11 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
     systemd leaves the unit stopped, and the next start runs ExecStartPre's guard. No unit is
     touched here.
 
-    Why is said by the publication that stopped it. With previews on, the save also starts a
-    rescan in the GUI. Its publication fails to compile too, with nothing more to say (the
-    service is gone by then), and it is the newest: it lands after the one that stopped the
-    service, or, seen once in a larger run, the stop's words were never said; read from the
-    code, that one was no longer current when it finished (only a current publication is
-    said). So the stop is checked by what was sent, and its words where they were said (R42-22).
+    Why stands until a publication gets through. With previews on, the save also starts a
+    rescan in the GUI, whose publication fails to compile too, with nothing to say of the
+    service (gone by then); it is the newest, and it may land after the one that stopped the
+    service or replace that one before it was said (only a current publication is said). Either
+    way the stop's words are said, and stay with the newest problem (R42-22).
     """
     profile, sent, reports = _turn_off(
         profiles,
@@ -272,17 +274,67 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
         schemas=OLDER,
     )
     assert _acted(sent) == ["stop", "quit"]
-    said = " ".join(reports)
+    said = [" ".join(reports)]
     if not service:
-        assert "a library folder can't be read" in profile.application.publication_problem
-    if service or not CURRENT[0] or "still plays" in said:
-        assert "still plays Electric Eye" in said
-        assert "It was stopped: it is older than this app" in said
-        assert "systemctl --user start wall-in-one" in said
-    else:
-        assert "a library folder can't be read" in said, said  # the rescan's, said instead
+        problem = profile.application.publication_problem
+        assert "a library folder can't be read" in problem
+        said.append(problem)
+    for words in said:
+        assert "still plays Electric Eye" in words
+        assert "It was stopped: it is older than this app" in words
+        assert "systemctl --user start wall-in-one" in words
     # Nothing it can't load was written.
     assert _names_page()
+
+
+STOPPED = (
+    "Allow web wallpapers is off, but the wallpaper service still plays Electric Eye. It was "
+    "stopped: it is older than this app. Starting it again (systemctl --user start wall-in-one)"
+)
+FAILED = "a library folder can't be read"
+
+
+@pytest.mark.parametrize("first", ["replaced-before-it-was-said", "said"])
+def test_what_the_guard_did_is_said_and_stays_whatever_publication_comes_next(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+) -> None:
+    """R42-22: only a current publication is said, so the one that carried what the guard did
+    (the older service stopped, and how to start it again) went unsaid when a later request had
+    replaced it, and the later one's compile error was all that was said and shown (seen once in
+    a larger run, on fd680432). What the guard did is kept apart: said with the next publication
+    that is said, once, shown with the newest problem, and gone when a publication gets through.
+    The lane's own steps run here, on publications made for it: no service, no compile."""
+    application = profiles().application
+    said: list[str] = []
+    monkeypatch.setattr(application, "window_report", said.append)
+    monkeypatch.setattr(application, "_ensure_runtime_compile_queued", lambda: None)
+    guard = {"says": STOPPED}
+    monkeypatch.setattr(application, "_web_off_guard", lambda: guard["says"])
+
+    def settle(generation: int, error: str, newest: int) -> None:
+        # The lane's tail (`_compile_runtime_until_current`), then GTK's.
+        publication = application._stopping_web_after_failure(
+            _RuntimePublication(generation, error=error)
+        )
+        application._runtime_authoring_request = SimpleNamespace(generation=newest)
+        done: Future[_RuntimePublication] = Future()
+        done.set_result(publication)
+        application._finish_runtime_compile(done)
+
+    settle(1, FAILED, 2 if first == "replaced-before-it-was-said" else 1)
+    guard["says"] = ""  # the service is gone: nothing more to do or say
+    settle(2, FAILED, 2)
+
+    # Said once, with whichever was said first; shown with the newest problem.
+    replaced = first == "replaced-before-it-was-said"
+    assert said == [f"{FAILED}. {STOPPED}"] + ([] if replaced else [FAILED])
+    assert application.publication_problem == f"{FAILED}. {STOPPED}"
+    reported = list(said)
+    settle(3, "", 3)  # one gets through
+    assert application.publication_problem == ""
+    assert said == reported
 
 
 def test_a_held_document_without_web_is_left_alone(

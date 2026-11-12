@@ -1,6 +1,6 @@
 pkgbase = wall-in-one
 	pkgdesc = Wallpaper manager for Wayland with Noctalia palette sync
-	pkgver = 0.4.1
+	pkgver = 0.4.2
 	pkgrel = 1
 	url = https://github.com/Go08er/wall-in-one
 	arch = x86_64
@@ -24,7 +24,7 @@ pkgbase = wall-in-one
 	depends = python-gobject
 	optdepends = mpvpaper: video wallpapers (AUR)
 	optdepends = linux-wallpaperengine: Wallpaper Engine scenes (AUR: linux-wallpaperengine-git)
-	source = wall-in-one-0.4.1.tar.gz::https://github.com/Go08er/wall-in-one/archive/refs/tags/v0.4.1.tar.gz
-	sha256sums = 40626b9447b37bb772ad33424260cf4c1c3a0becefe530c5c43508657534471d
+	source = wall-in-one-0.4.2.tar.gz::https://github.com/Go08er/wall-in-one/archive/refs/tags/v0.4.2.tar.gz
+	sha256sums = 354b9e718bc6825796ec17ee94f2debfe83a7fb56cec96a519088ef5f7b432ef
 
 pkgname = wall-in-one

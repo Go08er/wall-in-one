@@ -1,7 +1,7 @@
 # Maintainer: goober <149829787+Go08er@users.noreply.github.com>
 
 pkgname=wall-in-one
-pkgver=0.4.1
+pkgver=0.4.2
 pkgrel=1
 pkgdesc='Wallpaper manager for Wayland with Noctalia palette sync'
 arch=(x86_64 aarch64)
@@ -41,7 +41,7 @@ optdepends=(
   'linux-wallpaperengine: Wallpaper Engine scenes (AUR: linux-wallpaperengine-git)'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('40626b9447b37bb772ad33424260cf4c1c3a0becefe530c5c43508657534471d')
+sha256sums=('354b9e718bc6825796ec17ee94f2debfe83a7fb56cec96a519088ef5f7b432ef')
 
 prepare() {
   cd "$pkgname-$pkgver"

@@ -20,7 +20,15 @@ import pytest
 from wall_in_one import config, file_io, paths, predecessor_process, runtime_config
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
-from wall_in_one.library import adopted, capture_upgrade, pairing, pairings, scan, stills
+from wall_in_one.library import (
+    adopted,
+    capture_upgrade,
+    pairing,
+    pairings,
+    scan,
+    stills,
+    workshop,
+)
 from wall_in_one.library.model import Kind, MediaItem, Ownership
 
 #: The real frame grabber, before any fixture swaps in a fake one.
@@ -892,23 +900,33 @@ def test_missing_manual_choice_does_not_render_repeatedly(
     assert not stills.destination(fixture.source, fixture.root).exists()
 
 
+@pytest.mark.parametrize("untrusted", ("an-items-folder", "linked-inside"))
 def test_an_upgrade_in_a_still_folder_no_longer_trusted_is_skipped_quietly_at_every_start(
     tmp_path: Path,
     cleanup_environment: list[Path],
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    untrusted: str,
 ) -> None:
     """f7 R42-17 follow-up: a capture is made only in a still folder no item's author can write
     in, so the rebuild of one whose library folder's `Wall-in-One` is an item's folder now was
     refused at every start: logged as a failure, its selector withdrawn and written back, and a
     scan and a compile run, each start (on b867faff). Nothing there is used (f7 W1), so there is
-    nothing to upgrade: it is skipped, and nothing is said, run or written, start after start."""
+    nothing to upgrade: it is skipped, and nothing is said, run or written, start after start.
+
+    So is one whose `Wall-in-One` is a link to a folder in the same library folder: no capture
+    is made through it (f7 H3), and it was refused at every start the same way (f9)."""
     fixture = _cleanup_fixture(tmp_path)
     selector = stills.write_sidecar(fixture.source, fixture.capture)
-    (fixture.root / pairing.MANAGED_PARENT / "project.json").write_text(
-        json.dumps({"type": "web", "file": "index.html"})
-    )
-    assert not pairing.still_directory_trusted(fixture.root)
+    managed = fixture.root / pairing.MANAGED_PARENT
+    if untrusted == "an-items-folder":
+        (managed / "project.json").write_text(json.dumps({"type": "web", "file": "index.html"}))
+        assert not pairing.still_directory_trusted(fixture.root)
+    else:
+        managed.rename(fixture.root / "elsewhere")
+        managed.symlink_to("elsewhere", target_is_directory=True)
+        assert pairing.still_directory_trusted(fixture.root)
+        assert not workshop.reached_as_named(pairing.still_directory(fixture.root), fixture.root)
     kept = (_fingerprint(selector), _fingerprint(fixture.capture), selector.read_bytes())
     compiled: list[object] = []
     update = runtime_config.update

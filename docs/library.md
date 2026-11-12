@@ -180,12 +180,12 @@ New automatic captures are written under the first configured root whose still
 directory no Workshop item could have shipped (above), skipping one the scan
 doesn't use or can't look in (a link, not a folder, not there right now, or
 unreadable) and one whose `Wall-in-One` or `Automatic Stills` is a link (never
-written through); with no such root none is made, and Regenerate says why. Existing deterministic captures are
-discovered under every root whose still directory no item could have shipped, so
-changing root order does not strand an older representative. While a folder is
-away (a drive that isn't plugged in), the stills that would go in it are made in
-the next one; when it is back, both copies stay, and one of them is no longer
-used. Nothing removes it.
+written through); with no such root none is made, and Regenerate says why.
+Existing deterministic captures are discovered under every root whose still
+directory no item could have shipped, so changing root order does not strand an
+older representative. While a folder is away (a drive that isn't plugged in),
+the stills that would go in it are made in the next one; when it is back, both
+copies stay, and one of them is no longer used. Nothing removes it.
 
 At app or wallpaper-service startup, verified older automatic captures are
 replaced with current captures, generating missing ones and rebinding the

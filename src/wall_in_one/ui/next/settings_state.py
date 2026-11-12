@@ -148,7 +148,7 @@ KEY_FAILED: Final = "failed"
 STILLS_ELSEWHERE: Final = (
     "Generated stills go to the first folder Wall-in-One can trust with them: one that is "
     "there and can be read, that isn't a Wallpaper Engine item's folder or inside one, and "
-    "whose Wall-in-One folder isn't a link"
+    "whose Wall-in-One or Automatic Stills folder isn't a link"
 )
 
 

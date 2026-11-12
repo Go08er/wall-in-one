@@ -1146,6 +1146,11 @@ class Application(Adw.Application):
         #: The generation of the publication whose guard said them: one as new that
         #: gets through takes them away, said or not (f9 F1).
         self._web_off_explained_at = 0
+        #: The newest publication that got through, and how often web wallpapers went
+        #: back on: a guard still running for an older one, or from before they went on,
+        #: keeps nothing when it returns (R42-23).
+        self._web_off_through_at = 0
+        self._web_off_on_epoch = 0
         #: What the runtime document was built without when this process last
         #: compiled it (`runtime_config.LeftOut`); None before the first
         #: compile. Written by whichever lane compiled, under
@@ -5806,13 +5811,19 @@ class Application(Adw.Application):
         publication as new as ``generation`` (the one the guard ran for) gets through
         (`publication_problem`, `_publication_got_through`).
         """
+        with self._runtime_config_lock:
+            epoch = self._web_off_on_epoch
         done = self._web_off_guard()
         if done:
             with self._runtime_config_lock:
-                if done != self._web_off_explained:  # new words; the same ones said stay so (f9 F2)
-                    self._web_off_explained_said = False
-                self._web_off_explained = done
-                self._web_off_explained_at = generation
+                # What it did is over if web went back on or one as new got through while
+                # it ran: those cleared what was kept, and it isn't put back (R42-23).
+                over = epoch != self._web_off_on_epoch or self._web_off_through_at >= generation
+                if not over:
+                    if done != self._web_off_explained:  # new words; the same said stay so (f9 F2)
+                        self._web_off_explained_said = False
+                    self._web_off_explained = done
+                    self._web_off_explained_at = generation
         return done
 
     def _said_with_web_off(self, problem: str) -> str:
@@ -5843,6 +5854,7 @@ class Application(Adw.Application):
         be said if it wasn't: that publication failed after it.
         """
         with self._runtime_config_lock:
+            self._web_off_through_at = max(self._web_off_through_at, generation)
             gone = bool(self._web_off_explained) and generation >= self._web_off_explained_at
             if gone:
                 self._web_off_explained = ""
@@ -9396,8 +9408,10 @@ class Application(Adw.Application):
         if candidate.allow_web_wallpapers:
             with self._runtime_config_lock:
                 self._runtime_web_off_owed = 0
-                # What the guard did while they were off is over (f9 F1).
+                # What the guard did while they were off is over (f9 F1), and so is what
+                # a guard still running returns (R42-23).
                 explained, self._web_off_explained = self._web_off_explained, ""
+                self._web_off_on_epoch += 1
             changed = getattr(self._window, "publication_changed", None)
             if explained and callable(changed):
                 changed()

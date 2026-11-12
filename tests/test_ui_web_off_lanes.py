@@ -19,9 +19,10 @@ runs the updated one through ExecStartPre's guard.
 from __future__ import annotations
 
 import json
+import threading
 import tomllib
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -42,6 +43,7 @@ from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one.control import client  # noqa: E402
 from wall_in_one.control.protocol import Response  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
+    Application,
     _RuntimeHealthRequest,
     _RuntimeHealthResult,
     _RuntimePublication,
@@ -493,6 +495,74 @@ def test_the_health_lane_says_the_guards_words_once_under_a_standing_refusal(
     assert len(said) == 1 and STOPPED in said[0], said
     assert heard[1:] == [heard[0], heard[0]], "nothing more said or shown"
     assert STOPPED in application.publication_problem
+
+
+@pytest.mark.parametrize("clear", ["web-back-on", "newer-success", "nothing-clears"])
+def test_a_guard_still_running_doesnt_put_back_what_a_later_clear_ended(
+    profiles: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    clear: str,
+) -> None:
+    """R42-23 (Codex's shape): the real guard tells an older service to quit and waits for the
+    reply. Meanwhile web wallpapers go back on, or a newer publication gets through; each
+    clears what was kept, and there was nothing yet. The guard then returned and kept its
+    words, and the next failure said "Allow web wallpapers is off, …" again (on 19e7ac7b). A
+    guard that returns after such a clear keeps nothing; with nothing between, it keeps them."""
+    application, said, _shown, _guard = _lane(profiles, monkeypatch)
+    monkeypatch.setattr(application, "_make_missing_stills", lambda: None)
+    _steam_with_web()
+    paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.runtime_config_path().write_text(DOCUMENT, encoding="utf-8")
+    asked_to_quit, answer = threading.Event(), threading.Event()
+    sent: list[str] = []
+
+    def older_service(verb: str, *_arguments: object, **_keywords: object) -> Response:
+        sent.append(verb)
+        if verb == "status":
+            return Response.success(
+                json.dumps(
+                    {
+                        "status_version": 2,
+                        "supported_config_schemas": OLDER,
+                        "playback_state": "playing",
+                    }
+                )
+            )
+        if verb == "quit":
+            asked_to_quit.set()  # the guard waits for this reply, its compiler lock let go
+            assert answer.wait(15), "the test didn't answer the quit"
+        return Response.success()
+
+    monkeypatch.setattr(client, "send_runtime", older_service)
+    monkeypatch.setattr(
+        application, "_web_off_guard", lambda: Application._web_off_guard(application)
+    )
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-guard") as pool:
+        running = pool.submit(application._explaining_web_off_guard, 1)
+        try:
+            spin_until(asked_to_quit.is_set, 10, what="the guard to ask the service to quit")
+            assert [verb for verb in sent if verb != "status"] == ["stop", "quit"]
+            if clear == "web-back-on":
+                before = application.settings
+                after = replace(before, allow_web_wallpapers=True)
+                config.save(after)
+                application._adopt_settings(before, after)
+            elif clear == "newer-success":
+                _settled(application, _RuntimePublication(2, response=Response.success()), 2)
+            answer.set()
+            words = running.result(timeout=10)
+        finally:
+            answer.set()
+    assert "was stopped" in words
+
+    _settled(application, _RuntimePublication(3, error=FAILED), 3)
+
+    if clear == "nothing-clears":
+        assert words in application.publication_problem
+        assert sum(words in report for report in said) == 1, said
+    else:
+        assert application.publication_problem == FAILED, application.publication_problem
+        assert not any(words in report for report in said), said
 
 
 def test_a_held_document_without_web_is_left_alone(

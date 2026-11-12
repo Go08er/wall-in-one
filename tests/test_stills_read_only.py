@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_scenes import where_the_engine_looks
-from wall_in_one import paths, worker_processes
+from wall_in_one import config, paths, worker_processes
 from wall_in_one.library import pairing, scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
@@ -449,3 +449,42 @@ def test_a_capture_goes_only_where_its_folder_is_trusted_now(
         stills.generate(clip, root)
     assert not isinstance(raised.value, stills.StillFolderError)
     assert "item's author could write there" in str(raised.value)
+
+
+@pytest.mark.parametrize("spelling", ["plain", "middle-dotdot", "final-dotdot", "linked"])
+def test_a_library_folder_spelled_with_dotdot_gets_its_stills(
+    tmp_path: Path, rendered: list[Path], spelling: str
+) -> None:
+    """f7 R42-20: a library folder saved as ``/lib/child/..`` is scanned, and its first still
+    was refused ("anchored paths cannot contain dot components", on c8b2fddb): the pin walked
+    its last name as a folder below the ones resolved. It is the folder it names, as the scan
+    lists it; a ``..`` before the last name was fine already. One whose last name is a link is
+    still neither scanned nor written through, however it is spelled."""
+    physical = tmp_path / "library"
+    (physical / "child").mkdir(parents=True)
+    (physical / "linked").symlink_to(physical / "child", target_is_directory=True)
+    root = {
+        "plain": physical,
+        "middle-dotdot": physical / "child" / ".." / "child",
+        "final-dotdot": physical / "child" / "..",
+        "linked": physical / "child" / ".." / "linked",
+    }[spelling]
+    settings = config.Settings(roots=(root,))
+    assert settings.roots == (root,), "kept as saved"
+    clip = video(physical / "child" if spelling == "linked" else root)
+    library = scan.scan(settings.roots, {})
+    refused: list[stills.StillFolderError] = []
+    if spelling == "linked":
+        assert library.capture_roots == () and library.find(clip) is None
+        assert stills.ensure(item(clip, Kind.VIDEO), root, refused=refused.append) is None
+        assert len(refused) == 1 and "symbolic link" in refused[0].reason, refused
+        assert rendered == []
+        return
+    assert pairing.library_capture_root(library) == root
+    found = library.find(clip)
+    assert found is not None and found.paired_still is None
+
+    made = stills.ensure(found, root, refused=refused.append)
+
+    assert made is not None and made.is_file(), [str(error) for error in refused]
+    assert scan.scan(settings.roots, {}).find(clip).paired_still == made

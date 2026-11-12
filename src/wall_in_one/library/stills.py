@@ -1496,7 +1496,13 @@ def _pin_target_directory(
     absolute_directory = target.parent.absolute()
     try:
         below = absolute_directory.relative_to(absolute_root)
-        reached_root = absolute_root.parent.resolve(strict=True) / absolute_root.name
+        # One spelled with a final `..` (`/lib/child/..`) is the folder that names, as the
+        # scan lists it: resolved whole, and never a link itself (f7 R42-20).
+        reached_root = (
+            absolute_root.resolve(strict=True)
+            if absolute_root.name == ".."
+            else absolute_root.parent.resolve(strict=True) / absolute_root.name
+        )
         reached_directory = reached_root / below
         root_status = reached_root.lstat()
         directory_status = reached_directory.lstat()

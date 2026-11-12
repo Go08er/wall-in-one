@@ -537,7 +537,7 @@ def test_web_off_owed_while_a_finished_jobs_completion_waits_still_gets_a_job(
     assert application.remove_item_async(profile.rain, trash=True, finish=removed.append)
     _pump(hold)
     future, callback = held[0]
-    GLib.idle_add(callback, future, priority=GLib.PRIORITY_DEFAULT)
+    GLib.idle_add(callback, future, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
     spin_until(lambda: bool(removed), AT_ONCE, what="the removal")
     heard = next(
         (index for index, verb in enumerate(service.sent) if verb in {"reload", "stop", "quit"}),

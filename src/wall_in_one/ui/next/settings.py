@@ -562,9 +562,8 @@ class SettingsPage(Page):
             group.widget.remove(self._add_folder_row)
         group.entries = []
         self._folder_rows = []
-        stills_at = _stills_index(folders)
         for index, folder in enumerate(folders):
-            row = self._folder_row(index, folder, blocked, stills=index == stills_at)
+            row = self._folder_row(index, folders, blocked)
             keywords = f"folder {folder.path} {'missing unplugged' if folder.missing else ''}"
             if index == 0:
                 keywords += " downloads save store wallhaven motionbgs stills destination"
@@ -583,9 +582,10 @@ class SettingsPage(Page):
         self._add(group, self._add_folder_row, "add folder new location")
         self._apply_filter()
 
-    def _folder_row(
-        self, index: int, folder: Folder, blocked: bool, *, stills: bool
-    ) -> Adw.ActionRow:
+    def _folder_row(self, index: int, folders: Sequence[Folder], blocked: bool) -> Adw.ActionRow:
+        folder = folders[index]
+        # Whether generated stills go to this one, as the scan judged (f7 G5).
+        stills = index == _stills_index(folders)
         row = plain(Adw.ActionRow, title=folder.name, subtitle=folder.path)
         writers: list[Gtk.Widget] = []
         if folder.note:

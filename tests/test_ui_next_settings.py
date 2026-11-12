@@ -893,15 +893,8 @@ def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
     page = SimpleNamespace(
         access=Access(), make_download_folder=print, _ask_remove=print, _present=print
     )
-    stills_at = settings_page._stills_index(folders)
-    for index, (folder, tip) in enumerate(zip(folders, tips, strict=True)):
-        row = settings_page.SettingsPage._folder_row(
-            page,  # type: ignore[arg-type]
-            index,
-            folder,
-            False,
-            stills=index == stills_at,
-        )
+    for index, tip in enumerate(tips):
+        row = settings_page.SettingsPage._folder_row(page, index, folders, False)  # type: ignore[arg-type]
         shown = row.get_tooltip_text()
         assert (shown is None) if tip is None else (shown or "").startswith(tip), shown
 

@@ -1384,7 +1384,10 @@ fn a_reload_while_every_head_has_a_dash_name_is_loaded_and_plays_on_the_next_usa
         while gone.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(!gone.exists(), "{label}: the old document's video still runs");
+        assert!(
+            !gone.exists(),
+            "{label}: the old document's video still runs"
+        );
         let set = || fs::read_to_string(&asked).unwrap_or_default();
         if head == "-X" {
             assert!(!set().contains("wallpaper-set"), "{label}: {}", set());
@@ -1404,7 +1407,11 @@ fn a_reload_while_every_head_has_a_dash_name_is_loaded_and_plays_on_the_next_usa
         }
         assert!(!set().contains("/tmp/s0.png"), "{label}: {}", set());
         thread::sleep(Duration::from_millis(200));
-        assert_eq!(started(), [video.clone()], "{label}: the old video started again");
+        assert_eq!(
+            started(),
+            [video.as_str()],
+            "{label}: the old video started again"
+        );
         assert_eq!(
             status(&mut runtime, noon())["output_discovery_error"],
             "",

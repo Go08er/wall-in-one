@@ -255,6 +255,12 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
     Only the runtime's own ``quit`` (as ``wall-in-one ctl quit``): it exits cleanly, so
     systemd leaves the unit stopped, and the next start runs ExecStartPre's guard. No unit is
     touched here.
+
+    Why is said by the publication that stopped it. With previews on, the save also starts a
+    rescan in the GUI. Its publication fails to compile too, with nothing more to say (the
+    service is gone by then), and it is the newest: it lands after the one that stopped the
+    service, or before that one is said, which it then replaces (only a current publication is
+    said). So the stop is checked by what was sent, and its words where they were said (R42-22).
     """
     profile, sent, reports = _turn_off(
         profiles,
@@ -265,10 +271,15 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
         schemas=OLDER,
     )
     assert _acted(sent) == ["stop", "quit"]
-    said = " ".join(reports) if service else profile.application.publication_problem
-    assert "still plays Electric Eye" in said
-    assert "It was stopped: it is older than this app" in said
-    assert "systemctl --user start wall-in-one" in said
+    said = " ".join(reports)
+    if not service:
+        assert "a library folder can't be read" in profile.application.publication_problem
+    if service or not CURRENT[0] or "still plays" in said:
+        assert "still plays Electric Eye" in said
+        assert "It was stopped: it is older than this app" in said
+        assert "systemctl --user start wall-in-one" in said
+    else:
+        assert "a library folder can't be read" in said, said  # the rescan's, said instead
     # Nothing it can't load was written.
     assert _names_page()
 

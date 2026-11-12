@@ -19,7 +19,10 @@ sub-option on (an upgraded 0.4.1 profile) and off.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -57,6 +60,8 @@ from wall_in_one.ui.app import (  # noqa: E402
 
 #: How long the service gets to hear of it while the scan is held.
 AT_ONCE = 15.0
+#: The client's own exchange, before any fixture puts a recorder in its place.
+REAL_SEND_RUNTIME = client.send_runtime
 
 
 def _pump(seconds: float) -> None:
@@ -701,6 +706,119 @@ def test_web_off_owed_under_a_number_no_request_carries_is_settled_in_one_job(
     assert guards, "the guard didn't run"
     assert not service.allows_web(), service.sent
     assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
+
+
+class _PrivatePeer:
+    """A service of the test's own on a private socket: it answers ``status`` as a schema-8
+    service holding a document that allows web wallpapers, and holds ``stop`` until it is
+    told to answer, noting when the app closes that connection."""
+
+    def __init__(self, address: Path) -> None:
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(str(address))
+        self.listener.listen()
+        self.listener.settimeout(0.05)
+        self.at_stop, self.answer, self.closed = (threading.Event() for _ in range(3))
+        self.ending = threading.Event()
+        self.thread = threading.Thread(target=self._serve, name="test-private-peer")
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while not self.ending.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(0.05)
+                line = b""
+                while not line.endswith(b"\n") and not self.ending.is_set():
+                    try:
+                        part = connection.recv(4096)
+                    except TimeoutError:
+                        continue
+                    if not part:
+                        break
+                    line += part
+                if not line.endswith(b"\n"):
+                    continue
+                verb = Request.decode(line).verb
+                if verb == "stop":
+                    self.at_stop.set()
+                    while not self.answer.is_set() and not self.ending.is_set():
+                        try:
+                            if connection.recv(4096) == b"":
+                                self.closed.set()
+                                break
+                        except TimeoutError:
+                            pass
+                        except OSError:
+                            self.closed.set()
+                            break
+                status = {
+                    "status_version": 2,
+                    "supported_config_schemas": READS_EIGHT,
+                    "allow_web_wallpapers": True,
+                    "playback_state": "playing",
+                }
+                reply = Response.success(json.dumps(status) if verb == "status" else "")
+                with contextlib.suppress(OSError):
+                    connection.sendall(reply.encode())
+
+    def close(self) -> None:
+        self.answer.set()
+        self.ending.set()
+        self.listener.close()
+        self.thread.join(5)
+        assert not self.thread.is_alive()
+
+
+@pytest.mark.parametrize("asking", ["a-window-request", "the-web-off-guard"])
+def test_the_final_shutdown_closes_a_guards_exchange_in_flight(
+    profiles: Callable[..., Any],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    asking: str,
+) -> None:
+    """R42-26 (Codex's private-socket shape): the final shutdown cancels the application's
+    requests (`_runtime_cancellation`), which closes a window's; the guard's own exchanges
+    weren't registered, so one waiting on ``stop`` stayed open until its deadline (45 s; on
+    19e7ac7b). It is closed now, the guard ends at once, and what is on disk plays no page."""
+    application = profiles().application
+    config.save(config.Settings(roots=application.settings.roots, allow_web_wallpapers=False))
+    paths.runtime_config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.runtime_config_path().write_text(ALLOWING, encoding="utf-8")
+    monkeypatch.setattr(client, "send_runtime", REAL_SEND_RUNTIME)
+    monkeypatch.setattr(client, "RUNTIME_ACTION_TIMEOUT", 20.0)  # the wait would show
+    folder = tempfile.TemporaryDirectory(prefix="r42-26-")  # a socket's path is short
+    address = Path(folder.name) / "peer.sock"
+    monkeypatch.setattr(paths, "runtime_socket_path", lambda: address)
+    peer = _PrivatePeer(address)
+    work = (
+        application._web_off_guard
+        if asking == "the-web-off-guard"
+        else lambda: application._send_gui_runtime("stop")
+    )
+    pending = application._runtime_pool().submit(work)
+    try:
+        spin_until(peer.at_stop.is_set, 10, what="the peer to be asked to stop")
+        # `do_shutdown`'s last steps for the lane, past any settle wait it allowed.
+        with application._runtime_config_lock:
+            application._runtime_shutdown = True
+        application._runtime_cancellation.cancel()
+        spin_until(pending.done, 10, what="the exchange to end")
+        assert peer.closed.wait(5), "the app's end of the exchange wasn't closed"
+    finally:
+        peer.answer.set()
+        with contextlib.suppress(client.ControlError):
+            pending.result(timeout=10)
+        peer.close()
+        folder.cleanup()
+        with application._runtime_config_lock:
+            application._runtime_shutdown = False
+    if asking == "the-web-off-guard":
+        assert not runtime_config.allows_web_wallpapers(paths.runtime_config_path())
 
 
 class _SlowStop(Service):

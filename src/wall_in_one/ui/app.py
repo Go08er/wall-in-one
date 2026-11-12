@@ -5919,7 +5919,14 @@ class Application(Adw.Application):
         class): a writer that held it meanwhile may have seen web wallpapers
         turned on again and installed a document for them on, which is then
         what the setting allows, not a page to end.
+
+        Its exchanges with the service are the application's to cancel, as a
+        window's are (`_runtime_cancellation`): one in flight when the final
+        shutdown comes is closed, not waited for (R42-26). What the shutdown
+        itself does then (`_quit_older_service`, `_web_off_on_disk_at_exit`)
+        is its own.
         """
+        cancellation = self._runtime_cancellation
         try:
             settings = config.load_strict()
         except config.ConfigError:
@@ -5954,7 +5961,7 @@ class Application(Adw.Application):
             # Asked whatever the texts say: the document it holds may be one this
             # app never saw replaced (another writer's), and its answer says so.
             try:
-                status_reply = client.send_runtime("status")
+                status_reply = client.send_runtime("status", cancellation=cancellation)
                 decoded = json.loads(status_reply.message) if status_reply.ok else None
             except client.NotRunningError:
                 return self._web_off_not_running(settings, on_disk, target, locked=locked)
@@ -6000,7 +6007,7 @@ class Application(Adw.Application):
             # back, so that turning web wallpapers on again plays as before.
             was_playing = isinstance(status, dict) and status.get("playback_state") == "playing"
             try:
-                stopped = client.send_runtime("stop").ok
+                stopped = client.send_runtime("stop", cancellation=cancellation).ok
             except client.NotRunningError:
                 return self._web_off_not_running(settings, on_disk, target, locked=locked)
             except client.ControlError, OSError:
@@ -6026,7 +6033,7 @@ class Application(Adw.Application):
                         mark = self._held_replaced
         if written:
             try:
-                loaded = client.send_runtime("reload").ok
+                loaded = client.send_runtime("reload", cancellation=cancellation).ok
             except client.ControlError, OSError:
                 loaded = False
             if loaded:
@@ -6036,7 +6043,7 @@ class Application(Adw.Application):
                 if was_playing:
                     # Nothing can start now; Play only keeps the person's intent.
                     with contextlib.suppress(client.ControlError, OSError):
-                        client.send_runtime("play")
+                        client.send_runtime("play", cancellation=cancellation)
                 return (
                     f"{lead}. "
                     "Playback was stopped, and the service now has nothing to play: web "
@@ -6054,7 +6061,7 @@ class Application(Adw.Application):
         # does. It exits cleanly, so systemd leaves it stopped; the next start
         # (the companion's, or systemctl's) runs ExecStartPre's guard first.
         try:
-            quit_ok = client.send_runtime("quit").ok
+            quit_ok = client.send_runtime("quit", cancellation=cancellation).ok
         except client.NotRunningError:
             quit_ok = True
         except client.ControlError, OSError:

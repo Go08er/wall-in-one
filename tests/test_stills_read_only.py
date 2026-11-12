@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_scenes import where_the_engine_looks
-from wall_in_one import config, paths, worker_processes
+from wall_in_one import config, worker_processes
 from wall_in_one.library import pairing, scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
@@ -394,7 +394,9 @@ def test_a_still_folder_that_changed_or_went_since_the_scan_is_not_its_refusal(
     assert rendered == []
 
 
-@pytest.mark.parametrize("when", ["unchanged", "after-the-scan", "while-it-is-made"])
+@pytest.mark.parametrize(
+    "when", ["unchanged", "after-the-scan", "after-the-root-is-judged", "before-it-is-retained"]
+)
 def test_a_capture_goes_only_where_its_folder_is_trusted_now(
     tmp_path: Path, rendered: list[Path], monkeypatch: pytest.MonkeyPatch, when: str
 ) -> None:
@@ -402,7 +404,9 @@ def test_a_capture_goes_only_where_its_folder_is_trusted_now(
     the capture then went wherever the link led: into a Wallpaper Engine item, had it been
     pointed at one since (on c8b2fddb). The folder is judged again before anything is made in
     it, and where it was retained, which a change in between doesn't get past. Neither is the
-    folder's refusal (f7 H5): the next scan judges it."""
+    folder's refusal (f7 H5): the next scan judges it. R42-28: its folders were made by path,
+    so a link retargeted just before left them, empty, in the item (on 19e7ac7b); they are made
+    through the library folder as it was retained and judged."""
     clean = tmp_path / "clean"
     (clean / "captures").mkdir(parents=True)
     link = tmp_path / "parent-link"
@@ -424,16 +428,27 @@ def test_a_capture_goes_only_where_its_folder_is_trusted_now(
 
     if when == "after-the-scan":
         retarget()
-    elif when == "while-it-is-made":
-        make = paths.ensure_directory
+    elif when == "after-the-root-is-judged":
+        judge = stills._trusted_where
+        judged: list[Path] = []
 
-        def making(directory: Path) -> Path:
-            make(directory)
+        def judging(anchor: Path) -> bool:
+            trusted = judge(anchor)
+            judged.append(anchor)
+            if len(judged) == 1:
+                retarget()  # after the library folder is judged, before its folders are made
+            return trusted
+
+        monkeypatch.setattr(stills, "_trusted_where", judging)
+    elif when == "before-it-is-retained":
+        retain = stills._pin_target_directory
+
+        def retaining(at: Path, target: Path) -> object:
             pairing.still_directory(steam_item / "captures").mkdir(parents=True, exist_ok=True)
             retarget()
-            return directory
+            return retain(at, target)
 
-        monkeypatch.setattr(paths, "ensure_directory", making)
+        monkeypatch.setattr(stills, "_pin_target_directory", retaining)
     heard: list[stills.StillFolderError] = []
     found = library.find(clip)
     assert found is not None
@@ -445,8 +460,10 @@ def test_a_capture_goes_only_where_its_folder_is_trusted_now(
         return
     assert (made, heard, rendered) == (None, [], [])
     assert list(steam_item.rglob("*.png")) == []
-    if when == "after-the-scan":
+    if when != "before-it-is-retained":
         assert everything_under(steam_item) == ["captures", "project.json"], "nothing made"
+    if when == "after-the-root-is-judged":
+        assert pairing.still_directory(clean / "captures").is_dir(), "made where it was judged"
     with pytest.raises(stills.StillError) as raised:
         stills.generate(clip, root)
     assert not isinstance(raised.value, stills.StillFolderError)

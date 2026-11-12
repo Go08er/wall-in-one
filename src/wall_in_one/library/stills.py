@@ -1450,7 +1450,8 @@ def _made_target_directory(root: Path, target: Path) -> file_io.PinnedDirectoryC
     """``target``'s `Automatic Stills` under ``root``, made if need be, and retained.
 
     Only one no Wallpaper Engine item's author can write in
-    (`pairing.still_directory_trusted`), judged here, before anything is made, and
+    (`pairing.still_directory_trusted`), judged where the library folder, retained,
+    really is, before anything is made in it (`_made_below_judged_root`, R42-28), and
     again where the folder retained is (`_pin_target_directory`, f7 R42-17): the
     scan's verdict is as old as the scan, and a link above the library folder (P1)
     may lead into an item since. Such a folder changed since the scan, which is a
@@ -1465,13 +1466,76 @@ def _made_target_directory(root: Path, target: Path) -> file_io.PinnedDirectoryC
             f"{linked} is a symbolic link",
             linked,
         )
-    if not pairing.still_directory_trusted(root):
-        raise StillError(_untrusted(target.parent))
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise _not_made(target.parent, error) from error
+    _made_below_judged_root(root, target)
     return _pin_target_directory(root, target)
+
+
+def _made_below_judged_root(root: Path, target: Path) -> None:
+    """``target``'s folders made under ``root``, through ``root`` retained and judged (R42-28).
+
+    The library folder is retained as the scan lists it (`_reached_root`), judged where
+    it really is (`_trusted_where`), and the folders below it are made through that
+    descriptor, each without following a link: none is made where a link above it led
+    since the scan judged it, as into a Wallpaper Engine item. A library folder that
+    isn't there is made first, as it always was (a capture is asked for one the scan
+    uses); one that changed is left for the pin to say (`_pin_target_directory`).
+    """
+    absolute_root = root.absolute()
+    try:
+        below = target.parent.absolute().relative_to(absolute_root).parts
+    except ValueError:
+        return
+    try:
+        boundary = file_io.pin_directory_path(_reached_root(absolute_root))
+    except FileNotFoundError:
+        try:
+            paths.ensure_directory(absolute_root)
+        except OSError as error:
+            raise _not_made(target.parent, error) from error
+        try:
+            boundary = file_io.pin_directory_path(_reached_root(absolute_root))
+        except OSError, RuntimeError, ValueError:
+            return
+    except OSError, RuntimeError, ValueError:
+        return
+    try:
+        if not _trusted_where(Path("/proc/self/fd") / str(boundary.descriptor)):
+            raise StillError(_untrusted(target.parent))
+        folder = os.dup(boundary.descriptor)
+        try:
+            made = absolute_root
+            for name in below:
+                made = made / name
+                try:
+                    os.mkdir(name, dir_fd=folder)
+                except FileExistsError:
+                    pass
+                except OSError as error:
+                    named = OSError(error.errno, error.strerror, str(made))
+                    raise _not_made(target.parent, named) from error
+                try:
+                    inner = os.open(name, _BELOW_FLAGS, dir_fd=folder)
+                except OSError:
+                    return
+                os.close(folder)
+                folder = inner
+        finally:
+            os.close(folder)
+    finally:
+        boundary.close()
+
+
+#: How `_made_below_judged_root` goes down: to a directory, never through a link.
+_BELOW_FLAGS: Final = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _reached_root(absolute_root: Path) -> Path:
+    """The library folder as the scan lists it: the folders above it resolved (f7 P1), not
+    it; one spelled with a final `..` (`/lib/child/..`) is the folder that names, resolved
+    whole, and never a link itself (f7 R42-20)."""
+    if absolute_root.name == "..":
+        return absolute_root.resolve(strict=True)
+    return absolute_root.parent.resolve(strict=True) / absolute_root.name
 
 
 def _untrusted(directory: Path) -> str:
@@ -1505,13 +1569,7 @@ def _pin_target_directory(
     absolute_directory = target.parent.absolute()
     try:
         below = absolute_directory.relative_to(absolute_root)
-        # One spelled with a final `..` (`/lib/child/..`) is the folder that names, as the
-        # scan lists it: resolved whole, and never a link itself (f7 R42-20).
-        reached_root = (
-            absolute_root.resolve(strict=True)
-            if absolute_root.name == ".."
-            else absolute_root.parent.resolve(strict=True) / absolute_root.name
-        )
+        reached_root = _reached_root(absolute_root)
         reached_directory = reached_root / below
         root_status = reached_root.lstat()
         directory_status = reached_directory.lstat()

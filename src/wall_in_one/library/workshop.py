@@ -201,12 +201,13 @@ def still_root_judged(
 
     For `pairing.still_directory_trusted`, which every video and scene of a scan
     asks for every root: the answer doesn't change within one, unless what it is
-    about did. ``about`` (its `Wall-in-One` and `Automatic Stills`) are looked at
-    when it is judged, and again, without following a link in their place
-    (`_identity`), only by a caller about to rely on it (``confirm``: a still found
-    there, about to be returned, or the scan's capture roots), so a lookup that
-    finds nothing costs nothing more (f9 F3). One replaced since (by a link into an
-    item's folder, or made by a first capture) is judged again, from scratch, as
+    about did. ``about`` (its `Wall-in-One` and `Automatic Stills`, and the item
+    markers the answer depends on) are looked at when it is judged, and again,
+    without following a link in their place (`_identity`), only by a caller about
+    to rely on it (``confirm``: a still found there, about to be returned, or the
+    scan's capture roots), so a lookup that finds nothing costs nothing more (f9
+    F3). One replaced since (by a link into an item's folder, or made by a first
+    capture), or a marker come or gone (R42-25), is judged again, from scratch, as
     what this scan resolved is as old (f7 R42-17).
     """
     memo = _SCAN_MEMO.get()

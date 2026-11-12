@@ -418,8 +418,9 @@ def test_a_scan_looks_at_each_roots_still_folders_only_where_a_verdict_is_relied
 
     monkeypatch.setattr(workshop, "_identity", counting)
     scan.scan([mine, other], {})
-    # Judged once each (2 folders), then the capture roots (2 more): 40 videos ask nothing.
-    assert len(looked) == 2 * 2 * 2, len(looked)
+    # Judged once each (2 folders and 3 item markers), then the capture roots (5 more):
+    # the 40 videos ask nothing.
+    assert len(looked) == 2 * 5 * 2, len(looked)
 
 
 def test_captures_skip_a_library_folder_the_scan_doesnt_use(tmp_path: Path) -> None:
@@ -592,3 +593,56 @@ def test_a_still_folder_that_changed_during_a_scan_is_judged_again(
         assert (found, trusted) == ((root,), True)
     else:
         assert (found, trusted) == (automatic / names[lookup == "scene"], True)
+
+
+@pytest.mark.parametrize("lookup", ["video", "selector", "scene", "capture-roots"])
+@pytest.mark.parametrize("marker", ["none", "before-it-is-judged", "after-it-is-judged"])
+def test_a_confirmed_still_verdict_notices_an_item_marker_come_since(
+    tmp_path: Path, lookup: str, marker: str
+) -> None:
+    """R42-25 (Codex's 12 lookup cases): a confirmed verdict looked only at the identity of
+    `Wall-in-One` and `Automatic Stills`, so a `project.json` put in the unchanged
+    `Wall-in-One` after the scan judged it, with pictures under the stills' names, paired and
+    took captures as before (on 19e7ac7b). The markers the verdict depends on are looked at
+    too: what was ours stays so, what is an item's now isn't."""
+    root = tmp_path / "library"
+    automatic = pairing.still_directory(root)
+    automatic.mkdir(parents=True)
+    video = root / "clip.mp4"
+    video.write_bytes(b"x")
+    selected = automatic / f"{pairing.automatic_still_stem(video)}.png"
+    if lookup == "selector":
+        video.with_name(video.name + pairing.SIDECAR_SUFFIX).write_text(
+            json.dumps({pairing.SIDECAR_STILL_KEY: str(selected)})
+        )
+    scene = MediaItem(tmp_path / "200", Kind.SCENE, 1, 1, scene="200")
+
+    def an_item_moves_in() -> None:
+        (automatic.parent / "project.json").write_text(json.dumps({"type": "web", "file": "x"}))
+        for name in (selected.name, "200.png"):
+            (automatic / name).write_bytes(PNG)
+
+    if marker == "before-it-is-judged":
+        an_item_moves_in()
+    elif marker == "none":
+        for name in (selected.name, "200.png"):
+            (automatic / name).write_bytes(PNG)
+    with workshop.one_scan():
+        assert pairing.still_directory_trusted(root) is (marker != "before-it-is-judged")
+        if marker == "after-it-is-judged":
+            an_item_moves_in()
+        if lookup == "scene":
+            found: object = pairing.scene_still(scene, (root,))
+        elif lookup == "capture-roots":
+            found = pairing.capture_roots((root,))
+        else:
+            found = pairing.find_still(video, (root,), labelled_workshop=False)
+
+    if marker == "none":
+        assert found == (
+            (root,)
+            if lookup == "capture-roots"
+            else automatic / ("200.png" if lookup == "scene" else selected.name)
+        )
+    else:
+        assert found == (() if lookup == "capture-roots" else None), found

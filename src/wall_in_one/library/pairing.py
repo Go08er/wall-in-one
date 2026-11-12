@@ -588,13 +588,22 @@ def still_directory_trusted(root: Path, *, confirm: bool = False) -> bool:
     and no capture goes there (`capture_root`): an author could have shipped any
     picture, or a link, under the name a still is looked for by. Judged once per
     root in a scan, while its `Wall-in-One` and `Automatic Stills` stay the
-    folders judged, which ``confirm`` looks at again: for a still found there,
-    about to be returned (`workshop.still_root_judged`).
+    folders judged, and no ``project.json`` has come or gone in them or in
+    ``root`` (what `workshop.item_folder_of` looks at, R42-25), which ``confirm``
+    looks at again: for a still found there, about to be returned
+    (`workshop.still_root_judged`).
     """
+    managed, directory = root / MANAGED_PARENT, still_directory(root)
     return workshop.still_root_judged(
         root,
         _still_directory_trusted,
-        (root / MANAGED_PARENT, still_directory(root)),
+        (
+            managed,
+            directory,
+            root / "project.json",
+            managed / "project.json",
+            directory / "project.json",
+        ),
         confirm=confirm,
     )
 

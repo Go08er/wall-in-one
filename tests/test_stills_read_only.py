@@ -524,3 +524,46 @@ def test_a_library_folder_that_is_a_link_gets_nothing_made_through_it(
     assert everything_under(real) == [], "nothing made through the link"
     assert len(heard) == 1 and heard[0].folder == tmp_path, heard
     assert heard[0].reason.startswith("linked in it is a symbolic link"), heard[0].reason
+
+
+@pytest.mark.parametrize("marker", ["none", "while-it-is-made"])
+def test_a_still_is_published_only_where_the_folder_takes_stills_then(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+) -> None:
+    """R42-25 (Codex's publication case): the folder was judged before the still was made and
+    when its directory was retained, not when it was published, so an item's marker put in
+    `Wall-in-One` while ffmpeg ran had the still published there all the same (on 19e7ac7b).
+    It is judged again just before; refused, no still is there, and nothing of the frame: the
+    hidden output is withdrawn as after any refused capture, an empty claim left at most."""
+    root = tmp_path / "captures"
+    source = tmp_path / "source"
+    root.mkdir()
+    source.mkdir()
+    clip = video(source)
+    library = scan.scan((root, source), {})
+    found = library.find(clip)
+    assert found is not None and pairing.library_capture_root(library) == root
+    automatic = pairing.still_directory(root)
+
+    def render(_source: Path, output: Path, *_arguments: object, **_options: object) -> str:
+        if marker == "while-it-is-made":
+            (automatic.parent / "project.json").write_text('{"type": "web", "file": "x"}')
+        output.write_bytes(FRAME)
+        return ""
+
+    monkeypatch.setattr(stills, "is_available", lambda: True)
+    monkeypatch.setattr(stills, "_run", render)
+
+    made = stills.ensure(found, root)
+
+    if marker == "none":
+        assert made is not None and made.is_file()
+    else:
+        assert made is None
+        from tests.test_stills import _retained_claims
+        from wall_in_one import file_io
+
+        left = {path.name for path in automatic.iterdir()}
+        assert left <= {file_io.RETAINED_ENTRY_DIRECTORY}, left
+        if left:
+            _retained_claims(automatic)  # empty claims and tombstones only

@@ -1532,14 +1532,20 @@ def _pin_target_directory(
             raise StillError(message) from error
         reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
         raise StillFolderError(message, target.parent, reason) from error
-    try:
-        reached = Path(os.readlink(context.root_anchor))
-    except OSError:
-        reached = None
-    if reached is None or not pairing.still_directory_trusted(reached):
+    if not _trusted_where(context.root_anchor):
         context.close()
         raise StillError(_untrusted(target.parent))
     return context
+
+
+def _trusted_where(anchor: Path) -> bool:
+    """Whether the library folder retained at ``anchor`` (a ``/proc/self/fd`` path) takes
+    stills where it really is now (`pairing.still_directory_trusted`, R42-17, R42-25)."""
+    try:
+        reached = Path(os.readlink(anchor))
+    except OSError:
+        return False
+    return pairing.still_directory_trusted(reached)
 
 
 def _linked_refusal(message: str, linked: Path) -> StillFolderError:
@@ -1591,6 +1597,10 @@ def _publish_image(
     existing: _ExistingTarget | None,
 ) -> _ImagePublication:
     """Publish while retaining rollback authority over new and prior stills."""
+    # Judged again as it is now, before anything is kept or published: an item's
+    # marker may have come into it while the still was made (R42-25).
+    if not _trusted_where(target_context.root_anchor):
+        raise StillError(_untrusted(target.parent))
     fingerprint = temporary.retain_rendered()
     claim: file_io.ClaimedPath | None = None
     media_committed = False

@@ -461,6 +461,86 @@ def test_a_regenerated_still_cancelled_by_web_going_off_is_no_failure_and_is_tri
         maker.shutdown()
 
 
+@pytest.mark.parametrize("when", ["off-before-it-starts", "off-as-it-starts", "decoder-fails"])
+def test_a_regenerated_still_withdrawn_by_the_preview_setting_is_no_failure_and_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    """f7 R42-19: R42-13's rule for the preview setting. Turned off after a page's still was
+    asked for again, the queued capture refused it as a failure ("Could not regenerate"), and
+    the page stayed attempted, so turning the setting back on asked for nothing (on c8b2fddb).
+    The worker withdraws it quietly, unattempted, as the automatic one does; the setting is
+    read once there, so one turned off as it starts is no failure either. A decoder that fails
+    is still said, and attempted. No decoder is started: its boundary is replaced."""
+    from tests.test_scene_preset_stills import WEB, Tree
+    from wall_in_one.ui import stills as ui_stills
+
+    tree = Tree(tmp_path)
+    (tree.automatic / f"{WEB}.png").unlink()
+    item = tree.scan(previews=True)[WEB]
+    assert item.preview_kind and item.paired_still is None
+    previews = {"on": True}
+    asked: list[bool] = []
+    messages: list[str] = []
+    queued: list[tuple[Callable[..., None], tuple[Any, ...], str]] = []
+    made: list[int] = []
+
+    def setting() -> bool:
+        asked.append(previews["on"])
+        if when == "off-as-it-starts" and len(asked) == 2:
+            previews["on"] = False  # read on the worker, then turned off
+        return asked[-1]
+
+    maker = ui_stills.StillMaker(
+        web_allowed=lambda: True, previews=setting, displays=lambda: (), report=messages.append
+    )
+
+    def queue(work: Callable[..., None], *arguments: Any, context: str) -> None:
+        queued.append((work, arguments, context))
+
+    def decoder(_source: Path, output: Path, _seek: float, **_options: object) -> str:
+        if when == "decoder-fails":
+            return "the fixture decoder failed"
+        output.write_bytes(PNG)
+        return ""
+
+    monkeypatch.setattr(maker, "_submit", queue)
+    monkeypatch.setattr(outputs, "discover", lambda *_a, **_k: ())
+    monkeypatch.setattr(scenes, "measured_capture_size", lambda *_a, **_k: (64, 64))
+    monkeypatch.setattr(stills, "is_available", lambda: True)
+    monkeypatch.setattr(stills, "_run", decoder)
+    monkeypatch.setattr(
+        "wall_in_one.ui.stills.GLib.idle_add",
+        lambda callback, *arguments, **_k: callback(*arguments),
+    )
+    try:
+        maker.regenerate_scene(item, tree.root, made.append)
+        assert len(queued) == 1 and item.path in maker._attempted
+        if when == "off-before-it-starts":
+            previews["on"] = False
+        work, arguments, context = queued[0]
+        done: Future[None] = Future()
+        try:
+            work(*arguments)
+        except stills.StillError as error:
+            done.set_exception(error)
+        else:
+            done.set_result(None)
+        maker._finished(done, context)
+        if when == "decoder-fails":
+            assert len(messages) == 1 and "the fixture decoder failed" in messages[0], messages
+            assert item.path in maker._attempted
+        elif when == "off-as-it-starts":
+            assert (messages, made) == ([], [1])
+        else:
+            assert (messages, made) == ([], [])
+            assert item.path not in maker._attempted
+            previews["on"] = True
+            maker.request((item,), tree.root, lambda _made: None)
+            assert len(queued) == 2, "turning the setting back on asks for it again"
+    finally:
+        maker.shutdown()
+
+
 def test_a_refused_web_item_and_a_preset_of_nothing_get_nothing_while_web_is_off(
     web_folder: Fixture, watch: _Watch
 ) -> None:

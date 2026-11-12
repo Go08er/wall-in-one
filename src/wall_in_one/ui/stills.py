@@ -288,17 +288,7 @@ class StillMaker:
         for item in items:
             if self._processes.cancelled():
                 return
-            web = self._web_allowed()
-            if workshop.previews_off(item, web):
-                # Turned off since this was queued: nothing of it is opened,
-                # and it is not counted as attempted, so turning web on makes it.
-                self._attempted.discard(item.path)
-                continue
-            if workshop.no_automatic_still(item, self._previews()):
-                # The preview setting went off since this was queued: nothing is
-                # made, and it is not counted as attempted, so turning it back
-                # on makes it.
-                self._attempted.discard(item.path)
+            if self._withdrawn_by_settings(item, self._previews()):
                 continue
             processes = (
                 worker_processes.GatedCancellation(self._processes, self._web_allowed)
@@ -377,6 +367,24 @@ class StillMaker:
         # Plain idle (200) sits below GTK's redraw (120) and starves while tiles spin.
         GLib.idle_add(deliver, priority=GLib.PRIORITY_DEFAULT)  # type: ignore[call-arg]
 
+    def _withdrawn_by_settings(self, item: MediaItem, previews: bool) -> bool:
+        """Whether a setting turned off since ``item`` was queued withdraws its still.
+
+        Web wallpapers, for a web wallpaper's files (`workshop.previews_off`); or
+        ``previews`` (the preview setting, read now), for one whose still only its
+        preview makes (`workshop.no_automatic_still`). Nothing of it is opened, it
+        is no failure, and it is not counted as attempted, so turning the setting
+        back on makes it. Asked on the worker before each capture, automatic or
+        asked for (f7 R42-19).
+        """
+        if not (
+            workshop.previews_off(item, self._web_allowed())
+            or workshop.no_automatic_still(item, previews)
+        ):
+            return False
+        self._attempted.discard(item.path)
+        return True
+
     def _withdrawn_if_cancelled(
         self, item: MediaItem, processes: worker_processes.Cancellation
     ) -> bool:
@@ -429,9 +437,8 @@ class StillMaker:
         fallback = self._local_displays()
 
         def run() -> None:
-            web = self._web_allowed()
-            if workshop.previews_off(item, web):
-                self._attempted.discard(item.path)
+            previews = self._previews()
+            if self._withdrawn_by_settings(item, previews):
                 return
             processes = (
                 worker_processes.GatedCancellation(self._processes, self._web_allowed)
@@ -446,7 +453,7 @@ class StillMaker:
                     force=True,
                     processes=processes,
                     size=size,
-                    previews=self._previews(),
+                    previews=previews,
                     **({"allow_web": True} if item.holds_web else {}),
                 )
             except stills.StillError:

@@ -489,8 +489,14 @@ def generate(
     paths.ensure_directory(destination.parent)
     with contextlib.ExitStack() as held:
         try:
-            # Handed the file, never its name (`decoding.opened`, R42-10).
-            opened = held.enter_context(decoding.opened(source))
+            # Handed the file, never its name (`decoding.opened`, R42-10). A scene's
+            # paired still is followed if it is a link, as playback follows it (f6 N3):
+            # it is the app's own capture or one a person picked, never a file an
+            # item's author shipped (`pairing.still_directory_trusted`, f7 W1). The
+            # item's own file and its declared preview are opened as themselves only.
+            # (A scene is a folder, so only its paired still's branch returns that path.)
+            follow = item.kind is Kind.SCENE and source == item.paired_still
+            opened = held.enter_context(decoding.opened(source, follow=follow))
         except OSError as error:
             raise ThumbnailError(f"cannot open {source}: {error.strerror or error}") from error
         return _encode(item, opened, destination, processes)

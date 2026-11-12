@@ -53,16 +53,20 @@ def input_options(*, pipe: bool = False) -> list[str]:
 
 
 @contextlib.contextmanager
-def opened(path: Path) -> Iterator[Path]:
+def opened(path: Path, *, follow: bool = False) -> Iterator[Path]:
     """``path`` as ffmpeg's input: the regular file it names now, opened, by its descriptor.
 
     The path given to ffmpeg is ``/proc/<pid>/fd/<n>``: exactly the inode opened
     here, whatever is at the name by the time ffmpeg runs, and a name with no
     pattern, glob or extension in it to be read as anything else. A symbolic
-    link at ``path`` itself is refused (the library's walk lists none), as is
-    anything but a regular file: an `OSError`, as when it can't be opened.
+    link at ``path`` itself is refused (the library's walk lists none), unless
+    ``follow``, as is anything but a regular file: an `OSError`, as when it
+    can't be opened. ``follow`` is for a scene's paired still only, which
+    playback follows too (`thumbnails.generate`).
     """
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
+    if follow:
+        flags &= ~os.O_NOFOLLOW
     descriptor = os.open(path, flags)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):

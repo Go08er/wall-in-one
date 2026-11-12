@@ -405,6 +405,32 @@ def test_a_wallpaper_that_is_a_link_now_is_not_followed(
 
 
 @needs_ffmpeg
+def test_a_scenes_paired_still_that_is_a_link_is_thumbnailed_and_its_preview_is_not(
+    cache_home: Path, tmp_path: Path
+) -> None:
+    """f6 N3: ``Automatic Stills/<id>.png -> ~/Pictures/mine.png`` is paired and played,
+    the link followed, but the thumbnailer refused it, a blank tile (on 86840ed). A scene's
+    paired still is the app's own or one a person picked (f7 W1), so the thumbnail follows
+    it too, still from a descriptor. A declared preview, the author's, is not followed."""
+    real = _made(tmp_path / "real.png", "red")
+    link = tmp_path / "still.png"
+    link.symlink_to(real)
+
+    assert _red(_first_pixel(thumbnails.generate(_scene_showing(link))))
+
+    directory = tmp_path / "124"
+    directory.mkdir()
+    preview = directory / "preview.png"
+    preview.symlink_to(real)
+    scene = MediaItem(
+        path=directory, kind=Kind.SCENE, size=1, mtime=1, scene="124", preview=preview
+    )
+    with pytest.raises(thumbnails.ThumbnailError, match="cannot open"):
+        thumbnails.generate(scene)
+    assert not thumbnails.cached_path(scene).exists()
+
+
+@needs_ffmpeg
 def test_a_name_handed_to_ffmpeg_is_never_read_as_a_sequence(tmp_path: Path) -> None:
     """`decoding.FORMATS` leaves image2 out, so even a name handed over is no pattern."""
     source = _made(tmp_path / "preview%01d.png", "red")

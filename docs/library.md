@@ -100,10 +100,12 @@ selected library. What that means for each place a link can be:
   instead.
 - **A linked folder or file inside a library folder is not followed** and does
   not appear.
-- **A library folder reached through a link higher up its path is scanned,** but
-  Delete and Move to Trash refuse destructive authority through symbolic-link
-  directory components. Configure the real absolute folder when you want those
-  actions available.
+- **A library folder reached through a link higher up its path is scanned,** and
+  gets its stills like any other (the folders above it are resolved when one is
+  made; inside it, a link is never written through, and one that keeps a still
+  from being made is said once). Delete and Move to Trash refuse destructive
+  authority through symbolic-link directory components. Configure the real
+  absolute folder when you want those actions available.
 
 That refusal is for your wallpapers. Wall-in-One's own bookkeeping files (an
 entry it retires into `.wall-in-one-retained`, and the palette template's lock

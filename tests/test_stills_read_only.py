@@ -24,7 +24,7 @@ import pytest
 
 from tests.test_scenes import where_the_engine_looks
 from wall_in_one import worker_processes
-from wall_in_one.library import pairing, stills
+from wall_in_one.library import pairing, scan, stills
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
 
@@ -265,3 +265,86 @@ def test_a_scene_capture_with_the_stills_folder_read_only_on_its_own(
     assert str(error) == f"could not create a temporary still in {folder}: Permission denied"
     assert [heard_error.folder for heard_error in heard] == [folder]
     assert list(folder.iterdir()) == []
+
+
+# -- f7 P1: a library folder reached through a link higher up its path ---------------------------
+
+
+def _linked_library(tmp_path: Path, depth: str) -> Path:
+    """``home/u/Videos/Wallpapers``, where ``Videos`` (or ``home``) links to another disk."""
+    disk = tmp_path / "disk"
+    if depth == "parent":
+        (disk / "Videos" / "Wallpapers").mkdir(parents=True)
+        (tmp_path / "home" / "u").mkdir(parents=True)
+        (tmp_path / "home" / "u" / "Videos").symlink_to(disk / "Videos")
+    else:
+        (disk / "home" / "u" / "Videos" / "Wallpapers").mkdir(parents=True)
+        (tmp_path / "home").symlink_to(disk / "home")
+    return tmp_path / "home" / "u" / "Videos" / "Wallpapers"
+
+
+@pytest.mark.parametrize("depth", ["parent", "higher-up"])
+def test_a_library_folder_reached_through_a_link_gets_its_stills_and_keeps_them(
+    tmp_path: Path, rendered: list[Path], depth: str
+) -> None:
+    """The capture's folder was walked from ``/`` without following a link, so a library
+    folder reached through one (``~/Videos`` on another disk) failed every capture with
+    "Not a directory", and nothing said so: its videos never got a still, and stayed out of
+    playlists (on 86840ed, and since 0.1.0). The folders above it are resolved now; it and
+    everything below it are still walked without links. A rescan pairs the still, and it is
+    not taken again."""
+    root = _linked_library(tmp_path, depth)
+    clip = video(root)
+
+    made = stills.generate(clip, root)
+
+    assert made == stills.destination(clip, root) and made.is_file()
+    found = scan.scan([root], {}).find(clip)
+    assert found is not None and found.paired_still == made
+    assert stills.ensure(found, root) == made
+    assert len(rendered) == 1, "taken once"
+
+
+def test_a_scene_still_is_captured_into_a_library_folder_reached_through_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scene route pins the same folder (`stills.capture_scene`)."""
+    from tests.test_scene_preset_stills import _engine
+
+    root = _linked_library(tmp_path, "parent")
+    folder = tmp_path / "workshop" / SCENE
+    folder.mkdir(parents=True)
+    asked = _engine(monkeypatch)
+    where_the_engine_looks(SCENE)
+
+    made = stills.capture_scene(item(folder, Kind.SCENE, SCENE), root, force=True, size=(64, 64))
+
+    assert made == pairing.still_directory(root) / f"{SCENE}.png" and made.is_file()
+    assert len(asked) == 1
+
+
+@pytest.mark.parametrize("linked", ["Wall-in-One", "Automatic Stills"])
+def test_a_link_inside_the_library_folder_is_still_not_written_through_and_is_said(
+    tmp_path: Path, rendered: list[Path], linked: str
+) -> None:
+    """Below the library folder nothing is followed, as before; and what was a plain
+    `StillError`, which nothing said, is now the folder's refusal, which the still maker says."""
+    root = tmp_path / "library"
+    root.mkdir()
+    clip = video(root)
+    kept = root / "kept"
+    if linked == "Wall-in-One":
+        (kept / "Automatic Stills").mkdir(parents=True)
+        (root / "Wall-in-One").symlink_to(kept)
+    else:
+        kept.mkdir()
+        (root / "Wall-in-One").mkdir()
+        (root / "Wall-in-One" / "Automatic Stills").symlink_to(kept)
+    assert pairing.still_directory_trusted(root), "inside the library folder: W1 trusts it"
+    heard: list[stills.StillFolderError] = []
+
+    assert stills.ensure(item(clip, Kind.VIDEO), root, refused=heard.append) is None
+
+    assert len(heard) == 1 and "symbolic link" in heard[0].reason, heard
+    assert rendered == [], "refused before ffmpeg was run"
+    assert list(kept.rglob("*.png")) == []

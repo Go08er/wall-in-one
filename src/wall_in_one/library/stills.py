@@ -1450,24 +1450,65 @@ def _pin_target_directory(
     root: Path,
     target: Path,
 ) -> file_io.PinnedDirectoryContext:
-    """Retain the no-symlink root and Automatic Stills directory."""
+    """Retain the library folder and its Automatic Stills directory, walked without links.
+
+    The folder a person chose may be reached through a link higher up its path
+    (``~/Videos`` on another disk, f7 P1): the folders above it are resolved,
+    once, and it is pinned from there, as the scan lists it. The folder itself,
+    and everything below it down to `Automatic Stills`, are walked without
+    following a link, as before: a link there is refused (and W1 doesn't trust
+    a still directory reached through a link out of its root), and so is a
+    library folder that is itself a link, which the scan doesn't use either.
+
+    What fails here is the folder's (`StillFolderError`), so the still maker
+    says it once per folder: it used to be a plain `StillError`, which nothing
+    said, and the folder never got a still.
+    """
     absolute_root = root.absolute()
     absolute_directory = target.parent.absolute()
     try:
-        root_status = absolute_root.lstat()
-        directory_status = absolute_directory.lstat()
+        below = absolute_directory.relative_to(absolute_root)
+        reached_root = absolute_root.parent.resolve(strict=True) / absolute_root.name
+        reached_directory = reached_root / below
+        root_status = reached_root.lstat()
+        directory_status = reached_directory.lstat()
         if not stat.S_ISDIR(root_status.st_mode) or not stat.S_ISDIR(directory_status.st_mode):
             raise OSError("automatic-still root contains a non-directory entry")
         return file_io.pin_directory_beneath(
-            absolute_root,
-            absolute_directory,
+            reached_root,
+            reached_directory,
             expected_root_identity=(root_status.st_dev, root_status.st_ino),
             expected_directory_identity=(directory_status.st_dev, directory_status.st_ino),
         )
-    except (OSError, ValueError) as error:
-        raise StillError(
-            f"could not safely retain automatic-still directory {target.parent}: {error}"
+    except (OSError, RuntimeError, ValueError) as error:
+        raise StillFolderError(
+            f"could not safely retain automatic-still directory {target.parent}: {error}",
+            target.parent,
+            _pin_refusal(absolute_root, absolute_directory, error),
         ) from error
+
+
+def _pin_refusal(root: Path, directory: Path, error: Exception) -> str:
+    """Why `_pin_target_directory` refused, in a person's words where it is a link."""
+    for folder in (root, *(root / part for part in _parts_below(root, directory))):
+        with contextlib.suppress(OSError):
+            if folder.is_symlink():
+                return (
+                    f"{folder.name} is a symbolic link, which Wall-in-One doesn't write "
+                    "through inside a library folder"
+                )
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror
+    return str(error)
+
+
+def _parts_below(root: Path, directory: Path) -> tuple[Path, ...]:
+    """Each path from ``root`` down to ``directory``, relative to ``root``: ``a``, ``a/b``..."""
+    try:
+        parts = directory.relative_to(root).parts
+    except ValueError:
+        return ()
+    return tuple(Path(*parts[: depth + 1]) for depth in range(len(parts)))
 
 
 def _pin_existing_target(
@@ -2213,6 +2254,14 @@ def _still_from_preview(
         )
 
 
+def _said(refused: Callable[[StillFolderError], None] | None, error: StillFolderError) -> None:
+    """``refused`` hears ``error``; with nobody to hear it, it is logged, never dropped (f7 P1)."""
+    if refused is not None:
+        refused(error)
+    else:
+        LOGGER.warning("%s", error)
+
+
 def ensure(
     item: MediaItem,
     root: Path,
@@ -2263,8 +2312,7 @@ def ensure(
                 previews=previews,
             )
         except StillFolderError as error:
-            if refused is not None:
-                refused(error)
+            _said(refused, error)
             return None
         except CaptureFailedError as error:
             if failed is not None:
@@ -2286,8 +2334,7 @@ def ensure(
     try:
         return generate(item.path, root, processes=processes)
     except StillFolderError as error:
-        if refused is not None:
-            refused(error)
+        _said(refused, error)
         return None
     except StillError:
         return None

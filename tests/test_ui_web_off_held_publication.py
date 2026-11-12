@@ -44,11 +44,12 @@ from tests.test_ui_web_off_failed_publish import _steam_with_web  # noqa: E402
 from tests.test_ui_web_off_lanes import ALLOWING, READS_EIGHT  # noqa: E402
 from wall_in_one import config, paths, runtime_config  # noqa: E402
 from wall_in_one import session as session_module  # noqa: E402
-from wall_in_one.control import client  # noqa: E402
-from wall_in_one.control.protocol import Response  # noqa: E402
+from wall_in_one.control import client, server  # noqa: E402
+from wall_in_one.control.protocol import Request, Response  # noqa: E402
 from wall_in_one.library import scan as scan_module  # noqa: E402
 from wall_in_one.library.model import Kind, Library, MediaItem  # noqa: E402
 from wall_in_one.ui.app import (  # noqa: E402
+    _Commands,
     _RuntimeInventoryInvalidError,
     _RuntimeLibraryNotReadyError,
 )
@@ -394,21 +395,26 @@ def test_web_off_during_a_removal_runs_the_guard_at_once(
 SLOW_REMOVAL = 3.0
 
 
+@pytest.mark.parametrize("by", ["window", "ctl"])
 @pytest.mark.parametrize("gesture", [False, True], ids=["no-gesture", "a-gesture-waits"])
 def test_web_off_saved_just_before_a_removal_reaches_the_service_before_the_removal(
     profiles: Callable[..., Any],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     gesture: bool,
+    by: str,
 ) -> None:
-    """f6 L2: a real removal, queued in the same tick as web off, takes its time.
+    """f6 L2: a real removal, asked for just after web off, takes its time.
 
     Its run holds the runtime lane's lock and the compiler lock throughout, and web off's
     publication, or the guard it runs, needs both. On 86840ed, with a gesture waiting for a
-    scan (which lets the lock go while it waits), the removal always took them first, and the
+    scan (which lets the lock go while it waits), the removal took them first, and the
     service heard nothing until the removal was over; without one, now and then. Now the
     removal lets web off out first: the service hears it at once, nothing left allows web
     wallpapers, the removal still runs, holding the lock, and nothing is owed after.
+
+    The window's removal is queued behind the save in the same tick. ``ctl remove`` is
+    refused while a save is being written, so it is sent the moment the save is done.
     """
     profile = profiles()
     application = profile.application
@@ -448,18 +454,30 @@ def test_web_off_saved_just_before_a_removal_reaches_the_service_before_the_remo
     saved: list[object] = []
     removed: list[object] = []
 
-    # The same tick: web off saved, then the removal queued behind it.
+    verbs = server.build_verb_table(_Commands(application))
+
+    def by_ctl() -> bool:
+        server.dispatch(verbs, Request("remove", str(profile.rain.path)).encode(), removed.append)
+        return GLib.SOURCE_REMOVE
+
+    def landed(outcome: object) -> None:
+        saved.append(outcome)
+        if by == "ctl":
+            GLib.idle_add(by_ctl)
+
     assert application.update_settings_async(
-        on_success=saved.append, on_error=saved.append, allow_web_wallpapers=False
+        on_success=landed, on_error=saved.append, allow_web_wallpapers=False
     )
-    assert application.remove_item_async(profile.rain, trash=True, finish=removed.append)
+    if by == "window":
+        assert application.remove_item_async(profile.rain, trash=True, finish=removed.append)
     spin_until(lambda: bool(removed), SLOW_REMOVAL + AT_ONCE, what="the removal")
     assert held == [True], "the removal's run holds the runtime lane's lock"
     assert reached, "web off never reached the service"
     assert reached[0] < ran[-1] - SLOW_REMOVAL / 2, (
         f"web off reached the service {reached[0] - ran[0]:.2f}s into a {SLOW_REMOVAL}s removal"
     )
-    assert getattr(removed[0], "committed", False), removed
+    done = removed[0]
+    assert done.ok if isinstance(done, Response) else getattr(done, "committed", False), done
     scans.release()
     _owed_clears(application)
     spin_until(lambda: not application._runtime_publication_held, AT_ONCE, what="the publications")

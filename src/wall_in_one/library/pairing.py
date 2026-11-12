@@ -598,13 +598,22 @@ def _still_directory_trusted(root: Path) -> bool:
 
 
 def capture_roots(roots: Iterable[Path], refused: Iterable[Path] = ()) -> tuple[Path, ...]:
-    """The roots, in order, whose still directory is trusted, but those in ``refused``.
+    """The roots, in order, a capture can go in: their still directory is trusted, and
+    reached through no link (which a capture never writes through, f7 H3), but those
+    in ``refused``.
 
     ``refused``: the roots a scan didn't use (`scan.scan`'s ``ROOT_NOT_USABLE``: a
-    link, not a folder, not there), where no capture can land either (f7 G8).
+    link, not a folder, not there) or couldn't look in (``UNREADABLE``), where no
+    capture can land either (f7 G8, H3).
     """
     left_out = set(refused)
-    return tuple(root for root in roots if root not in left_out and still_directory_trusted(root))
+    return tuple(
+        root
+        for root in roots
+        if root not in left_out
+        and still_directory_trusted(root)
+        and workshop.reached_as_named(still_directory(root), root)
+    )
 
 
 def judged_capture_roots(library: Library, roots: Sequence[Path]) -> tuple[Path, ...] | None:

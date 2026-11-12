@@ -413,3 +413,31 @@ def test_captures_skip_a_library_folder_the_scan_doesnt_use(tmp_path: Path) -> N
     library = scan.scan([linked, missing, mine], {})
     assert library.capture_roots == (mine,)
     assert pairing.library_capture_root(library) == mine
+
+
+def test_captures_skip_a_folder_the_scan_couldnt_look_in_or_one_linked_inside(
+    tmp_path: Path,
+) -> None:
+    """f7 H3: G8 left out only the folders the scan called not usable. One it couldn't look in
+    (a permission, a dead mount) stayed the capture target, failed every capture and the next
+    folder was never tried; so did one whose `Wall-in-One` is a link (inside the folder, so
+    trusted for reading), which a capture never writes through (on 0b96417c)."""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("permission bits don't bind root")
+    gate = tmp_path / "gate"
+    unreadable = gate / "Wallpapers"
+    unreadable.mkdir(parents=True)
+    linked = tmp_path / "linked"
+    (linked / "kept").mkdir(parents=True)
+    (linked / "Wall-in-One").symlink_to(linked / "kept")
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    gate.chmod(0)
+    try:
+        library = scan.scan([unreadable, linked, mine], {})
+    finally:
+        gate.chmod(0o700)
+    assert library.capture_roots == (mine,)
+    assert pairing.still_directory_trusted(linked), "still read: it stays inside its folder"

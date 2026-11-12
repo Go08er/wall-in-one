@@ -857,6 +857,15 @@ def _scan(
         chosen_stills=pairings.chosen_stills(records or {}),
         previews=previews,
         # Judged here, on the scan's worker and once per root (f7 G2, G7), with the
-        # scan's own verdict on its roots (f7 G8).
-        capture_roots=pairing.capture_roots(resolved_roots, unusable_roots),
+        # scan's own verdict on its roots (f7 G8): one it couldn't use, or couldn't
+        # look in at all (f7 H3).
+        capture_roots=pairing.capture_roots(
+            resolved_roots,
+            unusable_roots
+            | {
+                place.path
+                for place in unseen
+                if place.kind is UnseenKind.UNREADABLE and place.path in resolved_roots
+            },
+        ),
     )

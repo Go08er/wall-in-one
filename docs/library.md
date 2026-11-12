@@ -171,8 +171,9 @@ while one or more moving wallpapers use it as their representative.
 
 New automatic captures are written under the first configured root whose still
 directory no Workshop item could have shipped (above), skipping one the scan
-doesn't use (a link, not a folder, or not there right now); with no such root
-none is made, and Regenerate says why. Existing deterministic captures are
+doesn't use or can't look in (a link, not a folder, not there right now, or
+unreadable) and one whose `Wall-in-One` or `Automatic Stills` is a link (never
+written through); with no such root none is made, and Regenerate says why. Existing deterministic captures are
 discovered under every root whose still directory no item could have shipped, so
 changing root order does not strand an older representative.
 

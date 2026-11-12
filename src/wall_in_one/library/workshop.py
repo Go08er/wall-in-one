@@ -208,6 +208,22 @@ def lies_beneath(path: Path, folder: Path) -> bool:
     return resolved is not None and within is not None and resolved.is_relative_to(within)
 
 
+def reached_as_named(path: Path, folder: Path) -> bool:
+    """Whether ``path``, below ``folder``, is reached through no link from it (f7 H3).
+
+    The resolved ``path`` is the resolved ``folder`` and ``path``'s own names below
+    it. False if either can't be resolved, or ``path`` isn't below ``folder``.
+    """
+    resolved, within = _resolved(path), _resolved(folder)
+    if resolved is None or within is None:
+        return False
+    try:
+        below = path.relative_to(folder)
+    except ValueError:
+        return False
+    return resolved == within / below
+
+
 def is_content_folder(path: Path) -> bool:
     """Whether the resolved ``path`` is Steam's ``steamapps/workshop/content/431960`` folder itself.
 

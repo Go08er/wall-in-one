@@ -89,9 +89,10 @@ Three properties of the list are worth knowing:
   for a folder that is no longer one. An image you chose for one is still
   found, wherever it is, so that alone is no reason to refuse.
 
-Symbolic links are never followed at the time the app acts, which keeps a link
-swapped between scan and removal from redirecting an operation outside the
-selected library. What that means for each place a link can be:
+Symbolic links inside a library folder are never followed at the time the app
+acts, which keeps a link swapped between scan and removal from redirecting an
+operation outside the selected library; above it, a still being made resolves
+them once (below). What that means for each place a link can be:
 
 - **A library folder that is itself a link is not scanned.** When you pick a
   link in the folder chooser, the app adds the real folder it points to,
@@ -107,7 +108,9 @@ selected library. What that means for each place a link can be:
   made; inside it, a link is never written through, and one that keeps a still
   from being made is said once). Delete and Move to Trash refuse destructive
   authority through symbolic-link directory components. Configure the real
-  absolute folder when you want those actions available.
+  absolute folder when you want those actions available; its stills are then
+  made again (they are named by each video's path), and the ones made through
+  the link stay beside them.
 
 That refusal is for your wallpapers. Wall-in-One's own bookkeeping files (an
 entry it retires into `.wall-in-one-retained`, and the palette template's lock
@@ -175,7 +178,10 @@ doesn't use or can't look in (a link, not a folder, not there right now, or
 unreadable) and one whose `Wall-in-One` or `Automatic Stills` is a link (never
 written through); with no such root none is made, and Regenerate says why. Existing deterministic captures are
 discovered under every root whose still directory no item could have shipped, so
-changing root order does not strand an older representative.
+changing root order does not strand an older representative. While a folder is
+away (a drive that isn't plugged in), the stills that would go in it are made in
+the next one; when it is back, both copies stay, and one of them is no longer
+used. Nothing removes it.
 
 At app or wallpaper-service startup, verified older automatic captures are
 replaced with current captures, generating missing ones and rebinding the

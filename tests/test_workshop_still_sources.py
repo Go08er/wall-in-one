@@ -397,6 +397,31 @@ def test_a_scan_judges_each_roots_still_directory_once(
     assert sorted(judged) == sorted([mine, other])
 
 
+def test_a_scan_looks_at_each_roots_still_folders_only_where_a_verdict_is_relied_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f9 F3: R42-17's identity of `Wall-in-One` and `Automatic Stills` was looked at by every
+    still lookup, for every root, two `lstat`s each, 15 % more scan time on a big library (on
+    cab9225a). It is looked at when a root is judged, and by a lookup about to rely on the
+    verdict (a still found there, the capture roots): not once per video."""
+    mine, other = tmp_path / "mine", tmp_path / "other"
+    for root in (mine, other):
+        root.mkdir()
+        for index in range(20):
+            (root / f"clip{index}.mp4").write_bytes(b"x")
+    looked: list[Path] = []
+    real = workshop._identity
+
+    def counting(path: Path) -> object:
+        looked.append(path)
+        return real(path)
+
+    monkeypatch.setattr(workshop, "_identity", counting)
+    scan.scan([mine, other], {})
+    # Judged once each (2 folders), then the capture roots (2 more): 40 videos ask nothing.
+    assert len(looked) == 2 * 2 * 2, len(looked)
+
+
 def test_captures_skip_a_library_folder_the_scan_doesnt_use(tmp_path: Path) -> None:
     """f7 G8: a library folder that is a link, or isn't there, is one the scan reports and
     lists nothing from; a capture there fails too (a link isn't written through, and a missing
@@ -505,41 +530,65 @@ def test_an_old_selector_reads_a_capture_only_from_a_still_folder_that_is_truste
     assert rescanned is not None and rescanned.paired_still == made
 
 
-@pytest.mark.parametrize("change", ["linked-to-an-items-folder", "made-by-a-first-capture"])
+@pytest.mark.parametrize("lookup", ["video", "selector", "scene", "capture-roots"])
+@pytest.mark.parametrize(
+    "change", ["linked-to-an-items-folder", "an-items-folder-moved-in", "made-by-a-first-capture"]
+)
 def test_a_still_folder_that_changed_during_a_scan_is_judged_again(
-    tmp_path: Path, change: str
+    tmp_path: Path, change: str, lookup: str
 ) -> None:
     """f7 R42-17: a scan judged each root's still directory once (G7) and kept the verdict,
     whatever became of the folders: a `Wall-in-One` replaced by a link to an item's folder in
     the library stayed trusted, and the picture the item holds under a still's name paired (on
     c8b2fddb). The verdict holds while `Wall-in-One` and `Automatic Stills` are the folders it
-    judged; one replaced is judged again, and one a first capture made is trusted as before."""
+    judged; one replaced is judged again, and one a first capture made is trusted as before.
+    Each lookup that is about to rely on it looks: a video's still, a selector's, a scene's,
+    and the scan's capture roots; one that finds nothing doesn't need to (f9 F3)."""
     root = tmp_path / "library"
     root.mkdir()
     video = root / "clip.mp4"
     video.write_bytes(b"x")
-    name = f"{pairing.automatic_still_stem(video)}.png"
+    scene = MediaItem(tmp_path / "200", Kind.SCENE, 1, 1, scene="200")
+    names = (f"{pairing.automatic_still_stem(video)}.png", "200.png")
     managed, automatic = root / pairing.MANAGED_PARENT, pairing.still_directory(root)
+    if lookup == "selector":
+        video.with_name(video.name + pairing.SIDECAR_SUFFIX).write_text(
+            json.dumps({pairing.SIDECAR_STILL_KEY: str(automatic / names[0])})
+        )
     item = root / "copied-in-item"
-    if change == "linked-to-an-items-folder":
+    if change != "made-by-a-first-capture":
         automatic.mkdir(parents=True)
         (item / pairing.AUTOMATIC_STILLS_DIRECTORY).mkdir(parents=True)
         (item / "project.json").write_text(json.dumps({"type": "web", "file": "index.html"}))
-        (item / pairing.AUTOMATIC_STILLS_DIRECTORY / name).write_bytes(PNG)
+        for name in names:
+            (item / pairing.AUTOMATIC_STILLS_DIRECTORY / name).write_bytes(PNG)
+
+    def looked_up() -> object:
+        if lookup == "scene":
+            return pairing.scene_still(scene, (root,))
+        if lookup == "capture-roots":
+            return pairing.capture_roots((root,))
+        return pairing.find_still(video, (root,), labelled_workshop=False)
 
     with workshop.one_scan():
         assert pairing.still_directory_trusted(root)
-        if change == "linked-to-an-items-folder":
+        if change == "made-by-a-first-capture":
+            automatic.mkdir(parents=True)
+            for name in names:
+                (automatic / name).write_bytes(PNG)
+        else:
             automatic.rmdir()
             managed.rmdir()
-            managed.symlink_to(item, target_is_directory=True)
-        else:
-            automatic.mkdir(parents=True)
-            (automatic / name).write_bytes(PNG)
-        found = pairing.find_still(video, (root,), labelled_workshop=False)
+            if change == "linked-to-an-items-folder":
+                managed.symlink_to(item, target_is_directory=True)
+            else:
+                item.rename(managed)
+        found = looked_up()
         trusted = pairing.still_directory_trusted(root)
 
-    if change == "linked-to-an-items-folder":
-        assert (found, trusted) == (None, False)
+    if change != "made-by-a-first-capture":
+        assert (found, trusted) == ((() if lookup == "capture-roots" else None), False)
+    elif lookup == "capture-roots":
+        assert (found, trusted) == ((root,), True)
     else:
-        assert (found, trusted) == (automatic / name, True)
+        assert (found, trusted) == (automatic / names[lookup == "scene"], True)

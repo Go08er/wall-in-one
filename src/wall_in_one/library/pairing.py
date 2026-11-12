@@ -406,7 +406,7 @@ def read_sidecar(video: Path, roots: Iterable[Path]) -> Path | None:
     chosen = _selected_still(video, strict=False)
     if chosen is None or not _trusted_location(video, chosen, roots):
         return None
-    if is_generated_still(chosen) and not still_directory_trusted(chosen.parents[2]):
+    if is_generated_still(chosen) and not still_directory_trusted(chosen.parents[2], confirm=True):
         return None
     return chosen
 
@@ -573,7 +573,7 @@ def still_directory(root: Path) -> Path:
     return root / MANAGED_PARENT / AUTOMATIC_STILLS_DIRECTORY
 
 
-def still_directory_trusted(root: Path) -> bool:
+def still_directory_trusted(root: Path, *, confirm: bool = False) -> bool:
     """Whether ``root``'s `still_directory` is out of every Workshop item author's reach (f7 W1).
 
     Not in an item folder: a ``project.json`` in it or above it, up to ``root``
@@ -588,10 +588,14 @@ def still_directory_trusted(root: Path) -> bool:
     and no capture goes there (`capture_root`): an author could have shipped any
     picture, or a link, under the name a still is looked for by. Judged once per
     root in a scan, while its `Wall-in-One` and `Automatic Stills` stay the
-    folders judged (`workshop.still_root_judged`).
+    folders judged, which ``confirm`` looks at again: for a still found there,
+    about to be returned (`workshop.still_root_judged`).
     """
     return workshop.still_root_judged(
-        root, _still_directory_trusted, (root / MANAGED_PARENT, still_directory(root))
+        root,
+        _still_directory_trusted,
+        (root / MANAGED_PARENT, still_directory(root)),
+        confirm=confirm,
     )
 
 
@@ -619,7 +623,7 @@ def capture_roots(roots: Iterable[Path], refused: Iterable[Path] = ()) -> tuple[
         root
         for root in roots
         if root not in left_out
-        and still_directory_trusted(root)
+        and still_directory_trusted(root, confirm=True)
         and workshop.reached_as_named(still_directory(root), root)
     )
 
@@ -717,7 +721,9 @@ def _automatic_still(video: Path, roots: Iterable[Path]) -> Path | None:
         for extension in _still_extensions():
             candidate = directory / (automatic_still_stem(video) + extension)
             if present(candidate):
-                return candidate
+                if still_directory_trusted(root, confirm=True):
+                    return candidate
+                break
     return None
 
 
@@ -782,7 +788,9 @@ def scene_still(item: MediaItem, roots: Iterable[Path] = ()) -> Path | None:
         for extension in _still_extensions():
             candidate = directory / f"{stem}{extension}"
             if present(candidate):
-                return candidate
+                if still_directory_trusted(root, confirm=True):
+                    return candidate
+                break
     return None
 
 

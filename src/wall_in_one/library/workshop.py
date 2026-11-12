@@ -193,25 +193,29 @@ def in_content_tree(path: Path) -> bool:
     return inside
 
 
-def still_root_judged(root: Path, judge: Callable[[Path], bool], about: Sequence[Path]) -> bool:
+def still_root_judged(
+    root: Path, judge: Callable[[Path], bool], about: Sequence[Path], *, confirm: bool = False
+) -> bool:
     """``judge(root)``, asked once per root in a scan (`one_scan`, f7 G7), while the
     folders it is ``about`` stay the ones it judged.
 
     For `pairing.still_directory_trusted`, which every video and scene of a scan
     asks for every root: the answer doesn't change within one, unless what it is
     about did. ``about`` (its `Wall-in-One` and `Automatic Stills`) are looked at
-    each time, without following a link in their place (`_identity`): one replaced
-    since (by a link into an item's folder, or made by a first capture) is judged
-    again, from scratch, as what this scan resolved is as old (f7 R42-17).
+    when it is judged, and again, without following a link in their place
+    (`_identity`), only by a caller about to rely on it (``confirm``: a still found
+    there, about to be returned, or the scan's capture roots), so a lookup that
+    finds nothing costs nothing more (f9 F3). One replaced since (by a link into an
+    item's folder, or made by a first capture) is judged again, from scratch, as
+    what this scan resolved is as old (f7 R42-17).
     """
     memo = _SCAN_MEMO.get()
     if memo is None:
         return judge(root)
-    now = tuple(_identity(path) for path in about)
     kept = memo.still_roots.get(root)
     if kept is None:
-        kept = memo.still_roots[root] = (now, judge(root))
-    elif kept[0] != now:
+        kept = memo.still_roots[root] = (tuple(_identity(path) for path in about), judge(root))
+    elif confirm and kept[0] != (now := tuple(_identity(path) for path in about)):
         token = _SCAN_MEMO.set(None)
         try:
             kept = memo.still_roots[root] = (now, judge(root))

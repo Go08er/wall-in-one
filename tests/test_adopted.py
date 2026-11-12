@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from wall_in_one import config, file_io, paths, predecessor_process
+from wall_in_one import config, file_io, paths, predecessor_process, runtime_config
 from wall_in_one.control import client
 from wall_in_one.control.protocol import Response
 from wall_in_one.library import adopted, capture_upgrade, pairing, pairings, scan, stills
@@ -911,13 +911,13 @@ def test_an_upgrade_in_a_still_folder_no_longer_trusted_is_skipped_quietly_at_ev
     assert not pairing.still_directory_trusted(fixture.root)
     kept = (_fingerprint(selector), _fingerprint(fixture.capture), selector.read_bytes())
     compiled: list[object] = []
-    update = capture_upgrade.runtime_config.update
+    update = runtime_config.update
 
     def compile_counted(*arguments: Any, **keywords: Any) -> Any:
         compiled.append(arguments)
         return update(*arguments, **keywords)
 
-    monkeypatch.setattr(capture_upgrade.runtime_config, "update", compile_counted)
+    monkeypatch.setattr(runtime_config, "update", compile_counted)
 
     with caplog.at_level(logging.INFO, logger=capture_upgrade.LOGGER.name):
         results = [capture_upgrade.prepare(), capture_upgrade.prepare()]

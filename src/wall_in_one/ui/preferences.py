@@ -230,10 +230,8 @@ class PreferencesPage(Adw.PreferencesPage):
         read_only = bool(self._read_only_keys())
         # Where generated stills go, as the scan judged; the first folder while it
         # hasn't judged these (f7 G5).
-        session = getattr(self._app, "session", None)
-        judged = (
-            pairing.judged_capture_roots(session.library, roots) if session is not None else None
-        )
+        library = getattr(getattr(self._app, "session", None), "library", None)
+        judged = pairing.judged_capture_roots(library, roots) if library is not None else None
         stills_root = roots[0] if judged is None else (judged[0] if judged else None)
         for index, root in enumerate(roots):
             row = plain(Adw.ActionRow, title=root.name or str(root), subtitle=str(root))

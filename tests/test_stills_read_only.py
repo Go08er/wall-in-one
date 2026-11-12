@@ -346,6 +346,9 @@ def test_a_link_inside_the_library_folder_is_still_not_written_through_and_is_sa
     assert stills.ensure(item(clip, Kind.VIDEO), root, refused=heard.append) is None
 
     assert len(heard) == 1 and "symbolic link" in heard[0].reason, heard
+    # The folder said is the one that holds the link (f7 H5), not Automatic Stills.
+    assert heard[0].folder == (root if linked == "Wall-in-One" else root / "Wall-in-One")
+    assert heard[0].reason.startswith(f"{linked} in it is a symbolic link"), heard[0].reason
     assert rendered == [], "refused before ffmpeg was run"
     assert list(kept.rglob("*.png")) == []
 
@@ -363,3 +366,29 @@ def test_a_refusal_nobody_asked_to_hear_is_logged_not_dropped(
     with caplog.at_level("WARNING", logger=stills.LOGGER.name):
         assert stills.ensure(item(clip, Kind.VIDEO), root) is None
     assert any("could not safely retain" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("gone", ["changed", "vanished"])
+def test_a_still_folder_that_changed_or_went_since_the_scan_is_not_its_refusal(
+    root: Path, rendered: list[Path], monkeypatch: pytest.MonkeyPatch, gone: str
+) -> None:
+    """f7 H5: P1 made every failure of the pin the folder's refusal, so a folder replaced or
+    gone between the scan and the capture was toasted as one that "cannot be written". It is
+    a plain `StillError` again, as before P1; a link or a permission stays the folder's."""
+    from wall_in_one import file_io
+
+    clip = video(root)
+
+    def pin(*_arguments: object, **_keywords: object) -> object:
+        if gone == "changed":
+            raise file_io.PathChangedError(f"{root} is not the journaled filesystem root")
+        raise FileNotFoundError(2, "No such file or directory", str(root))
+
+    monkeypatch.setattr(file_io, "pin_directory_beneath", pin)
+    heard: list[stills.StillFolderError] = []
+    with pytest.raises(stills.StillError) as raised:
+        stills.generate(clip, root)
+    assert not isinstance(raised.value, stills.StillFolderError), raised.value
+    assert stills.ensure(item(clip, Kind.VIDEO), root, refused=heard.append) is None
+    assert heard == []
+    assert rendered == []

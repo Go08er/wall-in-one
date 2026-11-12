@@ -1460,9 +1460,12 @@ def _pin_target_directory(
     a still directory reached through a link out of its root), and so is a
     library folder that is itself a link, which the scan doesn't use either.
 
-    What fails here is the folder's (`StillFolderError`), so the still maker
-    says it once per folder: it used to be a plain `StillError`, which nothing
-    said, and the folder never got a still.
+    A link in it, or a folder that refuses (a permission), is the folder's
+    refusal (`StillFolderError`), said once per folder, naming the folder that
+    holds the link: it used to be a plain `StillError`, which nothing said, and
+    the folder never got a still. A folder that went away or changed since the
+    scan stays a plain `StillError`, as before (f7 H5): that is no folder's
+    refusal to say.
     """
     absolute_root = root.absolute()
     absolute_directory = target.parent.absolute()
@@ -1481,34 +1484,33 @@ def _pin_target_directory(
             expected_directory_identity=(directory_status.st_dev, directory_status.st_ino),
         )
     except (OSError, RuntimeError, ValueError) as error:
-        raise StillFolderError(
-            f"could not safely retain automatic-still directory {target.parent}: {error}",
-            target.parent,
-            _pin_refusal(absolute_root, absolute_directory, error),
-        ) from error
+        message = f"could not safely retain automatic-still directory {target.parent}: {error}"
+        linked = _linked_on_the_way(absolute_root, absolute_directory)
+        if linked is not None:
+            raise StillFolderError(
+                message,
+                linked.parent,
+                f"{linked.name} in it is a symbolic link, which Wall-in-One doesn't write "
+                "a still through",
+            ) from error
+        if isinstance(error, file_io.PathChangedError | FileNotFoundError):
+            raise StillError(message) from error
+        reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+        raise StillFolderError(message, target.parent, reason) from error
 
 
-def _pin_refusal(root: Path, directory: Path, error: Exception) -> str:
-    """Why `_pin_target_directory` refused, in a person's words where it is a link."""
-    for folder in (root, *(root / part for part in _parts_below(root, directory))):
-        with contextlib.suppress(OSError):
-            if folder.is_symlink():
-                return (
-                    f"{folder.name} is a symbolic link, which Wall-in-One doesn't write "
-                    "through inside a library folder"
-                )
-    if isinstance(error, OSError) and error.strerror:
-        return error.strerror
-    return str(error)
-
-
-def _parts_below(root: Path, directory: Path) -> tuple[Path, ...]:
-    """Each path from ``root`` down to ``directory``, relative to ``root``: ``a``, ``a/b``..."""
+def _linked_on_the_way(root: Path, directory: Path) -> Path | None:
+    """The first of ``root`` and the folders below it down to ``directory`` that is a link."""
     try:
         parts = directory.relative_to(root).parts
     except ValueError:
-        return ()
-    return tuple(Path(*parts[: depth + 1]) for depth in range(len(parts)))
+        parts = ()
+    for depth in range(len(parts) + 1):
+        folder = root.joinpath(*parts[:depth])
+        with contextlib.suppress(OSError):
+            if folder.is_symlink():
+                return folder
+    return None
 
 
 def _pin_existing_target(

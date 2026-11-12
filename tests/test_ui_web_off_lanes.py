@@ -259,7 +259,8 @@ def test_an_older_service_that_cant_play_nothing_is_told_to_quit(
     Why is said by the publication that stopped it. With previews on, the save also starts a
     rescan in the GUI. Its publication fails to compile too, with nothing more to say (the
     service is gone by then), and it is the newest: it lands after the one that stopped the
-    service, or before that one is said, which it then replaces (only a current publication is
+    service, or, seen once in a larger run, the stop's words were never said; read from the
+    code, that one was no longer current when it finished (only a current publication is
     said). So the stop is checked by what was sent, and its words where they were said (R42-22).
     """
     profile, sent, reports = _turn_off(

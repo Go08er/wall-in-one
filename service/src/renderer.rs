@@ -1356,17 +1356,15 @@ impl SystemDriver {
             .collect();
         if enabled.is_empty() {
             // A failure like any other: `published` keeps the last snapshot
-            // that succeeded, as status documents.
+            // that succeeded, as status documents. What is played meanwhile is
+            // the runtime's to decide (by mode), so neither answer says (f6 N5).
             if !self.ignored_outputs.is_empty() {
                 return Err(format!(
-                    "{NO_USABLE_OUTPUTS}: ignored {}, a name that starts with '-'; \
-                     paired still remains applied",
+                    "{NO_USABLE_OUTPUTS}: ignored {}, a name that starts with '-'",
                     self.ignored_outputs.join(", ")
                 ));
             }
-            return Err(
-                "the compositor reported no enabled outputs; paired still remains applied".into(),
-            );
+            return Err("the compositor reported no enabled outputs".into());
         }
         self.published = reported;
         Ok(enabled)

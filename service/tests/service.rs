@@ -1147,6 +1147,8 @@ fn when_every_output_has_a_dash_name_none_is_present_and_no_window_opens() {
     assert!(error.contains("no usable outputs"), "{error}");
     assert!(error.contains("-X"), "names the ignored head: {error}");
     assert!(!error.contains("reported no enabled outputs"), "{error}");
+    // Nothing is applied in that state, so nothing is said to remain applied (f6 N5).
+    assert!(!error.contains("applied"), "{error}");
     // Asked for all of them, the engine is given none and not started.
     assert!(driver.apply(&scene, "", &parsed.settings).is_err());
     assert!(
@@ -1731,6 +1733,8 @@ fn a_compositor_with_only_switched_off_heads_is_a_readiness_error() {
         error.contains("the compositor reported no enabled outputs"),
         "{error}"
     );
+    // Nothing succeeded yet, so no still was applied to remain (f6 N5).
+    assert!(!error.contains("applied"), "{error}");
     assert!(
         driver.published_outputs().is_empty(),
         "nothing succeeded yet"

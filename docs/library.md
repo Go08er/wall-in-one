@@ -105,7 +105,8 @@ them once (below). What that means for each place a link can be:
   not appear.
 - **A library folder reached through a link higher up its path is scanned,** and
   gets its stills like any other (the folders above it are resolved when one is
-  made; inside it, a link is never written through, and one that keeps a still
+  made, and none is made if by then they lead into a Wallpaper Engine item;
+  inside it, a link is never written through, and one that keeps a still
   from being made is said once). Delete and Move to Trash refuse destructive
   authority through symbolic-link directory components. Configure the real
   absolute folder when you want those actions available; its stills are then

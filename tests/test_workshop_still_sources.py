@@ -484,3 +484,43 @@ def test_an_old_selector_reads_a_capture_only_from_a_still_folder_that_is_truste
     identity = pairings.Identity.of(library.find(video))
     picked = {identity.key: pairings.Pairing(identity=identity, still=capture, customized=True)}
     assert scan.scan([root], picked).find(video).paired_still == capture
+
+
+@pytest.mark.parametrize("change", ["linked-to-an-items-folder", "made-by-a-first-capture"])
+def test_a_still_folder_that_changed_during_a_scan_is_judged_again(
+    tmp_path: Path, change: str
+) -> None:
+    """f7 R42-17: a scan judged each root's still directory once (G7) and kept the verdict,
+    whatever became of the folders: a `Wall-in-One` replaced by a link to an item's folder in
+    the library stayed trusted, and the picture the item holds under a still's name paired (on
+    c8b2fddb). The verdict holds while `Wall-in-One` and `Automatic Stills` are the folders it
+    judged; one replaced is judged again, and one a first capture made is trusted as before."""
+    root = tmp_path / "library"
+    root.mkdir()
+    video = root / "clip.mp4"
+    video.write_bytes(b"x")
+    name = f"{pairing.automatic_still_stem(video)}.png"
+    managed, automatic = root / pairing.MANAGED_PARENT, pairing.still_directory(root)
+    item = root / "copied-in-item"
+    if change == "linked-to-an-items-folder":
+        automatic.mkdir(parents=True)
+        (item / pairing.AUTOMATIC_STILLS_DIRECTORY).mkdir(parents=True)
+        (item / "project.json").write_text(json.dumps({"type": "web", "file": "index.html"}))
+        (item / pairing.AUTOMATIC_STILLS_DIRECTORY / name).write_bytes(PNG)
+
+    with workshop.one_scan():
+        assert pairing.still_directory_trusted(root)
+        if change == "linked-to-an-items-folder":
+            automatic.rmdir()
+            managed.rmdir()
+            managed.symlink_to(item, target_is_directory=True)
+        else:
+            automatic.mkdir(parents=True)
+            (automatic / name).write_bytes(PNG)
+        found = pairing.find_still(video, (root,), labelled_workshop=False)
+        trusted = pairing.still_directory_trusted(root)
+
+    if change == "linked-to-an-items-folder":
+        assert (found, trusted) == (None, False)
+    else:
+        assert (found, trusted) == (automatic / name, True)

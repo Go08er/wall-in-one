@@ -587,9 +587,12 @@ def still_directory_trusted(root: Path) -> bool:
     through (`stills._pin_target_directory`). Another's stills are not looked at,
     and no capture goes there (`capture_root`): an author could have shipped any
     picture, or a link, under the name a still is looked for by. Judged once per
-    root in a scan (`workshop.still_root_judged`).
+    root in a scan, while its `Wall-in-One` and `Automatic Stills` stay the
+    folders judged (`workshop.still_root_judged`).
     """
-    return workshop.still_root_judged(root, _still_directory_trusted)
+    return workshop.still_root_judged(
+        root, _still_directory_trusted, (root / MANAGED_PARENT, still_directory(root))
+    )
 
 
 def _still_directory_trusted(root: Path) -> bool:

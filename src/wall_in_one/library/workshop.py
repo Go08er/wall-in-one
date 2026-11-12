@@ -96,6 +96,11 @@ def labelled_workshop(item: MediaItem) -> bool:
     return item.provider == WORKSHOP_PROVIDER
 
 
+#: What is at a path, by `lstat`: its device, inode and type (a link made where a folder
+#: was can take the inode it freed); None when nothing is there or it can't be looked at.
+_Identity = tuple[int, int, int] | None
+
+
 @dataclass
 class _ScanMemo:
     """What the place tests learned during one scan (`one_scan`)."""
@@ -110,8 +115,9 @@ class _ScanMemo:
     item_folders: dict[tuple[Path, tuple[Path, ...]], tuple[Path, ...]] = field(
         default_factory=dict
     )
-    #: A root as given: whether its still directory is trusted (`still_root_judged`).
-    still_roots: dict[Path, bool] = field(default_factory=dict)
+    #: A root as given: what the folders its verdict is about were then, and whether its
+    #: still directory is trusted (`still_root_judged`).
+    still_roots: dict[Path, tuple[tuple[_Identity, ...], bool]] = field(default_factory=dict)
 
 
 _SCAN_MEMO: ContextVar[_ScanMemo | None] = ContextVar("wall_in_one_scan_places", default=None)
@@ -187,19 +193,39 @@ def in_content_tree(path: Path) -> bool:
     return inside
 
 
-def still_root_judged(root: Path, judge: Callable[[Path], bool]) -> bool:
-    """``judge(root)``, asked once per root in a scan (`one_scan`, f7 G7).
+def still_root_judged(root: Path, judge: Callable[[Path], bool], about: Sequence[Path]) -> bool:
+    """``judge(root)``, asked once per root in a scan (`one_scan`, f7 G7), while the
+    folders it is ``about`` stay the ones it judged.
 
     For `pairing.still_directory_trusted`, which every video and scene of a scan
-    asks for every root: the answer doesn't change within one.
+    asks for every root: the answer doesn't change within one, unless what it is
+    about did. ``about`` (its `Wall-in-One` and `Automatic Stills`) are looked at
+    each time, without following a link in their place (`_identity`): one replaced
+    since (by a link into an item's folder, or made by a first capture) is judged
+    again, from scratch, as what this scan resolved is as old (f7 R42-17).
     """
     memo = _SCAN_MEMO.get()
-    if memo is not None and root in memo.still_roots:
-        return memo.still_roots[root]
-    judged = judge(root)
-    if memo is not None:
-        memo.still_roots[root] = judged
-    return judged
+    if memo is None:
+        return judge(root)
+    now = tuple(_identity(path) for path in about)
+    kept = memo.still_roots.get(root)
+    if kept is None:
+        kept = memo.still_roots[root] = (now, judge(root))
+    elif kept[0] != now:
+        token = _SCAN_MEMO.set(None)
+        try:
+            kept = memo.still_roots[root] = (now, judge(root))
+        finally:
+            _SCAN_MEMO.reset(token)
+    return kept[1]
+
+
+def _identity(path: Path) -> _Identity:
+    try:
+        status = path.lstat()
+    except OSError, ValueError:
+        return None
+    return (status.st_dev, status.st_ino, stat.S_IFMT(status.st_mode))
 
 
 def lies_beneath(path: Path, folder: Path) -> bool:

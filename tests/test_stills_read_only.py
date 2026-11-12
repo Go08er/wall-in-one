@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 from tests.test_scenes import where_the_engine_looks
-from wall_in_one import worker_processes
-from wall_in_one.library import pairing, scan, stills
+from wall_in_one import paths, worker_processes
+from wall_in_one.library import pairing, scan, stills, workshop
 from wall_in_one.library.model import Kind, MediaItem
 from wall_in_one.wallpaper import scenes
 
@@ -392,3 +392,60 @@ def test_a_still_folder_that_changed_or_went_since_the_scan_is_not_its_refusal(
     assert stills.ensure(item(clip, Kind.VIDEO), root, refused=heard.append) is None
     assert heard == []
     assert rendered == []
+
+
+@pytest.mark.parametrize("when", ["unchanged", "after-the-scan", "while-it-is-made"])
+def test_a_capture_goes_only_where_its_folder_is_trusted_now(
+    tmp_path: Path, rendered: list[Path], monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    """f7 R42-17: the scan judges a library folder reached through a link above it (P1), and
+    the capture then went wherever the link led: into a Wallpaper Engine item, had it been
+    pointed at one since (on c8b2fddb). The folder is judged again before anything is made in
+    it, and where it was retained, which a change in between doesn't get past. Neither is the
+    folder's refusal (f7 H5): the next scan judges it."""
+    clean = tmp_path / "clean"
+    (clean / "captures").mkdir(parents=True)
+    link = tmp_path / "parent-link"
+    link.symlink_to(clean, target_is_directory=True)
+    root = link / "captures"
+    content = tmp_path / "other" / "steamapps" / "workshop" / "content" / workshop.APP_ID
+    steam_item = content / "200"
+    (steam_item / "captures").mkdir(parents=True)
+    (steam_item / "project.json").write_text('{"type": "web", "file": "index.html"}')
+    source = tmp_path / "source"
+    source.mkdir()
+    clip = video(source)
+    library = scan.scan((root, source), {})
+    assert pairing.library_capture_root(library) == root
+
+    def retarget() -> None:
+        link.unlink()
+        link.symlink_to(steam_item, target_is_directory=True)
+
+    if when == "after-the-scan":
+        retarget()
+    elif when == "while-it-is-made":
+        make = paths.ensure_directory
+
+        def making(directory: Path) -> Path:
+            make(directory)
+            pairing.still_directory(steam_item / "captures").mkdir(parents=True, exist_ok=True)
+            retarget()
+            return directory
+
+        monkeypatch.setattr(paths, "ensure_directory", making)
+    heard: list[stills.StillFolderError] = []
+
+    made = stills.ensure(library.find(clip), root, refused=heard.append)
+
+    if when == "unchanged":
+        assert made is not None and made.resolve().is_relative_to(clean)
+        return
+    assert (made, heard, rendered) == (None, [], [])
+    assert list(steam_item.rglob("*.png")) == []
+    if when == "after-the-scan":
+        assert everything_under(steam_item) == ["captures", "project.json"], "nothing made"
+    with pytest.raises(stills.StillError) as raised:
+        stills.generate(clip, root)
+    assert not isinstance(raised.value, stills.StillFolderError)
+    assert "item's author could write there" in str(raised.value)

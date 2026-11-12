@@ -1446,6 +1446,29 @@ def _engine_output_path(
     )
 
 
+def _made_target_directory(root: Path, target: Path) -> file_io.PinnedDirectoryContext:
+    """``target``'s `Automatic Stills` under ``root``, made if need be, and retained.
+
+    Only one no Wallpaper Engine item's author can write in
+    (`pairing.still_directory_trusted`), judged here, before anything is made, and
+    again where the folder retained is (`_pin_target_directory`, f7 R42-17): the
+    scan's verdict is as old as the scan, and a link above the library folder (P1)
+    may lead into an item since. Such a folder changed since the scan, which is a
+    plain `StillError`, no folder's refusal (f7 H5).
+    """
+    if not pairing.still_directory_trusted(root):
+        raise StillError(_untrusted(target.parent))
+    try:
+        paths.ensure_directory(target.parent)
+    except OSError as error:
+        raise _not_made(target.parent, error) from error
+    return _pin_target_directory(root, target)
+
+
+def _untrusted(directory: Path) -> str:
+    return f"no still is made in {directory}: a Wallpaper Engine item's author could write there"
+
+
 def _pin_target_directory(
     root: Path,
     target: Path,
@@ -1465,7 +1488,9 @@ def _pin_target_directory(
     holds the link: it used to be a plain `StillError`, which nothing said, and
     the folder never got a still. A folder that went away or changed since the
     scan stays a plain `StillError`, as before (f7 H5): that is no folder's
-    refusal to say.
+    refusal to say. So does one retained where an item's author could write: the
+    folders above may have been linked elsewhere since the scan judged them, and it
+    is judged again where it is (`pairing.still_directory_trusted`, f7 R42-17).
     """
     absolute_root = root.absolute()
     absolute_directory = target.parent.absolute()
@@ -1477,7 +1502,7 @@ def _pin_target_directory(
         directory_status = reached_directory.lstat()
         if not stat.S_ISDIR(root_status.st_mode) or not stat.S_ISDIR(directory_status.st_mode):
             raise OSError("automatic-still root contains a non-directory entry")
-        return file_io.pin_directory_beneath(
+        context = file_io.pin_directory_beneath(
             reached_root,
             reached_directory,
             expected_root_identity=(root_status.st_dev, root_status.st_ino),
@@ -1497,6 +1522,14 @@ def _pin_target_directory(
             raise StillError(message) from error
         reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
         raise StillFolderError(message, target.parent, reason) from error
+    try:
+        reached = Path(os.readlink(context.root_anchor))
+    except OSError:
+        reached = None
+    if reached is None or not pairing.still_directory_trusted(reached):
+        context.close()
+        raise StillError(_untrusted(target.parent))
+    return context
 
 
 def _linked_on_the_way(root: Path, directory: Path) -> Path | None:
@@ -1787,11 +1820,7 @@ def _generate_from_source(
     """Capture and publish while retaining the opened source identity."""
 
     target = destination(video, root)
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise _not_made(target.parent, error) from error
-    target_context = _pin_target_directory(root, target)
+    target_context = _made_target_directory(root, target)
     target_access = target_context.child(target.name)
     try:
         if not force:
@@ -2141,11 +2170,7 @@ def _capture_scene_from_source(
         raise StillError(f"linux-wallpaperengine is not installed, so no still for {item.name}")
     elif size is None:
         raise StillError(f"no display size was measured, so no still was taken for {item.name}")
-    try:
-        paths.ensure_directory(target.parent)
-    except OSError as error:
-        raise _not_made(target.parent, error) from error
-    target_context = _pin_target_directory(root, target)
+    target_context = _made_target_directory(root, target)
     target_access = target_context.child(target.name)
     try:
         existing = _pin_existing_target(target, target_access)

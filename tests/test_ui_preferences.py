@@ -180,7 +180,8 @@ def test_the_folder_stills_go_to_is_the_one_the_scan_judged(
     page = PreferencesPage(application)  # type: ignore[arg-type]
     page.apply_settings(application.settings)
 
-    assert [row.get_title() for row in page._root_rows] == titles
+    rows = [row for row in page._root_rows if isinstance(row, Adw.ActionRow)]
+    assert [row.get_title() for row in rows] == titles
 
 
 def test_adaptive_default_copy_and_saved_setting_preserve_explicit_pairing_choices(
